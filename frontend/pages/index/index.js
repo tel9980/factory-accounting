@@ -12,7 +12,8 @@ Page({
     e_category: 0, e_amount: '', e_remark: '',
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
     import_type: 0, import_text: '',
-    report_year: '', report_text: ''
+    report_year: '', report_text: '',
+    history_type: 'ar', history_ar_list: [], history_ap_list: []
   },
   onShow() { this.refresh() },
   refresh() {
@@ -20,6 +21,7 @@ Page({
     this.loadAr()
     this.loadAp()
     this.loadExpenses()
+    this.loadHistory()
   },
   loadDashboard() {
     wx.request({
@@ -223,5 +225,10 @@ Page({
       data: this.data.report_text,
       success: () => wx.showToast({ title: '报表已复制', icon: 'none' })
     })
-  }
+  },
+  loadHistory() {
+    wx.request({ url: API_BASE + '/history?type=ar', success: (res) => this.setData({ history_ar_list: res.data || [] }) })
+    wx.request({ url: API_BASE + '/history?type=ap', success: (res) => this.setData({ history_ap_list: res.data || [] }) })
+  },
+  setHistoryType(e) { this.setData({ history_type: e.currentTarget.dataset.t }) }
 })

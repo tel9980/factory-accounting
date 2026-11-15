@@ -338,4 +338,16 @@ app.delete('/ledger/:id', async (c) => {
   return c.json({ ok: true })
 })
 
+// 已结清历史
+app.get('/history', async (c) => {
+  const type = c.req.query('type') || 'ar'
+  const db = c.env.DB
+  if (type === 'ap') {
+    const { results } = await db.prepare('SELECT * FROM payables WHERE paid >= amount ORDER BY id DESC LIMIT 200').all()
+    return c.json(results.map((r) => ({ ...r, settle: round2(r.amount) })))
+  }
+  const { results } = await db.prepare('SELECT * FROM orders WHERE paid >= price ORDER BY id DESC LIMIT 200').all()
+  return c.json(results.map((r) => ({ ...r, settle: round2(r.price) })))
+})
+
 export default app

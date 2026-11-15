@@ -15,6 +15,7 @@
     <view class="tab {{tab=='expense'?'on':''}}" bindtap="setTab" data-t="expense">支出</view>
     <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">批量导入</view>
     <view class="tab {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
+    <view class="tab {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
   </view>
 
   <block wx:if="{{tab=='ar'}}">
@@ -102,5 +103,30 @@
         </view>
       </view>
     </view>
+  </block>
+
+  <block wx:if="{{tab=='history'}}">
+    <view class="form">
+      <view class="seg {{history_type=='ar'?'on':''}}" bindtap="setHistoryType" data-t="ar">已收完的应收</view>
+      <view class="seg {{history_type=='ap'?'on':''}}" bindtap="setHistoryType" data-t="ap">已付完的应付</view>
+    </view>
+    <block wx:if="{{history_type=='ar'}}">
+      <view class="list">
+        <view class="item" wx:for="{{history_ar_list}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt ok">{{item.settle}}</text></view>
+          <view class="row2">结清 · {{item.created_at}}</view>
+        </view>
+        <view class="empty" wx:if="{{!history_ar_list.length}}">暂无已结清应收</view>
+      </view>
+    </block>
+    <block wx:else>
+      <view class="list">
+        <view class="item" wx:for="{{history_ap_list}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt ok">{{item.settle}}</text></view>
+          <view class="row2">{{item.remark}} · 结清 · {{item.created_at}}</view>
+        </view>
+        <view class="empty" wx:if="{{!history_ap_list.length}}">暂无已结清应付</view>
+      </view>
+    </block>
   </block>
 </view>
