@@ -653,6 +653,80 @@ async function buildBackup(db) {
   }, null, 2)
 }
 
+// ── 备份到笔记站（md.1211.cc.cd）──
+async function buildMarkdown(db) {
+  const orders = await db.prepare('SELECT * FROM orders ORDER BY id').all()
+  const payables = await db.prepare('SELECT * FROM payables ORDER BY id').all()
+  const ledger = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
+  const ar = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
+  const ap = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS t FROM payables WHERE paid < amount').first()
+  const inAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in'").first()
+  const outAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out'").first()
+  const st = (s) => (s == 2 ? '已交付' : s == 1 ? '加工中' : '待加工')
+  const L = []
+  L.push('# 小工厂记账 · 自动备份')
+  L.push('')
+  L.push(`导出时间：${now().slice(0, 19).replace('T', ' ')}`)
+  L.push('')
+  L.push('## 总览')
+  L.push(`- 客户还欠我：**${round2(num(ar.t))}** 元`)
+  L.push(`- 我还欠供应商：**${round2(num(ap.t))}** 元`)
+  L.push(`- 累计已收款：${round2(num(inAll.t))} 元`)
+  L.push(`- 累计已付款：${round2(num(outAll.t))} 元`)
+  L.push('')
+  L.push('## 应收明细')
+  L.push('')
+  L.push('| 日期 | 客户 | 产品 | 金额 | 已收 | 未收 | 状态 | 到期日 | 经手人 |')
+  L.push('|---|---|---|---|---|---|---|---|---|')
+  for (const o of orders.results) L.push(`| ${o.created_at.slice(0, 10)} | ${o.customer} | ${o.item_name || ''} | ${o.price} | ${o.paid} | ${round2(o.price - o.paid)} | ${st(o.status)} | ${(o.due_date || '').slice(0, 10)} | ${o.operator || ''} |`)
+  L.push('')
+  L.push('## 应付明细')
+  L.push('')
+  L.push('| 日期 | 供应商 | 金额 | 已付 | 未付 | 分类 | 备注 | 经手人 |')
+  L.push('|---|---|---|---|---|---|---|---|')
+  for (const p of payables.results) L.push(`| ${p.created_at.slice(0, 10)} | ${p.supplier} | ${p.amount} | ${p.paid} | ${round2(p.amount - p.paid)} | ${p.category || ''} | ${p.remark || ''} | ${p.operator || ''} |`)
+  L.push('')
+  L.push('## 收支流水')
+  L.push('')
+  L.push('| 日期 | 方向 | 金额 | 分类 | 备注 | 经手人 |')
+  L.push('|---|---|---|---|---|---|')
+  for (const l of ledger.results) L.push(`| ${l.created_at.slice(0, 10)} | ${l.direction === 'in' ? '收' : '付'} | ${l.amount} | ${l.category || ''} | ${l.remark || ''} | ${l.operator || ''} |`)
+  L.push('')
+  return L.join('\n')
+}
+
+async function pushToNotes(db, env) {
+  const base = env.NOTES_BASE || 'https://md.1211.cc.cd'
+  const pass = env.NOTES_PASS || ''
+  const slug = env.NOTES_SLUG || 'factory-ledger-backup'
+  if (!pass) return { ok: false, error: '未配置笔记站口令 NOTES_PASS' }
+  const md = await buildMarkdown(db)
+  const loginRes = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: pass })
+  })
+  if (!loginRes.ok) return { ok: false, error: `笔记站登录失败（${loginRes.status}）` }
+  const cookie = (loginRes.headers.get('set-cookie') || '').split(';')[0]
+  const headers = { 'Content-Type': 'application/json', Cookie: cookie }
+  let r = await fetch(`${base}/api/docs/${slug}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ title: '小工厂记账自动备份', content: md })
+  })
+  if (r.status === 404) {
+    r = await fetch(`${base}/api/docs`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: '小工厂记账自动备份', slug, content: md })
+    })
+  }
+  if (!r.ok) return { ok: false, error: `笔记站写入失败（${r.status}）` }
+  const d = await r.json().catch(() => ({}))
+  return { ok: true, slug: d.slug || slug, saved_at: now() }
+}
+
+
 // 数据备份：全量导出 JSON（复制用）
 app.get('/backup', async (c) => {
   return c.json({ text: await buildBackup(c.env.DB) })
@@ -672,6 +746,12 @@ app.post('/cloud-backup', async (c) => {
   return c.json({ ok: true, saved_at: latest.created_at, id: latest.id, size: latest.size })
 })
 
+// 备份到笔记站（https://md.1211.cc.cd），先登录拿 cookie 再写固定 slug 的笔记
+app.post('/backup-to-notes', async (c) => {
+  const res = await pushToNotes(c.env.DB, c.env)
+  return c.json(res, res.ok ? 200 : 500)
+})
+
 // 云端备份列表
 app.get('/backup-list', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT id, created_at, length(content) AS size FROM backups ORDER BY id DESC LIMIT 30').all()
@@ -688,12 +768,17 @@ app.get('/backup-get', async (c) => {
 
 export default {
   fetch: (req, env, ctx) => app.fetch(req, env, ctx),
-  // 每天 UTC 16:00（北京时间 0 点）自动备份一次
+  // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站
   scheduled: async (event, env, ctx) => {
     try {
       await saveBackup(env.DB)
     } catch (e) {
       console.error('scheduled backup failed', e)
+    }
+    try {
+      await pushToNotes(env.DB, env)
+    } catch (e) {
+      console.error('scheduled push-to-notes failed', e)
     }
   }
 }

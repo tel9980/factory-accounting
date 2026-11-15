@@ -9,3 +9,8 @@ database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
 
 [triggers]
 crons = ["0 16 * * *"]
+
+[vars]
+NOTES_BASE = "https://md.1211.cc.cd"
+NOTES_SLUG = "factory-ledger-backup"
+# NOTES_PASS 用 secret 存：npx wrangler secret put NOTES_PASS

@@ -524,5 +524,27 @@ Page({
         }
       }
     })
+  },
+  backupToNotes() {
+    wx.showModal({
+      title: '备份到笔记站',
+      content: '把全部账目生成一篇笔记，写到你的 Markdown 笔记站（md.1211.cc.cd），每天凌晨会自动同步一次',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.showLoading({ title: '正在写入…' })
+        this.req({
+          url: API_BASE + '/backup-to-notes', method: 'POST',
+          success: (res) => {
+            wx.hideLoading()
+            if (res.data && res.data.ok) {
+              wx.showToast({ title: '已备份到笔记站', icon: 'success' })
+            } else {
+              wx.showToast({ title: (res.data && res.data.error) || '备份失败', icon: 'none' })
+            }
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
   }
 })

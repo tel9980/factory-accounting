@@ -155,6 +155,7 @@
       <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水</button>
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
       <button class="btn" size="mini" bindtap="cloudBackup">云端备份</button>
+      <button class="btn" size="mini" bindtap="backupToNotes">备份到笔记站</button>
       <button class="btn" size="mini" bindtap="changeKey">改口令</button>
     </view>
     <view class="tip" wx:if="{{cloud_backup_at}}">最近云端备份：{{cloud_backup_at}}（每天自动备份一次）</view>
