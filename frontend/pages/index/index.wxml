@@ -162,6 +162,23 @@
       <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>
       <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>
     </view>
+    <view class="form">
+      <view class="tip">固定支出（每月自动记一笔，如工资、房租）</view>
+      <input class="inp" placeholder="金额" type="digit" value="{{f_amount}}" bindinput="onFAmount"/>
+      <picker range="{{categories}}" value="{{f_category}}" bindchange="onFCategory">
+        <view class="inp picker">{{categories[f_category]}}</view>
+      </picker>
+      <input class="inp" placeholder="每月几号记（1-28）" type="number" value="{{f_day}}" bindinput="onFDay"/>
+      <input class="inp" placeholder="备注，如 3月工资" value="{{f_remark}}" bindinput="onFRemark"/>
+      <button class="btn" size="mini" bindtap="addFixed">添加固定支出</button>
+      <button class="btn" size="mini" bindtap="runFixed">立即补记本月</button>
+      <view class="list" wx:if="{{fixed_list.length}}">
+        <view class="item" wx:for="{{fixed_list}}" wx:key="id">
+          <view class="row1">{{item.remark || item.category}} · 每月{{item.day}}号 · ¥{{item.amount}}</view>
+          <view class="row2">{{item.category}}<button size="mini" bindtap="delFixed" data-id="{{item.id}}">删</button></view>
+        </view>
+      </view>
+    </view>
     <view class="tip" wx:if="{{cloud_backup_at}}">最近云端备份：{{cloud_backup_at}}（每天自动备份一次）</view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">

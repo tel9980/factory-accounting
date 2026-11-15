@@ -221,6 +221,35 @@ app.post('/expenses', async (c) => {
   return c.json({ ok: true })
 })
 
+// 固定支出（工资、房租等每月自动记）
+app.get('/fixed', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM fixed_expenses ORDER BY day').all()
+  return c.json(results)
+})
+
+app.post('/fixed', async (c) => {
+  const { amount, category, day, remark } = await c.req.json()
+  const d = num(day)
+  if (num(amount) <= 0) return c.json({ error: '金额必填' }, 400)
+  if (!(d >= 1 && d <= 28)) return c.json({ error: '每月号数填 1–28' }, 400)
+  const db = c.env.DB
+  await db.prepare('INSERT INTO fixed_expenses (amount, category, remark, day, created_at) VALUES (?,?,?,?,?)')
+    .bind(num(amount), category || '', remark || '', d, now()).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/fixed/:id', async (c) => {
+  const id = c.req.param('id')
+  await c.env.DB.prepare('DELETE FROM fixed_expenses WHERE id=?').bind(id).run()
+  return c.json({ ok: true })
+})
+
+// 立即补记本月固定支出（平时由每日 cron 自动跑）
+app.post('/run-fixed', async (c) => {
+  const n = await runFixed(c.env.DB)
+  return c.json({ ok: true, added: n })
+})
+
 // 对账单（按单位）
 app.get('/statement', async (c) => {
   const type = c.req.query('type')
@@ -822,6 +851,11 @@ export default {
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站
   scheduled: async (event, env, ctx) => {
     try {
+      await runFixed(env.DB)
+    } catch (e) {
+      console.error('scheduled fixed failed', e)
+    }
+    try {
       await saveBackup(env.DB)
     } catch (e) {
       console.error('scheduled backup failed', e)
@@ -832,4 +866,21 @@ export default {
       console.error('scheduled push-to-notes failed', e)
     }
   }
+}
+
+// 固定支出：每月号数到了就自动记一条支出（当天错过，之后几天会补记，每月只记一次）
+async function runFixed(db) {
+  const { results } = await db.prepare('SELECT * FROM fixed_expenses').all()
+  const m = now().slice(0, 7)
+  const todayD = Number(now().slice(8, 10))
+  let n = 0
+  for (const f of results) {
+    if (Number(f.day) > todayD) continue
+    const c = await db.prepare("SELECT COUNT(*) AS c FROM ledger WHERE ref_type='fixed' AND ref_id=? AND substr(created_at,1,7)=?").bind(f.id, m).first()
+    if (c && c.c > 0) continue
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','fixed',?,?,?,?,?)")
+      .bind(f.id, num(f.amount), f.category || '', f.remark || '固定支出', now()).run()
+    n++
+  }
+  return n
 }

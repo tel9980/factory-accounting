@@ -23,7 +23,8 @@ Page({
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
     cloud_backup_at: '',
-    restore_text: ''
+    restore_text: '',
+    fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: ''
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -86,6 +87,7 @@ Page({
     this.loadExpenses()
     this.loadHistory()
     this.loadContacts()
+    this.loadFixed()
   },
   loadCloudBackup() {
     this.req({
@@ -138,7 +140,11 @@ Page({
   onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }) },
   onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }) },
   onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this.data.exp_all, e.detail.value) }) },
-  setTab(e) { this.setData({ tab: e.currentTarget.dataset.t }) },
+  setTab(e) {
+    const t = e.currentTarget.dataset.t
+    this.setData({ tab: t })
+    if (t === 'report') this.loadFixed()
+  },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
   onOPrice(e) { this.setData({ o_price: e.detail.value }) },
@@ -574,6 +580,53 @@ Page({
           },
           fail: () => wx.hideLoading()
         })
+      }
+    })
+  },
+  loadFixed() {
+    this.req({ url: API_BASE + '/fixed', success: (res) => this.setData({ fixed_list: res.data || [] }) })
+  },
+  onFAmount(e) { this.setData({ f_amount: e.detail.value }) },
+  onFCategory(e) { this.setData({ f_category: Number(e.detail.value) }) },
+  onFDay(e) { this.setData({ f_day: e.detail.value }) },
+  onFRemark(e) { this.setData({ f_remark: e.detail.value }) },
+  addFixed() {
+    const amount = Number(this.data.f_amount)
+    const day = Number(this.data.f_day)
+    if (!(amount > 0)) return wx.showToast({ title: '金额必填', icon: 'none' })
+    if (!(day >= 1 && day <= 28)) return wx.showToast({ title: '每月号数填 1–28', icon: 'none' })
+    this.req({
+      url: API_BASE + '/fixed', method: 'POST',
+      data: { amount, category: this.data.categories[this.data.f_category], day, remark: this.data.f_remark },
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          this.setData({ f_amount: '', f_remark: '', f_day: '' })
+          this.loadFixed()
+          wx.showToast({ title: '已添加', icon: 'success' })
+        } else {
+          wx.showToast({ title: (res.data && res.data.error) || '添加失败', icon: 'none' })
+        }
+      }
+    })
+  },
+  delFixed(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除固定支出',
+      content: '删除后不再每月自动记这笔；已经记过的流水不会删。确定吗？',
+      success: (r) => {
+        if (r.confirm) this.req({ url: API_BASE + '/fixed/' + id, method: 'DELETE', success: () => this.loadFixed() })
+      }
+    })
+  },
+  runFixed() {
+    this.req({
+      url: API_BASE + '/run-fixed', method: 'POST',
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          wx.showToast({ title: '本月已补记 ' + res.data.added + ' 笔', icon: 'none' })
+          this.refresh()
+        }
       }
     })
   }

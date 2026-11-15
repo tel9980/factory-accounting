@@ -53,3 +53,14 @@ CREATE TABLE IF NOT EXISTS backups (
   content TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- 固定支出（每月自动记一笔：工资、房租等）
+CREATE TABLE IF NOT EXISTS fixed_expenses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  amount REAL NOT NULL DEFAULT 0,
+  category TEXT,
+  remark TEXT,
+  day INTEGER NOT NULL DEFAULT 1,   -- 每月几号记（1–28）
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_fixed ON ledger(ref_type, ref_id);
