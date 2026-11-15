@@ -15,9 +15,9 @@ Page({
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '',
-    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
+    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
     import_type: 0, import_text: '',
-    import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注',
+    import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
@@ -360,7 +360,7 @@ Page({
   },
   doImport() {
     const { import_type, import_text, import_types } = this.data
-    const types = ['ar', 'ap', 'expense']
+    const types = ['ar', 'ap', 'expense', 'ar_init', 'ap_init']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
     this.req({
       url: API_BASE + '/import', method: 'POST',

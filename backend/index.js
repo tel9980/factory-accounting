@@ -362,6 +362,9 @@ app.post('/import', async (c) => {
     let d = t
     if (p.length > 1 && looksLikeDate(p[p.length - 1])) {
       d = toIsoDate(p.pop())
+    } else if (type === 'ar_init' || type === 'ap_init') {
+      // 期初余额：不带日期就记到今年 1 月 1 日（表示“以前欠下的”）
+      d = `${new Date().getFullYear()}-01-01T00:00:00.000Z`
     }
     if (type === 'ar') {
       const [customer, item, price] = p
@@ -370,11 +373,25 @@ app.post('/import', async (c) => {
           .bind(customer, item || '批量导入', num(price), d).run()
         n++
       }
+    } else if (type === 'ar_init') {
+      const [customer, price] = p
+      if (customer && num(price) > 0) {
+        await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
+          .bind(customer, '期初欠款', num(price), d).run()
+        n++
+      }
     } else if (type === 'ap') {
       const [supplier, amount, remark] = p
       if (supplier && num(amount) > 0) {
         await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
           .bind(supplier, num(amount), '', remark || '', d).run()
+        n++
+      }
+    } else if (type === 'ap_init') {
+      const [supplier, amount] = p
+      if (supplier && num(amount) > 0) {
+        await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
+          .bind(supplier, num(amount), '', '期初欠款', d).run()
         n++
       }
     } else if (type === 'expense') {
