@@ -5,6 +5,8 @@ Page({
     tab: 'ar',
     ar_total: 0, ap_total: 0,
     month_income: 0, month_outcome: 0, month_profit: 0,
+    month_order_add: 0, month_payable_add: 0, profit_biz: 0,
+    overdue_count: 0, overdue: [],
     ar_list: [], ap_list: [], expense_list: [],
     ar_all: [], ap_all: [], exp_all: [],
     ar_kw: '', ap_kw: '', ex_kw: '',
@@ -99,7 +101,10 @@ Page({
           this.setData({
             ar_total: res.data.ar_total, ap_total: res.data.ap_total,
             month_income: res.data.month_income, month_outcome: res.data.month_outcome,
-            month_profit: res.data.month_profit
+            month_profit: res.data.month_profit,
+            month_order_add: res.data.month_order_add, month_payable_add: res.data.month_payable_add,
+            profit_biz: res.data.profit_biz,
+            overdue_count: res.data.overdue_count, overdue: res.data.overdue || []
           })
         }
       }

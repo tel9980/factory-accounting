@@ -87,13 +87,24 @@ app.get('/dashboard', async (c) => {
   const out = await db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM ledger WHERE direction='out' AND substr(created_at,1,7)=?").bind(m).first()
   const pending = await db.prepare('SELECT COUNT(*) AS n FROM orders WHERE status < 2').first()
   const recent = await db.prepare('SELECT * FROM ledger ORDER BY id DESC LIMIT 10').all()
+  const orderAdd = await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
+  const payableAdd = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?').bind(m).first()
+  const expCash = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='expense' AND substr(created_at,1,7)=?").bind(m).first()
+  const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+  const overdue = await db.prepare('SELECT * FROM orders WHERE paid < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all()
   return c.json({
     ar_total: round2(num(ar.total)),
     ap_total: round2(num(ap.total)),
     month_income: round2(num(inc.total)),
     month_outcome: round2(num(out.total)),
     month_profit: round2(num(inc.total) - num(out.total)),
+    month_order_add: round2(num(orderAdd.t)),
+    month_payable_add: round2(num(payableAdd.t)),
+    month_expense_cash: round2(num(expCash.t)),
+    profit_biz: round2(num(orderAdd.t) - num(payableAdd.t) - num(expCash.t)),
     pending_count: pending.n,
+    overdue_count: overdue.results.length,
+    overdue: overdue.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })),
     recent: recent.results
   })
 })
