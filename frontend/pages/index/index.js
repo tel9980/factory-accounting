@@ -25,7 +25,8 @@ Page({
     cloud_backup_at: '',
     restore_text: '',
     fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: '',
-    lock_month: '', month_locks: []
+    lock_month: '', month_locks: [],
+    audit_logs: []
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -90,6 +91,7 @@ Page({
     this.loadContacts()
     this.loadFixed()
     this.loadMonthLocks()
+    this.loadAuditLogs()
   },
   loadCloudBackup() {
     this.req({
@@ -634,6 +636,9 @@ Page({
   },
   loadMonthLocks() {
     this.req({ url: API_BASE + '/month-locks', success: (res) => this.setData({ month_locks: res.data || [] }) })
+  },
+  loadAuditLogs() {
+    this.req({ url: API_BASE + '/audit-logs', success: (res) => this.setData({ audit_logs: res.data || [] }) })
   },
   onLockMonth(e) { this.setData({ lock_month: e.detail.value }) },
   lockMonth() {

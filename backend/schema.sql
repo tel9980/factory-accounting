@@ -70,3 +70,13 @@ CREATE TABLE IF NOT EXISTS month_lock (
   month TEXT PRIMARY KEY,            -- 如 2026-11
   locked_at TEXT NOT NULL
 );
+
+-- 操作日志（谁在什么时候动了哪笔账）
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action TEXT NOT NULL,
+  target TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);

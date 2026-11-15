@@ -190,6 +190,16 @@
         </view>
       </view>
     </view>
+    <view class="form">
+      <view class="tip">操作日志（最近 100 条，防有人乱改账）</view>
+      <view class="list" wx:if="{{audit_logs.length}}">
+        <view class="item" wx:for="{{audit_logs}}" wx:key="id">
+          <view class="row1">{{item.action}}{{item.target ? ' · ' + item.target : ''}}</view>
+          <view class="row2">{{item.detail}} · {{item.created_at}}</view>
+        </view>
+      </view>
+      <view class="tip" wx:else>暂无操作记录</view>
+    </view>
     <view class="tip" wx:if="{{cloud_backup_at}}">最近云端备份：{{cloud_backup_at}}（每天自动备份一次）</view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">

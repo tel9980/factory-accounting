@@ -19,6 +19,14 @@ const isMonthLocked = async (db, m) => {
   const r = await db.prepare('SELECT 1 FROM month_lock WHERE month=?').bind(m).first()
   return !!r
 }
+const logAudit = async (db, action, target, detail) => {
+  try {
+    await db.prepare('INSERT INTO audit_log (action, target, detail, created_at) VALUES (?,?,?,?)')
+      .bind(action, target, detail || '', now()).run()
+  } catch (e) {
+    console.error('audit log failed', e)
+  }
+}
 
 const getKey = async (db) => {
   const r = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first()
@@ -161,6 +169,7 @@ app.post('/orders', async (c) => {
   const due = toIsoDate(due_date)
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, now()).run()
+  await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
   return c.json({ ok: true })
 })
 
@@ -179,6 +188,7 @@ app.post('/orders/:id/receive', async (c) => {
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, created_at) VALUES ('in','order',?,?,?,?)")
       .bind(id, a, `收 ${o.customer} ${o.item_name}`, normDate(date))
   ])
+  await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`)
   return c.json({ ok: true })
 })
 
@@ -191,6 +201,7 @@ app.post('/orders/:id/status', async (c) => {
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   await db.prepare('UPDATE orders SET status=? WHERE id=?').bind(num(status), id).run()
+  await logAudit(db, '状态变更', o.customer, `${o.customer} ${o.item_name} → ${['待加工','加工中','已交付'][num(status)] || num(status)}`)
   return c.json({ ok: true })
 })
 
@@ -202,6 +213,7 @@ app.post('/payables', async (c) => {
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, created_at) VALUES (?,?,0,?,?,?,?)')
     .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
+  await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
 
@@ -220,6 +232,7 @@ app.post('/payables/:id/pay', async (c) => {
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','payable',?,?,?,?,?)")
       .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, normDate(date))
   ])
+  await logAudit(db, '付款', p.supplier, `${p.supplier} 付 ¥${a}`)
   return c.json({ ok: true })
 })
 
@@ -231,6 +244,7 @@ app.post('/expenses', async (c) => {
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, created_at) VALUES ('out','expense',0,?,?,?,?,?)")
     .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
+  await logAudit(db, '新增支出', category || '其他', `${category || '其他'} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
 
@@ -248,18 +262,23 @@ app.post('/fixed', async (c) => {
   const db = c.env.DB
   await db.prepare('INSERT INTO fixed_expenses (amount, category, remark, day, created_at) VALUES (?,?,?,?,?)')
     .bind(num(amount), category || '', remark || '', d, now()).run()
+  await logAudit(db, '添加固定支出', category || '其他', `每月${d}号 ¥${num(amount)}`)
   return c.json({ ok: true })
 })
 
 app.delete('/fixed/:id', async (c) => {
   const id = c.req.param('id')
-  await c.env.DB.prepare('DELETE FROM fixed_expenses WHERE id=?').bind(id).run()
+  const db = c.env.DB
+  const f = await db.prepare('SELECT * FROM fixed_expenses WHERE id=?').bind(id).first()
+  await db.prepare('DELETE FROM fixed_expenses WHERE id=?').bind(id).run()
+  if (f) await logAudit(db, '删除固定支出', f.category || '其他', `每月${f.day}号 ¥${f.amount}`)
   return c.json({ ok: true })
 })
 
 // 立即补记本月固定支出（平时由每日 cron 自动跑）
 app.post('/run-fixed', async (c) => {
   const n = await runFixed(c.env.DB)
+  if (n) await logAudit(c.env.DB, '补记固定支出', '', `本月补记 ${n} 笔`)
   return c.json({ ok: true, added: n })
 })
 
@@ -274,13 +293,21 @@ app.post('/month-lock', async (c) => {
   const mm = String(m || '').trim()
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM，如 2026-11' }, 400)
   await c.env.DB.prepare('INSERT OR IGNORE INTO month_lock (month, locked_at) VALUES (?,?)').bind(mm, now()).run()
+  await logAudit(c.env.DB, '月度锁定', mm, `锁定 ${mm}`)
   return c.json({ ok: true })
 })
 
 app.delete('/month-lock/:month', async (c) => {
   const m = c.req.param('month')
   await c.env.DB.prepare('DELETE FROM month_lock WHERE month=?').bind(m).run()
+  await logAudit(c.env.DB, '解除锁定', m, `解锁 ${m}`)
   return c.json({ ok: true })
+})
+
+// 操作日志（最近 100 条）
+app.get('/audit-logs', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 100').all()
+  return c.json(results)
 })
 
 // 对账单（按单位）
@@ -408,6 +435,7 @@ app.post('/quick', async (c) => {
   } else {
     return c.json({ error: '没识别出收/付/分类，请写如：收张老板5000、付货款3000、工资5000' }, 400)
   }
+  await logAudit(db, '一句话记账', '', summary)
   return c.json({ ok: true, summary })
 })
 
@@ -468,6 +496,7 @@ app.post('/import', async (c) => {
       }
     }
   }
+  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}`)
   return c.json({ imported: n, skipped_locked: skippedLocked })
 })
 
@@ -570,6 +599,7 @@ app.patch('/orders/:id', async (c) => {
   if (p < num(o.paid)) return c.json({ error: '金额不能小于已收款' }, 400)
   await db.prepare('UPDATE orders SET customer=?, item_name=?, price=? WHERE id=?')
     .bind(customer || o.customer, item_name || o.item_name, p, id).run()
+  await logAudit(db, '编辑应收', customer || o.customer, `${customer || o.customer} ${item_name || o.item_name} ¥${p}`)
   return c.json({ ok: true })
 })
 
@@ -585,6 +615,7 @@ app.patch('/payables/:id', async (c) => {
   if (a < num(p.paid)) return c.json({ error: '金额不能小于已付款' }, 400)
   await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=? WHERE id=?')
     .bind(supplier || p.supplier, a, remark !== undefined ? remark : p.remark, id).run()
+  await logAudit(db, '编辑应付', supplier || p.supplier, `${supplier || p.supplier} ¥${a}`)
   return c.json({ ok: true })
 })
 
@@ -600,6 +631,7 @@ app.patch('/ledger/:id', async (c) => {
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
   await db.prepare('UPDATE ledger SET amount=?, category=?, remark=? WHERE id=?')
     .bind(a, category || l.category, remark !== undefined ? remark : l.remark, id).run()
+  await logAudit(db, '编辑支出', category || l.category, `${category || l.category} ¥${a}`)
   return c.json({ ok: true })
 })
 
@@ -614,6 +646,7 @@ app.delete('/orders/:id', async (c) => {
     db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('order', id),
     db.prepare('DELETE FROM orders WHERE id=?').bind(id)
   ])
+  await logAudit(db, '删除应收', o.customer, `${o.customer} ${o.item_name}`)
   return c.json({ ok: true })
 })
 
@@ -628,6 +661,7 @@ app.delete('/payables/:id', async (c) => {
     db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('payable', id),
     db.prepare('DELETE FROM payables WHERE id=?').bind(id)
   ])
+  await logAudit(db, '删除应付', p.supplier, `${p.supplier} ${p.remark}`)
   return c.json({ ok: true })
 })
 
@@ -639,6 +673,7 @@ app.delete('/ledger/:id', async (c) => {
   if (!l) return c.json({ error: '支出记录不存在' }, 404)
   if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) return c.json({ error: '该支出所在月份已结账锁定' }, 403)
   await db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='expense'").bind(id).run()
+  await logAudit(db, '删除支出', l.category || '其他', `${l.category || '其他'} ¥${l.amount}`)
   return c.json({ ok: true })
 })
 
@@ -891,6 +926,7 @@ app.post('/restore', async (c) => {
       .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now()))
   }
   await runBatch(db, stmts)
+  await logAudit(db, '数据恢复', '', `恢复 应收${orders.length - skipped.orders} 应付${payables.length - skipped.payables} 流水${ledger.length - skipped.ledger}`)
   return c.json({ ok: true, restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, skipped })
 })
 
