@@ -3,10 +3,10 @@ import { Hono } from 'hono'
 const app = new Hono()
 
 app.use('*', async (c, next) => {
-  await next()
   c.header('Access-Control-Allow-Origin', '*')
   c.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
-  c.header('Access-Control-Allow-Headers', 'Content-Type')
+  c.header('Access-Control-Allow-Headers', 'Content-Type,X-Access-Key')
+  await next()
 })
 app.options('*', (c) => c.text('', 204))
 
@@ -14,6 +14,46 @@ const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
+
+const getKey = async (db) => {
+  const r = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first()
+  return r ? String(r.value) : ''
+}
+
+// 访问口令：首次设置 / 修改 / 校验
+app.post('/auth/setup', async (c) => {
+  const { key } = await c.req.json()
+  const k = String(key || '').trim()
+  if (k.length < 4) return c.json({ error: '口令至少 4 位' }, 400)
+  const db = c.env.DB
+  const existing = await getKey(db)
+  if (existing) return c.json({ error: '口令已存在，请用修改功能' }, 400)
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(k).run()
+  return c.json({ ok: true })
+})
+
+app.post('/auth/change', async (c) => {
+  const { old_key, new_key } = await c.req.json()
+  const db = c.env.DB
+  const saved = await getKey(db)
+  if (!saved) return c.json({ error: '尚未设置口令' }, 400)
+  if (String(old_key || '') !== saved) return c.json({ error: '旧口令不对' }, 403)
+  const nk = String(new_key || '').trim()
+  if (nk.length < 4) return c.json({ error: '新口令至少 4 位' }, 400)
+  await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(nk).run()
+  return c.json({ ok: true })
+})
+
+// 除 /auth/* 外全部需要口令
+app.use('*', async (c, next) => {
+  const path = new URL(c.req.url).pathname
+  if (path.startsWith('/auth/')) return next()
+  const db = c.env.DB
+  const saved = await getKey(db)
+  if (!saved) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
+  if (c.req.header('x-access-key') !== saved) return c.json({ error: '访问口令错误', code: 'bad_key' }, 401)
+  await next()
+})
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
 const toIsoDate = (s) => {
   if (!s) return ''

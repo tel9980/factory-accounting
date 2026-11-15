@@ -36,3 +36,9 @@ CREATE TABLE IF NOT EXISTS ledger (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);
+
+-- 系统设置（访问口令等）
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);

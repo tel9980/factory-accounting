@@ -17,6 +17,59 @@ Page({
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: []
   },
+  req(opts) {
+    const ak = wx.getStorageSync('ak') || ''
+    const doReq = (key) => {
+      wx.request(Object.assign({}, opts, {
+        header: Object.assign({ 'X-Access-Key': key }, opts.header),
+        success: (res) => {
+          if (res.statusCode === 401) {
+            if (this._askingKey) return
+            this._askingKey = true
+            const code = res.data && res.data.code
+            const done = () => { this._askingKey = false }
+            if (code === 'no_key') {
+              wx.showModal({
+                title: '首次使用',
+                content: '先设置一个访问口令（至少 4 位，记牢）',
+                editable: true, placeholderText: '设置口令',
+                success: (r) => {
+                  if (r.confirm && r.content) {
+                    const k = r.content.trim()
+                    wx.request({
+                      url: API_BASE + '/auth/setup', method: 'POST',
+                      data: { key: k },
+                      success: (s) => {
+                        done()
+                        if (s.data && s.data.ok) { wx.setStorageSync('ak', k); doReq(k) }
+                        else wx.showToast({ title: (s.data && s.data.error) || '设置失败', icon: 'none' })
+                      },
+                      fail: () => { done(); wx.showToast({ title: '网络失败', icon: 'none' }) }
+                    })
+                  } else done()
+                }
+              })
+            } else {
+              wx.showModal({
+                title: '访问口令', editable: true, placeholderText: '请输入访问口令',
+                success: (r) => {
+                  if (r.confirm && r.content) {
+                    const k = r.content.trim()
+                    wx.setStorageSync('ak', k)
+                    done(); doReq(k)
+                  } else done()
+                }
+              })
+            }
+            return
+          }
+          opts.success && opts.success(res)
+        }
+      }))
+    }
+    doReq(ak)
+  },
+
   onShow() { this.refresh() },
   refresh() {
     this.loadDashboard()
@@ -27,7 +80,7 @@ Page({
     this.loadContacts()
   },
   loadDashboard() {
-    wx.request({
+    this.req({
       url: API_BASE + '/dashboard',
       success: (res) => {
         if (res.data && !res.data.error) {
@@ -41,13 +94,13 @@ Page({
     })
   },
   loadAr() {
-    wx.request({ url: API_BASE + '/ar', success: (res) => this.setData({ ar_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/ar', success: (res) => this.setData({ ar_list: res.data || [] }) })
   },
   loadAp() {
-    wx.request({ url: API_BASE + '/ap', success: (res) => this.setData({ ap_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/ap', success: (res) => this.setData({ ap_list: res.data || [] }) })
   },
   loadExpenses() {
-    wx.request({ url: API_BASE + '/expenses', success: (res) => this.setData({ expense_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/expenses', success: (res) => this.setData({ expense_list: res.data || [] }) })
   },
   setTab(e) { this.setData({ tab: e.currentTarget.dataset.t }) },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
@@ -64,7 +117,7 @@ Page({
   addOrder() {
     const { o_customer, o_item, o_price } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
-    wx.request({
+    this.req({
       url: API_BASE + '/orders', method: 'POST',
       data: { customer: o_customer, item_name: o_item, price: Number(o_price) },
       success: () => { this.setData({ o_customer: '', o_item: '', o_price: '' }); this.refresh() }
@@ -73,7 +126,7 @@ Page({
   addPayable() {
     const { p_supplier, p_amount, p_remark } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
-    wx.request({
+    this.req({
       url: API_BASE + '/payables', method: 'POST',
       data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark },
       success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '' }); this.refresh() }
@@ -82,7 +135,7 @@ Page({
   addExpense() {
     const { e_amount, e_remark, categories, e_category } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
-    wx.request({
+    this.req({
       url: API_BASE + '/expenses', method: 'POST',
       data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark },
       success: () => { this.setData({ e_amount: '', e_remark: '' }); this.refresh() }
@@ -95,7 +148,7 @@ Page({
       success: (r) => {
         if (r.confirm && r.content) {
           const parts = r.content.split(/[,，\s]+/)
-          wx.request({
+          this.req({
             url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
             data: { amount: Number(parts[0]), date: parts[1] || '' },
             success: () => this.refresh()
@@ -111,7 +164,7 @@ Page({
       success: (r) => {
         if (r.confirm && r.content) {
           const parts = r.content.split(/[,，\s]+/)
-          wx.request({
+          this.req({
             url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
             data: { amount: Number(parts[0]), date: parts[1] || '' },
             success: () => this.refresh()
@@ -122,7 +175,7 @@ Page({
   },
   finishOrder(e) {
     const id = e.currentTarget.dataset.id
-    wx.request({
+    this.req({
       url: API_BASE + '/orders/' + id + '/status', method: 'POST',
       data: { status: 2 },
       success: () => this.refresh()
@@ -134,7 +187,7 @@ Page({
       title: '删除应收单', content: '会连同它的收款记录一起删除，确定？',
       success: (r) => {
         if (r.confirm) {
-          wx.request({ url: API_BASE + '/orders/' + id, method: 'DELETE', success: () => this.refresh() })
+          this.req({ url: API_BASE + '/orders/' + id, method: 'DELETE', success: () => this.refresh() })
         }
       }
     })
@@ -145,7 +198,7 @@ Page({
       title: '删除应付单', content: '会连同它的付款记录一起删除，确定？',
       success: (r) => {
         if (r.confirm) {
-          wx.request({ url: API_BASE + '/payables/' + id, method: 'DELETE', success: () => this.refresh() })
+          this.req({ url: API_BASE + '/payables/' + id, method: 'DELETE', success: () => this.refresh() })
         }
       }
     })
@@ -156,14 +209,14 @@ Page({
       title: '删除支出', content: '确定删除这条支出流水？',
       success: (r) => {
         if (r.confirm) {
-          wx.request({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => this.refresh() })
+          this.req({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => this.refresh() })
         }
       }
     })
   },
   statement(e) {
     const { type, name } = e.currentTarget.dataset
-    wx.request({
+    this.req({
       url: API_BASE + '/statement', data: { type, name },
       success: (res) => {
         wx.setClipboardData({
@@ -184,7 +237,7 @@ Page({
       content: ym,
       success: (r) => {
         if (r.confirm && r.content) {
-          wx.request({
+          this.req({
             url: API_BASE + '/statement-month',
             data: { type, name, month: r.content.trim() },
             success: (res) => {
@@ -202,7 +255,7 @@ Page({
     const { import_type, import_text, import_types } = this.data
     const types = ['ar', 'ap', 'expense']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
-    wx.request({
+    this.req({
       url: API_BASE + '/import', method: 'POST',
       data: { type: types[import_type], text: import_text },
       success: (res) => {
@@ -218,7 +271,7 @@ Page({
   quick() {
     const t = this.data.q_text.trim()
     if (!t) return
-    wx.request({
+    this.req({
       url: API_BASE + '/quick', method: 'POST',
       data: { text: t },
       success: (res) => {
@@ -234,7 +287,7 @@ Page({
   },
   genReport() {
     const y = this.data.report_year.trim() || String(new Date().getFullYear())
-    wx.request({
+    this.req({
       url: API_BASE + '/report', data: { year: y },
       success: (res) => {
         if (res.data && res.data.text) this.setData({ report_text: res.data.text })
@@ -247,13 +300,39 @@ Page({
       success: () => wx.showToast({ title: '报表已复制', icon: 'none' })
     })
   },
+  changeKey() {
+    wx.showModal({
+      title: '修改访问口令',
+      content: '格式：旧口令,新口令（逗号分隔）',
+      editable: true,
+      placeholderText: '旧口令,新口令',
+      success: (r) => {
+        if (r.confirm && r.content) {
+          const p = r.content.split(/[,，]/).map((s) => s.trim())
+          if (p.length < 2 || !p[0] || !p[1]) return wx.showToast({ title: '格式：旧口令,新口令', icon: 'none' })
+          wx.request({
+            url: API_BASE + '/auth/change', method: 'POST',
+            data: { old_key: p[0], new_key: p[1] },
+            success: (s) => {
+              if (s.data && s.data.ok) {
+                wx.setStorageSync('ak', p[1])
+                wx.showToast({ title: '口令已修改', icon: 'none' })
+              } else {
+                wx.showToast({ title: (s.data && s.data.error) || '修改失败', icon: 'none' })
+              }
+            }
+          })
+        }
+      }
+    })
+  },
   loadHistory() {
-    wx.request({ url: API_BASE + '/history?type=ar', success: (res) => this.setData({ history_ar_list: res.data || [] }) })
-    wx.request({ url: API_BASE + '/history?type=ap', success: (res) => this.setData({ history_ap_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/history?type=ar', success: (res) => this.setData({ history_ar_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/history?type=ap', success: (res) => this.setData({ history_ap_list: res.data || [] }) })
   },
   setHistoryType(e) { this.setData({ history_type: e.currentTarget.dataset.t }) },
   loadContacts() {
-    wx.request({ url: API_BASE + '/contacts', success: (res) => {
+    this.req({ url: API_BASE + '/contacts', success: (res) => {
       if (res.data && !res.data.error) {
         this.setData({ contacts_ar: res.data.ar || [], contacts_ap: res.data.ap || [] })
       }
@@ -262,7 +341,7 @@ Page({
   setContactType(e) { this.setData({ contact_type: e.currentTarget.dataset.t }) },
   contactDetail(e) {
     const { type, name } = e.currentTarget.dataset
-    wx.request({
+    this.req({
       url: API_BASE + '/contact-detail', data: { type, name },
       success: (res) => {
         if (res.data && res.data.text) {
@@ -280,7 +359,7 @@ Page({
       content: '会把全部订单、应付、流水打包成文本复制到剪贴板，粘贴到微信/记事本/电脑保存即可',
       success: (r) => {
         if (r.confirm) {
-          wx.request({
+          this.req({
             url: API_BASE + '/backup',
             success: (res) => {
               if (res.data && res.data.text) {

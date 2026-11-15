@@ -101,6 +101,7 @@
       <input class="inp" placeholder="年份，如 2026" value="{{report_year}}" bindinput="onReportYear"/>
       <button class="btn" size="mini" bindtap="genReport">生成年度报表</button>
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
+      <button class="btn" size="mini" bindtap="changeKey">改口令</button>
     </view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">
