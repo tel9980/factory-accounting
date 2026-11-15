@@ -14,6 +14,7 @@
     <view class="tab {{tab=='ap'?'on':''}}" bindtap="setTab" data-t="ap">应付</view>
     <view class="tab {{tab=='expense'?'on':''}}" bindtap="setTab" data-t="expense">支出</view>
     <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">批量导入</view>
+    <view class="tab {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
   </view>
 
   <block wx:if="{{tab=='ar'}}">
@@ -80,6 +81,21 @@
       <textarea class="ta" placeholder="每行一条，用逗号分隔&#10;应收：客户,产品,金额&#10;应付：供应商,金额,备注&#10;支出：金额,分类,备注" value="{{import_text}}" bindinput="onImportText"></textarea>
       <button class="btn" size="mini" bindtap="doImport">开始导入</button>
       <view class="tip">可从 Excel 复制多行，直接粘贴到这里</view>
+    </view>
+  </block>
+
+  <block wx:if="{{tab=='report'}}">
+    <view class="form">
+      <input class="inp" placeholder="年份，如 2026" value="{{report_year}}" bindinput="onReportYear"/>
+      <button class="btn" size="mini" bindtap="genReport">生成年度报表</button>
+    </view>
+    <view class="list" wx:if="{{report_text}}">
+      <view class="item">
+        <view class="row2 pre">{{report_text}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="copyReport">复制报表</button>
+        </view>
+      </view>
     </view>
   </block>
 </view>

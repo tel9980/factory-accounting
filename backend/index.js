@@ -252,4 +252,50 @@ app.post('/import', async (c) => {
   return c.json({ imported: n })
 })
 
+// 年度流水报表
+app.get('/report', async (c) => {
+  const y = String(c.req.query('year') || new Date().getFullYear())
+  const db = c.env.DB
+  const prefix = y + '-%'
+  const lines = []
+  lines.push(`【${y} 年度流水报表】`)
+  const pad = (s, n) => String(s).padEnd(n, ' ')
+  const fmt = (n) => String(round2(n))
+  // 按月汇总
+  const { results: monthly } = await db.prepare(
+    "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE created_at LIKE ? GROUP BY m ORDER BY m"
+  ).bind(prefix).all()
+  lines.push('')
+  lines.push('【按月汇总】')
+  lines.push(pad('月份', 10) + pad('收入', 12) + pad('支出', 12) + '结余')
+  let ti = 0, to = 0
+  for (const r of monthly) {
+    const inc = num(r.inc), out = num(r.out)
+    ti += inc; to += out
+    lines.push(pad(r.m, 10) + pad(fmt(inc), 12) + pad(fmt(out), 12) + fmt(inc - out))
+  }
+  if (!monthly.length) lines.push('（本年暂无流水）')
+  lines.push(pad('合计', 10) + pad(fmt(ti), 12) + pad(fmt(to), 12) + fmt(ti - to))
+  // 支出分类
+  const { results: cats } = await db.prepare(
+    "SELECT COALESCE(NULLIF(category,''),'其他') AS c, SUM(amount) AS t FROM ledger WHERE direction='out' AND created_at LIKE ? GROUP BY c ORDER BY t DESC"
+  ).bind(prefix).all()
+  lines.push('')
+  lines.push('【支出分类】')
+  for (const r of cats) lines.push(`${r.c}：${fmt(num(r.t))}`)
+  if (!cats.length) lines.push('（无支出）')
+  // 应收应付
+  const ar = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
+  const ap = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS t FROM payables WHERE paid < amount').first()
+  const inAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in'").first()
+  const outAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out'").first()
+  lines.push('')
+  lines.push('【应收应付】')
+  lines.push(`累计已收款：${fmt(num(inAll.t))}`)
+  lines.push(`累计已付款：${fmt(num(outAll.t))}`)
+  lines.push(`客户还欠我：${fmt(num(ar.t))}`)
+  lines.push(`我还欠供应商：${fmt(num(ap.t))}`)
+  return c.json({ text: lines.join('\n') })
+})
+
 export default app

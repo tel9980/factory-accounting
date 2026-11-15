@@ -11,7 +11,8 @@ Page({
     categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
     e_category: 0, e_amount: '', e_remark: '',
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
-    import_type: 0, import_text: ''
+    import_type: 0, import_text: '',
+    report_year: '', report_text: ''
   },
   onShow() { this.refresh() },
   refresh() {
@@ -170,6 +171,22 @@ Page({
         this.setData({ import_text: '' })
         this.refresh()
       }
+    })
+  },
+  onReportYear(e) { this.setData({ report_year: e.detail.value }) },
+  genReport() {
+    const y = this.data.report_year.trim() || String(new Date().getFullYear())
+    wx.request({
+      url: API_BASE + '/report', data: { year: y },
+      success: (res) => {
+        if (res.data && res.data.text) this.setData({ report_text: res.data.text })
+      }
+    })
+  },
+  copyReport() {
+    wx.setClipboardData({
+      data: this.data.report_text,
+      success: () => wx.showToast({ title: '报表已复制', icon: 'none' })
     })
   }
 })

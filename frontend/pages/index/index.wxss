@@ -26,3 +26,4 @@
 .btns { display: flex; gap: 12rpx; }
 .btns button { font-size: 24rpx; }
 .empty { text-align: center; color: #aaa; font-size: 26rpx; padding: 40rpx 0; }
+.pre { white-space: pre-wrap; font-family: monospace; font-size: 22rpx; line-height: 1.6; color: #333; }
