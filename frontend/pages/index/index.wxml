@@ -2,7 +2,7 @@
   <view class="form">
     <input class="inp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
     <button class="btn" size="mini" bindtap="quick">记</button>
-    <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300</view>
+    <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘的语音输入说话</view>
   </view>
   <view class="stats">
     <view class="stat"><view class="num">{{month_income}}</view><view class="label">本月收</view></view>
