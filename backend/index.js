@@ -5,7 +5,7 @@ const app = new Hono()
 app.use('*', async (c, next) => {
   await next()
   c.header('Access-Control-Allow-Origin', '*')
-  c.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+  c.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
   c.header('Access-Control-Allow-Headers', 'Content-Type')
 })
 app.options('*', (c) => c.text('', 204))
@@ -14,6 +14,16 @@ const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
+// 收款/付款日期补录：支持 YYYY-MM-DD 或 MM-DD，否则用当前时间
+const normDate = (s) => {
+  const t = String(s || '').trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t + 'T00:00:00.000Z'
+  if (/^\d{1,2}-\d{1,2}$/.test(t)) {
+    const [mm, dd] = t.split('-')
+    return `${new Date().getFullYear()}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}T00:00:00.000Z`
+  }
+  return now()
+}
 
 // 首页汇总
 app.get('/dashboard', async (c) => {
@@ -67,10 +77,10 @@ app.post('/orders', async (c) => {
   return c.json({ ok: true })
 })
 
-// 收客户款
+// 收客户款（可带日期补录）
 app.post('/orders/:id/receive', async (c) => {
   const id = c.req.param('id')
-  const { amount } = await c.req.json()
+  const { amount, date } = await c.req.json()
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
@@ -79,7 +89,7 @@ app.post('/orders/:id/receive', async (c) => {
   await db.batch([
     db.prepare('UPDATE orders SET paid=paid+? WHERE id=?').bind(a, id),
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, created_at) VALUES ('in','order',?,?,?,?)")
-      .bind(id, a, `收 ${o.customer} ${o.item_name}`, now())
+      .bind(id, a, `收 ${o.customer} ${o.item_name}`, normDate(date))
   ])
   return c.json({ ok: true })
 })
@@ -103,10 +113,10 @@ app.post('/payables', async (c) => {
   return c.json({ ok: true })
 })
 
-// 付供应商款
+// 付供应商款（可带日期补录）
 app.post('/payables/:id/pay', async (c) => {
   const id = c.req.param('id')
-  const { amount } = await c.req.json()
+  const { amount, date } = await c.req.json()
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
@@ -115,7 +125,7 @@ app.post('/payables/:id/pay', async (c) => {
   await db.batch([
     db.prepare('UPDATE payables SET paid=paid+? WHERE id=?').bind(a, id),
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','payable',?,?,?,?,?)")
-      .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, now())
+      .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, normDate(date))
   ])
   return c.json({ ok: true })
 })
@@ -296,6 +306,36 @@ app.get('/report', async (c) => {
   lines.push(`客户还欠我：${fmt(num(ar.t))}`)
   lines.push(`我还欠供应商：${fmt(num(ap.t))}`)
   return c.json({ text: lines.join('\n') })
+})
+
+// 删除应收单（连带删其收款流水）
+app.delete('/orders/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  await db.batch([
+    db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('order', id),
+    db.prepare('DELETE FROM orders WHERE id=?').bind(id)
+  ])
+  return c.json({ ok: true })
+})
+
+// 删除应付单（连带删其付款流水）
+app.delete('/payables/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  await db.batch([
+    db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('payable', id),
+    db.prepare('DELETE FROM payables WHERE id=?').bind(id)
+  ])
+  return c.json({ ok: true })
+})
+
+// 删除支出流水（仅现付支出）
+app.delete('/ledger/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  await db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='expense'").bind(id).run()
+  return c.json({ ok: true })
 })
 
 export default app

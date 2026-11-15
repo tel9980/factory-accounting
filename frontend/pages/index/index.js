@@ -86,12 +86,13 @@ Page({
   payOrder(e) {
     const id = e.currentTarget.dataset.id
     wx.showModal({
-      title: '收客户款', editable: true, placeholderText: '金额(元)',
+      title: '收客户款', editable: true, placeholderText: '金额 或 金额,日期(如 5000,07-05)',
       success: (r) => {
         if (r.confirm && r.content) {
+          const parts = r.content.split(/[,，\s]+/)
           wx.request({
             url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
-            data: { amount: Number(r.content) },
+            data: { amount: Number(parts[0]), date: parts[1] || '' },
             success: () => this.refresh()
           })
         }
@@ -101,12 +102,13 @@ Page({
   payPayable(e) {
     const id = e.currentTarget.dataset.id
     wx.showModal({
-      title: '付供应商款', editable: true, placeholderText: '金额(元)',
+      title: '付供应商款', editable: true, placeholderText: '金额 或 金额,日期(如 5000,07-05)',
       success: (r) => {
         if (r.confirm && r.content) {
+          const parts = r.content.split(/[,，\s]+/)
           wx.request({
             url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
-            data: { amount: Number(r.content) },
+            data: { amount: Number(parts[0]), date: parts[1] || '' },
             success: () => this.refresh()
           })
         }
@@ -119,6 +121,39 @@ Page({
       url: API_BASE + '/orders/' + id + '/status', method: 'POST',
       data: { status: 2 },
       success: () => this.refresh()
+    })
+  },
+  delOrder(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除应收单', content: '会连同它的收款记录一起删除，确定？',
+      success: (r) => {
+        if (r.confirm) {
+          wx.request({ url: API_BASE + '/orders/' + id, method: 'DELETE', success: () => this.refresh() })
+        }
+      }
+    })
+  },
+  delPayable(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除应付单', content: '会连同它的付款记录一起删除，确定？',
+      success: (r) => {
+        if (r.confirm) {
+          wx.request({ url: API_BASE + '/payables/' + id, method: 'DELETE', success: () => this.refresh() })
+        }
+      }
+    })
+  },
+  delExpense(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除支出', content: '确定删除这条支出流水？',
+      success: (r) => {
+        if (r.confirm) {
+          wx.request({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => this.refresh() })
+        }
+      }
     })
   },
   statement(e) {
