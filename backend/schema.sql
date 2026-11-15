@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS orders (
   price REAL NOT NULL DEFAULT 0,
   status INTEGER NOT NULL DEFAULT 0,   -- 0待加工 1加工中 2已交付
   paid REAL NOT NULL DEFAULT 0,
+  due_date TEXT,                        -- 约定收款日（可选，用于到期提醒）
+  operator TEXT,                        -- 经手人
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
@@ -19,6 +21,7 @@ CREATE TABLE IF NOT EXISTS payables (
   paid REAL NOT NULL DEFAULT 0,
   category TEXT,
   remark TEXT,
+  operator TEXT,                        -- 经手人
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);
@@ -33,6 +36,7 @@ CREATE TABLE IF NOT EXISTS ledger (
   amount REAL NOT NULL,
   category TEXT,
   remark TEXT,
+  operator TEXT,             -- 经手人
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);

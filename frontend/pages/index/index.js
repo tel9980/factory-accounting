@@ -7,16 +7,18 @@ Page({
     month_income: 0, month_outcome: 0, month_profit: 0,
     month_order_add: 0, month_payable_add: 0, profit_biz: 0,
     overdue_count: 0, overdue: [],
+    due_soon_count: 0, due_soon: [],
     ar_list: [], ap_list: [], expense_list: [],
     ar_all: [], ap_all: [], exp_all: [],
     ar_kw: '', ap_kw: '', ex_kw: '',
-    o_customer: '', o_item: '', o_price: '',
-    p_supplier: '', p_amount: '', p_remark: '',
+    o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '',
+    p_supplier: '', p_amount: '', p_remark: '', p_operator: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
-    e_category: 0, e_amount: '', e_remark: '',
+    e_category: 0, e_amount: '', e_remark: '', e_operator: '',
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
     import_type: 0, import_text: '',
-    report_year: '', report_text: '',
+    import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注',
+    report_year: '', report_text: '', chart: [],
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
@@ -104,7 +106,8 @@ Page({
             month_profit: res.data.month_profit,
             month_order_add: res.data.month_order_add, month_payable_add: res.data.month_payable_add,
             profit_biz: res.data.profit_biz,
-            overdue_count: res.data.overdue_count, overdue: res.data.overdue || []
+            overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
+            due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || []
           })
         }
       }
@@ -138,39 +141,45 @@ Page({
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
   onOPrice(e) { this.setData({ o_price: e.detail.value }) },
+  onODue(e) { this.setData({ o_due: e.detail.value }) },
+  onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
+  pickCustomer(e) { this.setData({ o_customer: e.currentTarget.dataset.n }) },
   onPSupplier(e) { this.setData({ p_supplier: e.detail.value }) },
   onPAmount(e) { this.setData({ p_amount: e.detail.value }) },
   onPRemark(e) { this.setData({ p_remark: e.detail.value }) },
+  onPOperator(e) { this.setData({ p_operator: e.detail.value }) },
+  pickSupplier(e) { this.setData({ p_supplier: e.currentTarget.dataset.n }) },
   onECategory(e) { this.setData({ e_category: Number(e.detail.value) }) },
   onEAmount(e) { this.setData({ e_amount: e.detail.value }) },
   onERemark(e) { this.setData({ e_remark: e.detail.value }) },
+  onEOperator(e) { this.setData({ e_operator: e.detail.value }) },
   onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
   onImportText(e) { this.setData({ import_text: e.detail.value }) },
   addOrder() {
-    const { o_customer, o_item, o_price } = this.data
+    const { o_customer, o_item, o_price, o_due, o_operator } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST',
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price) },
-      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '' }); this.refresh() }
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price), due_date: o_due, operator: o_operator },
+      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '' }); this.refresh() }
     })
   },
   addPayable() {
-    const { p_supplier, p_amount, p_remark } = this.data
+    const { p_supplier, p_amount, p_remark, p_operator } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/payables', method: 'POST',
-      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark },
-      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '' }); this.refresh() }
+      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator },
+      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '' }); this.refresh() }
     })
   },
   addExpense() {
-    const { e_amount, e_remark, categories, e_category } = this.data
+    const { e_amount, e_remark, categories, e_category, e_operator } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/expenses', method: 'POST',
-      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark },
-      success: () => { this.setData({ e_amount: '', e_remark: '' }); this.refresh() }
+      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator },
+      success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '' }); this.refresh() }
     })
   },
   payOrder(e) {
@@ -389,6 +398,37 @@ Page({
       url: API_BASE + '/report', data: { year: y },
       success: (res) => {
         if (res.data && res.data.text) this.setData({ report_text: res.data.text })
+      }
+    })
+    this.req({
+      url: API_BASE + '/report-data', data: { year: y },
+      success: (res) => {
+        const list = res.data || []
+        const max = Math.max(1, ...list.map((x) => Math.max(x.inc, x.out)))
+        this.setData({ chart: list.map((x) => ({ ...x, m_short: x.m.slice(5), inc_w: Math.round(x.inc / max * 100), out_w: Math.round(x.out / max * 100) })) })
+      }
+    })
+  },
+  exportCsv(e) {
+    const type = e.currentTarget.dataset.type
+    const names = { orders: '应收账单', payables: '应付账单', ledger: '全部收支流水' }
+    wx.showModal({
+      title: '导出 Excel',
+      content: '会把' + (names[type] || '数据') + '做成表格文本复制到剪贴板，粘贴到电脑记事本另存为 .csv 文件，再用 Excel 打开即可。',
+      success: (r) => {
+        if (r.confirm) {
+          this.req({
+            url: API_BASE + '/export', data: { type },
+            success: (res) => {
+              if (res.data && res.data.text) {
+                wx.setClipboardData({
+                  data: res.data.text,
+                  success: () => wx.showToast({ title: '已复制，去电脑粘贴保存', icon: 'none' })
+                })
+              }
+            }
+          })
+        }
       }
     })
   },

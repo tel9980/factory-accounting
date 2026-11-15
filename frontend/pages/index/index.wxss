@@ -33,3 +33,16 @@
 .biz { background: #fff; border-radius: 12rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 24rpx; color: #1a1a1a; display: flex; justify-content: space-between; align-items: center; }
 .biz-sub { color: #999; font-size: 20rpx; }
 .overdue { background: #fdeaea; color: #c0392b; border-radius: 12rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 26rpx; font-weight: 600; }
+.duesoon { background: #fff6e0; color: #b8860b; border-radius: 12rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 26rpx; font-weight: 600; }
+.chips { width: 100%; display: flex; flex-wrap: wrap; gap: 8rpx; align-items: center; }
+.chip-label { font-size: 22rpx; color: #999; }
+.chip { background: #eef2ff; color: #3d7bf5; border-radius: 8rpx; padding: 6rpx 14rpx; font-size: 24rpx; }
+.chart { background: #fff; border-radius: 12rpx; padding: 16rpx; margin-bottom: 12rpx; }
+.chart-title { font-size: 26rpx; font-weight: 600; color: #1a1a1a; margin-bottom: 12rpx; }
+.bar-line { display: flex; align-items: center; gap: 8rpx; margin-bottom: 8rpx; }
+.bar-m { width: 64rpx; font-size: 22rpx; color: #666; text-align: right; flex-shrink: 0; }
+.bar-zone { flex: 1; display: flex; align-items: center; gap: 8rpx; }
+.bar { height: 22rpx; border-radius: 6rpx; min-width: 2rpx; }
+.bar-in { background: #3d7bf5; }
+.bar-out { background: #e0711e; }
+.bar-num { font-size: 20rpx; color: #888; width: 88rpx; flex-shrink: 0; }

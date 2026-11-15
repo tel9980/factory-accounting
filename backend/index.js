@@ -104,6 +104,9 @@ app.get('/dashboard', async (c) => {
   const expCash = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='expense' AND substr(created_at,1,7)=?").bind(m).first()
   const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
   const overdue = await db.prepare('SELECT * FROM orders WHERE paid < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all()
+  const todayS = new Date().toISOString().slice(0, 10)
+  const soonS = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  const dueSoon = await db.prepare("SELECT * FROM orders WHERE paid < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
   return c.json({
     ar_total: round2(num(ar.total)),
     ap_total: round2(num(ap.total)),
@@ -117,6 +120,8 @@ app.get('/dashboard', async (c) => {
     pending_count: pending.n,
     overdue_count: overdue.results.length,
     overdue: overdue.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })),
+    due_soon_count: dueSoon.results.length,
+    due_soon: dueSoon.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
     recent: recent.results
   })
 })
@@ -125,7 +130,7 @@ app.get('/dashboard', async (c) => {
 app.get('/ar', async (c) => {
   const db = c.env.DB
   const { results } = await db.prepare('SELECT * FROM orders WHERE paid < price ORDER BY id DESC LIMIT 200').all()
-  return c.json(results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })))
+  return c.json(results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })))
 })
 
 // 应付：未结清应付单
@@ -144,11 +149,12 @@ app.get('/expenses', async (c) => {
 
 // 记应收（加工订单）
 app.post('/orders', async (c) => {
-  const { customer, item_name, price } = await c.req.json()
+  const { customer, item_name, price, due_date, operator } = await c.req.json()
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
-  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
-    .bind(customer, item_name || '', num(price), now()).run()
+  const due = toIsoDate(due_date)
+  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?)')
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, now()).run()
   return c.json({ ok: true })
 })
 
@@ -180,11 +186,11 @@ app.post('/orders/:id/status', async (c) => {
 
 // 记应付
 app.post('/payables', async (c) => {
-  const { supplier, amount, category, remark } = await c.req.json()
+  const { supplier, amount, category, remark, operator } = await c.req.json()
   if (!supplier || num(amount) <= 0) return c.json({ error: '供应商和金额必填' }, 400)
   const db = c.env.DB
-  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', now()).run()
+  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, created_at) VALUES (?,?,0,?,?,?,?)')
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
   return c.json({ ok: true })
 })
 
@@ -207,11 +213,11 @@ app.post('/payables/:id/pay', async (c) => {
 
 // 现付支出
 app.post('/expenses', async (c) => {
-  const { amount, category, remark } = await c.req.json()
+  const { amount, category, remark, operator } = await c.req.json()
   if (num(amount) <= 0) return c.json({ error: '金额必填' }, 400)
   const db = c.env.DB
-  await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
-    .bind(num(amount), category || '', remark || '', now()).run()
+  await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, created_at) VALUES ('out','expense',0,?,?,?,?,?)")
+    .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
   return c.json({ ok: true })
 })
 
@@ -427,6 +433,47 @@ app.get('/report', async (c) => {
   lines.push(`客户还欠我：${fmt(num(ar.t))}`)
   lines.push(`我还欠供应商：${fmt(num(ap.t))}`)
   return c.json({ text: lines.join('\n') })
+})
+
+// 导出 Excel（CSV，可直接用 Excel 打开）
+const csvCell = (v) => { v = String(v == null ? '' : v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v }
+app.get('/export', async (c) => {
+  const type = c.req.query('type') || 'orders'
+  const db = c.env.DB
+  const rows = []
+  if (type === 'orders') {
+    rows.push(['日期', '客户', '产品/项目', '金额', '已收', '未收', '状态', '到期日', '经手人'])
+    const { results } = await db.prepare('SELECT * FROM orders ORDER BY id').all()
+    const st = (s) => (s == 2 ? '已交付' : s == 1 ? '加工中' : '待加工')
+    for (const o of results) rows.push([o.created_at.slice(0, 10), o.customer, o.item_name, o.price, o.paid, round2(o.price - o.paid), st(o.status), (o.due_date || '').slice(0, 10), o.operator || ''])
+  } else if (type === 'payables') {
+    rows.push(['日期', '供应商', '金额', '已付', '未付', '分类', '备注', '经手人'])
+    const { results } = await db.prepare('SELECT * FROM payables ORDER BY id').all()
+    for (const p of results) rows.push([p.created_at.slice(0, 10), p.supplier, p.amount, p.paid, round2(p.amount - p.paid), p.category, p.remark, p.operator || ''])
+  } else {
+    rows.push(['日期', '方向', '金额', '分类', '备注', '经手人'])
+    const { results } = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
+    for (const l of results) rows.push([l.created_at.slice(0, 10), l.direction === 'in' ? '收' : '付', l.amount, l.category, l.remark, l.operator || ''])
+  }
+  const text = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\n')
+  return c.json({ text, filename: `factory-${type}-${new Date().toISOString().slice(0, 10)}.csv` })
+})
+
+// 报表图表数据（按月收入/支出）
+app.get('/report-data', async (c) => {
+  const y = String(c.req.query('year') || new Date().getFullYear())
+  const db = c.env.DB
+  const { results } = await db.prepare(
+    "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE created_at LIKE ? GROUP BY m ORDER BY m"
+  ).bind(y + '-%').all()
+  const map = {}
+  results.forEach((r) => { map[r.m] = r })
+  const arr = []
+  for (let i = 1; i <= 12; i++) {
+    const m = y + '-' + String(i).padStart(2, '0')
+    arr.push({ m, inc: round2(num((map[m] || {}).inc)), out: round2(num((map[m] || {}).out)) })
+  }
+  return c.json(arr)
 })
 
 // 编辑应收单
