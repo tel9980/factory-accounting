@@ -22,6 +22,8 @@ Page({
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
+    contact_show: false, contact_title: '', contact_text: '',
+    trash_list: [],
     cloud_backup_at: '',
     restore_text: '',
     fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: '',
@@ -92,6 +94,7 @@ Page({
     this.loadFixed()
     this.loadMonthLocks()
     this.loadAuditLogs()
+    this.loadTrash()
   },
   loadCloudBackup() {
     this.req({
@@ -493,6 +496,9 @@ Page({
   genReportImage() {
     const text = this.data.report_text
     if (!text) return wx.showToast({ title: '先点「生成报表」', icon: 'none' })
+    this.drawTextImage(text)
+  },
+  drawTextImage(text) {
     wx.showLoading({ title: '生成图片…' })
     const FONT = 15, LH = 22, PAD = 20, W = 750
     const unit = (ch) => (/[\u0000-\u00ff]/.test(ch) ? 0.55 : 1)
@@ -581,13 +587,26 @@ Page({
       url: API_BASE + '/contact-detail', data: { type, name },
       success: (res) => {
         if (res.data && res.data.text) {
-          wx.setClipboardData({
-            data: res.data.text,
-            success: () => wx.showToast({ title: '往来明细已复制', icon: 'none' })
+          this.setData({
+            contact_show: true,
+            contact_title: (type === 'ar' ? '客户' : '供应商') + '对账单 · ' + name,
+            contact_text: res.data.text
           })
         }
       }
     })
+  },
+  closeContact() { this.setData({ contact_show: false }) },
+  copyContactText() {
+    wx.setClipboardData({
+      data: this.data.contact_text,
+      success: () => wx.showToast({ title: '已复制', icon: 'none' })
+    })
+  },
+  genContactImage() {
+    const text = this.data.contact_text
+    if (!text) return wx.showToast({ title: '暂无内容', icon: 'none' })
+    this.drawTextImage(text)
   },
   backup() {
     wx.showModal({
@@ -762,6 +781,46 @@ Page({
         this.req({
           url: API_BASE + '/month-lock/' + m, method: 'DELETE',
           success: () => { this.loadMonthLocks(); wx.showToast({ title: '已解锁 ' + m, icon: 'success' }) }
+        })
+      }
+    })
+  },
+  loadTrash() {
+    this.req({ url: API_BASE + '/trash', success: (res) => this.setData({ trash_list: res.data || [] }) })
+  },
+  restoreTrash(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '恢复',
+      content: '把这批删掉的账恢复到原处。确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/trash/' + id + '/restore', method: 'POST',
+          success: (res) => {
+            if (res.data && res.data.ok) {
+              this.loadTrash()
+              this.refresh()
+              wx.showToast({ title: '已恢复 ' + res.data.restored + ' 条', icon: 'success' })
+            } else {
+              wx.showToast({ title: (res.data && res.data.error) || '恢复失败', icon: 'none' })
+            }
+          }
+        })
+      }
+    })
+  },
+  purgeTrash(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '彻底删除',
+      content: '彻底删除后无法恢复。确定吗？',
+      confirmColor: '#e64340',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/trash/' + id, method: 'DELETE',
+          success: () => { this.loadTrash(); wx.showToast({ title: '已彻底删除', icon: 'success' }) }
         })
       }
     })

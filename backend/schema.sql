@@ -91,3 +91,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+
+-- 回收站（删除的单据先放这里，30天内可恢复）
+CREATE TABLE IF NOT EXISTS trash (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,      -- order / payable / ledger / process
+  ref_id INTEGER NOT NULL,
+  data TEXT NOT NULL,      -- 原记录完整 JSON
+  batch TEXT NOT NULL,     -- 同批删除（如订单+它的收款流水）
+  deleted_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_trash_batch ON trash(batch);

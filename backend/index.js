@@ -19,6 +19,13 @@ const isMonthLocked = async (db, m) => {
   const r = await db.prepare('SELECT 1 FROM month_lock WHERE month=?').bind(m).first()
   return !!r
 }
+const uid = () => {
+  try { return globalThis.crypto.randomUUID() } catch { return Date.now().toString(36) + Math.random().toString(36).slice(2) }
+}
+const intoTrash = async (db, type, refId, obj, batch) => {
+  await db.prepare('INSERT INTO trash (type, ref_id, data, batch, deleted_at) VALUES (?,?,?,?,?)')
+    .bind(type, refId, JSON.stringify(obj), batch, now()).run()
+}
 const logAudit = async (db, action, target, detail) => {
   try {
     await db.prepare('INSERT INTO audit_log (action, target, detail, created_at) VALUES (?,?,?,?)')
@@ -665,7 +672,14 @@ app.delete('/orders/:id', async (c) => {
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
+  const b = uid()
+  await intoTrash(db, 'order', o.id, o, b)
+  const pays = await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id=?").bind(id).all()
+  for (const l of pays.results) await intoTrash(db, 'ledger', l.id, l, b)
+  const procs = await db.prepare('SELECT * FROM process_log WHERE order_id=?').bind(id).all()
+  for (const p of procs.results) await intoTrash(db, 'process', p.id, p, b)
   await db.batch([
+    db.prepare('DELETE FROM process_log WHERE order_id=?').bind(id),
     db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('order', id),
     db.prepare('DELETE FROM orders WHERE id=?').bind(id)
   ])
@@ -680,6 +694,10 @@ app.delete('/payables/:id', async (c) => {
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
+  const b = uid()
+  await intoTrash(db, 'payable', p.id, p, b)
+  const pays = await db.prepare("SELECT * FROM ledger WHERE ref_type='payable' AND ref_id=?").bind(id).all()
+  for (const l of pays.results) await intoTrash(db, 'ledger', l.id, l, b)
   await db.batch([
     db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('payable', id),
     db.prepare('DELETE FROM payables WHERE id=?').bind(id)
@@ -695,8 +713,74 @@ app.delete('/ledger/:id', async (c) => {
   const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(id).first()
   if (!l) return c.json({ error: '支出记录不存在' }, 404)
   if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) return c.json({ error: '该支出所在月份已结账锁定' }, 403)
+  const b = uid()
+  await intoTrash(db, 'ledger', l.id, l, b)
   await db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='expense'").bind(id).run()
   await logAudit(db, '删除支出', l.category || '其他', `${l.category || '其他'} ¥${l.amount}`)
+  return c.json({ ok: true })
+})
+
+// 回收站列表（按批聚合）
+app.get('/trash', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM trash ORDER BY deleted_at DESC, id DESC LIMIT 300').all()
+  const groups = {}
+  const order = []
+  for (const r of results) {
+    const d = JSON.parse(r.data || '{}')
+    let label = ''
+    if (r.type === 'order') label = `应收 ${d.customer || ''} ¥${d.price || 0}`
+    else if (r.type === 'payable') label = `应付 ${d.supplier || ''} ¥${d.amount || 0}`
+    else if (r.type === 'ledger') label = `流水 ¥${d.amount || 0}（${d.remark || d.category || ''}）`
+    else label = `工序记录（订单#${d.order_id || ''}）`
+    if (!groups[r.batch]) { groups[r.batch] = { batch: r.batch, deleted_at: r.deleted_at, ids: [], items: [] }; order.push(r.batch) }
+    groups[r.batch].ids.push(r.id)
+    groups[r.batch].items.push(label)
+  }
+  return c.json(order.map((b) => groups[b]))
+})
+
+// 恢复回收站（按批整体恢复）
+app.post('/trash/:id/restore', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const t = await db.prepare('SELECT * FROM trash WHERE id=?').bind(id).first()
+  if (!t) return c.json({ error: '记录不存在' }, 404)
+  const { results: rows } = await db.prepare('SELECT * FROM trash WHERE batch=?').bind(t.batch).all()
+  for (const r of rows) {
+    const d = JSON.parse(r.data || '{}')
+    const m = (d.created_at || '').slice(0, 7)
+    if (m && await isMonthLocked(db, m)) return c.json({ error: `该批记录所属月份 ${m} 已结账锁定，先解锁再恢复` }, 403)
+  }
+  let n = 0
+  for (const r of rows) {
+    const d = JSON.parse(r.data || '{}')
+    if (r.type === 'order') {
+      await db.prepare('INSERT INTO orders (id,customer,item_name,price,status,paid,due_date,operator,progress,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .bind(d.id, d.customer, d.item_name, num(d.price), num(d.status), num(d.paid), d.due_date || null, d.operator || '', d.progress || '', d.created_at).run()
+    } else if (r.type === 'payable') {
+      await db.prepare('INSERT INTO payables (id,supplier,amount,paid,category,remark,operator,created_at) VALUES (?,?,?,?,?,?,?,?)')
+        .bind(d.id, d.supplier, num(d.amount), num(d.paid), d.category || '', d.remark || '', d.operator || '', d.created_at).run()
+    } else if (r.type === 'ledger') {
+      await db.prepare('INSERT INTO ledger (id,direction,ref_type,ref_id,amount,category,remark,operator,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .bind(d.id, d.direction || 'out', d.ref_type || 'expense', d.ref_id || 0, num(d.amount), d.category || '', d.remark || '', d.operator || '', d.created_at).run()
+    } else if (r.type === 'process') {
+      await db.prepare('INSERT INTO process_log (id,order_id,progress,operator,created_at) VALUES (?,?,?,?,?)')
+        .bind(d.id, d.order_id, d.progress || '', d.operator || '', d.created_at).run()
+    }
+    n++
+  }
+  await db.prepare('DELETE FROM trash WHERE batch=?').bind(t.batch).run()
+  await logAudit(db, '恢复回收站', 'trash', `${t.batch}（${n}条）`)
+  return c.json({ ok: true, restored: n })
+})
+
+// 彻底删除（不可恢复）
+app.delete('/trash/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const t = await db.prepare('SELECT * FROM trash WHERE id=?').bind(id).first()
+  if (!t) return c.json({ error: '记录不存在' }, 404)
+  await db.prepare('DELETE FROM trash WHERE batch=?').bind(t.batch).run()
   return c.json({ ok: true })
 })
 
@@ -971,6 +1055,13 @@ export default {
       await pushToNotes(env.DB, env)
     } catch (e) {
       console.error('scheduled push-to-notes failed', e)
+    }
+    try {
+      // 回收站超过 30 天自动彻底清除
+      const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+      await env.DB.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cutoff).run()
+    } catch (e) {
+      console.error('scheduled trash-clean failed', e)
     }
   }
 }

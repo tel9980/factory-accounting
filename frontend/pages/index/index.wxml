@@ -192,6 +192,20 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">回收站（删掉的账先放这里，30 天内可恢复）</view>
+      <view class="list" wx:if="{{trash_list.length}}">
+        <view class="item" wx:for="{{trash_list}}" wx:key="batch">
+          <view class="row1">{{item.items.length}} 条 · 删除于 {{item.deleted_at}}</view>
+          <view class="row2 pre">{{item.items}}</view>
+          <view class="btns">
+            <button size="mini" bindtap="restoreTrash" data-id="{{item.ids[0]}}">恢复</button>
+            <button size="mini" bindtap="purgeTrash" data-id="{{item.ids[0]}}">彻底删除</button>
+          </view>
+        </view>
+      </view>
+      <view class="empty" wx:if="{{!trash_list.length}}">回收站是空的</view>
+    </view>
+    <view class="form">
       <view class="tip">操作日志（最近 100 条，防有人乱改账）</view>
       <view class="list" wx:if="{{audit_logs.length}}">
         <view class="item" wx:for="{{audit_logs}}" wx:key="id">
@@ -211,7 +225,6 @@
         </view>
       </view>
     </view>
-    <canvas type="2d" id="reportCanvas" class="report-canvas"></canvas>
   </block>
 
   <block wx:if="{{tab=='history'}}">
@@ -269,4 +282,20 @@
       </view>
     </block>
   </block>
+
+  <view class="mask" wx:if="{{contact_show}}" bindtap="closeContact">
+    <view class="modal" catchtap="">
+      <view class="modal-title">{{contact_title}}</view>
+      <scroll-view scroll-y class="modal-body">
+        <view class="pre">{{contact_text}}</view>
+      </scroll-view>
+      <view class="btns">
+        <button size="mini" bindtap="copyContactText">复制文字</button>
+        <button size="mini" bindtap="genContactImage">生成图片</button>
+        <button size="mini" bindtap="closeContact">关闭</button>
+      </view>
+    </view>
+  </view>
+
+  <canvas type="2d" id="reportCanvas" class="report-canvas"></canvas>
 </view>
