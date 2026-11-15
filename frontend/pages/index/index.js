@@ -13,7 +13,8 @@ Page({
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
     import_type: 0, import_text: '',
     report_year: '', report_text: '',
-    history_type: 'ar', history_ar_list: [], history_ap_list: []
+    history_type: 'ar', history_ar_list: [], history_ap_list: [],
+    contact_type: 'ar', contacts_ar: [], contacts_ap: []
   },
   onShow() { this.refresh() },
   refresh() {
@@ -22,6 +23,7 @@ Page({
     this.loadAp()
     this.loadExpenses()
     this.loadHistory()
+    this.loadContacts()
   },
   loadDashboard() {
     wx.request({
@@ -230,5 +232,48 @@ Page({
     wx.request({ url: API_BASE + '/history?type=ar', success: (res) => this.setData({ history_ar_list: res.data || [] }) })
     wx.request({ url: API_BASE + '/history?type=ap', success: (res) => this.setData({ history_ap_list: res.data || [] }) })
   },
-  setHistoryType(e) { this.setData({ history_type: e.currentTarget.dataset.t }) }
+  setHistoryType(e) { this.setData({ history_type: e.currentTarget.dataset.t }) },
+  loadContacts() {
+    wx.request({ url: API_BASE + '/contacts', success: (res) => {
+      if (res.data && !res.data.error) {
+        this.setData({ contacts_ar: res.data.ar || [], contacts_ap: res.data.ap || [] })
+      }
+    }})
+  },
+  setContactType(e) { this.setData({ contact_type: e.currentTarget.dataset.t }) },
+  contactDetail(e) {
+    const { type, name } = e.currentTarget.dataset
+    wx.request({
+      url: API_BASE + '/contact-detail', data: { type, name },
+      success: (res) => {
+        if (res.data && res.data.text) {
+          wx.setClipboardData({
+            data: res.data.text,
+            success: () => wx.showToast({ title: '往来明细已复制', icon: 'none' })
+          })
+        }
+      }
+    })
+  },
+  backup() {
+    wx.showModal({
+      title: '备份全部数据',
+      content: '会把全部订单、应付、流水打包成文本复制到剪贴板，粘贴到微信/记事本/电脑保存即可',
+      success: (r) => {
+        if (r.confirm) {
+          wx.request({
+            url: API_BASE + '/backup',
+            success: (res) => {
+              if (res.data && res.data.text) {
+                wx.setClipboardData({
+                  data: res.data.text,
+                  success: () => wx.showToast({ title: '已复制，请粘贴保存', icon: 'none' })
+                })
+              }
+            }
+          })
+        }
+      }
+    })
+  }
 })

@@ -16,6 +16,7 @@
     <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">批量导入</view>
     <view class="tab {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
     <view class="tab {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
+    <view class="tab {{tab=='contact'?'on':''}}" bindtap="setTab" data-t="contact">单位</view>
   </view>
 
   <block wx:if="{{tab=='ar'}}">
@@ -94,6 +95,7 @@
     <view class="form">
       <input class="inp" placeholder="年份，如 2026" value="{{report_year}}" bindinput="onReportYear"/>
       <button class="btn" size="mini" bindtap="genReport">生成年度报表</button>
+      <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
     </view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">
@@ -126,6 +128,37 @@
           <view class="row2">{{item.remark}} · 结清 · {{item.created_at}}</view>
         </view>
         <view class="empty" wx:if="{{!history_ap_list.length}}">暂无已结清应付</view>
+      </view>
+    </block>
+  </block>
+
+  <block wx:if="{{tab=='contact'}}">
+    <view class="form">
+      <view class="seg {{contact_type=='ar'?'on':''}}" bindtap="setContactType" data-t="ar">客户</view>
+      <view class="seg {{contact_type=='ap'?'on':''}}" bindtap="setContactType" data-t="ap">供应商</view>
+    </view>
+    <block wx:if="{{contact_type=='ar'}}">
+      <view class="list">
+        <view class="item" wx:for="{{contacts_ar}}" wx:key="name">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
+          <view class="row2">累计{{item.total}} · 已收{{item.paid}} · {{item.cnt}}笔</view>
+          <view class="btns">
+            <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
+          </view>
+        </view>
+        <view class="empty" wx:if="{{!contacts_ar.length}}">暂无客户记录</view>
+      </view>
+    </block>
+    <block wx:else>
+      <view class="list">
+        <view class="item" wx:for="{{contacts_ap}}" wx:key="name">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
+          <view class="row2">累计{{item.total}} · 已付{{item.paid}} · {{item.cnt}}笔</view>
+          <view class="btns">
+            <button size="mini" bindtap="contactDetail" data-type="ap" data-name="{{item.name}}">往来明细</button>
+          </view>
+        </view>
+        <view class="empty" wx:if="{{!contacts_ap.length}}">暂无供应商记录</view>
       </view>
     </block>
   </block>

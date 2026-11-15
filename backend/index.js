@@ -350,4 +350,82 @@ app.get('/history', async (c) => {
   return c.json(results.map((r) => ({ ...r, settle: round2(r.price) })))
 })
 
+// 单位列表（客户/供应商汇总）
+app.get('/contacts', async (c) => {
+  const db = c.env.DB
+  const ar = await db.prepare(
+    "SELECT customer AS name, SUM(price) AS total, SUM(paid) AS paid, SUM(price-paid) AS unpaid, COUNT(*) AS cnt FROM orders GROUP BY customer ORDER BY unpaid DESC"
+  ).all()
+  const ap = await db.prepare(
+    "SELECT supplier AS name, SUM(amount) AS total, SUM(paid) AS paid, SUM(amount-paid) AS unpaid, COUNT(*) AS cnt FROM payables GROUP BY supplier ORDER BY unpaid DESC"
+  ).all()
+  return c.json({
+    ar: ar.results.map((r) => ({ ...r, total: round2(r.total), paid: round2(r.paid), unpaid: round2(r.unpaid) })),
+    ap: ap.results.map((r) => ({ ...r, total: round2(r.total), paid: round2(r.paid), unpaid: round2(r.unpaid) }))
+  })
+})
+
+// 单位往来明细
+app.get('/contact-detail', async (c) => {
+  const type = c.req.query('type') || 'ar'
+  const name = c.req.query('name')
+  if (!name) return c.json({ error: '缺少单位名称' }, 400)
+  const db = c.env.DB
+  const lines = []
+  if (type === 'ar') {
+    const { results: orders } = await db.prepare('SELECT * FROM orders WHERE customer=? ORDER BY id').bind(name).all()
+    const { results: ins } = await db.prepare(
+      "SELECT l.* FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND o.customer=? ORDER BY l.id"
+    ).bind(name).all()
+    let total = 0, paid = 0
+    orders.forEach((o) => { total += o.price; paid += o.paid })
+    lines.push(`【${name} · 往来明细】`)
+    lines.push(`累计应收：${round2(total)}  已收：${round2(paid)}  未收：${round2(total - paid)}`)
+    lines.push('')
+    lines.push('—— 订单 ——')
+    orders.forEach((o, i) => lines.push(`${i + 1}. ${o.item_name || '加工'} 总${o.price} 已收${o.paid} 欠${round2(o.price - o.paid)}（${o.created_at.slice(0, 10)}）`))
+    if (!orders.length) lines.push('（无）')
+    lines.push('')
+    lines.push('—— 收款记录 ——')
+    ins.forEach((l, i) => lines.push(`${i + 1}. ${l.created_at.slice(0, 10)} 收${l.amount} ${l.remark}`))
+    if (!ins.length) lines.push('（无）')
+  } else {
+    const { results: pays } = await db.prepare('SELECT * FROM payables WHERE supplier=? ORDER BY id').bind(name).all()
+    const { results: outs } = await db.prepare(
+      "SELECT l.* FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND p.supplier=? ORDER BY l.id"
+    ).bind(name).all()
+    let total = 0, paid = 0
+    pays.forEach((p) => { total += p.amount; paid += p.paid })
+    lines.push(`【${name} · 往来明细】`)
+    lines.push(`累计应付：${round2(total)}  已付：${round2(paid)}  未付：${round2(total - paid)}`)
+    lines.push('')
+    lines.push('—— 应付单 ——')
+    pays.forEach((p, i) => {
+      const desc = [p.category, p.remark].filter(Boolean).join(' ')
+      lines.push(`${i + 1}. ${desc || '货款'} 总${p.amount} 已付${p.paid} 欠${round2(p.amount - p.paid)}（${p.created_at.slice(0, 10)}）`)
+    })
+    if (!pays.length) lines.push('（无）')
+    lines.push('')
+    lines.push('—— 付款记录 ——')
+    outs.forEach((l, i) => lines.push(`${i + 1}. ${l.created_at.slice(0, 10)} 付${l.amount} ${l.remark}`))
+    if (!outs.length) lines.push('（无）')
+  }
+  return c.json({ text: lines.join('\n') })
+})
+
+// 数据备份：全量导出 JSON
+app.get('/backup', async (c) => {
+  const db = c.env.DB
+  const orders = await db.prepare('SELECT * FROM orders ORDER BY id').all()
+  const payables = await db.prepare('SELECT * FROM payables ORDER BY id').all()
+  const ledger = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
+  const data = {
+    exported_at: now(),
+    orders: orders.results,
+    payables: payables.results,
+    ledger: ledger.results
+  }
+  return c.json({ text: JSON.stringify(data, null, 2) })
+})
+
 export default app
