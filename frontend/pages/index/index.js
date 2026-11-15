@@ -22,7 +22,8 @@ Page({
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
-    cloud_backup_at: ''
+    cloud_backup_at: '',
+    restore_text: ''
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -540,6 +541,35 @@ Page({
               wx.showToast({ title: '已备份到笔记站', icon: 'success' })
             } else {
               wx.showToast({ title: (res.data && res.data.error) || '备份失败', icon: 'none' })
+            }
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
+  },
+  onRestoreInput(e) { this.setData({ restore_text: e.detail.value }) },
+  restoreData() {
+    const t = this.data.restore_text.trim()
+    if (!t) return wx.showToast({ title: '先粘贴备份文本', icon: 'none' })
+    wx.showModal({
+      title: '从备份恢复',
+      content: '恢复会用备份内容覆盖当前全部账目（恢复前会自动留一份云端快照），确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.showLoading({ title: '恢复中…' })
+        this.req({
+          url: API_BASE + '/restore', method: 'POST',
+          data: { text: t },
+          success: (res) => {
+            wx.hideLoading()
+            if (res.data && res.data.ok) {
+              const d = res.data.restored || {}
+              wx.showToast({ title: '已恢复：应收' + (d.orders || 0) + ' 应付' + (d.payables || 0) + ' 流水' + (d.ledger || 0), icon: 'none' })
+              this.setData({ restore_text: '' })
+              this.refresh()
+            } else {
+              wx.showToast({ title: (res.data && res.data.error) || '恢复失败', icon: 'none' })
             }
           },
           fail: () => wx.hideLoading()

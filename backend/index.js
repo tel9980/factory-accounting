@@ -766,6 +766,57 @@ app.get('/backup-get', async (c) => {
   return c.json({ text: r.content })
 })
 
+// 一键恢复：用备份 JSON 覆盖当前账目（恢复前自动留一份快照）
+async function runBatch(db, stmts) {
+  for (let i = 0; i < stmts.length; i += 50) {
+    await db.batch(stmts.slice(i, i + 50))
+  }
+}
+
+app.post('/restore', async (c) => {
+  const db = c.env.DB
+  let data
+  try {
+    const raw = await c.req.json()
+    data = raw
+    if (typeof raw.text === 'string') data = JSON.parse(raw.text)
+    else if (typeof raw.data === 'string') data = JSON.parse(raw.data)
+  } catch (e) {
+    return c.json({ error: '备份内容不是有效 JSON' }, 400)
+  }
+  const orders = Array.isArray(data.orders) ? data.orders : []
+  const payables = Array.isArray(data.payables) ? data.payables : []
+  const ledger = Array.isArray(data.ledger) ? data.ledger : []
+  if (!orders.length && !payables.length && !ledger.length) return c.json({ error: '备份里没有账目数据' }, 400)
+
+  // 恢复前自动快照，防止误操作
+  await saveBackup(db)
+
+  const stmts = [
+    db.prepare('DELETE FROM ledger'),
+    db.prepare('DELETE FROM payables'),
+    db.prepare('DELETE FROM orders')
+  ]
+  const skipped = { orders: 0, payables: 0, ledger: 0 }
+  for (const o of orders) {
+    if (!o.customer || num(o.price) <= 0) { skipped.orders++; continue }
+    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now()))
+  }
+  for (const p of payables) {
+    if (!p.supplier || num(p.amount) <= 0) { skipped.payables++; continue }
+    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.created_at || now()))
+  }
+  for (const l of ledger) {
+    if (num(l.amount) <= 0 || !l.direction) { skipped.ledger++; continue }
+    stmts.push(db.prepare('INSERT INTO ledger (id, direction, ref_type, ref_id, amount, category, remark, operator, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now()))
+  }
+  await runBatch(db, stmts)
+  return c.json({ ok: true, restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, skipped })
+})
+
 export default {
   fetch: (req, env, ctx) => app.fetch(req, env, ctx),
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站

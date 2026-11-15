@@ -46,3 +46,4 @@
 .bar-in { background: #3d7bf5; }
 .bar-out { background: #e0711e; }
 .bar-num { font-size: 20rpx; color: #888; width: 88rpx; flex-shrink: 0; }
+.restore-ta { width: 100%; min-height: 120rpx; font-size: 24rpx; box-sizing: border-box; }

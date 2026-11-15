@@ -158,6 +158,10 @@
       <button class="btn" size="mini" bindtap="backupToNotes">备份到笔记站</button>
       <button class="btn" size="mini" bindtap="changeKey">改口令</button>
     </view>
+    <view class="form">
+      <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>
+      <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>
+    </view>
     <view class="tip" wx:if="{{cloud_backup_at}}">最近云端备份：{{cloud_backup_at}}（每天自动备份一次）</view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">
