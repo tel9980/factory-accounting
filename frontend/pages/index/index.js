@@ -449,6 +449,52 @@ Page({
       success: () => wx.showToast({ title: '报表已复制', icon: 'none' })
     })
   },
+  genReportImage() {
+    const text = this.data.report_text
+    if (!text) return wx.showToast({ title: '先点「生成报表」', icon: 'none' })
+    wx.showLoading({ title: '生成图片…' })
+    const FONT = 15, LH = 22, PAD = 20, W = 750
+    const unit = (ch) => (/[\u0000-\u00ff]/.test(ch) ? 0.55 : 1)
+    const wrap = []
+    for (const line of text.split('\n')) {
+      if (!line.trim()) { wrap.push(' '); continue }
+      let cur = '', w = 0
+      for (const ch of line) {
+        const u = unit(ch)
+        if (w + u > (W - PAD * 2) / FONT) { wrap.push(cur); cur = ch; w = u }
+        else { cur += ch; w += u }
+      }
+      if (cur) wrap.push(cur)
+    }
+    const H = PAD * 2 + wrap.length * LH
+    wx.createSelectorQuery().in(this).select('#reportCanvas')
+      .fields({ node: true, size: true })
+      .exec((res) => {
+        if (!res || !res[0] || !res[0].node) return wx.hideLoading()
+        const canvas = res[0].node
+        const ctx = canvas.getContext('2d')
+        const dpr = (wx.getWindowInfo ? wx.getWindowInfo() : wx.getSystemInfoSync()).pixelRatio || 2
+        canvas.width = W * dpr
+        canvas.height = H * dpr
+        ctx.scale(dpr, dpr)
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, W, H)
+        ctx.fillStyle = '#111111'
+        ctx.font = FONT + 'px sans-serif'
+        ctx.textBaseline = 'top'
+        wrap.forEach((t, i) => ctx.fillText(t, PAD, PAD + i * LH))
+        wx.canvasToTempFilePath({
+          canvas,
+          destWidth: W * dpr,
+          destHeight: H * dpr,
+          success: (r) => {
+            wx.hideLoading()
+            wx.previewImage({ urls: [r.tempFilePath] })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '生成失败', icon: 'none' }) }
+        })
+      })
+  },
   changeKey() {
     wx.showModal({
       title: '修改访问口令',

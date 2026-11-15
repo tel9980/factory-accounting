@@ -206,9 +206,11 @@
         <view class="row2 pre">{{report_text}}</view>
         <view class="btns">
           <button size="mini" bindtap="copyReport">复制报表</button>
+          <button size="mini" bindtap="genReportImage">生成图片</button>
         </view>
       </view>
     </view>
+    <canvas type="2d" id="reportCanvas" class="report-canvas"></canvas>
   </block>
 
   <block wx:if="{{tab=='history'}}">
