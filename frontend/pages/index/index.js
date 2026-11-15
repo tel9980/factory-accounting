@@ -1,5 +1,5 @@
 // 部署好 Cloudflare Worker 后，把下面这行换成你的 Worker 地址（保留 /orders 等路径之前的域名部分）
-const API_BASE = 'https://factory-accounting.tel9980-fb9.workers.dev'
+const API_BASE = 'https://jz.qy663.de5.net'
 
 const STATUS_TEXT = { 0: '待加工', 1: '加工中', 2: '已交付' }
 
