@@ -190,6 +190,22 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">经营分析</view>
+      <button class="btn" size="mini" bindtap="genCredits">客户欠款榜</button>
+      <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{cmp_month}}" bindinput="onCmpMonth"/>
+      <button class="btn" size="mini" bindtap="genCompare">同比环比</button>
+      <button class="btn" size="mini" bindtap="genSelfcheck">数据自检</button>
+    </view>
+    <view class="list" wx:if="{{analysis_text}}">
+      <view class="item">
+        <view class="row2 pre">{{analysis_text}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="copyAnalysis">复制</button>
+          <button size="mini" bindtap="analysisImage">生成图片</button>
+        </view>
+      </view>
+    </view>
+    <view class="form">
       <button class="btn" size="mini" bindtap="exportCsv" data-type="orders">导出应收</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="payables">导出应付</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水</button>

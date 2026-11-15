@@ -706,6 +706,139 @@ app.get('/report-data', async (c) => {
   return c.json(arr)
 })
 
+// 客户/供应商信用看板：欠款榜 + 平均回款天数
+app.get('/credits', async (c) => {
+  const db = c.env.DB
+  const today = new Date().toISOString().slice(0, 10)
+  const { results: orders } = await db.prepare('SELECT * FROM orders').all()
+  const { results: pays } = await db.prepare("SELECT * FROM ledger WHERE direction='in' AND ref_type='order'").all()
+  const lastPay = {}
+  for (const p of pays) {
+    const k = String(p.ref_id)
+    const d = (p.created_at || '').slice(0, 10)
+    if (!lastPay[k] || d > lastPay[k]) lastPay[k] = d
+  }
+  const dayDiff = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000)
+  const map = {}
+  for (const o of orders) {
+    const nm = o.customer || '(未填)'
+    const g = map[nm] || (map[nm] = { name: nm, total: 0, unpaid: 0, cnt: 0, open_cnt: 0, oldest: 0, pay_days: [], last_order: '' })
+    const unpaid = num(o.price) - num(o.paid)
+    g.total += num(o.price)
+    g.cnt++
+    if (unpaid > 0) {
+      g.unpaid += unpaid
+      g.open_cnt++
+      const d = (o.created_at || '').slice(0, 10)
+      const days = d ? dayDiff(d, today) : 0
+      if (days > g.oldest) g.oldest = days
+    } else if (o.paid > 0) {
+      const start = (o.created_at || '').slice(0, 10)
+      const end = lastPay[String(o.id)]
+      if (start && end) {
+        const dd = dayDiff(start, end)
+        if (dd >= 0) g.pay_days.push(dd)
+      }
+    }
+    const od = (o.created_at || '').slice(0, 10)
+    if (od > g.last_order) g.last_order = od
+  }
+  const list = Object.values(map).map((g) => ({
+    name: g.name,
+    total: round2(g.total),
+    unpaid: round2(g.unpaid),
+    cnt: g.cnt,
+    open_cnt: g.open_cnt,
+    oldest: g.oldest,
+    avg_days: g.pay_days.length ? Math.round(g.pay_days.reduce((a, b) => a + b, 0) / g.pay_days.length) : null,
+    last_order: g.last_order
+  })).sort((a, b) => b.unpaid - a.unpaid || b.total - a.total)
+  return c.json(list)
+})
+
+// 同比环比（本月 vs 上月 / 去年同月）
+app.get('/compare', async (c) => {
+  const db = c.env.DB
+  const base = String(c.req.query('month') || month())
+  const mRe = /^(\d{4})-(\d{2})$/
+  let y = Number(base.slice(0, 4))
+  let mo = Number(base.slice(5, 7))
+  if (!mRe.test(base) || !mo || mo > 12) return c.json({ error: '月份格式：YYYY-MM' }, 400)
+  const prevY = mo === 1 ? y - 1 : y
+  const prevM = mo === 1 ? 12 : mo - 1
+  const prev = `${prevY}-${String(prevM).padStart(2, '0')}`
+  const lastYear = `${y - 1}-${String(mo).padStart(2, '0')}`
+  const stat = async (m) => {
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,7)=?").bind(m).first()
+    const out = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND substr(created_at,1,7)=?").bind(m).first()
+    const oadd = await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
+    const padd = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?').bind(m).first()
+    return {
+      month: m,
+      income: round2(num(inc.t)),
+      outcome: round2(num(out.t)),
+      net: round2(num(inc.t) - num(out.t)),
+      order_add: round2(num(oadd.t)),
+      payable_add: round2(num(padd.t))
+    }
+  }
+  return c.json({ cur: await stat(base), prev: await stat(prev), last_year: await stat(lastYear) })
+})
+
+// 数据自检：账实是否对得上
+app.get('/selfcheck', async (c) => {
+  const db = c.env.DB
+  const issues = []
+  const { results: orders } = await db.prepare('SELECT * FROM orders').all()
+  const { results: inSum } = await db.prepare("SELECT ref_id, COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND ref_type='order' GROUP BY ref_id").all()
+  const { results: payables } = await db.prepare('SELECT * FROM payables').all()
+  const { results: outSum } = await db.prepare("SELECT ref_id, COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='payable' GROUP BY ref_id").all()
+  const mi = {}, mo = {}
+  for (const r of inSum) mi[String(r.ref_id)] = num(r.t)
+  for (const r of outSum) mo[String(r.ref_id)] = num(r.t)
+  let overpaid = 0, mismatch = 0
+  for (const o of orders) {
+    const s = round2(mi[String(o.id)] || 0)
+    const p = round2(num(o.paid))
+    if (s !== p) {
+      mismatch++
+      if (issues.length < 12) issues.push(`应收 #${o.id} ${o.customer}：单据已收 ${p}，流水合计 ${s}`)
+    }
+    if (p > num(o.price)) {
+      overpaid++
+      if (issues.length < 12) issues.push(`应收 #${o.id} ${o.customer}：已收 ${p} 超过单据金额 ${num(o.price)}`)
+    }
+  }
+  let apMismatch = 0
+  for (const p of payables) {
+    const s = round2(mo[String(p.id)] || 0)
+    const q = round2(num(p.paid))
+    if (s !== q) {
+      apMismatch++
+      if (issues.length < 12) issues.push(`应付 #${p.id} ${p.supplier}：单据已付 ${q}，流水合计 ${s}`)
+    }
+  }
+  const arRow = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
+  const arFlow = await db.prepare('SELECT COALESCE(SUM(price),0) AS a, COALESCE(SUM(paid),0) AS p FROM orders').first()
+  const flowIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in'").first()
+  const flowOut = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out'").first()
+  const apRow = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS t FROM payables WHERE paid < amount').first()
+  return c.json({
+    ok: mismatch === 0 && apMismatch === 0 && overpaid === 0,
+    orders: orders.length,
+    payables: payables.length,
+    ar_total: round2(num(arRow.t)),
+    ar_check: round2(num(arFlow.a) - num(arFlow.p)),
+    ap_total: round2(num(apRow.t)),
+    flow_in: round2(num(flowIn.t)),
+    flow_out: round2(num(flowOut.t)),
+    mismatch,
+    ap_mismatch: apMismatch,
+    overpaid,
+    issues
+  })
+})
+
 // 编辑应收单
 app.patch('/orders/:id', async (c) => {
   const id = c.req.param('id')

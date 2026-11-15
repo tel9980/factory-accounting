@@ -21,6 +21,7 @@ Page({
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
+    cmp_month: '', analysis_text: '',
     pc_month: '', pc: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
@@ -571,6 +572,103 @@ Page({
       data: this.data.report_text,
       success: () => wx.showToast({ title: '报表已复制', icon: 'none' })
     })
+  },
+  onCmpMonth(e) { this.setData({ cmp_month: e.detail.value }) },
+  genCredits() {
+    this.req({
+      url: API_BASE + '/credits',
+      success: (res) => {
+        const list = res.data || []
+        if (!list.length) return wx.showToast({ title: '还没有客户记录', icon: 'none' })
+        const L = []
+        L.push('【客户欠款排行】')
+        L.push('客户 | 未结欠款 | 未结单数 | 最久几天 | 平均回款')
+        let i = 0
+        for (const r of list) {
+          i++
+          if (i > 20) break
+          const avg = r.avg_days === null ? '—' : r.avg_days + '天'
+          L.push(`${i}. ${r.name} | ¥${r.unpaid} | ${r.open_cnt}单 | ${r.oldest}天 | ${avg}`)
+        }
+        const bad = list.filter((r) => r.unpaid > 0 && r.oldest > 60)
+        if (bad.length) {
+          L.push('')
+          L.push('⚠ 超过 60 天没结：' + bad.map((r) => `${r.name}（¥${r.unpaid}，${r.oldest}天）`).join('、'))
+        }
+        const slow = list.filter((r) => r.avg_days !== null).sort((a, b) => b.avg_days - a.avg_days)[0]
+        if (slow) {
+          L.push('')
+          L.push(`回款最慢：${slow.name}（平均 ${slow.avg_days} 天到账）`)
+        }
+        this.setData({ analysis_text: L.join('\n') })
+      }
+    })
+  },
+  genCompare() {
+    const m = (this.data.cmp_month || '').trim()
+    this.req({
+      url: API_BASE + '/compare',
+      data: m ? { month: m } : {},
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        const cur = d.cur, pv = d.prev, ly = d.last_year
+        const rate = (a, b) => {
+          if (!b) return a ? '新增' : '—'
+          const r = Math.round(((a - b) / b) * 1000) / 10
+          return (r >= 0 ? '+' : '') + r + '%'
+        }
+        const L = []
+        L.push(`【${cur.month} 经营对比】`)
+        L.push(`收到钱：¥${cur.income}（上月 ¥${pv.income}，${rate(cur.income, pv.income)}；去年同月 ¥${ly.income}，${rate(cur.income, ly.income)}）`)
+        L.push(`付出去：¥${cur.outcome}（上月 ¥${pv.outcome}，${rate(cur.outcome, pv.outcome)}；去年同月 ¥${ly.outcome}，${rate(cur.outcome, ly.outcome)}）`)
+        L.push(`结余：¥${cur.net}（上月 ¥${pv.net}；去年同月 ¥${ly.net}）`)
+        L.push('')
+        L.push(`接单额：¥${cur.order_add}（上月 ¥${pv.order_add}，${rate(cur.order_add, pv.order_add)}）`)
+        L.push(`赊购额：¥${cur.payable_add}（上月 ¥${pv.payable_add}，${rate(cur.payable_add, pv.payable_add)}）`)
+        L.push('')
+        const trend = cur.net > pv.net ? '比上月好' : cur.net === pv.net ? '与上月持平' : '比上月差'
+        L.push(`一句话：这个月结余${trend}，收钱 ${rate(cur.income, pv.income)}，花钱 ${rate(cur.outcome, pv.outcome)}。`)
+        this.setData({ analysis_text: L.join('\n') })
+      }
+    })
+  },
+  genSelfcheck() {
+    this.req({
+      url: API_BASE + '/selfcheck',
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        const L = []
+        L.push('【账目自检】')
+        L.push(`应收单据 ${d.orders} 张，应付单据 ${d.payables} 张`)
+        L.push(`应收未结 ¥${d.ar_total}（按单据算）／¥${d.ar_check}（按单据金额−已收算）`)
+        L.push(`应付未结 ¥${d.ap_total}`)
+        L.push(`累计收款 ¥${d.flow_in}，累计付款 ¥${d.flow_out}`)
+        L.push('')
+        if (d.ok) {
+          L.push('✅ 检查通过：每张单据的已收/已付与流水记录完全对得上，没有多收，账面是干净的。')
+        } else {
+          L.push('⚠ 发现对不上的地方：')
+          if (d.mismatch) L.push(`· 应收单据与收款流水不一致 ${d.mismatch} 张`)
+          if (d.ap_mismatch) L.push(`· 应付单据与付款流水不一致 ${d.ap_mismatch} 张`)
+          if (d.overpaid) L.push(`· 收款超过单据金额 ${d.overpaid} 张`)
+          for (const s of d.issues || []) L.push('  ' + s)
+          L.push('')
+          L.push('处理办法：把这几张的单据金额改对，或补录/删除多出的收款记录。')
+        }
+        this.setData({ analysis_text: L.join('\n') })
+      }
+    })
+  },
+  copyAnalysis() {
+    wx.setClipboardData({
+      data: this.data.analysis_text,
+      success: () => wx.showToast({ title: '已复制', icon: 'none' })
+    })
+  },
+  analysisImage() {
+    this.drawTextImage(this.data.analysis_text)
   },
   genReportImage() {
     const text = this.data.report_text
