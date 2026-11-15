@@ -553,10 +553,10 @@ app.get('/export', async (c) => {
   const db = c.env.DB
   const rows = []
   if (type === 'orders') {
-    rows.push(['日期', '客户', '产品/项目', '金额', '已收', '未收', '状态', '到期日', '经手人'])
+    rows.push(['日期', '客户', '产品/项目', '金额', '已收', '未收', '状态', '进度', '到期日', '经手人'])
     const { results } = await db.prepare('SELECT * FROM orders ORDER BY id').all()
     const st = (s) => (s == 2 ? '已交付' : s == 1 ? '加工中' : '待加工')
-    for (const o of results) rows.push([o.created_at.slice(0, 10), o.customer, o.item_name, o.price, o.paid, round2(o.price - o.paid), st(o.status), (o.due_date || '').slice(0, 10), o.operator || ''])
+    for (const o of results) rows.push([o.created_at.slice(0, 10), o.customer, o.item_name, o.price, o.paid, round2(o.price - o.paid), st(o.status), o.progress || '', (o.due_date || '').slice(0, 10), o.operator || ''])
   } else if (type === 'payables') {
     rows.push(['日期', '供应商', '金额', '已付', '未付', '分类', '备注', '经手人'])
     const { results } = await db.prepare('SELECT * FROM payables ORDER BY id').all()
@@ -601,6 +601,29 @@ app.patch('/orders/:id', async (c) => {
     .bind(customer || o.customer, item_name || o.item_name, p, id).run()
   await logAudit(db, '编辑应收', customer || o.customer, `${customer || o.customer} ${item_name || o.item_name} ¥${p}`)
   return c.json({ ok: true })
+})
+
+// 更新订单工序进度（生产环节基础版）
+app.patch('/orders/:id/progress', async (c) => {
+  const id = c.req.param('id')
+  const { progress, operator } = await c.req.json()
+  const p = String(progress || '').trim()
+  const db = c.env.DB
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '订单不存在' }, 404)
+  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
+  await db.prepare('UPDATE orders SET progress=? WHERE id=?').bind(p, id).run()
+  if (p) await db.prepare('INSERT INTO process_log (order_id, progress, operator, created_at) VALUES (?,?,?,?)')
+    .bind(id, p, operator || '', now()).run()
+  await logAudit(db, '更新工序', o.customer, `${o.customer} → ${p}`)
+  return c.json({ ok: true })
+})
+
+// 订单工序历史
+app.get('/orders/:id/processes', async (c) => {
+  const id = c.req.param('id')
+  const { results } = await c.env.DB.prepare('SELECT * FROM process_log WHERE order_id=? ORDER BY id DESC LIMIT 50').bind(id).all()
+  return c.json(results)
 })
 
 // 编辑应付单

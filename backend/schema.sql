@@ -8,10 +8,21 @@ CREATE TABLE IF NOT EXISTS orders (
   paid REAL NOT NULL DEFAULT 0,
   due_date TEXT,                        -- 约定收款日（可选，用于到期提醒）
   operator TEXT,                        -- 经手人
+  progress TEXT DEFAULT '',             -- 当前工序（如 备料/加工/喷涂/包装）
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+
+-- 订单工序流水
+CREATE TABLE IF NOT EXISTS process_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  progress TEXT NOT NULL,
+  operator TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_process_order ON process_log(order_id);
 
 -- 应付来源：应付单
 CREATE TABLE IF NOT EXISTS payables (

@@ -247,6 +247,47 @@ Page({
       }
     })
   },
+  editProgress(e) {
+    const id = e.currentTarget.dataset.id
+    const it = this.data.ar_all.find((x) => x.id === id) || {}
+    wx.showActionSheet({
+      itemList: ['更新进度', '查看进度历史'],
+      success: (r) => {
+        if (r.tapIndex === 0) this.inputProgress(id, it)
+        else this.viewProcesses(id, it)
+      }
+    })
+  },
+  inputProgress(id, it) {
+    wx.showModal({
+      title: '更新工序（' + (it.customer || '') + '）', editable: true,
+      placeholderText: '如：备料 / 加工 / 喷涂 / 包装',
+      content: it.progress || '',
+      success: (r) => {
+        if (r.confirm) {
+          this.req({
+            url: API_BASE + '/orders/' + id + '/progress', method: 'PATCH',
+            data: { progress: (r.content || '').trim(), operator: this.data.o_operator || '' },
+            success: (res) => {
+              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
+              else { wx.showToast({ title: '已更新', icon: 'success' }); this.refresh() }
+            }
+          })
+        }
+      }
+    })
+  },
+  viewProcesses(id, it) {
+    this.req({
+      url: API_BASE + '/orders/' + id + '/processes',
+      success: (res) => {
+        const list = res.data || []
+        if (!list.length) return wx.showToast({ title: '暂无工序记录', icon: 'none' })
+        const lines = list.map((p) => p.progress + (p.operator ? ' · ' + p.operator : '') + ' · ' + (p.created_at || '').slice(0, 16).replace('T', ' '))
+        wx.showModal({ title: (it.customer || '') + ' 工序历史', content: lines.join('\n'), showCancel: false })
+      }
+    })
+  },
   editPayable(e) {
     const id = e.currentTarget.dataset.id
     const it = this.data.ap_all.find((x) => x.id === id) || {}
