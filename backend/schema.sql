@@ -42,3 +42,10 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- 云端快照备份（全量 JSON，自动+手动）
+CREATE TABLE IF NOT EXISTS backups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);

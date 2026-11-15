@@ -113,8 +113,10 @@
       <input class="inp" placeholder="年份，如 2026" value="{{report_year}}" bindinput="onReportYear"/>
       <button class="btn" size="mini" bindtap="genReport">生成年度报表</button>
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
+      <button class="btn" size="mini" bindtap="cloudBackup">云端备份</button>
       <button class="btn" size="mini" bindtap="changeKey">改口令</button>
     </view>
+    <view class="tip" wx:if="{{cloud_backup_at}}">最近云端备份：{{cloud_backup_at}}（每天自动备份一次）</view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">
         <view class="row2 pre">{{report_text}}</view>

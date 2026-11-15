@@ -553,19 +553,60 @@ app.get('/contact-detail', async (c) => {
   return c.json({ text: lines.join('\n') })
 })
 
-// 数据备份：全量导出 JSON
-app.get('/backup', async (c) => {
-  const db = c.env.DB
+// 生成全量备份 JSON
+async function buildBackup(db) {
   const orders = await db.prepare('SELECT * FROM orders ORDER BY id').all()
   const payables = await db.prepare('SELECT * FROM payables ORDER BY id').all()
   const ledger = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
-  const data = {
+  return JSON.stringify({
     exported_at: now(),
     orders: orders.results,
     payables: payables.results,
     ledger: ledger.results
-  }
-  return c.json({ text: JSON.stringify(data, null, 2) })
+  }, null, 2)
+}
+
+// 数据备份：全量导出 JSON（复制用）
+app.get('/backup', async (c) => {
+  return c.json({ text: await buildBackup(c.env.DB) })
 })
 
-export default app
+// 云端备份：写一份快照进 backups 表，保留最近 30 份
+async function saveBackup(db) {
+  const content = await buildBackup(db)
+  await db.prepare('INSERT INTO backups (content, created_at) VALUES (?,?)').bind(content, now()).run()
+  await db.prepare('DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 30)').run()
+  const latest = await db.prepare('SELECT id, created_at, length(content) AS size FROM backups ORDER BY id DESC LIMIT 1').first()
+  return latest
+}
+
+app.post('/cloud-backup', async (c) => {
+  const latest = await saveBackup(c.env.DB)
+  return c.json({ ok: true, saved_at: latest.created_at, id: latest.id, size: latest.size })
+})
+
+// 云端备份列表
+app.get('/backup-list', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT id, created_at, length(content) AS size FROM backups ORDER BY id DESC LIMIT 30').all()
+  return c.json(results)
+})
+
+// 取某份云端备份内容
+app.get('/backup-get', async (c) => {
+  const id = c.req.query('id')
+  const r = await c.env.DB.prepare('SELECT content FROM backups WHERE id=?').bind(num(id)).first()
+  if (!r) return c.json({ error: '备份不存在' }, 404)
+  return c.json({ text: r.content })
+})
+
+export default {
+  fetch: (req, env, ctx) => app.fetch(req, env, ctx),
+  // 每天 UTC 16:00（北京时间 0 点）自动备份一次
+  scheduled: async (event, env, ctx) => {
+    try {
+      await saveBackup(env.DB)
+    } catch (e) {
+      console.error('scheduled backup failed', e)
+    }
+  }
+}

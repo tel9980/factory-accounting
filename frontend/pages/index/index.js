@@ -17,7 +17,8 @@ Page({
     report_year: '', report_text: '',
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
-    contact_type: 'ar', contacts_ar: [], contacts_ap: []
+    contact_type: 'ar', contacts_ar: [], contacts_ap: [],
+    cloud_backup_at: ''
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -72,7 +73,7 @@ Page({
     doReq(ak)
   },
 
-  onShow() { this.refresh() },
+  onShow() { this.refresh(); this.loadCloudBackup() },
   refresh() {
     this.loadDashboard()
     this.loadAr()
@@ -80,6 +81,15 @@ Page({
     this.loadExpenses()
     this.loadHistory()
     this.loadContacts()
+  },
+  loadCloudBackup() {
+    this.req({
+      url: API_BASE + '/backup-list',
+      success: (res) => {
+        const list = res.data || []
+        if (list.length) this.setData({ cloud_backup_at: list[0].created_at })
+      }
+    })
   },
   loadDashboard() {
     this.req({
@@ -453,6 +463,19 @@ Page({
               }
             }
           })
+        }
+      }
+    })
+  },
+  cloudBackup() {
+    this.req({
+      url: API_BASE + '/cloud-backup', method: 'POST',
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          this.setData({ cloud_backup_at: res.data.saved_at })
+          wx.showToast({ title: '云端备份成功', icon: 'success' })
+        } else {
+          wx.showToast({ title: (res.data && res.data.error) || '备份失败', icon: 'none' })
         }
       }
     })
