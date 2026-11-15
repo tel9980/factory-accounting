@@ -52,3 +52,14 @@
 .modal { width: 86%; max-height: 78%; background: #fff; border-radius: 16rpx; padding: 24rpx; display: flex; flex-direction: column; }
 .modal-title { font-size: 30rpx; font-weight: 600; margin-bottom: 12rpx; }
 .modal-body { flex: 1; min-height: 200rpx; max-height: 60vh; }
+
+/* 赚没赚两口径 */
+.pc { margin-top: 12rpx; }
+.pc-row { background: #fff; border-radius: 12rpx; padding: 20rpx; margin-bottom: 16rpx; }
+.pc-t { font-size: 28rpx; font-weight: 600; color: #333; }
+.pc-s { font-size: 22rpx; color: #999; font-weight: 400; }
+.pc-n { font-size: 40rpx; font-weight: 700; margin: 8rpx 0; }
+.pc-n.ok { color: #07a35a; }
+.pc-n.bad { color: #e24032; }
+.pc-sub { font-size: 24rpx; color: #888; line-height: 1.6; }
+.pc-gap { font-size: 24rpx; color: #8a6d3b; background: #fdf6e3; border-radius: 10rpx; padding: 14rpx 18rpx; }

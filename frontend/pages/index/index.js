@@ -19,6 +19,7 @@ Page({
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
+    pc_month: '', pc: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
@@ -150,7 +151,7 @@ Page({
   setTab(e) {
     const t = e.currentTarget.dataset.t
     this.setData({ tab: t })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
@@ -429,6 +430,20 @@ Page({
     })
   },
   onReportYear(e) { this.setData({ report_year: e.detail.value }) },
+  onPcMonth(e) { this.setData({ pc_month: e.detail.value }) },
+  loadProfitCompare() {
+    const m = (this.data.pc_month || '').trim()
+    this.req({
+      url: API_BASE + '/profit-compare' + (m ? '?month=' + encodeURIComponent(m) : ''),
+      success: (res) => {
+        if (res.data && !res.data.error) {
+          const d = res.data
+          d.cost_cash = Math.round((Number(d.expense_cash || 0) + Number(d.fixed_cash || 0)) * 100) / 100
+          this.setData({ pc: d })
+        }
+      }
+    })
+  },
   onQText(e) { this.setData({ q_text: e.detail.value }) },
   quick() {
     const t = this.data.q_text.trim()

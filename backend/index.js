@@ -146,6 +146,38 @@ app.get('/dashboard', async (c) => {
   })
 })
 
+// 赚没赚：两个口径对比
+app.get('/profit-compare', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || month()).slice(0, 7)
+  const q = async (sql) => num((await db.prepare(sql).bind(m).first()).t)
+  const inc = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,7)=?")
+  const out = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND substr(created_at,1,7)=?")
+  const orderAdd = await q('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?')
+  const payableAdd = await q('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?')
+  const expCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='expense' AND substr(created_at,1,7)=?")
+  const fixedCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='fixed' AND substr(created_at,1,7)=?")
+  // 现金口径：本月实际收到的钱 − 本月实际付出的钱
+  const cash = num(inc) - num(out)
+  // 权责口径：本月接的活 − 本月赊的料 − 本月花的现金成本（工资水电等）
+  const otherCash = round2(num(out) - expCash - fixedCash) // 还供应商/其它付出
+  const accrual = round2(num(orderAdd) - num(payableAdd) - expCash - fixedCash)
+  return c.json({
+    month: m,
+    cash_income: round2(num(inc)),
+    cash_outcome: round2(num(out)),
+    cash_profit: round2(cash),
+    order_add: round2(num(orderAdd)),
+    payable_add: round2(num(payableAdd)),
+    expense_cash: round2(expCash),
+    fixed_cash: round2(fixedCash),
+    other_cash_out: otherCash,
+    accrual_profit: accrual,
+    // 两者差额 = 本月应收新增 − 本月应收回款等价部分，简单解释用
+    gap: round2(accrual - cash)
+  })
+})
+
 // 应收：未结清订单
 app.get('/ar', async (c) => {
   const db = c.env.DB
