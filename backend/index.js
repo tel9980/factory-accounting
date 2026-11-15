@@ -162,6 +162,60 @@ app.get('/statement', async (c) => {
   return c.json({ text: lines.join('\n') })
 })
 
+// 月度对账（按单位+月份）
+app.get('/statement-month', async (c) => {
+  const type = c.req.query('type')
+  const name = c.req.query('name')
+  const m = c.req.query('month') || month()
+  if (!name) return c.json({ error: '缺少单位名称' }, 400)
+  const db = c.env.DB
+  const prefix = m + '%'
+  const lines = []
+  if (type === 'ar') {
+    const { results: orders } = await db.prepare('SELECT * FROM orders WHERE customer=? ORDER BY id').bind(name).all()
+    let open = 0, cur = 0, curCnt = 0
+    for (const o of orders) {
+      if (o.created_at < m + '-01') open += o.price - o.paid
+      else if (o.created_at.startsWith(m + '-')) { cur += o.price; curCnt++ }
+    }
+    const got = await db.prepare("SELECT COALESCE(SUM(l.amount),0) AS t FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND o.customer=? AND l.created_at LIKE ?").bind(name, prefix).first()
+    const end = open + cur - num(got.t)
+    lines.push(`【${m} 月对账单】${name}`)
+    lines.push(`期初欠：${round2(open)}`)
+    lines.push(`本月新增应收：${round2(cur)}（${curCnt} 笔）`)
+    lines.push(`本月已收：${round2(num(got.t))}`)
+    lines.push(`期末欠：${round2(end)}`)
+    const monthOrders = orders.filter((o) => o.created_at.startsWith(m + '-'))
+    if (monthOrders.length) {
+      lines.push(`本月明细：`)
+      monthOrders.forEach((o, i) => lines.push(`${i + 1}. ${o.item_name || '加工'} 总${o.price} 已收${o.paid}`))
+    }
+  } else {
+    const { results: pays } = await db.prepare('SELECT * FROM payables WHERE supplier=? ORDER BY id').bind(name).all()
+    let open = 0, cur = 0, curCnt = 0
+    for (const p of pays) {
+      if (p.created_at < m + '-01') open += p.amount - p.paid
+      else if (p.created_at.startsWith(m + '-')) { cur += p.amount; curCnt++ }
+    }
+    const paid = await db.prepare("SELECT COALESCE(SUM(l.amount),0) AS t FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND p.supplier=? AND l.created_at LIKE ?").bind(name, prefix).first()
+    const end = open + cur - num(paid.t)
+    lines.push(`【${m} 月对账单】${name}`)
+    lines.push(`期初欠：${round2(open)}`)
+    lines.push(`本月新增应付：${round2(cur)}（${curCnt} 笔）`)
+    lines.push(`本月已付：${round2(num(paid.t))}`)
+    lines.push(`期末欠：${round2(end)}`)
+    const monthPays = pays.filter((p) => p.created_at.startsWith(m + '-'))
+    if (monthPays.length) {
+      lines.push(`本月明细：`)
+      monthPays.forEach((p, i) => {
+        const desc = [p.category, p.remark].filter(Boolean).join(' ')
+        lines.push(`${i + 1}. ${desc || '货款'} 总${p.amount} 已付${p.paid}`)
+      })
+    }
+  }
+  return c.json({ text: lines.join('\n') })
+})
+
 // 批量导入
 app.post('/import', async (c) => {
   const { type, text } = await c.req.json()

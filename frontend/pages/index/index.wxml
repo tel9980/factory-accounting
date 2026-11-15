@@ -31,6 +31,7 @@
           <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
           <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
           <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
+          <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.customer}}">月结</button>
         </view>
       </view>
       <view class="empty" wx:if="{{!ar_list.length}}">没有未结清的应收</view>
@@ -51,6 +52,7 @@
         <view class="btns">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
+          <button size="mini" bindtap="monthStatement" data-type="ap" data-name="{{item.supplier}}">月结</button>
         </view>
       </view>
       <view class="empty" wx:if="{{!ap_list.length}}">没有未结清的应付</view>

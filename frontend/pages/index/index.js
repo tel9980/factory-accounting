@@ -132,6 +132,31 @@ Page({
       }
     })
   },
+  monthStatement(e) {
+    const { type, name } = e.currentTarget.dataset
+    const d = new Date()
+    const ym = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    wx.showModal({
+      title: '按月对账 · ' + name,
+      editable: true,
+      placeholderText: '月份，如 ' + ym,
+      content: ym,
+      success: (r) => {
+        if (r.confirm && r.content) {
+          wx.request({
+            url: API_BASE + '/statement-month',
+            data: { type, name, month: r.content.trim() },
+            success: (res) => {
+              wx.setClipboardData({
+                data: res.data.text,
+                success: () => wx.showToast({ title: '月对账单已复制', icon: 'none' })
+              })
+            }
+          })
+        }
+      }
+    })
+  },
   doImport() {
     const { import_type, import_text, import_types } = this.data
     const types = ['ar', 'ap', 'expense']
