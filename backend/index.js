@@ -44,6 +44,18 @@ app.post('/auth/change', async (c) => {
   return c.json({ ok: true })
 })
 
+// 浏览器直接打开根路径时给个友好提示（不需要口令）
+app.get('/', (c) => c.html(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小工厂记账</title>
+<style>body{font-family:-apple-system,sans-serif;max-width:520px;margin:12vh auto;padding:0 24px;color:#333;line-height:1.7}h1{font-size:20px}.ok{font-size:44px}a{color:#07c}</style>
+</head><body><div class="ok">✅</div><h1>小工厂记账 · 服务已就绪</h1>
+<p>这里是记账小程序的<strong>服务器</strong>，给微信小程序提供数据接口，不是网页。</p>
+<p>请不要在浏览器里打开，请到<strong>微信开发者工具</strong>或<strong>手机微信</strong>里使用小程序。</p>
+<p>第一次打开小程序时会让你<strong>设置一个访问口令</strong>，之后每台设备输一次口令即可记账。</p>
+</body></html>`))
+
 // 除 /auth/* 外全部需要口令
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
