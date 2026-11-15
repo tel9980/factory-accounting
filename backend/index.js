@@ -14,6 +14,18 @@ const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
+// 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
+const toIsoDate = (s) => {
+  if (!s) return ''
+  const m = String(s).trim().match(/^(\d{4})?[-/年]?(\d{1,2})[-/月](\d{1,2})日?$/)
+  if (!m) return ''
+  const y = m[1] || new Date().getFullYear()
+  const mm = String(m[2]).padStart(2, '0')
+  const dd = String(m[3]).padStart(2, '0')
+  if (num(mm) < 1 || num(mm) > 12 || num(dd) < 1 || num(dd) > 31) return ''
+  return `${y}-${mm}-${dd}T00:00:00.000Z`
+}
+const looksLikeDate = (s) => !!toIsoDate(s)
 // 收款/付款日期补录：支持 YYYY-MM-DD 或 MM-DD，否则用当前时间
 const normDate = (s) => {
   const t = String(s || '').trim()
@@ -226,6 +238,47 @@ app.get('/statement-month', async (c) => {
   return c.json({ text: lines.join('\n') })
 })
 
+// 一句话记账：收/付/分类 自动识别
+app.post('/quick', async (c) => {
+  const { text } = await c.req.json()
+  const s = String(text || '').trim()
+  const am = s.match(/(\d+(?:\.\d+)?)/)
+  if (!s || !am) return c.json({ error: '没识别出内容，请带上金额，如：收张老板加工费5000' }, 400)
+  const amount = num(am[1])
+  if (amount <= 0) return c.json({ error: '金额无效' }, 400)
+  const rest = s.replace(am[1], '').replace(/[元块钱\s]/g, '')
+  const db = c.env.DB
+  const t = now()
+  const cats = ['工资', '水电', '房租', '采购', '辅料', '其他']
+  let summary = ''
+  if (/收/.test(s)) {
+    const name = rest.replace(/[收收到到自从]/g, '').replace(/[的了给]/g, '').trim() || '客户'
+    await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
+      .bind(name, '一句话记账', amount, t).run()
+    summary = `应收 ${name} ${amount} 元`
+  } else if (/付|转给|打给|给了?/.test(s) && cats.some((k) => s.includes(k))) {
+    const cat = cats.find((k) => s.includes(k))
+    const name = rest.replace(/付给|付款|支付|付|转给|打给|给了?/g, '').replace(cat, '').replace(/[的了]/g, '').trim() || '其他'
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
+      .bind(amount, cat, name, t).run()
+    summary = `支出 ${cat} ${amount} 元`
+  } else if (/付|转给|打给|给了?/.test(s)) {
+    const name = rest.replace(/付给|付款|支付|付|转给|打给|给了?/g, '').replace(/[货款的了]/g, '').trim() || '供应商'
+    await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
+      .bind(name, amount, '', '', t).run()
+    summary = `应付 ${name} ${amount} 元`
+  } else if (cats.some((k) => s.includes(k))) {
+    const cat = cats.find((k) => s.includes(k))
+    const name = rest.replace(cat, '').replace(/[的了]/g, '').trim() || ''
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
+      .bind(amount, cat, name, t).run()
+    summary = `支出 ${cat} ${amount} 元`
+  } else {
+    return c.json({ error: '没识别出收/付/分类，请写如：收张老板5000、付货款3000、工资5000' }, 400)
+  }
+  return c.json({ ok: true, summary })
+})
+
 // 批量导入
 app.post('/import', async (c) => {
   const { type, text } = await c.req.json()
@@ -235,26 +288,31 @@ app.post('/import', async (c) => {
   let n = 0
   const t = now()
   for (const row of rows) {
-    const p = row.split(/[,，\t]/).map((s) => s.trim())
+    let p = row.split(/[,，\t]/).map((s) => s.trim())
+    // 最后一列若是日期，单独取出；否则按今天
+    let d = t
+    if (p.length > 1 && looksLikeDate(p[p.length - 1])) {
+      d = toIsoDate(p.pop())
+    }
     if (type === 'ar') {
       const [customer, item, price] = p
       if (customer && num(price) > 0) {
         await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
-          .bind(customer, item || '批量导入', num(price), t).run()
+          .bind(customer, item || '批量导入', num(price), d).run()
         n++
       }
     } else if (type === 'ap') {
       const [supplier, amount, remark] = p
       if (supplier && num(amount) > 0) {
         await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
-          .bind(supplier, num(amount), '', remark || '', t).run()
+          .bind(supplier, num(amount), '', remark || '', d).run()
         n++
       }
     } else if (type === 'expense') {
       const [amount, category, remark] = p
       if (num(amount) > 0) {
         await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
-          .bind(num(amount), category || '', remark || '', t).run()
+          .bind(num(amount), category || '', remark || '', d).run()
         n++
       }
     }

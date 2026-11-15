@@ -1,4 +1,9 @@
 <view class="page">
+  <view class="form">
+    <input class="inp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
+    <button class="btn" size="mini" bindtap="quick">记</button>
+    <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300</view>
+  </view>
   <view class="stats">
     <view class="stat"><view class="num">{{month_income}}</view><view class="label">本月收</view></view>
     <view class="stat"><view class="num">{{month_outcome}}</view><view class="label">本月付</view></view>
@@ -85,7 +90,7 @@
   <block wx:if="{{tab=='import'}}">
     <view class="form">
       <picker range="{{import_types}}" bindchange="onImportType"><view class="picker">{{import_types[import_type]}} ▾</view></picker>
-      <textarea class="ta" placeholder="每行一条，用逗号分隔&#10;应收：客户,产品,金额&#10;应付：供应商,金额,备注&#10;支出：金额,分类,备注" value="{{import_text}}" bindinput="onImportText"></textarea>
+      <textarea class="ta" placeholder="每行一条，用逗号分隔，末尾可带日期（如 07-05）&#10;应收：客户,产品,金额&#10;应付：供应商,金额,备注&#10;支出：金额,分类,备注" value="{{import_text}}" bindinput="onImportText"></textarea>
       <button class="btn" size="mini" bindtap="doImport">开始导入</button>
       <view class="tip">可从 Excel 复制多行，直接粘贴到这里</view>
     </view>

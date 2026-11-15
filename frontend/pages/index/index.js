@@ -13,6 +13,7 @@ Page({
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
     import_type: 0, import_text: '',
     report_year: '', report_text: '',
+    q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: []
   },
@@ -213,6 +214,24 @@ Page({
     })
   },
   onReportYear(e) { this.setData({ report_year: e.detail.value }) },
+  onQText(e) { this.setData({ q_text: e.detail.value }) },
+  quick() {
+    const t = this.data.q_text.trim()
+    if (!t) return
+    wx.request({
+      url: API_BASE + '/quick', method: 'POST',
+      data: { text: t },
+      success: (res) => {
+        if (res.data && res.data.error) {
+          wx.showToast({ title: res.data.error, icon: 'none' })
+        } else {
+          wx.showToast({ title: '已记：' + res.data.summary, icon: 'none' })
+          this.setData({ q_text: '' })
+          this.refresh()
+        }
+      }
+    })
+  },
   genReport() {
     const y = this.data.report_year.trim() || String(new Date().getFullYear())
     wx.request({
