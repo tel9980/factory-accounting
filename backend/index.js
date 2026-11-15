@@ -4,7 +4,7 @@ const app = new Hono()
 
 app.use('*', async (c, next) => {
   c.header('Access-Control-Allow-Origin', '*')
-  c.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
+  c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS')
   c.header('Access-Control-Allow-Headers', 'Content-Type,X-Access-Key')
   await next()
 })
@@ -404,6 +404,48 @@ app.get('/report', async (c) => {
   lines.push(`客户还欠我：${fmt(num(ar.t))}`)
   lines.push(`我还欠供应商：${fmt(num(ap.t))}`)
   return c.json({ text: lines.join('\n') })
+})
+
+// 编辑应收单
+app.patch('/orders/:id', async (c) => {
+  const id = c.req.param('id')
+  const { customer, item_name, price } = await c.req.json()
+  const db = c.env.DB
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '订单不存在' }, 404)
+  const p = num(price, o.price)
+  if (p < num(o.paid)) return c.json({ error: '金额不能小于已收款' }, 400)
+  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=? WHERE id=?')
+    .bind(customer || o.customer, item_name || o.item_name, p, id).run()
+  return c.json({ ok: true })
+})
+
+// 编辑应付单
+app.patch('/payables/:id', async (c) => {
+  const id = c.req.param('id')
+  const { supplier, amount, remark } = await c.req.json()
+  const db = c.env.DB
+  const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
+  if (!p) return c.json({ error: '应付单不存在' }, 404)
+  const a = num(amount, p.amount)
+  if (a < num(p.paid)) return c.json({ error: '金额不能小于已付款' }, 400)
+  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=? WHERE id=?')
+    .bind(supplier || p.supplier, a, remark !== undefined ? remark : p.remark, id).run()
+  return c.json({ ok: true })
+})
+
+// 编辑现付支出流水
+app.patch('/ledger/:id', async (c) => {
+  const id = c.req.param('id')
+  const { amount, category, remark } = await c.req.json()
+  const db = c.env.DB
+  const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(id).first()
+  if (!l) return c.json({ error: '支出记录不存在' }, 404)
+  const a = num(amount, l.amount)
+  if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  await db.prepare('UPDATE ledger SET amount=?, category=?, remark=? WHERE id=?')
+    .bind(a, category || l.category, remark !== undefined ? remark : l.remark, id).run()
+  return c.json({ ok: true })
 })
 
 // 删除应收单（连带删其收款流水）

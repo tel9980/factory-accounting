@@ -31,6 +31,9 @@
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
       <button class="btn" size="mini" bindtap="addOrder">记一笔应收</button>
     </view>
+    <view class="form">
+      <input class="inp" placeholder="搜索客户/产品" value="{{ar_kw}}" bindinput="onArKw"/>
+    </view>
     <view class="list">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
@@ -38,6 +41,7 @@
         <view class="btns">
           <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
           <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
+          <button size="mini" bindtap="editOrder" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.customer}}">月结</button>
           <button size="mini" bindtap="delOrder" data-id="{{item.id}}">删</button>
@@ -54,12 +58,16 @@
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <button class="btn" size="mini" bindtap="addPayable">记一笔应付</button>
     </view>
+    <view class="form">
+      <input class="inp" placeholder="搜索供应商/备注" value="{{ap_kw}}" bindinput="onApKw"/>
+    </view>
     <view class="list">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
         <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.remark ? ' · ' + item.remark : ''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
+          <button size="mini" bindtap="editPayable" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ap" data-name="{{item.supplier}}">月结</button>
           <button size="mini" bindtap="delPayable" data-id="{{item.id}}">删</button>
@@ -76,11 +84,15 @@
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <button class="btn" size="mini" bindtap="addExpense">记支出</button>
     </view>
+    <view class="form">
+      <input class="inp" placeholder="搜索分类/备注" value="{{ex_kw}}" bindinput="onExKw"/>
+    </view>
     <view class="list">
       <view class="item" wx:for="{{expense_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.category}}</text><text class="amt out">{{item.amount}}</text></view>
         <view class="row2">{{item.remark}} · {{item.created_at}}</view>
         <view class="btns">
+          <button size="mini" bindtap="editExpense" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="delExpense" data-id="{{item.id}}">删</button>
         </view>
       </view>

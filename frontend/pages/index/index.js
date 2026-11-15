@@ -6,6 +6,8 @@ Page({
     ar_total: 0, ap_total: 0,
     month_income: 0, month_outcome: 0, month_profit: 0,
     ar_list: [], ap_list: [], expense_list: [],
+    ar_all: [], ap_all: [], exp_all: [],
+    ar_kw: '', ap_kw: '', ex_kw: '',
     o_customer: '', o_item: '', o_price: '',
     p_supplier: '', p_amount: '', p_remark: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
@@ -94,14 +96,29 @@ Page({
     })
   },
   loadAr() {
-    this.req({ url: API_BASE + '/ar', success: (res) => this.setData({ ar_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/ar', success: (res) => {
+      const all = res.data || []
+      this.setData({ ar_all: all, ar_list: this.filterAr(all, this.data.ar_kw) })
+    } })
   },
   loadAp() {
-    this.req({ url: API_BASE + '/ap', success: (res) => this.setData({ ap_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/ap', success: (res) => {
+      const all = res.data || []
+      this.setData({ ap_all: all, ap_list: this.filterAp(all, this.data.ap_kw) })
+    } })
   },
   loadExpenses() {
-    this.req({ url: API_BASE + '/expenses', success: (res) => this.setData({ expense_list: res.data || [] }) })
+    this.req({ url: API_BASE + '/expenses', success: (res) => {
+      const all = res.data || []
+      this.setData({ exp_all: all, expense_list: this.filterEx(all, this.data.ex_kw) })
+    } })
   },
+  filterAr(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.customer + ' ' + (x.item_name || '')).indexOf(kw) >= 0) : list },
+  filterAp(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.supplier + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
+  filterEx(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => ((x.category || '') + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
+  onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }) },
+  onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }) },
+  onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this.data.exp_all, e.detail.value) }) },
   setTab(e) { this.setData({ tab: e.currentTarget.dataset.t }) },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
@@ -168,6 +185,72 @@ Page({
             url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
             data: { amount: Number(parts[0]), date: parts[1] || '' },
             success: () => this.refresh()
+          })
+        }
+      }
+    })
+  },
+  editOrder(e) {
+    const id = e.currentTarget.dataset.id
+    const it = this.data.ar_all.find((x) => x.id === id) || {}
+    wx.showModal({
+      title: '改应收单', editable: true,
+      placeholderText: '客户,产品,金额',
+      content: [it.customer, it.item_name, it.price].join(','),
+      success: (r) => {
+        if (r.confirm && r.content) {
+          const p = r.content.split(/[,，]/).map((s) => s.trim())
+          this.req({
+            url: API_BASE + '/orders/' + id, method: 'PATCH',
+            data: { customer: p[0], item_name: p[1], price: Number(p[2]) },
+            success: (res) => {
+              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
+              else this.refresh()
+            }
+          })
+        }
+      }
+    })
+  },
+  editPayable(e) {
+    const id = e.currentTarget.dataset.id
+    const it = this.data.ap_all.find((x) => x.id === id) || {}
+    wx.showModal({
+      title: '改应付单', editable: true,
+      placeholderText: '供应商,金额,备注',
+      content: [it.supplier, it.amount, it.remark || ''].join(','),
+      success: (r) => {
+        if (r.confirm && r.content) {
+          const p = r.content.split(/[,，]/).map((s) => s.trim())
+          this.req({
+            url: API_BASE + '/payables/' + id, method: 'PATCH',
+            data: { supplier: p[0], amount: Number(p[1]), remark: p[2] || '' },
+            success: (res) => {
+              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
+              else this.refresh()
+            }
+          })
+        }
+      }
+    })
+  },
+  editExpense(e) {
+    const id = e.currentTarget.dataset.id
+    const it = this.data.exp_all.find((x) => x.id === id) || {}
+    wx.showModal({
+      title: '改支出', editable: true,
+      placeholderText: '金额,分类,备注',
+      content: [it.amount, it.category, it.remark || ''].join(','),
+      success: (r) => {
+        if (r.confirm && r.content) {
+          const p = r.content.split(/[,，]/).map((s) => s.trim())
+          this.req({
+            url: API_BASE + '/ledger/' + id, method: 'PATCH',
+            data: { amount: Number(p[0]), category: p[1] || '', remark: p[2] || '' },
+            success: (res) => {
+              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
+              else this.refresh()
+            }
           })
         }
       }
