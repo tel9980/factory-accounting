@@ -1,0 +1,25 @@
+<view class="container">
+  <view class="card summary">
+    <text>未收款合计：{{summary.unpaid}} 元</text>
+  </view>
+
+  <view class="card form">
+    <input placeholder="客户名称" value="{{customer}}" bindinput="onCustomerInput" />
+    <input placeholder="产品名称" value="{{item_name}}" bindinput="onItemInput" />
+    <input placeholder="加工费（元）" type="digit" value="{{price}}" bindinput="onPriceInput" />
+    <button type="primary" bindtap="addOrder">保存订单</button>
+  </view>
+
+  <view class="card list">
+    <view class="order-item" wx:for="{{orders}}" wx:key="id">
+      <view class="row">
+        <text>{{item.customer}} · {{item.item_name}}</text>
+        <text>{{item.price}} 元</text>
+      </view>
+      <view class="row sub">
+        <text>{{item.status_text}} · 已收 {{item.paid}} · 欠 {{item.unpaid}}</text>
+        <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
+      </view>
+    </view>
+  </view>
+</view>

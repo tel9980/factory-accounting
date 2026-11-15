@@ -1,0 +1,13 @@
+{
+  "pages": [
+    "pages/index/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "加工费记账",
+    "navigationBarBackgroundColor": "#1f6feb",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f5f6f8"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}
