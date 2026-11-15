@@ -63,3 +63,14 @@
 .pc-n.bad { color: #e24032; }
 .pc-sub { font-size: 24rpx; color: #888; line-height: 1.6; }
 .pc-gap { font-size: 24rpx; color: #8a6d3b; background: #fdf6e3; border-radius: 10rpx; padding: 14rpx 18rpx; }
+
+/* 首页四宫格（大字，一眼看清） */
+.grid4 { display: flex; flex-wrap: wrap; gap: 12rpx; margin-bottom: 12rpx; }
+.g4 { width: calc(50% - 6rpx); box-sizing: border-box; background: #fff; border-radius: 14rpx; padding: 22rpx 18rpx; }
+.g4n { font-size: 46rpx; font-weight: 700; color: #1a1a1a; line-height: 1.2; }
+.g4n.red { color: #d93a3a; }
+.g4n.green { color: #17a673; }
+.g4l { font-size: 24rpx; color: #888; margin-top: 6rpx; }
+.monthline { font-size: 24rpx; color: #666; margin: 0 4rpx 12rpx; }
+.topcust { background: #fff7e8; color: #a4620d; font-size: 24rpx; border-radius: 12rpx; padding: 12rpx 16rpx; margin-bottom: 12rpx; }
+.btn.gray { background: #f1f2f4; color: #333; }

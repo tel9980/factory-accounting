@@ -11,6 +11,8 @@ Page({
     ar_list: [], ap_list: [], expense_list: [],
     ar_all: [], ap_all: [], exp_all: [],
     ar_kw: '', ap_kw: '', ex_kw: '',
+    rb_customer: '', rb_amount: '', rb_date: '',
+    today_income: 0, top_customer: '', top_unpaid: 0,
     o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '',
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
@@ -118,7 +120,9 @@ Page({
             month_order_add: res.data.month_order_add, month_payable_add: res.data.month_payable_add,
             profit_biz: res.data.profit_biz,
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
-            due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || []
+            due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || [],
+            today_income: res.data.today_income || 0,
+            top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0
           })
         }
       }
@@ -213,8 +217,68 @@ Page({
       }
     })
   },
-  payPayable(e) {
-    const id = e.currentTarget.dataset.id
+  onRbCustomer(e) { this.setData({ rb_customer: e.detail.value }) },
+  onRbAmount(e) { this.setData({ rb_amount: e.detail.value }) },
+  onRbDate(e) { this.setData({ rb_date: e.detail.value }) },
+  pickRbCustomer(e) { this.setData({ rb_customer: e.currentTarget.dataset.n }) },
+  receiveBatch() {
+    const customer = (this.data.rb_customer || '').trim()
+    const amount = Number(this.data.rb_amount)
+    if (!customer) return wx.showToast({ title: '填客户名称', icon: 'none' })
+    if (!(amount > 0)) return wx.showToast({ title: '填收款金额', icon: 'none' })
+    wx.showModal({
+      title: '批量核销收款',
+      content: '收到 ' + customer + ' ¥' + amount + '，将按「先老后新」抵掉未结的单，确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/receive-batch', method: 'POST',
+          data: { customer, amount, date: this.data.rb_date },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) {
+              const detail = (d.used || []).map((x) => `· ${x.item} 抵 ¥${x.use}（原欠¥${x.unpaid}）`).join('\n')
+              wx.showModal({
+                title: '核销成功',
+                content: `共核销 ¥${d.total}，${(d.used || []).length} 张单\n${detail}` + (d.rest > 0 ? `\n\n还剩 ¥${d.rest} 没抵完（已无未结单或已抵完）` : ''),
+                showCancel: false
+              })
+              this.setData({ rb_amount: '', rb_date: '' })
+              this.refresh()
+            } else {
+              wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+            }
+          }
+        })
+      }
+    })
+  },
+  dunning() {
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url: API_BASE + '/dunning?type=' + this.data.tab,
+      success: (res) => {
+        wx.hideLoading()
+        const text = res.data
+        if (!text) return wx.showToast({ title: '没有待催款', icon: 'none' })
+        wx.showModal({
+          title: '催款清单',
+          content: String(text).slice(0, 400),
+          confirmText: '复制',
+          cancelText: '存图片',
+          success: (r) => {
+            if (r.confirm) {
+              wx.setClipboardData({ data: text, success: () => wx.showToast({ title: '已复制，可发微信', icon: 'none' }) })
+            } else {
+              this.drawTextImage(text)
+            }
+          }
+        })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  payPayable(e) {    const id = e.currentTarget.dataset.id
     wx.showModal({
       title: '付供应商款', editable: true, placeholderText: '金额 或 金额,日期(如 5000,07-05)',
       success: (r) => {

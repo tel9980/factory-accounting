@@ -127,6 +127,8 @@ app.get('/dashboard', async (c) => {
   const todayS = new Date().toISOString().slice(0, 10)
   const soonS = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
   const dueSoon = await db.prepare("SELECT * FROM orders WHERE paid < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
+  const todayIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,10)=?").bind(todayS).first()
+  const topCust = await db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price GROUP BY customer ORDER BY t DESC LIMIT 1').first()
   return c.json({
     ar_total: round2(num(ar.total)),
     ap_total: round2(num(ap.total)),
@@ -138,6 +140,9 @@ app.get('/dashboard', async (c) => {
     month_expense_cash: round2(num(expCash.t)),
     profit_biz: round2(num(orderAdd.t) - num(payableAdd.t) - num(expCash.t)),
     pending_count: pending.n,
+    today_income: round2(num(todayIn.t)),
+    top_customer: topCust ? topCust.nm : '',
+    top_unpaid: topCust ? round2(num(topCust.t)) : 0,
     overdue_count: overdue.results.length,
     overdue: overdue.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })),
     due_soon_count: dueSoon.results.length,
@@ -229,6 +234,81 @@ app.post('/orders/:id/receive', async (c) => {
   ])
   await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`)
   return c.json({ ok: true })
+})
+
+// 批量核销收款：客户一次打款，按「先老后新」自动抵掉多张未结单
+app.post('/receive-batch', async (c) => {
+  const { customer, amount, date, remark } = await c.req.json()
+  const db = c.env.DB
+  const name = String(customer || '').trim()
+  let left = num(amount)
+  if (!name) return c.json({ error: '请填客户名称' }, 400)
+  if (left <= 0) return c.json({ error: '金额无效' }, 400)
+  const { results: list } = await db.prepare(
+    'SELECT * FROM orders WHERE customer=? AND paid < price ORDER BY created_at, id'
+  ).bind(name).all()
+  if (!list.length) return c.json({ error: `${name} 没有未结清的应收` }, 400)
+  const d = normDate(date)
+  const detail = []
+  let total = 0
+  for (const o of list) {
+    if (left <= 0) break
+    const unpaid = round2(o.price - o.paid)
+    if (unpaid <= 0) continue
+    const use = round2(Math.min(left, unpaid))
+    total += use
+    left = round2(left - use)
+    detail.push({ id: o.id, item: o.item_name, unpaid, use })
+    await db.batch([
+      db.prepare('UPDATE orders SET paid=paid+? WHERE id=?').bind(use, o.id),
+      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, created_at) VALUES ('in','order',?,?,?,?)")
+        .bind(o.id, use, `收 ${name} ${o.item_name}${remark ? ' ' + remark : ''}`, d)
+    ])
+  }
+  await logAudit(db, '批量收款', name, `${name} 共收 ¥${total}，核销 ${detail.length} 张单`)
+  return c.json({ ok: true, total: round2(total), used: detail, rest: round2(left) })
+})
+
+// 一键催款：按客户汇总未结应收，生成可直接发微信的话术
+app.get('/dunning', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') || 'ar'
+  const days = num(c.req.query('days'), 30)
+  const name = c.req.query('name')
+  const today = Date.now()
+  const lines = []
+  if (type === 'ar') {
+    let sql = 'SELECT customer AS nm, COUNT(*) AS cnt, SUM(price-paid) AS unpaid, MIN(created_at) AS oldest, MAX(created_at) AS newest FROM orders WHERE paid < price'
+    const binds = []
+    if (name) { sql += ' AND customer=?'; binds.push(name) }
+    sql += ' GROUP BY customer ORDER BY unpaid DESC'
+    const { results } = await db.prepare(sql).bind(...binds).all()
+    const rows = results.filter((r) => num(r.unpaid) > 0)
+    if (!rows.length) return c.text('没有未结清的应收，暂时不用催款。')
+    let all = 0
+    for (const r of rows) {
+      const od = Math.floor((today - new Date(r.oldest).getTime()) / 86400000)
+      all += num(r.unpaid)
+      lines.push(`${r.nm}：欠 ¥${round2(num(r.unpaid))}（${r.cnt} 单，最早一笔 ${od} 天前）`)
+    }
+    return c.text(
+      `【应收催款清单 ${new Date().toISOString().slice(0, 10)}】\n` +
+        `合计待收：¥${round2(all)}\n\n${lines.join('\n')}\n\n` +
+        `—— 催款话术模板（复制后改名字发微信）——\n` +
+        `${rows[0].nm}您好，麻烦对一下账：这边还有 ¥${round2(num(rows[0].unpaid))} 加工费没结（${rows[0].cnt} 单），方便的话这两天安排一下，谢谢！`
+    )
+  }
+  // 应付：我该付谁
+  const { results } = await db.prepare(
+    'SELECT supplier AS nm, COUNT(*) AS cnt, SUM(amount-paid) AS unpaid, MIN(created_at) AS oldest FROM payables WHERE paid < amount GROUP BY supplier ORDER BY unpaid DESC'
+  ).all()
+  if (!results.length) return c.text('没有未结清的应付。')
+  let all = 0
+  for (const r of results) {
+    all += num(r.unpaid)
+    lines.push(`${r.nm}：欠 ¥${round2(num(r.unpaid))}（${r.cnt} 笔）`)
+  }
+  return c.text(`【应付清单 ${new Date().toISOString().slice(0, 10)}】\n合计待付：¥${round2(all)}\n\n${lines.join('\n')}`)
 })
 
 // 订单状态
