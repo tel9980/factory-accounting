@@ -14,6 +14,11 @@ const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
+const isMonthLocked = async (db, m) => {
+  if (!m) return false
+  const r = await db.prepare('SELECT 1 FROM month_lock WHERE month=?').bind(m).first()
+  return !!r
+}
 
 const getKey = async (db) => {
   const r = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first()
@@ -152,6 +157,7 @@ app.post('/orders', async (c) => {
   const { customer, item_name, price, due_date, operator } = await c.req.json()
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
+  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date)
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, now()).run()
@@ -165,6 +171,7 @@ app.post('/orders/:id/receive', async (c) => {
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
+  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
   await db.batch([
@@ -180,6 +187,9 @@ app.post('/orders/:id/status', async (c) => {
   const id = c.req.param('id')
   const { status } = await c.req.json()
   const db = c.env.DB
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '订单不存在' }, 404)
+  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   await db.prepare('UPDATE orders SET status=? WHERE id=?').bind(num(status), id).run()
   return c.json({ ok: true })
 })
@@ -189,6 +199,7 @@ app.post('/payables', async (c) => {
   const { supplier, amount, category, remark, operator } = await c.req.json()
   if (!supplier || num(amount) <= 0) return c.json({ error: '供应商和金额必填' }, 400)
   const db = c.env.DB
+  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, created_at) VALUES (?,?,0,?,?,?,?)')
     .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
   return c.json({ ok: true })
@@ -201,6 +212,7 @@ app.post('/payables/:id/pay', async (c) => {
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
+  if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
   await db.batch([
@@ -216,6 +228,7 @@ app.post('/expenses', async (c) => {
   const { amount, category, remark, operator } = await c.req.json()
   if (num(amount) <= 0) return c.json({ error: '金额必填' }, 400)
   const db = c.env.DB
+  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, created_at) VALUES ('out','expense',0,?,?,?,?,?)")
     .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
   return c.json({ ok: true })
@@ -248,6 +261,26 @@ app.delete('/fixed/:id', async (c) => {
 app.post('/run-fixed', async (c) => {
   const n = await runFixed(c.env.DB)
   return c.json({ ok: true, added: n })
+})
+
+// ── 月度结账锁定 ──
+app.get('/month-locks', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM month_lock ORDER BY month DESC').all()
+  return c.json(results)
+})
+
+app.post('/month-lock', async (c) => {
+  const { month: m } = await c.req.json()
+  const mm = String(m || '').trim()
+  if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM，如 2026-11' }, 400)
+  await c.env.DB.prepare('INSERT OR IGNORE INTO month_lock (month, locked_at) VALUES (?,?)').bind(mm, now()).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/month-lock/:month', async (c) => {
+  const m = c.req.param('month')
+  await c.env.DB.prepare('DELETE FROM month_lock WHERE month=?').bind(m).run()
+  return c.json({ ok: true })
 })
 
 // 对账单（按单位）
@@ -346,6 +379,7 @@ app.post('/quick', async (c) => {
   if (amount <= 0) return c.json({ error: '金额无效' }, 400)
   const rest = s.replace(am[1], '').replace(/[元块钱\s]/g, '')
   const db = c.env.DB
+  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   const t = now()
   const cats = ['工资', '水电', '房租', '采购', '辅料', '其他']
   let summary = ''
@@ -384,6 +418,7 @@ app.post('/import', async (c) => {
   if (!rows.length) return c.json({ error: '没有可导入的内容' }, 400)
   const db = c.env.DB
   let n = 0
+  let skippedLocked = 0
   const t = now()
   for (const row of rows) {
     let p = row.split(/[,，\t]/).map((s) => s.trim())
@@ -395,6 +430,7 @@ app.post('/import', async (c) => {
       // 期初余额：不带日期就记到今年 1 月 1 日（表示“以前欠下的”）
       d = `${new Date().getFullYear()}-01-01T00:00:00.000Z`
     }
+    if (await isMonthLocked(db, (d || '').slice(0, 7))) { skippedLocked++; continue }
     if (type === 'ar') {
       const [customer, item, price] = p
       if (customer && num(price) > 0) {
@@ -432,7 +468,7 @@ app.post('/import', async (c) => {
       }
     }
   }
-  return c.json({ imported: n })
+  return c.json({ imported: n, skipped_locked: skippedLocked })
 })
 
 // 年度流水报表
@@ -529,6 +565,7 @@ app.patch('/orders/:id', async (c) => {
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
+  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   const p = num(price, o.price)
   if (p < num(o.paid)) return c.json({ error: '金额不能小于已收款' }, 400)
   await db.prepare('UPDATE orders SET customer=?, item_name=?, price=? WHERE id=?')
@@ -543,6 +580,7 @@ app.patch('/payables/:id', async (c) => {
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
+  if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
   const a = num(amount, p.amount)
   if (a < num(p.paid)) return c.json({ error: '金额不能小于已付款' }, 400)
   await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=? WHERE id=?')
@@ -557,6 +595,7 @@ app.patch('/ledger/:id', async (c) => {
   const db = c.env.DB
   const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(id).first()
   if (!l) return c.json({ error: '支出记录不存在' }, 404)
+  if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) return c.json({ error: '该支出所在月份已结账锁定' }, 403)
   const a = num(amount, l.amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
   await db.prepare('UPDATE ledger SET amount=?, category=?, remark=? WHERE id=?')
@@ -568,6 +607,9 @@ app.patch('/ledger/:id', async (c) => {
 app.delete('/orders/:id', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '订单不存在' }, 404)
+  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   await db.batch([
     db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('order', id),
     db.prepare('DELETE FROM orders WHERE id=?').bind(id)
@@ -579,6 +621,9 @@ app.delete('/orders/:id', async (c) => {
 app.delete('/payables/:id', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
+  const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
+  if (!p) return c.json({ error: '应付单不存在' }, 404)
+  if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
   await db.batch([
     db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('payable', id),
     db.prepare('DELETE FROM payables WHERE id=?').bind(id)
@@ -590,6 +635,9 @@ app.delete('/payables/:id', async (c) => {
 app.delete('/ledger/:id', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
+  const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(id).first()
+  if (!l) return c.json({ error: '支出记录不存在' }, 404)
+  if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) return c.json({ error: '该支出所在月份已结账锁定' }, 403)
   await db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='expense'").bind(id).run()
   return c.json({ ok: true })
 })
@@ -870,6 +918,7 @@ export default {
 
 // 固定支出：每月号数到了就自动记一条支出（当天错过，之后几天会补记，每月只记一次）
 async function runFixed(db) {
+  if (await isMonthLocked(db, now().slice(0, 7))) return 0
   const { results } = await db.prepare('SELECT * FROM fixed_expenses').all()
   const m = now().slice(0, 7)
   const todayD = Number(now().slice(8, 10))

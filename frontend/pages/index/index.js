@@ -24,7 +24,8 @@ Page({
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
     cloud_backup_at: '',
     restore_text: '',
-    fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: ''
+    fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: '',
+    lock_month: '', month_locks: []
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -88,6 +89,7 @@ Page({
     this.loadHistory()
     this.loadContacts()
     this.loadFixed()
+    this.loadMonthLocks()
   },
   loadCloudBackup() {
     this.req({
@@ -143,7 +145,7 @@ Page({
   setTab(e) {
     const t = e.currentTarget.dataset.t
     this.setData({ tab: t })
-    if (t === 'report') this.loadFixed()
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks() }
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
@@ -627,6 +629,48 @@ Page({
           wx.showToast({ title: '本月已补记 ' + res.data.added + ' 笔', icon: 'none' })
           this.refresh()
         }
+      }
+    })
+  },
+  loadMonthLocks() {
+    this.req({ url: API_BASE + '/month-locks', success: (res) => this.setData({ month_locks: res.data || [] }) })
+  },
+  onLockMonth(e) { this.setData({ lock_month: e.detail.value }) },
+  lockMonth() {
+    const m = (this.data.lock_month || '').trim()
+    if (!/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '月份格式：2026-11', icon: 'none' })
+    wx.showModal({
+      title: '月度结账锁定',
+      content: '锁定 ' + m + ' 后，该月所有账目不能再增、删、改。确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/month-lock', method: 'POST',
+          data: { month: m },
+          success: (res) => {
+            if (res.data && res.data.ok) {
+              this.setData({ lock_month: '' })
+              this.loadMonthLocks()
+              wx.showToast({ title: '已锁定 ' + m, icon: 'success' })
+            } else {
+              wx.showToast({ title: (res.data && res.data.error) || '锁定失败', icon: 'none' })
+            }
+          }
+        })
+      }
+    })
+  },
+  unlockMonth(e) {
+    const m = e.currentTarget.dataset.m
+    wx.showModal({
+      title: '解除锁定',
+      content: '解锁 ' + m + ' 后，该月账目恢复可编辑。确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/month-lock/' + m, method: 'DELETE',
+          success: () => { this.loadMonthLocks(); wx.showToast({ title: '已解锁 ' + m, icon: 'success' }) }
+        })
       }
     })
   }

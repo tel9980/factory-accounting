@@ -179,6 +179,17 @@
         </view>
       </view>
     </view>
+    <view class="form">
+      <view class="tip">月度结账锁定（锁住后该月账目不能改，防误动）</view>
+      <input class="inp" placeholder="月份，如 2026-11" value="{{lock_month}}" bindinput="onLockMonth"/>
+      <button class="btn" size="mini" bindtap="lockMonth">锁定该月</button>
+      <view class="list" wx:if="{{month_locks.length}}">
+        <view class="item" wx:for="{{month_locks}}" wx:key="month">
+          <view class="row1">已锁定：{{item.month}}</view>
+          <view class="row2">锁定于 {{item.locked_at}}<button size="mini" bindtap="unlockMonth" data-m="{{item.month}}">解锁</button></view>
+        </view>
+      </view>
+    </view>
     <view class="tip" wx:if="{{cloud_backup_at}}">最近云端备份：{{cloud_backup_at}}（每天自动备份一次）</view>
     <view class="list" wx:if="{{report_text}}">
       <view class="item">

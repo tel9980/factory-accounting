@@ -64,3 +64,9 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_fixed ON ledger(ref_type, ref_id);
+
+-- 月度结账锁定（锁定后该月账目不可增删改）
+CREATE TABLE IF NOT EXISTS month_lock (
+  month TEXT PRIMARY KEY,            -- 如 2026-11
+  locked_at TEXT NOT NULL
+);
