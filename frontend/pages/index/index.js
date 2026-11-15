@@ -1,139 +1,150 @@
 const API_BASE = 'https://jz.qy663.de5.net'
 
-const STATUS_TEXT = { 0: '待加工', 1: '加工中', 2: '已交付' }
-const CATEGORIES = ['工资', '水电', '房租', '采购', '辅料', '其他']
-
 Page({
   data: {
-    month_income: 0,
-    month_expense: 0,
-    month_profit: 0,
-    unpaid_total: 0,
-    pending_count: 0,
-    orders: [],
-
-    customer: '',
-    item_name: '',
-    price: '',
-
-    expense_amount: '',
-    expense_category: '其他',
-    expense_category_index: 5,
-    expense_remark: '',
-    categories: CATEGORIES,
+    tab: 'ar',
+    ar_total: 0, ap_total: 0,
+    month_income: 0, month_outcome: 0, month_profit: 0,
+    ar_list: [], ap_list: [], expense_list: [],
+    o_customer: '', o_item: '', o_price: '',
+    p_supplier: '', p_amount: '', p_remark: '',
+    categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
+    e_category: 0, e_amount: '', e_remark: '',
+    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注'],
+    import_type: 0, import_text: ''
   },
-
-  onShow() { this.loadDashboard() },
-
+  onShow() { this.refresh() },
+  refresh() {
+    this.loadDashboard()
+    this.loadAr()
+    this.loadAp()
+    this.loadExpenses()
+  },
   loadDashboard() {
     wx.request({
       url: API_BASE + '/dashboard',
       success: (res) => {
-        const d = res.data || {}
-        const orders = (d.recent_orders || []).map((o) => ({
-          ...o,
-          status_text: STATUS_TEXT[o.status] || '未知',
-          unpaid: (o.price - o.paid).toFixed(2),
-        }))
-        this.setData({
-          month_income: d.month_income || 0,
-          month_expense: d.month_expense || 0,
-          month_profit: d.month_profit || 0,
-          unpaid_total: d.unpaid_total || 0,
-          pending_count: d.pending_count || 0,
-          orders,
-        })
-      },
-      fail: () => wx.showToast({ title: '网络错误', icon: 'none' }),
-    })
-  },
-
-  // ---- 订单 ----
-  onCustomerInput(e) { this.setData({ customer: e.detail.value }) },
-  onItemInput(e) { this.setData({ item_name: e.detail.value }) },
-  onPriceInput(e) { this.setData({ price: e.detail.value }) },
-
-  addOrder() {
-    const { customer, item_name, price } = this.data
-    if (!customer || !item_name || !price) {
-      wx.showToast({ title: '请填写完整', icon: 'none' })
-      return
-    }
-    wx.request({
-      url: API_BASE + '/orders',
-      method: 'POST',
-      data: { customer, item_name, price: Number(price) },
-      success: () => {
-        wx.showToast({ title: '已记录' })
-        this.setData({ customer: '', item_name: '', price: '' })
-        this.loadDashboard()
-      },
-      fail: () => wx.showToast({ title: '网络错误', icon: 'none' }),
-    })
-  },
-
-  // ---- 收款：一键收全款，可改数字 ----
-  payFull(e) {
-    const id = e.currentTarget.dataset.id
-    const unpaid = e.currentTarget.dataset.unpaid
-    wx.showModal({
-      title: '收款',
-      content: '剩余欠款 ' + unpaid + ' 元，输入本次收款金额',
-      editable: true,
-      placeholderText: unpaid,
-      success: (res) => {
-        if (res.confirm) {
-          const amount = parseFloat(res.content) || parseFloat(unpaid)
-          wx.request({
-            url: API_BASE + '/orders/' + id + '/payments',
-            method: 'POST',
-            data: { amount },
-            success: () => {
-              wx.showToast({ title: '已收款' })
-              this.loadDashboard()
-            },
-            fail: () => wx.showToast({ title: '网络错误', icon: 'none' }),
+        if (res.data && !res.data.error) {
+          this.setData({
+            ar_total: res.data.ar_total, ap_total: res.data.ap_total,
+            month_income: res.data.month_income, month_outcome: res.data.month_outcome,
+            month_profit: res.data.month_profit
           })
         }
-      },
+      }
     })
   },
-
+  loadAr() {
+    wx.request({ url: API_BASE + '/ar', success: (res) => this.setData({ ar_list: res.data || [] }) })
+  },
+  loadAp() {
+    wx.request({ url: API_BASE + '/ap', success: (res) => this.setData({ ap_list: res.data || [] }) })
+  },
+  loadExpenses() {
+    wx.request({ url: API_BASE + '/expenses', success: (res) => this.setData({ expense_list: res.data || [] }) })
+  },
+  setTab(e) { this.setData({ tab: e.currentTarget.dataset.t }) },
+  onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
+  onOItem(e) { this.setData({ o_item: e.detail.value }) },
+  onOPrice(e) { this.setData({ o_price: e.detail.value }) },
+  onPSupplier(e) { this.setData({ p_supplier: e.detail.value }) },
+  onPAmount(e) { this.setData({ p_amount: e.detail.value }) },
+  onPRemark(e) { this.setData({ p_remark: e.detail.value }) },
+  onECategory(e) { this.setData({ e_category: Number(e.detail.value) }) },
+  onEAmount(e) { this.setData({ e_amount: e.detail.value }) },
+  onERemark(e) { this.setData({ e_remark: e.detail.value }) },
+  onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
+  onImportText(e) { this.setData({ import_text: e.detail.value }) },
+  addOrder() {
+    const { o_customer, o_item, o_price } = this.data
+    if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
+    wx.request({
+      url: API_BASE + '/orders', method: 'POST',
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price) },
+      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '' }); this.refresh() }
+    })
+  },
+  addPayable() {
+    const { p_supplier, p_amount, p_remark } = this.data
+    if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
+    wx.request({
+      url: API_BASE + '/payables', method: 'POST',
+      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark },
+      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '' }); this.refresh() }
+    })
+  },
+  addExpense() {
+    const { e_amount, e_remark, categories, e_category } = this.data
+    if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
+    wx.request({
+      url: API_BASE + '/expenses', method: 'POST',
+      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark },
+      success: () => { this.setData({ e_amount: '', e_remark: '' }); this.refresh() }
+    })
+  },
+  payOrder(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '收客户款', editable: true, placeholderText: '金额(元)',
+      success: (r) => {
+        if (r.confirm && r.content) {
+          wx.request({
+            url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
+            data: { amount: Number(r.content) },
+            success: () => this.refresh()
+          })
+        }
+      }
+    })
+  },
+  payPayable(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '付供应商款', editable: true, placeholderText: '金额(元)',
+      success: (r) => {
+        if (r.confirm && r.content) {
+          wx.request({
+            url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
+            data: { amount: Number(r.content) },
+            success: () => this.refresh()
+          })
+        }
+      }
+    })
+  },
   finishOrder(e) {
     const id = e.currentTarget.dataset.id
     wx.request({
-      url: API_BASE + '/orders/' + id,
-      method: 'PATCH',
+      url: API_BASE + '/orders/' + id + '/status', method: 'POST',
       data: { status: 2 },
-      success: () => this.loadDashboard(),
-      fail: () => wx.showToast({ title: '网络错误', icon: 'none' }),
+      success: () => this.refresh()
     })
   },
-
-  // ---- 支出 ----
-  onExpenseAmount(e) { this.setData({ expense_amount: e.detail.value }) },
-  onExpenseRemark(e) { this.setData({ expense_remark: e.detail.value }) },
-  onExpenseCategory(e) {
-    const i = Number(e.detail.value)
-    this.setData({ expense_category_index: i, expense_category: CATEGORIES[i] })
-  },
-
-  addExpense() {
-    const { expense_amount, expense_category, expense_remark } = this.data
-    if (!expense_amount) {
-      wx.showToast({ title: '填金额', icon: 'none' })
-      return
-    }
+  statement(e) {
+    const { type, name } = e.currentTarget.dataset
     wx.request({
-      url: API_BASE + '/expenses',
-      method: 'POST',
-      data: { amount: Number(expense_amount), category: expense_category, remark: expense_remark },
-      success: () => {
-        wx.showToast({ title: '已记录' })
-        this.setData({ expense_amount: '', expense_remark: '' })
-        this.loadDashboard()
-      },
-      fail: () => wx.showToast({ title: '网络错误', icon: 'none' }),
+      url: API_BASE + '/statement', data: { type, name },
+      success: (res) => {
+        wx.setClipboardData({
+          data: res.data.text,
+          success: () => wx.showToast({ title: '对账单已复制', icon: 'none' })
+        })
+      }
     })
   },
+  doImport() {
+    const { import_type, import_text, import_types } = this.data
+    const types = ['ar', 'ap', 'expense']
+    if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
+    wx.request({
+      url: API_BASE + '/import', method: 'POST',
+      data: { type: types[import_type], text: import_text },
+      success: (res) => {
+        const n = (res.data && res.data.imported) || 0
+        wx.showToast({ title: '已导入 ' + n + ' 条', icon: 'none' })
+        this.setData({ import_text: '' })
+        this.refresh()
+      }
+    })
+  }
 })

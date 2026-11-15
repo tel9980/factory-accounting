@@ -1,72 +1,83 @@
 <view class="page">
-
-  <!-- 本月三数 -->
   <view class="stats">
-    <view class="stat">
-      <view class="num">{{month_income}}</view>
-      <view class="label">本月收入</view>
-    </view>
-    <view class="stat">
-      <view class="num">{{month_expense}}</view>
-      <view class="label">本月支出</view>
-    </view>
-    <view class="stat">
-      <view class="num profit">{{month_profit}}</view>
-      <view class="label">本月毛利</view>
-    </view>
+    <view class="stat"><view class="num">{{month_income}}</view><view class="label">本月收</view></view>
+    <view class="stat"><view class="num">{{month_outcome}}</view><view class="label">本月付</view></view>
+    <view class="stat"><view class="num">{{month_profit}}</view><view class="label">本月结余</view></view>
   </view>
-
-  <!-- 首页两件事 -->
   <view class="cards">
-    <view class="card warn">
-      <view class="num">{{unpaid_total}}</view>
-      <view class="label">总欠款（元）</view>
+    <view class="card"><view class="num">{{ar_total}}</view><view class="label">应收·客户欠我</view></view>
+    <view class="card"><view class="num">{{ap_total}}</view><view class="label">应付·我欠别人</view></view>
+  </view>
+
+  <view class="tabs">
+    <view class="tab {{tab=='ar'?'on':''}}" bindtap="setTab" data-t="ar">应收</view>
+    <view class="tab {{tab=='ap'?'on':''}}" bindtap="setTab" data-t="ap">应付</view>
+    <view class="tab {{tab=='expense'?'on':''}}" bindtap="setTab" data-t="expense">支出</view>
+    <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">批量导入</view>
+  </view>
+
+  <block wx:if="{{tab=='ar'}}">
+    <view class="form">
+      <input class="inp" placeholder="客户名" value="{{o_customer}}" bindinput="onOCustomer"/>
+      <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem"/>
+      <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
+      <button class="btn" size="mini" bindtap="addOrder">记一笔应收</button>
     </view>
-    <view class="card">
-      <view class="num">{{pending_count}}</view>
-      <view class="label">进行中订单</view>
-    </view>
-  </view>
-
-  <!-- 记一笔 -->
-  <view class="section-title">记一笔</view>
-
-  <view class="form">
-    <input placeholder="客户名" value="{{customer}}" bindinput="onCustomerInput" />
-    <input placeholder="产品名" value="{{item_name}}" bindinput="onItemInput" />
-    <input placeholder="加工费（元）" type="digit" value="{{price}}" bindinput="onPriceInput" />
-    <button size="mini" type="primary" bindtap="addOrder">保存加工订单</button>
-  </view>
-
-  <view class="form">
-    <input placeholder="支出金额（元）" type="digit" value="{{expense_amount}}" bindinput="onExpenseAmount" />
-    <picker range="{{categories}}" value="{{expense_category_index}}" bindchange="onExpenseCategory">
-      <view class="picker">{{expense_category}} ▾</view>
-    </picker>
-    <input placeholder="备注（可选）" value="{{expense_remark}}" bindinput="onExpenseRemark" />
-    <button size="mini" type="warn" bindtap="addExpense">记支出</button>
-  </view>
-
-  <!-- 最近订单 -->
-  <view class="section-title">最近订单</view>
-  <view class="orders">
-    <view class="order" wx:for="{{orders}}" wx:key="id">
-      <view class="row1">
-        <text class="cust">{{item.customer}}</text>
-        <text class="status">{{item.status_text}}</text>
-      </view>
-      <view class="row2">{{item.item_name}} · 加工费 {{item.price}} 元</view>
-      <view class="row3">
-        <text class="pay">已收 {{item.paid}} · 欠 {{item.unpaid}}</text>
+    <view class="list">
+      <view class="item" wx:for="{{ar_list}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
+        <view class="row2">总{{item.price}} · 已收{{item.paid}} · 状态{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}</view>
         <view class="btns">
-          <button size="mini" wx:if="{{item.status < 2 && item.unpaid > 0}}"
-            data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" bindtap="payFull">收款</button>
-          <button size="mini" type="primary" wx:if="{{item.status < 2}}"
-            data-id="{{item.id}}" bindtap="finishOrder">交付</button>
+          <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
+          <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
+          <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
         </view>
       </view>
+      <view class="empty" wx:if="{{!ar_list.length}}">没有未结清的应收</view>
     </view>
-    <view class="empty" wx:if="{{orders.length === 0}}">还没有订单，先记一笔吧</view>
-  </view>
+  </block>
 
+  <block wx:if="{{tab=='ap'}}">
+    <view class="form">
+      <input class="inp" placeholder="供应商/收款人" value="{{p_supplier}}" bindinput="onPSupplier"/>
+      <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount"/>
+      <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
+      <button class="btn" size="mini" bindtap="addPayable">记一笔应付</button>
+    </view>
+    <view class="list">
+      <view class="item" wx:for="{{ap_list}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
+        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.remark ? ' · ' + item.remark : ''}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
+          <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
+        </view>
+      </view>
+      <view class="empty" wx:if="{{!ap_list.length}}">没有未结清的应付</view>
+    </view>
+  </block>
+
+  <block wx:if="{{tab=='expense'}}">
+    <view class="form">
+      <picker range="{{categories}}" bindchange="onECategory"><view class="picker">{{categories[e_category]}} ▾</view></picker>
+      <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
+      <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
+      <button class="btn" size="mini" bindtap="addExpense">记支出</button>
+    </view>
+    <view class="list">
+      <view class="item" wx:for="{{expense_list}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.category}}</text><text class="amt out">{{item.amount}}</text></view>
+        <view class="row2">{{item.remark}} · {{item.created_at}}</view>
+      </view>
+    </view>
+  </block>
+
+  <block wx:if="{{tab=='import'}}">
+    <view class="form">
+      <picker range="{{import_types}}" bindchange="onImportType"><view class="picker">{{import_types[import_type]}} ▾</view></picker>
+      <textarea class="ta" placeholder="每行一条，用逗号分隔&#10;应收：客户,产品,金额&#10;应付：供应商,金额,备注&#10;支出：金额,分类,备注" value="{{import_text}}" bindinput="onImportText"></textarea>
+      <button class="btn" size="mini" bindtap="doImport">开始导入</button>
+      <view class="tip">可从 Excel 复制多行，直接粘贴到这里</view>
+    </view>
+  </block>
 </view>
