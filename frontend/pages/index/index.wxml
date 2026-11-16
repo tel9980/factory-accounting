@@ -48,6 +48,7 @@
     </view>
   </view>
   <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
+  <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
   <view class="topcust" wx:if="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}</view>
   <view class="overdue" wx:if="{{overdue_count > 0}}" bindtap="setTab" data-t="ar">
     <text>⚠ {{overdue_count}} 笔应收超过 30 天没结，点此查看</text>
@@ -88,6 +89,17 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">客户先给钱、活还没做 → 记预收款，开单后可一键抵扣</view>
+      <input class="inp" placeholder="客户名" value="{{a_party}}" bindinput="onAParty"/>
+      <input class="inp" placeholder="预收金额(元)" type="digit" value="{{a_amount}}" bindinput="onAAmount"/>
+      <input class="inp" placeholder="备注(可选)" value="{{a_remark}}" bindinput="onARemark"/>
+      <button class="btn" size="mini" bindtap="addAdvance">记一笔预收款</button>
+      <view class="chips" wx:if="{{adv_in.length}}">
+        <text class="chip-label">手上的预收：</text>
+        <text class="chip" wx:for="{{adv_in}}" wx:key="id" bindtap="delAdvance" data-id="{{item.id}}" bindlongpress="delAdvance">{{item.party}} ¥{{item.remain}}（长按删）</text>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">客户一次打款，自动抵多张单（先老后新）</view>
       <input class="inp" placeholder="客户名" value="{{rb_customer}}" bindinput="onRbCustomer"/>
       <input class="inp" placeholder="收到金额(元)" type="digit" value="{{rb_amount}}" bindinput="onRbAmount"/>
@@ -110,6 +122,7 @@
           <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
           <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
           <button size="mini" bindtap="editProgress" data-id="{{item.id}}">进度</button>
+          <button size="mini" bindtap="applyAdvanceOrder" data-id="{{item.id}}">预收抵</button>
           <button size="mini" bindtap="editOrder" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.customer}}">月结</button>
@@ -136,6 +149,17 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">先付了定金、货还没到 → 记预付款，到货后可一键抵扣</view>
+      <input class="inp" placeholder="供应商名" value="{{a_party}}" bindinput="onAParty"/>
+      <input class="inp" placeholder="预付金额(元)" type="digit" value="{{a_amount}}" bindinput="onAAmount"/>
+      <input class="inp" placeholder="备注(可选)" value="{{a_remark}}" bindinput="onARemark"/>
+      <button class="btn" size="mini" bindtap="addAdvancePre">记一笔预付款</button>
+      <view class="chips" wx:if="{{adv_out.length}}">
+        <text class="chip-label">已付的预付：</text>
+        <text class="chip" wx:for="{{adv_out}}" wx:key="id" bindtap="delAdvance" data-id="{{item.id}}" bindlongpress="delAdvance">{{item.party}} ¥{{item.remain}}（长按删）</text>
+      </view>
+    </view>
+    <view class="form">
       <input class="inp" placeholder="搜索供应商/备注" value="{{ap_kw}}" bindinput="onApKw"/>
     </view>
     <view class="list">
@@ -144,6 +168,7 @@
         <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
+          <button size="mini" bindtap="applyAdvancePayable" data-id="{{item.id}}">预付抵</button>
           <button size="mini" bindtap="editPayable" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ap" data-name="{{item.supplier}}">月结</button>
@@ -158,7 +183,8 @@
 
   <block wx:if="{{tab=='expense'}}">
     <view class="form">
-      <picker range="{{categories}}" bindchange="onECategory"><view class="picker">{{categories[e_category]}} ▾</view></picker>
+      <picker range="{{categories}}" bindchange="onECategory"><view class="picker">分类：{{categories[e_category]}} ▾</view></picker>
+      <picker range="{{acc_names}}" bindchange="onEAcc"><view class="picker">付自：{{acc_names[e_acc] || '现金'}} ▾</view></picker>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
@@ -365,6 +391,38 @@
   </block>
 
   <block wx:if="{{tab=='contact'}}">
+    <view class="form">
+      <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>
+      <view class="item" wx:for="{{accounts}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.name}}{{item.id==acc_id?'（默认）':''}}</text><text class="amt {{item.balance<0?'red':''}}">¥{{item.balance}}</text></view>
+        <view class="row2">期初{{item.opening}} · 进{{item.in}} · 出{{item.out}}</view>
+        <view class="btns">
+          <button size="mini" wx:if="{{item.id!=acc_id}}" bindtap="setDefaultAcc" data-i="{{index}}">设为默认</button>
+          <button size="mini" bindtap="editOpening" data-id="{{item.id}}">改期初</button>
+          <button size="mini" bindtap="renameAccount" data-id="{{item.id}}">改名</button>
+          <button size="mini" bindtap="delAccount" data-id="{{item.id}}">删</button>
+        </view>
+      </view>
+      <input class="inp" placeholder="新账户名，如 农行卡 / 微信零钱" value="{{new_acc_name}}" bindinput="onNewAccName"/>
+      <input class="inp" placeholder="这个账户期初有多少钱(可不填)" type="digit" value="{{new_acc_opening}}" bindinput="onNewAccOpening"/>
+      <button class="btn" size="mini" bindtap="addAccount">加一个账户</button>
+      <view class="tip">期初余额 = 你开始用这个软件时，这个账户里本来有多少钱</view>
+    </view>
+    <view class="form">
+      <view class="tip">支出 / 收入分类（可自己加，报表和预算按分类统计）</view>
+      <view class="chips">
+        <text class="chip-label">支出类：</text>
+        <text class="chip" wx:for="{{cats_out}}" wx:key="id" bindtap="delCategory" data-id="{{item.id}}">{{item.name}} ✕</text>
+      </view>
+      <view class="chips">
+        <text class="chip-label">收入类：</text>
+        <text class="chip" wx:for="{{cats_in}}" wx:key="id" bindtap="delCategory" data-id="{{item.id}}">{{item.name}} ✕</text>
+      </view>
+      <picker range="{{['支出类', '收入类']}}" bindchange="onNewCatType"><view class="picker">加到：{{new_cat_type ? '收入类' : '支出类'}} ▾</view></picker>
+      <input class="inp" placeholder="新分类名，如 包装 / 快递" value="{{new_cat_name}}" bindinput="onNewCatName"/>
+      <button class="btn" size="mini" bindtap="addCategory">加分类</button>
+      <view class="tip">点分类名可删除（已用过的历史记录不受影响）</view>
+    </view>
     <view class="form">
       <view class="tip">账套（两厂/两车间分开核算，数据互不影响）</view>
       <view class="list">

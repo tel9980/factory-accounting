@@ -119,3 +119,70 @@ CREATE TABLE IF NOT EXISTS phrases (
   kind TEXT,                        -- 收 / 付 / 支 可选，仅作分组提示
   created_at TEXT NOT NULL
 );
+
+-- 资金账户（现金/银行卡/微信/支付宝）
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  kind TEXT DEFAULT 'cash',
+  opening REAL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+-- 预收款/预付款（客户先打钱、先付供应商定金）
+CREATE TABLE IF NOT EXISTS advances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  party TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  used REAL NOT NULL DEFAULT 0,
+  remark TEXT,
+  account_id INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+-- 收支分类（可自定义）
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  sort INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+-- ledger 增加：所属账户、是否现金流水（预收抵扣这类不算现金）
+-- ALTER TABLE ledger ADD COLUMN account_id INTEGER DEFAULT 0;
+-- ALTER TABLE ledger ADD COLUMN cash INTEGER DEFAULT 1;
+
+-- ── 第一档：资金账户 / 收支分类 / 预收预付（2026-11 新增）──
+-- 已用 ALTER 加到线上三库：
+--   ALTER TABLE ledger ADD COLUMN account_id INTEGER DEFAULT 0;
+--   ALTER TABLE ledger ADD COLUMN cash INTEGER DEFAULT 1;   -- 0 = 预收/预付抵扣，不动现金
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,            -- 现金 / 银行卡 / 微信 / 支付宝 / 自定义
+  kind TEXT DEFAULT 'cash',
+  opening REAL DEFAULT 0,        -- 期初余额
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,            -- out=支出类 in=收入类
+  name TEXT NOT NULL,
+  sort INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS advances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,            -- in=客户预收 out=供应商预付
+  party TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  used REAL NOT NULL DEFAULT 0,
+  remark TEXT,
+  account_id INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger(account_id);
+CREATE INDEX IF NOT EXISTS idx_advances_party ON advances(type, party);
+CREATE INDEX IF NOT EXISTS idx_categories_type ON categories(type);

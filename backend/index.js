@@ -111,6 +111,238 @@ const normDate = (s) => {
 }
 
 // 首页汇总
+// ── 资金账户 / 收支分类 / 预收预付 ──
+const DEFAULT_ACCOUNTS = [['现金', 'cash'], ['银行卡', 'bank'], ['微信', 'wechat'], ['支付宝', 'alipay']]
+const ensureAccounts = async (db) => {
+  try {
+    const c = await db.prepare('SELECT COUNT(*) AS n FROM accounts').first()
+    if (num(c.n) > 0) return
+    for (const [n, k] of DEFAULT_ACCOUNTS) {
+      await db.prepare('INSERT INTO accounts (name, kind, opening, created_at) VALUES (?,?,0,?)').bind(n, k, now()).run()
+    }
+  } catch (e) { console.error('ensureAccounts', e) }
+}
+const defaultAccountId = async (db) => {
+  await ensureAccounts(db)
+  const r = await db.prepare('SELECT id FROM accounts ORDER BY id LIMIT 1').first()
+  return r ? num(r.id) : 0
+}
+// 账户余额 = 期初 + 现金流入 − 现金流出
+const accountBalances = async (db) => {
+  await ensureAccounts(db)
+  const accs = (await db.prepare('SELECT * FROM accounts ORDER BY id').all()).results
+  const out = []
+  const firstId = accs.length ? accs[0].id : 0
+  for (const a of accs) {
+    // 未指定账户的老流水（account_id 为 0 或空）归到第一个账户，保证总余额对得上
+    const pick = a.id === firstId
+      ? "cash=1 AND direction='%s' AND (account_id=? OR account_id IS NULL OR account_id=0)"
+      : "cash=1 AND direction='%s' AND account_id=?"
+    const i = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ' + pick.replace('%s', 'in')).bind(a.id).first()
+    const o = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ' + pick.replace('%s', 'out')).bind(a.id).first()
+    const bal = round2(num(a.opening) + num(i.t) - num(o.t))
+    out.push({ id: a.id, name: a.name, kind: a.kind, opening: round2(num(a.opening)), in: round2(num(i.t)), out: round2(num(o.t)), balance: bal })
+  }
+  return out
+}
+
+app.get('/accounts', async (c) => {
+  const list = await accountBalances(c.env.DB)
+  const total = round2(list.reduce((s, a) => s + a.balance, 0))
+  return c.json({ accounts: list, total_balance: total })
+})
+
+app.post('/accounts', async (c) => {
+  const { name, kind, opening } = await c.req.json()
+  const nm = String(name || '').trim()
+  if (!nm) return c.json({ error: '账户名称必填' }, 400)
+  if (nm.length > 12) return c.json({ error: '名称最多 12 个字' }, 400)
+  const db = c.env.DB
+  await ensureAccounts(db)
+  const has = await db.prepare('SELECT 1 FROM accounts WHERE name=?').bind(nm).first()
+  if (has) return c.json({ error: '已经有同名账户了' }, 400)
+  await db.prepare('INSERT INTO accounts (name, kind, opening, created_at) VALUES (?,?,?,?)')
+    .bind(nm, String(kind || 'cash'), num(opening), now()).run()
+  await logAudit(db, '新增账户', nm, `${nm} 期初 ¥${num(opening)}`)
+  return c.json({ ok: true })
+})
+
+app.patch('/accounts/:id', async (c) => {
+  const id = c.req.param('id')
+  const { name, opening } = await c.req.json()
+  const db = c.env.DB
+  const a = await db.prepare('SELECT * FROM accounts WHERE id=?').bind(id).first()
+  if (!a) return c.json({ error: '账户不存在' }, 404)
+  const nm = name !== undefined ? String(name).trim() || a.name : a.name
+  await db.prepare('UPDATE accounts SET name=?, opening=? WHERE id=?')
+    .bind(nm, opening !== undefined ? num(opening) : num(a.opening), id).run()
+  await logAudit(db, '改账户', nm, `${nm} 期初 ${num(opening)}`)
+  return c.json({ ok: true })
+})
+
+app.delete('/accounts/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const used = await db.prepare('SELECT COUNT(*) AS n FROM ledger WHERE account_id=?').bind(id).first()
+  if (num(used.n) > 0) return c.json({ error: '这个账户已经有流水，不能删（可以改名）' }, 400)
+  await db.prepare('DELETE FROM accounts WHERE id=?').bind(id).run()
+  return c.json({ ok: true })
+})
+
+const DEFAULT_CATS_OUT = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
+const DEFAULT_CATS_IN = ['加工费', '维修', '其他']
+const ensureCats = async (db) => {
+  try {
+    const c = await db.prepare('SELECT COUNT(*) AS n FROM categories').first()
+    if (num(c.n) > 0) return
+    let i = 0
+    for (const n of DEFAULT_CATS_OUT) await db.prepare('INSERT INTO categories (type, name, sort, created_at) VALUES (?,?,?,?)').bind('out', n, i++, now()).run()
+    i = 0
+    for (const n of DEFAULT_CATS_IN) await db.prepare('INSERT INTO categories (type, name, sort, created_at) VALUES (?,?,?,?)').bind('in', n, i++, now()).run()
+  } catch (e) { console.error('ensureCats', e) }
+}
+
+app.get('/categories', async (c) => {
+  const db = c.env.DB
+  await ensureCats(db)
+  const rows = (await db.prepare('SELECT * FROM categories ORDER BY type, sort, id').all()).results
+  return c.json({
+    out: rows.filter((r) => r.type === 'out').map((r) => ({ id: r.id, name: r.name })),
+    inn: rows.filter((r) => r.type === 'in').map((r) => ({ id: r.id, name: r.name }))
+  })
+})
+
+app.post('/categories', async (c) => {
+  const { type, name } = await c.req.json()
+  const t = type === 'in' ? 'in' : 'out'
+  const nm = String(name || '').trim()
+  if (!nm) return c.json({ error: '分类名称必填' }, 400)
+  if (nm.length > 10) return c.json({ error: '名称最多 10 个字' }, 400)
+  const db = c.env.DB
+  await ensureCats(db)
+  const has = await db.prepare('SELECT 1 FROM categories WHERE type=? AND name=?').bind(t, nm).first()
+  if (has) return c.json({ error: '这个分类已存在' }, 400)
+  const mx = await db.prepare('SELECT COALESCE(MAX(sort),0) AS s FROM categories WHERE type=?').bind(t).first()
+  await db.prepare('INSERT INTO categories (type, name, sort, created_at) VALUES (?,?,?,?)').bind(t, nm, num(mx.s) + 1, now()).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/categories/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  await db.prepare('DELETE FROM categories WHERE id=?').bind(id).run()
+  return c.json({ ok: true })
+})
+
+// 预收款（客户先打钱给活还没做）/ 预付款（先付供应商定金）
+app.get('/advances', async (c) => {
+  const db = c.env.DB
+  const t = c.req.query('type') === 'out' ? 'out' : 'in'
+  const rows = (await db.prepare('SELECT * FROM advances WHERE type=? ORDER BY id DESC').bind(t).all()).results
+  return c.json(rows.map((r) => ({ ...r, remain: round2(num(r.amount) - num(r.used)) })))
+})
+
+app.post('/advances', async (c) => {
+  const { type, party, amount, remark, account_id, date } = await c.req.json()
+  const t = type === 'out' ? 'out' : 'in'
+  const nm = String(party || '').trim()
+  const a = num(amount)
+  if (!nm) return c.json({ error: t === 'in' ? '客户名称必填' : '供应商名称必填' }, 400)
+  if (a <= 0) return c.json({ error: '金额必须大于 0' }, 400)
+  const db = c.env.DB
+  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
+  const acc = num(account_id) || (await defaultAccountId(db))
+  const created = normDate(date)
+  const r = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
+    .bind(t, nm, a, remark || '', acc, created).run()
+  const aid = r.meta && r.meta.last_row_id ? r.meta.last_row_id : 0
+  await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES (?,?,?,?,?,?,?,1,?)")
+    .bind(t === 'in' ? 'in' : 'out', 'advance', aid, a, t === 'in' ? '预收款' : '预付款', `${t === 'in' ? '收预收' : '付预付'} ${nm}${remark ? ' ' + remark : ''}`, acc, created).run()
+  await logAudit(db, t === 'in' ? '收预收款' : '付预付款', nm, `${nm} ¥${a}`)
+  return c.json({ ok: true, id: aid })
+})
+
+app.delete('/advances/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const ad = await db.prepare('SELECT * FROM advances WHERE id=?').bind(id).first()
+  if (!ad) return c.json({ error: '记录不存在' }, 404)
+  if (num(ad.used) > 0) return c.json({ error: '已经抵扣过，不能删' }, 400)
+  if (await isMonthLocked(db, (ad.created_at || '').slice(0, 7))) return c.json({ error: '该记录所在月份已结账锁定' }, 403)
+  await db.batch([
+    db.prepare('DELETE FROM advances WHERE id=?').bind(id),
+    db.prepare("DELETE FROM ledger WHERE ref_type='advance' AND ref_id=?").bind(id)
+  ])
+  await logAudit(db, '删除预收预付', ad.party, `${ad.party} ¥${ad.amount}`)
+  return c.json({ ok: true })
+})
+
+// 用预收款抵扣应收单（不动现金，只冲往来）
+app.post('/orders/:id/apply-advance', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json().catch(() => ({}))
+  const db = c.env.DB
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '订单不存在' }, 404)
+  const unpaid = round2(num(o.price) - num(o.paid))
+  if (unpaid <= 0) return c.json({ error: '这张单已经收清了' }, 400)
+  const list = (await db.prepare("SELECT * FROM advances WHERE type='in' AND party=? AND used < amount ORDER BY created_at, id").bind(o.customer).all()).results
+  if (!list.length) return c.json({ error: `${o.customer} 没有可用的预收款` }, 400)
+  let left = body.amount ? Math.min(num(body.amount), unpaid) : unpaid
+  if (left <= 0) return c.json({ error: '金额无效' }, 400)
+  let total = 0
+  for (const ad of list) {
+    if (left <= 0) break
+    const remain = round2(num(ad.amount) - num(ad.used))
+    if (remain <= 0) continue
+    const use = Math.min(remain, left)
+    await db.prepare('UPDATE advances SET used=used+? WHERE id=?').bind(use, ad.id).run()
+    total = round2(total + use)
+    left = round2(left - use)
+  }
+  if (total <= 0) return c.json({ error: '没有可抵扣金额' }, 400)
+  await db.batch([
+    db.prepare('UPDATE orders SET paid=paid+? WHERE id=?').bind(total, id),
+    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,0,?)")
+      .bind(id, total, `预收款抵扣 ${o.customer} ${o.item_name}`, 0, now())
+  ])
+  await logAudit(db, '预收抵扣', o.customer, `${o.customer} 用预收抵扣 ¥${total}`)
+  return c.json({ ok: true, applied: total })
+})
+
+// 用预付款抵扣应付单
+app.post('/payables/:id/apply-advance', async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json().catch(() => ({}))
+  const db = c.env.DB
+  const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
+  if (!p) return c.json({ error: '应付单不存在' }, 404)
+  const unpaid = round2(num(p.amount) - num(p.paid))
+  if (unpaid <= 0) return c.json({ error: '这笔已经付清了' }, 400)
+  const list = (await db.prepare("SELECT * FROM advances WHERE type='out' AND party=? AND used < amount ORDER BY created_at, id").bind(p.supplier).all()).results
+  if (!list.length) return c.json({ error: `${p.supplier} 没有可用的预付款` }, 400)
+  let left = body.amount ? Math.min(num(body.amount), unpaid) : unpaid
+  if (left <= 0) return c.json({ error: '金额无效' }, 400)
+  let total = 0
+  for (const ad of list) {
+    if (left <= 0) break
+    const remain = round2(num(ad.amount) - num(ad.used))
+    if (remain <= 0) continue
+    const use = Math.min(remain, left)
+    await db.prepare('UPDATE advances SET used=used+? WHERE id=?').bind(use, ad.id).run()
+    total = round2(total + use)
+    left = round2(left - use)
+  }
+  if (total <= 0) return c.json({ error: '没有可抵扣金额' }, 400)
+  await db.batch([
+    db.prepare('UPDATE payables SET paid=paid+? WHERE id=?').bind(total, id),
+    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,0,?)")
+      .bind(id, total, `预付款抵扣 ${p.supplier}`, 0, now())
+  ])
+  await logAudit(db, '预付抵扣', p.supplier, `${p.supplier} 用预付抵扣 ¥${total}`)
+  return c.json({ ok: true, applied: total })
+})
+
 // ── 多账套 ──
 app.get('/books', async (c) => {
   const all = c.env.ENV_ALL || c.env
@@ -147,26 +379,26 @@ app.get('/dashboard', async (c) => {
   const m = month()
   const ar = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS total FROM orders WHERE paid < price').first()
   const ap = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS total FROM payables WHERE paid < amount').first()
-  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM ledger WHERE direction='in' AND substr(created_at,1,7)=?").bind(m).first()
-  const out = await db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM ledger WHERE direction='out' AND substr(created_at,1,7)=?").bind(m).first()
+  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+  const out = await db.prepare("SELECT COALESCE(SUM(amount),0) AS total FROM ledger WHERE direction='out' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
   const pending = await db.prepare('SELECT COUNT(*) AS n FROM orders WHERE status < 2').first()
   const recent = await db.prepare('SELECT * FROM ledger ORDER BY id DESC LIMIT 10').all()
   const orderAdd = await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
   const payableAdd = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?').bind(m).first()
-  const expCash = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='expense' AND substr(created_at,1,7)=?").bind(m).first()
+  const expCash = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)=?").bind(m).first()
   const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
   const overdue = await db.prepare('SELECT * FROM orders WHERE paid < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all()
   const todayS = new Date().toISOString().slice(0, 10)
   const soonS = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
   const dueSoon = await db.prepare("SELECT * FROM orders WHERE paid < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
   const paySoon = await db.prepare("SELECT * FROM payables WHERE paid < amount AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
-  const todayIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,10)=?").bind(todayS).first()
+  const todayIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,10)=?").bind(todayS).first()
   const topCust = await db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price GROUP BY customer ORDER BY t DESC LIMIT 1').first()
   // 预算：按分类统计本月已花，超出或接近 90% 的提醒
   const buds = await db.prepare('SELECT * FROM budgets ORDER BY id').all()
   const budgetOver = []
   for (const b of buds.results) {
-    const sp = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND COALESCE(NULLIF(category,''),'其他')=? AND substr(created_at,1,7)=?").bind(b.category, m).first()
+    const sp = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND COALESCE(NULLIF(category,''),'其他')=? AND substr(created_at,1,7)=?").bind(b.category, m).first()
     const spent = round2(num(sp.t))
     const limit = round2(num(b.amount))
     const pct = limit > 0 ? Math.round((spent / limit) * 100) : 0
@@ -194,7 +426,8 @@ app.get('/dashboard', async (c) => {
     pay_soon: paySoon.results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
     recent: recent.results,
     budget_over: budgetOver,
-    budget_alert_count: budgetOver.length
+    budget_alert_count: budgetOver.length,
+    cash_balance: round2((await accountBalances(db)).reduce((s2, a) => s2 + a.balance, 0))
   })
 })
 
@@ -203,12 +436,12 @@ app.get('/profit-compare', async (c) => {
   const db = c.env.DB
   const m = String(c.req.query('month') || month()).slice(0, 7)
   const q = async (sql) => num((await db.prepare(sql).bind(m).first()).t)
-  const inc = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,7)=?")
-  const out = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND substr(created_at,1,7)=?")
+  const inc = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?")
+  const out = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND substr(created_at,1,7)=?")
   const orderAdd = await q('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?')
   const payableAdd = await q('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?')
-  const expCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='expense' AND substr(created_at,1,7)=?")
-  const fixedCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND ref_type='fixed' AND substr(created_at,1,7)=?")
+  const expCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)=?")
+  const fixedCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type='fixed' AND substr(created_at,1,7)=?")
   // 现金口径：本月实际收到的钱 − 本月实际付出的钱
   const cash = num(inc) - num(out)
   // 权责口径：本月接的活 − 本月赊的料 − 本月花的现金成本（工资水电等）
@@ -306,17 +539,18 @@ app.post('/orders', async (c) => {
 // 收客户款（可带日期补录）
 app.post('/orders/:id/receive', async (c) => {
   const id = c.req.param('id')
-  const { amount, date } = await c.req.json()
+  const { amount, date, account_id } = await c.req.json()
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  const acc = num(account_id) || (await defaultAccountId(db))
   await db.batch([
     db.prepare('UPDATE orders SET paid=paid+? WHERE id=?').bind(a, id),
-    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, created_at) VALUES ('in','order',?,?,?,?)")
-      .bind(id, a, `收 ${o.customer} ${o.item_name}`, normDate(date))
+    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
+      .bind(id, a, `收 ${o.customer} ${o.item_name}`, acc, normDate(date))
   ])
   await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`)
   return c.json({ ok: true })
@@ -324,8 +558,9 @@ app.post('/orders/:id/receive', async (c) => {
 
 // 批量核销收款：客户一次打款，按「先老后新」自动抵掉多张未结单
 app.post('/receive-batch', async (c) => {
-  const { customer, amount, date, remark } = await c.req.json()
+  const { customer, amount, date, remark, account_id } = await c.req.json()
   const db = c.env.DB
+  const acc = num(account_id) || (await defaultAccountId(db))
   const name = String(customer || '').trim()
   let left = num(amount)
   if (!name) return c.json({ error: '请填客户名称' }, 400)
@@ -347,8 +582,8 @@ app.post('/receive-batch', async (c) => {
     detail.push({ id: o.id, item: o.item_name, unpaid, use })
     await db.batch([
       db.prepare('UPDATE orders SET paid=paid+? WHERE id=?').bind(use, o.id),
-      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, created_at) VALUES ('in','order',?,?,?,?)")
-        .bind(o.id, use, `收 ${name} ${o.item_name}${remark ? ' ' + remark : ''}`, d)
+      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
+        .bind(o.id, use, `收 ${name} ${o.item_name}${remark ? ' ' + remark : ''}`, acc, d)
     ])
   }
   await logAudit(db, '批量收款', name, `${name} 共收 ¥${total}，核销 ${detail.length} 张单`)
@@ -412,10 +647,17 @@ app.post('/orders/:id/status', async (c) => {
 
 // 记应付
 app.post('/payables', async (c) => {
-  const { supplier, amount, category, remark, operator, due_date } = await c.req.json()
+  const { supplier, amount, category, remark, operator, due_date, confirm_dup } = await c.req.json()
   if (!supplier || num(amount) <= 0) return c.json({ error: '供应商和金额必填' }, 400)
   const db = c.env.DB
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
+  // 防重复：同供应商 + 同金额，7 天内提醒一次
+  if (!confirm_dup) {
+    const since = new Date(Date.now() - 7 * 86400000).toISOString()
+    const d = await db.prepare('SELECT 1 FROM payables WHERE supplier=? AND amount=? AND created_at >= ?')
+      .bind(supplier, num(amount), since).first()
+    if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
+  }
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
     .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || null, now()).run()
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
@@ -425,17 +667,18 @@ app.post('/payables', async (c) => {
 // 付供应商款（可带日期补录）
 app.post('/payables/:id/pay', async (c) => {
   const id = c.req.param('id')
-  const { amount, date } = await c.req.json()
+  const { amount, date, account_id } = await c.req.json()
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  const acc = num(account_id) || (await defaultAccountId(db))
   await db.batch([
     db.prepare('UPDATE payables SET paid=paid+? WHERE id=?').bind(a, id),
-    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','payable',?,?,?,?,?)")
-      .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, normDate(date))
+    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,?,1,?)")
+      .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, acc, normDate(date))
   ])
   await logAudit(db, '付款', p.supplier, `${p.supplier} 付 ¥${a}`)
   return c.json({ ok: true })
@@ -443,12 +686,19 @@ app.post('/payables/:id/pay', async (c) => {
 
 // 现付支出
 app.post('/expenses', async (c) => {
-  const { amount, category, remark, operator } = await c.req.json()
+  const { amount, category, remark, operator, account_id, confirm_dup } = await c.req.json()
   if (num(amount) <= 0) return c.json({ error: '金额必填' }, 400)
   const db = c.env.DB
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
-  await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, created_at) VALUES ('out','expense',0,?,?,?,?,?)")
-    .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
+  // 防重复：同一天 + 同分类 + 同金额，提醒一次
+  if (!confirm_dup) {
+    const d = await db.prepare("SELECT 1 FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND amount=? AND COALESCE(NULLIF(category,''),'其他')=? AND substr(created_at,1,10)=?")
+      .bind(num(amount), category || '其他', now().slice(0, 10)).first()
+    if (d) return c.json({ error: `今天已经记过一笔「${category || '其他'} ${num(amount)}」，确认再记一次吗？`, dup: true }, 409)
+  }
+  const acc = num(account_id) || (await defaultAccountId(db))
+  await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,?,1,?)")
+    .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, acc, now()).run()
   await logAudit(db, '新增支出', category || '其他', `${category || '其他'} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
@@ -661,7 +911,7 @@ app.get('/statement-month', async (c) => {
 
 // 一句话记账：收/付/分类 自动识别
 app.post('/quick', async (c) => {
-  const { text } = await c.req.json()
+  const { text, account_id } = await c.req.json()
   const s = String(text || '').trim()
   const am = s.match(/(\d+(?:\.\d+)?)/)
   if (!s || !am) return c.json({ error: '没识别出内容，请带上金额，如：收张老板加工费5000' }, 400)
@@ -671,7 +921,8 @@ app.post('/quick', async (c) => {
   const db = c.env.DB
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   const t = now()
-  const cats = ['工资', '水电', '房租', '采购', '辅料', '其他']
+  const acc = num(account_id) || (await defaultAccountId(db))
+  const cats = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
   let summary = ''
   if (/收/.test(s)) {
     const name = rest.replace(/[收收到到自从]/g, '').replace(/[的了给]/g, '').trim() || '客户'
@@ -681,8 +932,8 @@ app.post('/quick', async (c) => {
   } else if (/付|转给|打给|给了?/.test(s) && cats.some((k) => s.includes(k))) {
     const cat = cats.find((k) => s.includes(k))
     const name = rest.replace(/付给|付款|支付|付|转给|打给|给了?/g, '').replace(cat, '').replace(/[的了]/g, '').trim() || '其他'
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
-      .bind(amount, cat, name, t).run()
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
+      .bind(amount, cat, name, acc, t).run()
     summary = `支出 ${cat} ${amount} 元`
   } else if (/付|转给|打给|给了?/.test(s)) {
     const name = rest.replace(/付给|付款|支付|付|转给|打给|给了?/g, '').replace(/[货款的了]/g, '').trim() || '供应商'
@@ -692,8 +943,8 @@ app.post('/quick', async (c) => {
   } else if (cats.some((k) => s.includes(k))) {
     const cat = cats.find((k) => s.includes(k))
     const name = rest.replace(cat, '').replace(/[的了]/g, '').trim() || ''
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
-      .bind(amount, cat, name, t).run()
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
+      .bind(amount, cat, name, acc, t).run()
     summary = `支出 ${cat} ${amount} 元`
   } else {
     return c.json({ error: '没识别出收/付/分类，请写如：收张老板5000、付货款3000、工资5000' }, 400)
@@ -753,8 +1004,9 @@ app.post('/import', async (c) => {
     } else if (type === 'expense') {
       const [amount, category, remark] = p
       if (num(amount) > 0) {
-        await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','expense',0,?,?,?,?)")
-          .bind(num(amount), category || '', remark || '', d).run()
+        const accI = await defaultAccountId(db)
+        await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
+          .bind(num(amount), category || '', remark || '', accI, d).run()
         n++
       }
     }
@@ -774,7 +1026,7 @@ app.get('/report', async (c) => {
   const fmt = (n) => String(round2(n))
   // 按月汇总
   const { results: monthly } = await db.prepare(
-    "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE created_at LIKE ? GROUP BY m ORDER BY m"
+    "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE cash=1 AND created_at LIKE ? GROUP BY m ORDER BY m"
   ).bind(prefix).all()
   lines.push('')
   lines.push('【按月汇总】')
@@ -789,7 +1041,7 @@ app.get('/report', async (c) => {
   lines.push(pad('合计', 10) + pad(fmt(ti), 12) + pad(fmt(to), 12) + fmt(ti - to))
   // 支出分类
   const { results: cats } = await db.prepare(
-    "SELECT COALESCE(NULLIF(category,''),'其他') AS c, SUM(amount) AS t FROM ledger WHERE direction='out' AND created_at LIKE ? GROUP BY c ORDER BY t DESC"
+    "SELECT COALESCE(NULLIF(category,''),'其他') AS c, SUM(amount) AS t FROM ledger WHERE direction='out' AND cash=1 AND created_at LIKE ? GROUP BY c ORDER BY t DESC"
   ).bind(prefix).all()
   lines.push('')
   lines.push('【支出分类】')
@@ -798,8 +1050,8 @@ app.get('/report', async (c) => {
   // 应收应付
   const ar = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
   const ap = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS t FROM payables WHERE paid < amount').first()
-  const inAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in'").first()
-  const outAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out'").first()
+  const inAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1").first()
+  const outAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1").first()
   lines.push('')
   lines.push('【应收应付】')
   lines.push(`累计已收款：${fmt(num(inAll.t))}`)
@@ -825,9 +1077,11 @@ app.get('/export', async (c) => {
     const { results } = await db.prepare('SELECT * FROM payables ORDER BY id').all()
     for (const p of results) rows.push([p.created_at.slice(0, 10), p.supplier, p.amount, p.paid, round2(p.amount - p.paid), p.category, p.remark, (p.due_date || '').slice(0, 10), p.operator || ''])
   } else {
-    rows.push(['日期', '方向', '金额', '分类', '备注', '经手人'])
-    const { results } = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
-    for (const l of results) rows.push([l.created_at.slice(0, 10), l.direction === 'in' ? '收' : '付', l.amount, l.category, l.remark, l.operator || ''])
+    rows.push(['日期', '方向', '金额', '分类', '备注', '账户', '经手人'])
+    const { results } = await db.prepare('SELECT * FROM ledger WHERE cash=1 ORDER BY id').all()
+    const accs = (await db.prepare('SELECT id,name FROM accounts').all()).results
+    const accName = (id) => (accs.find((a) => a.id === id) || {}).name || ''
+    for (const l of results) rows.push([l.created_at.slice(0, 10), l.direction === 'in' ? '收' : '付', l.amount, l.category, l.remark, accName(l.account_id), l.operator || ''])
   }
   const text = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\n')
   return c.json({ text, filename: `factory-${type}-${new Date().toISOString().slice(0, 10)}.csv` })
@@ -838,7 +1092,7 @@ app.get('/report-data', async (c) => {
   const y = String(c.req.query('year') || new Date().getFullYear())
   const db = c.env.DB
   const { results } = await db.prepare(
-    "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE created_at LIKE ? GROUP BY m ORDER BY m"
+    "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE cash=1 AND created_at LIKE ? GROUP BY m ORDER BY m"
   ).bind(y + '-%').all()
   const map = {}
   results.forEach((r) => { map[r.m] = r })
@@ -913,8 +1167,8 @@ app.get('/compare', async (c) => {
   const prev = `${prevY}-${String(prevM).padStart(2, '0')}`
   const lastYear = `${y - 1}-${String(mo).padStart(2, '0')}`
   const stat = async (m) => {
-    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,7)=?").bind(m).first()
-    const out = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND substr(created_at,1,7)=?").bind(m).first()
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+    const out = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
     const oadd = await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
     const padd = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?').bind(m).first()
     return {
@@ -964,8 +1218,8 @@ app.get('/selfcheck', async (c) => {
   }
   const arRow = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
   const arFlow = await db.prepare('SELECT COALESCE(SUM(price),0) AS a, COALESCE(SUM(paid),0) AS p FROM orders').first()
-  const flowIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in'").first()
-  const flowOut = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out'").first()
+  const flowIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1").first()
+  const flowOut = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1").first()
   const apRow = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS t FROM payables WHERE paid < amount').first()
   return c.json({
     ok: mismatch === 0 && apMismatch === 0 && overpaid === 0,
@@ -1269,8 +1523,8 @@ async function buildMarkdown(db) {
   const ledger = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
   const ar = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
   const ap = await db.prepare('SELECT COALESCE(SUM(amount-paid),0) AS t FROM payables WHERE paid < amount').first()
-  const inAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in'").first()
-  const outAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out'").first()
+  const inAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1").first()
+  const outAll = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1").first()
   const st = (s) => (s == 2 ? '已交付' : s == 1 ? '加工中' : '待加工')
   const L = []
   L.push('# 小工厂记账 · 自动备份')
@@ -1478,6 +1732,7 @@ export default {
 // 固定支出：每月号数到了就自动记一条支出（当天错过，之后几天会补记，每月只记一次）
 async function runFixed(db) {
   if (await isMonthLocked(db, now().slice(0, 7))) return 0
+  const accF = await defaultAccountId(db)
   const { results } = await db.prepare('SELECT * FROM fixed_expenses').all()
   const m = now().slice(0, 7)
   const todayD = Number(now().slice(8, 10))
@@ -1486,8 +1741,8 @@ async function runFixed(db) {
     if (Number(f.day) > todayD) continue
     const c = await db.prepare("SELECT COUNT(*) AS c FROM ledger WHERE ref_type='fixed' AND ref_id=? AND substr(created_at,1,7)=?").bind(f.id, m).first()
     if (c && c.c > 0) continue
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, created_at) VALUES ('out','fixed',?,?,?,?,?)")
-      .bind(f.id, num(f.amount), f.category || '', f.remark || '固定支出', now()).run()
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','fixed',?,?,?,?,?,1,?)")
+      .bind(f.id, num(f.amount), f.category || '', f.remark || '固定支出', accF, now()).run()
     n++
   }
   return n

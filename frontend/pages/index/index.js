@@ -16,8 +16,11 @@ Page({
     o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '',
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
-    categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
-    e_category: 0, e_amount: '', e_remark: '', e_operator: '',
+    categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
+    e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0,
+    cash_balance: 0, accounts: [], acc_names: [], acc_idx: 0, acc_id: 0, acc_name: '',
+    adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
+    new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -87,6 +90,24 @@ Page({
             }
             return
           }
+          if (res.statusCode >= 400) {
+            const d = res.data || {}
+            if (d.dup && opts.dupRetry) {
+              wx.showModal({
+                title: '可能重复了', content: d.error, confirmText: '再记一笔',
+                success: (r2) => {
+                  if (r2.confirm) {
+                    const body = Object.assign({}, opts.data, { confirm_dup: true })
+                    this.req(Object.assign({}, opts, { data: body, dupRetry: false }))
+                  }
+                }
+              })
+              return
+            }
+            wx.showToast({ title: d.error || '操作失败', icon: 'none' })
+            opts.fail && opts.fail(res)
+            return
+          }
           opts.success && opts.success(res)
         }
       }))
@@ -109,6 +130,9 @@ Page({
     this.loadPhrases()
     this.loadBudgets()
     this.loadBooks()
+    this.loadAccounts()
+    this.loadCategories()
+    this.loadAdvances()
   },
   loadCloudBackup() {
     this.req({
@@ -118,6 +142,180 @@ Page({
         if (list.length) this.setData({ cloud_backup_at: list[0].created_at })
       }
     })
+  },
+  // ── 资金账户 / 分类 / 预收预付 ──
+  loadAccounts() {
+    this.req({
+      url: API_BASE + '/accounts',
+      fail: () => {},
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return
+        const list = d.accounts || []
+        let idx = Number(this.data.acc_idx) || 0
+        if (idx >= list.length) idx = 0
+        this.setData({
+          accounts: list, acc_names: list.map((a) => a.name + ' ¥' + a.balance),
+          cash_balance: d.total_balance || 0,
+          acc_idx: idx, acc_id: list.length ? list[idx].id : 0,
+          acc_name: list.length ? list[idx].name : ''
+        })
+      }
+    })
+  },
+  loadCategories() {
+    this.req({
+      url: API_BASE + '/categories',
+      fail: () => {},
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return
+        const out = (d.out || []).map((x) => x.name)
+        this.setData({
+          categories: out.length ? out : this.data.categories,
+          cats_out: d.out || [], cats_in: d.inn || []
+        })
+      }
+    })
+  },
+  loadAdvances() {
+    this.req({
+      url: API_BASE + '/advances?type=in',
+      fail: () => {},
+      success: (res) => { this.setData({ adv_in: (res.data || []).filter((x) => x.remain > 0) }) }
+    })
+    this.req({
+      url: API_BASE + '/advances?type=out',
+      fail: () => {},
+      success: (res) => { this.setData({ adv_out: (res.data || []).filter((x) => x.remain > 0) }) }
+    })
+  },
+  onAdvType(e) { this.setData({ adv_type: Number(e.detail.value) }) },
+  onAParty(e) { this.setData({ a_party: e.detail.value }) },
+  onAAmount(e) { this.setData({ a_amount: e.detail.value }) },
+  onARemark(e) { this.setData({ a_remark: e.detail.value }) },
+  addAdvance() {
+    const { adv_type, a_party, a_amount, a_remark } = this.data
+    if (!a_party || !(Number(a_amount) > 0)) return wx.showToast({ title: '名称和金额必填', icon: 'none' })
+    this.req({
+      url: API_BASE + '/advances', method: 'POST',
+      data: { type: adv_type, party: a_party, amount: Number(a_amount), remark: a_remark, account_id: this.data.acc_id },
+      success: () => { this.setData({ a_party: '', a_amount: '', a_remark: '' }); this.refresh() }
+    })
+  },
+  addAdvancePre() {
+    this.setData({ adv_type: 1 })
+    const { a_party, a_amount, a_remark } = this.data
+    if (!a_party || !(Number(a_amount) > 0)) return wx.showToast({ title: '名称和金额必填', icon: 'none' })
+    this.req({
+      url: API_BASE + '/advances', method: 'POST',
+      data: { type: 'out', party: a_party, amount: Number(a_amount), remark: a_remark, account_id: this.data.acc_id },
+      success: () => { this.setData({ a_party: '', a_amount: '', a_remark: '' }); this.refresh() }
+    })
+  },
+  delAdvance(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除预收款/预付款', content: '确定删除吗？（已抵扣过的不能删）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/advances/' + id, method: 'DELETE', success: () => this.refresh() })
+      }
+    })
+  },
+  applyAdvanceOrder(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '用预收款抵扣', content: '把这客户手上的预收款抵到这张单上（不动现金，只冲往来）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/orders/' + id + '/apply-advance', method: 'POST', data: {}, success: () => this.refresh() })
+      }
+    })
+  },
+  applyAdvancePayable(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '用预付款抵扣', content: '把预付给供应商的钱抵到这笔应付上（不动现金）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/payables/' + id + '/apply-advance', method: 'POST', data: {}, success: () => this.refresh() })
+      }
+    })
+  },
+  onEAcc(e) {
+    const i = Number(e.detail.value)
+    const a = this.data.accounts[i] || {}
+    this.setData({ e_acc: i, acc_idx: i, acc_id: a.id || 0 })
+  },
+  setDefaultAcc(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const a = this.data.accounts[i] || {}
+    wx.setStorageSync('acc', a.id || 0)
+    this.setData({ acc_idx: i, acc_id: a.id || 0, acc_name: a.name || '' })
+    wx.showToast({ title: '默认用 ' + (a.name || ''), icon: 'none' })
+  },
+  onNewAccName(e) { this.setData({ new_acc_name: e.detail.value }) },
+  onNewAccOpening(e) { this.setData({ new_acc_opening: e.detail.value }) },
+  addAccount() {
+    const nm = (this.data.new_acc_name || '').trim()
+    if (!nm) return wx.showToast({ title: '填账户名', icon: 'none' })
+    this.req({
+      url: API_BASE + '/accounts', method: 'POST',
+      data: { name: nm, opening: Number(this.data.new_acc_opening) || 0 },
+      success: () => { this.setData({ new_acc_name: '', new_acc_opening: '' }); this.refresh() }
+    })
+  },
+  editOpening(e) {
+    const id = e.currentTarget.dataset.id
+    const a = this.data.accounts.find((x) => x.id === id) || {}
+    wx.showModal({
+      title: '改期初余额', editable: true,
+      content: String(a.opening || 0),
+      placeholderText: '这个账户开始记账时有多少钱',
+      success: (r) => {
+        if (r.confirm && r.content !== '') {
+          this.req({ url: API_BASE + '/accounts/' + id, method: 'PATCH', data: { opening: Number(r.content) || 0 }, success: () => this.refresh() })
+        }
+      }
+    })
+  },
+  renameAccount(e) {
+    const id = e.currentTarget.dataset.id
+    const a = this.data.accounts.find((x) => x.id === id) || {}
+    wx.showModal({
+      title: '给账户改名', editable: true, content: a.name || '',
+      success: (r) => {
+        if (r.confirm && r.content) {
+          this.req({ url: API_BASE + '/accounts/' + id, method: 'PATCH', data: { name: r.content.trim() }, success: () => this.refresh() })
+        }
+      }
+    })
+  },
+  delAccount(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除账户', content: '有流水的账户不能删（可以改名）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/accounts/' + id, method: 'DELETE', success: () => this.refresh() })
+      }
+    })
+  },
+  onNewCatType(e) { this.setData({ new_cat_type: Number(e.detail.value) }) },
+  onNewCatName(e) { this.setData({ new_cat_name: e.detail.value }) },
+  addCategory() {
+    const nm = (this.data.new_cat_name || '').trim()
+    if (!nm) return wx.showToast({ title: '填分类名', icon: 'none' })
+    this.req({
+      url: API_BASE + '/categories', method: 'POST',
+      data: { type: this.data.new_cat_type ? 'in' : 'out', name: nm },
+      success: () => { this.setData({ new_cat_name: '' }); this.loadCategories() }
+    })
+  },
+  delCategory(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({ url: API_BASE + '/categories/' + id, method: 'DELETE', success: () => this.loadCategories() })
   },
   loadDashboard() {
     this.req({
@@ -135,7 +333,8 @@ Page({
             pay_soon_count: res.data.pay_soon_count || 0, pay_soon: res.data.pay_soon || [],
             today_income: res.data.today_income || 0,
             top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0,
-            budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0
+            budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0,
+            cash_balance: res.data.cash_balance || 0
           })
         }
       }
@@ -223,7 +422,7 @@ Page({
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/payables', method: 'POST',
-      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due },
+      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due }, dupRetry: true,
       success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '' }); this.refresh() }
     })
   },
@@ -231,8 +430,8 @@ Page({
     const { e_amount, e_remark, categories, e_category, e_operator } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/expenses', method: 'POST',
-      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator },
+      url: API_BASE + '/expenses', method: 'POST', dupRetry: true,
+      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id },
       success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '' }); this.refresh() }
     })
   },
@@ -245,7 +444,7 @@ Page({
           const parts = r.content.split(/[,，\s]+/)
           this.req({
             url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
-            data: { amount: Number(parts[0]), date: parts[1] || '' },
+            data: { amount: Number(parts[0]), date: parts[1] || '', account_id: this.data.acc_id },
             success: () => this.refresh()
           })
         }
@@ -268,7 +467,7 @@ Page({
         if (!r.confirm) return
         this.req({
           url: API_BASE + '/receive-batch', method: 'POST',
-          data: { customer, amount, date: this.data.rb_date },
+          data: { customer, amount, date: this.data.rb_date, account_id: this.data.acc_id },
           success: (res) => {
             const d = res.data || {}
             if (d.ok) {
@@ -321,7 +520,7 @@ Page({
           const parts = r.content.split(/[,，\s]+/)
           this.req({
             url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
-            data: { amount: Number(parts[0]), date: parts[1] || '' },
+            data: { amount: Number(parts[0]), date: parts[1] || '', account_id: this.data.acc_id },
             success: () => this.refresh()
           })
         }
