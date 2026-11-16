@@ -3706,9 +3706,11 @@ app.get('/statement-log', async (c) => {
   if (party) { sql += ' AND party=?'; b.push(party) }
   if (month) { sql += ' AND substr(created_at,1,7)=?'; b.push(month) }
   sql += ' ORDER BY id DESC LIMIT ' + limit
-  const rows = ((b.length ? await db.prepare(sql).bind(...b).all() : await db.prepare(sql).all()).results || []).map((r) => ({
-    ...r, date: String(r.created_at || '').slice(0, 10), days: daysSince(r.created_at)
-  }))
+  const rows = ((b.length ? await db.prepare(sql).bind(...b).all() : await db.prepare(sql).all()).results || []).map((r) => {
+    const d0 = daysSince(r.created_at)
+    const ackText = r.ack === 'ok' ? '对方确认了' : (r.ack === 'doubt' ? '对方有异议' : (d0 >= 7 ? '发出去 ' + d0 + ' 天没回音' : '等对方看'))
+    return { ...r, date: String(r.created_at || '').slice(0, 10), days: d0, ack_text: ackText, no_reply: !r.ack && d0 >= 7 }
+  })
   const stat = {}
   for (const r of rows) {
     const s2 = stat[r.party] || (stat[r.party] = { party: r.party, times: 0, last: '' })
@@ -3730,6 +3732,25 @@ app.post('/statement-log', async (c) => {
     .bind(party, type, String(b.month || '').slice(0, 7), String(b.channel || '微信').slice(0, 10), String(b.note || '').slice(0, 100), now()).run()
   await logAudit(db, 'statement', party, '发对账单：' + (String(b.month || '') || '全部') + '（' + String(b.channel || '微信') + '）')
   return c.json({ ok: true })
+})
+// 对方回音：ok=确认无误，doubt=有异议（数量/金额对不上）
+app.post('/statement-log/:id/ack', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const b = await c.req.json().catch(() => ({}))
+  const ack = b.ack === 'doubt' ? 'doubt' : (b.ack === 'ok' ? 'ok' : '')
+  if (!ack) return c.json({ error: '要选「确认」或「有异议」' }, 400)
+  const row = await db.prepare('SELECT * FROM statement_log WHERE id=?').bind(id).first()
+  if (!row) return c.json({ error: '这条记录不存在' }, 404)
+  await db.prepare('UPDATE statement_log SET ack=?, ack_at=?, note=? WHERE id=?')
+    .bind(ack, now(), b.note ? String(b.note).slice(0, 100) : (row.note || ''), id).run()
+  await logAudit(db, 'statement', row.party, (ack === 'ok' ? '对账单已确认：' : '对账单有异议：') + row.party)
+  // 有异议的自动记一条催款，别让它躺在记录里
+  if (ack === 'doubt') {
+    await db.prepare('INSERT INTO dunning_log (party,type,channel,note,promise_date,created_at) VALUES (?,?,?,?,?,?)')
+      .bind(row.party, row.type === 'ap' ? 'ap' : 'ar', '对账单', '对方说对账单对不上' + (b.note ? '：' + String(b.note).slice(0, 40) : ''), null, now()).run()
+  }
+  return c.json({ ok: true, ack })
 })
 app.delete('/statement-log/:id', async (c) => {
   const db = c.env.DB
@@ -5737,6 +5758,14 @@ app.get('/reminders', async (c) => {
     if (soonRows.length) {
       const sum2 = round2(soonRows.reduce((a, x) => a + num(lmap[norm(x.party)]), 0))
       push('yellow', `${soonRows.length} 家答应明天付（共 ¥${sum2}），今天提一句`, 'ar', soonRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
+    }
+  } catch (e) {}
+  // 对账单发出去 7 天还没回音
+  try {
+    const nr = await db.prepare("SELECT party, type, month, channel, created_at FROM statement_log WHERE COALESCE(ack,'') = '' AND date(created_at) <= date(?, '-7 day') ORDER BY created_at").bind(today).all()
+    const list0 = nr.results || []
+    if (list0.length) {
+      push('yellow', `${list0.length} 份对账单发出去 7 天没回音`, 'ar', list0.slice(0, 3).map((x) => ({ party: x.party || '', amount: 0, note: (String(x.created_at).slice(5, 10)) + ' 用' + (x.channel || '微信') + '发的' })))
     }
   } catch (e) {}
   // 这个月还没发过对账单的欠款家（欠得久又没发单，最容易扯皮）

@@ -1432,9 +1432,24 @@
         <view class="btns">
           <button size="mini" bindtap="callParty" data-ph="{{item.phone}}">📞 打电话</button>
           <button size="mini" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 记发对账单</button>
+          <button size="mini" bindtap="openStLog" data-p="{{item.party}}">📄 送达/回音</button>
           <button size="mini" bindtap="openProfile" data-p="{{item.party}}">改档案</button>
         </view>
       </view>
+    </view>
+    <view class="form" wx:if="{{st_log}}">
+      <view class="tip">对账单送达与回音 · {{st_log.party}}　共 {{st_log.count}} 份</view>
+      <view class="item" wx:for="{{st_log.rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.date}}{{item.month ? ' · ' + item.month + ' 月账单' : ''}}</text><text class="amt {{item.no_reply?'red':'ok'}}">{{item.ack_text}}</text></view>
+        <view class="row2">方式：{{item.channel}}{{item.ack_at ? '　回音：' + item.ack_at.slice(0,10) : ''}}{{item.note ? '　' + item.note : ''}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="ackSt" data-id="{{item.id}}" data-ack="ok">✓ 对方确认了</button>
+          <button size="mini" bindtap="ackSt" data-id="{{item.id}}" data-ack="doubt">? 有异议</button>
+          <button size="mini" bindtap="delSt" data-id="{{item.id}}">删</button>
+        </view>
+      </view>
+      <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStLog">收起</button></view>
+      <view class="tip">发出去 7 天没回音的，首页会提醒你；点「有异议」会自动记一笔催款，免得忘了。</view>
     </view>
     <view class="form">
       <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>

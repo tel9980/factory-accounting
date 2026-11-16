@@ -75,7 +75,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '',
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', st_log: null,
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -1494,6 +1494,54 @@ Page({
     })
   },
   // 单位页手动补记（当面给纸质单、别人代发等）
+  // 某家的对账单送达与回音
+  openStLog(e) {
+    const party = e.currentTarget.dataset.p
+    this.loadStLog(party)
+  },
+  loadStLog(party) {
+    this.req({
+      url: API_BASE + '/statement-log?party=' + encodeURIComponent(party || ''),
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ st_log: { party, count: d.count || 0, rows: d.rows || [] } })
+      }
+    })
+  },
+  ackSt(e) {
+    const id = e.currentTarget.dataset.id
+    const ack = e.currentTarget.dataset.ack
+    const party = this.data.st_log && this.data.st_log.party
+    const doIt = (note) => {
+      this.req({
+        url: API_BASE + '/statement-log/' + id + '/ack', method: 'POST', data: { ack, note: note || '' },
+        success: (res) => {
+          if (res.data && res.data.ok) {
+            wx.showToast({ title: ack === 'ok' ? '已记对方确认' : '已记异议，并记了一笔催款', icon: 'none' })
+            this.loadStLog(party)
+          } else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+        }
+      })
+    }
+    if (ack === 'doubt') {
+      wx.showModal({
+        title: '对方说哪里对不上？', editable: true, placeholderText: '例：他说 11 月那笔 800 没收到 / 金额不对',
+        success: (r) => { if (r.confirm) doIt(r.content) }
+      })
+    } else doIt('')
+  },
+  delSt(e) {
+    const id = e.currentTarget.dataset.id
+    const party = this.data.st_log && this.data.st_log.party
+    wx.showModal({
+      title: '删掉这条送达记录？', content: '删了就不算发过（对账单提醒里会重新出现）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/statement-log/' + id, method: 'DELETE', success: () => this.loadStLog(party) })
+      }
+    })
+  },
+  closeStLog() { this.setData({ st_log: null }) },
   logStatementManual(e) {
     const party = e.currentTarget.dataset.p
     const type = e.currentTarget.dataset.k === 'ap' ? 'ap' : 'ar'
