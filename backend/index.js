@@ -3550,6 +3550,8 @@ app.post('/orders/:id/receive', async (c) => {
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  const leftOrder = round2(num(o.price) - num(o.paid) - num(o.written_off))
+  if (a > leftOrder + 0.005) return c.json({ error: `这单只剩 ¥${leftOrder} 没收，收不了 ¥${a}`, left: leftOrder }, 400)
   const acc = num(account_id) || (await defaultAccountId(db))
   await db.batch([
     db.prepare('UPDATE orders SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(a, id),
@@ -3717,6 +3719,8 @@ app.post('/payables/:id/pay', async (c) => {
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  const leftPay = round2(num(p.amount) - num(p.paid) - num(p.written_off))
+  if (a > leftPay + 0.005) return c.json({ error: `这笔只剩 ¥${leftPay} 没付，付不了 ¥${a}`, left: leftPay }, 400)
   const acc = num(account_id) || (await defaultAccountId(db))
   await db.batch([
     db.prepare('UPDATE payables SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(a, id),
@@ -3868,6 +3872,64 @@ app.get('/audit-logs', async (c) => {
 })
 
 // 对账单（按单位）
+// 一句话对账：某家到底欠我多少（截至今天，含未结清单、争议、对账进度）
+app.get('/party-balance', async (c) => {
+  const db = c.env.DB
+  const type = (c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  const T = type === 'ar' ? 'orders' : 'payables'
+  const who = type === 'ar' ? 'customer' : 'supplier'
+  const amt = type === 'ar' ? 'price' : 'amount'
+  const label = type === 'ar' ? '应收' : '应付'
+  const party = String(c.req.query('party') || '').trim()
+  const aggSql = `SELECT ${who} AS party, COUNT(*) AS cnt, ROUND(SUM(${amt}),2) AS total,
+      ROUND(SUM(paid),2) AS paid, ROUND(SUM(COALESCE(written_off,0)),2) AS written,
+      MAX(substr(created_at,1,10)) AS last_date FROM ${T} GROUP BY ${who}`
+  if (!party) {
+    const { results } = await db.prepare(`SELECT * FROM (${aggSql}) WHERE total - paid - written > 0 ORDER BY total - paid - written DESC LIMIT 60`).all()
+    const rows = results.map((r) => ({ party: r.party, cnt: r.cnt, total: num(r.total), paid: num(r.paid), left: round2(num(r.total) - num(r.paid) - num(r.written)), last_date: r.last_date }))
+    return c.json({ ok: true, type, rows, count: rows.length, total_left: round2(rows.reduce((a, x) => a + x.left, 0)) })
+  }
+  const head = await db.prepare(`SELECT * FROM (${aggSql}) WHERE party=?`).bind(party).first()
+  const { results: items } = await db.prepare(`SELECT id, substr(created_at,1,10) AS date, ${type === 'ar' ? 'item_name' : 'remark'} AS item,
+      ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, progress
+      FROM ${T} WHERE ${who}=? ORDER BY created_at DESC LIMIT 60`).bind(party).all()
+  const today = dayStr(new Date())
+  const rows = items.map((x) => {
+    const left = round2(num(x.amount) - num(x.paid) - num(x.wo))
+    const due = String(x.due_date || '').slice(0, 10)
+    return { id: x.id, date: x.date, item: x.item || '', amount: num(x.amount), paid: num(x.paid), left, days: x.date ? Math.max(0, Math.round((Date.parse(today) - Date.parse(x.date)) / 86400000)) : 0, due, over: due && due < today ? Math.round((Date.parse(today) - Date.parse(due)) / 86400000) : 0 }
+  })
+  const open = rows.filter((x) => x.left > 0.005)
+  const total = num(head && head.total), paid = num(head && head.paid), written = num(head && head.written)
+  const left = round2(total - paid - written)
+  const over90 = round2(open.filter((x) => x.days > 90).reduce((a, x) => a + x.left, 0))
+  const oldest = open.reduce((a, x) => Math.max(a, x.days), 0)
+  const [prof, term, st, recon, dun] = await Promise.all([
+    db.prepare('SELECT * FROM party_profiles WHERE party=?').bind(party).first().catch(() => null),
+    db.prepare('SELECT * FROM party_terms WHERE party=?').bind(party).first().catch(() => null),
+    db.prepare("SELECT COUNT(*) AS c, MAX(substr(created_at,1,10)) AS d FROM statement_log WHERE party=? AND (ack IS NULL OR ack='')").bind(party).first().catch(() => null),
+    db.prepare('SELECT COUNT(*) AS c FROM recon_log WHERE party=? AND done=0').bind(party).first().catch(() => null),
+    db.prepare('SELECT COUNT(*) AS c, MAX(substr(created_at,1,10)) AS d FROM dunning_log WHERE party=?').bind(party).first().catch(() => null)
+  ])
+  const title = (await getTitle(db)).title
+  const L = []
+  L.push(`${party}　截至 ${today}（${label}）`)
+  if (prof && (prof.contact || prof.phone)) L.push(`联系人 ${prof.contact || '—'}　电话 ${prof.phone || '—'}`)
+  L.push(`共 ${num(head && head.cnt)} 单，合计 ¥${total}，已${type === 'ar' ? '收' : '付'} ¥${paid}${written > 0 ? `，核销 ¥${written}` : ''}，还欠 ¥${left}`)
+  if (open.length) {
+    L.push(`还欠的 ${open.length} 笔${over90 > 0 ? `，其中超 90 天 ¥${over90}` : ''}；最久一笔欠 ${oldest} 天`)
+    open.slice(0, 10).forEach((x) => L.push(`  ${x.date} ${x.item || '—'} ¥${x.amount}（已${type === 'ar' ? '收' : '付'} ${x.paid}，还欠 ${x.left}${x.over > 0 ? `，超期 ${x.over} 天` : ''}）`))
+    if (open.length > 10) L.push(`  …还有 ${open.length - 10} 笔`)
+  } else L.push('已经全部结清 ✓')
+  if (term && num(term.term_days) > 0) L.push(`账期：${num(term.term_days)} 天`)
+  if (st && num(st.c) > 0) L.push(`对账单：${num(st.c)} 份还没确认（最近 ${st.d || '—'}）`)
+  if (recon && num(recon.c) > 0) L.push(`⚠ 有 ${num(recon.c)} 条对账差异还没处理`)
+  if (dun && num(dun.c) > 0) L.push(`已催 ${num(dun.c)} 次（上次 ${dun.d || '—'}）`)
+  L.push('')
+  L.push(`—— ${title} ——`)
+  return c.json({ ok: true, type, party, total, paid, written, left, cnt: num(head && head.cnt), open_count: open.length, over90, oldest, rows, open, profile: prof || null, term: term || null, open_stmt: num(st && st.c), open_recon: num(recon && recon.c), dun_times: num(dun && dun.c), title, text: L.join('\n') })
+})
+
 app.get('/statement', async (c) => {
   const type = c.req.query('type')
   const name = c.req.query('name')

@@ -1739,6 +1739,16 @@
       <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStLog">收起</button></view>
       <view class="tip">发出去 7 天没回音的，首页会提醒你；点「有异议」会自动记一笔催款，免得忘了。</view>
     </view>
+    <view class="form" wx:if="{{pbal}}">
+      <view class="tip">一句话对账 · {{pbal.party}}（{{pbal.type=='ar'?'应收':'应付'}}）</view>
+      <view class="pbtext">{{pbal.text}}</view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="copyPartyBalance">复制这段话</button>
+        <button class="btn ghost" size="mini" bindtap="partyBalanceDetail">看往来明细</button>
+        <button class="btn ghost" size="mini" bindtap="closePartyBalance">收起</button>
+      </view>
+      <view class="tip">直接发微信给对方：「你说的总数我算了一下」，有争议的对方一看就知道是哪一笔。</view>
+    </view>
     <view class="form">
       <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>
       <view class="item" wx:for="{{accounts}}" wx:key="id">
@@ -1813,6 +1823,7 @@
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ar" data-name="{{item.name}}">打印版</button>
             <button size="mini" bindtap="trackLink" data-name="{{item.name}}">发进度</button>
+            <button size="mini" bindtap="oneLiner" data-type="ar" data-n="{{item.name}}">一句话</button>
             <button size="mini" wx:if="{{role!='staff'}}" bindtap="setCreditLimit" data-name="{{item.name}}">设额度</button>
           </view>
         </view>
@@ -1827,6 +1838,7 @@
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ap" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ap" data-name="{{item.name}}">打印版</button>
+            <button size="mini" bindtap="oneLiner" data-type="ap" data-n="{{item.name}}">一句话</button>
           </view>
         </view>
         <view class="empty" wx:if="{{!contacts_ap.length}}">暂无供应商记录</view>
