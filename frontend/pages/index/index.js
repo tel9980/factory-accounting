@@ -7,14 +7,15 @@ Page({
     month_income: 0, month_outcome: 0, month_profit: 0,
     month_order_add: 0, month_payable_add: 0, profit_biz: 0,
     overdue_count: 0, overdue: [],
-    due_soon_count: 0, due_soon: [],
+    due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
     ar_list: [], ap_list: [], expense_list: [],
     ar_all: [], ap_all: [], exp_all: [],
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
     o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '',
-    p_supplier: '', p_amount: '', p_remark: '', p_operator: '',
+    p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '',
+    ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '',
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
@@ -131,6 +132,7 @@ Page({
             profit_biz: res.data.profit_biz,
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
             due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || [],
+            pay_soon_count: res.data.pay_soon_count || 0, pay_soon: res.data.pay_soon || [],
             today_income: res.data.today_income || 0,
             top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0,
             budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0
@@ -139,23 +141,44 @@ Page({
       }
     })
   },
-  loadAr() {
-    this.req({ url: API_BASE + '/ar', success: (res) => {
-      const all = res.data || []
-      this.setData({ ar_all: all, ar_list: this.filterAr(all, this.data.ar_kw) })
+  PAGE: 60,
+  // more=true 表示上拉加载下一页
+  loadAr(more) {
+    const off = more ? this.data.ar_off : 0
+    this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
+      const page = res.data || []
+      const all = more ? this.data.ar_all.concat(page) : page
+      this.setData({ ar_all: all, ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw) })
     } })
   },
-  loadAp() {
-    this.req({ url: API_BASE + '/ap', success: (res) => {
-      const all = res.data || []
-      this.setData({ ap_all: all, ap_list: this.filterAp(all, this.data.ap_kw) })
+  loadAp(more) {
+    const off = more ? this.data.ap_off : 0
+    this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
+      const page = res.data || []
+      const all = more ? this.data.ap_all.concat(page) : page
+      this.setData({ ap_all: all, ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw) })
     } })
   },
-  loadExpenses() {
-    this.req({ url: API_BASE + '/expenses', success: (res) => {
-      const all = res.data || []
-      this.setData({ exp_all: all, expense_list: this.filterEx(all, this.data.ex_kw) })
+  loadExpenses(more) {
+    const off = more ? this.data.ex_off : 0
+    this.req({ url: API_BASE + '/expenses?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
+      const page = res.data || []
+      const all = more ? this.data.exp_all.concat(page) : page
+      this.setData({ exp_all: all, ex_off: all.length, ex_more: page.length >= this.PAGE, expense_list: this.filterEx(all, this.data.ex_kw) })
     } })
+  },
+  // 上拉到底自动加载更多
+  onReachBottom() {
+    const t = this.data.tab
+    if (t === 'ar' && this.data.ar_more) this.loadAr(true)
+    else if (t === 'ap' && this.data.ap_more) this.loadAp(true)
+    else if (t === 'expense' && this.data.ex_more) this.loadExpenses(true)
+  },
+  loadMoreTap() {
+    const t = this.data.tab
+    if (t === 'ar') this.loadAr(true)
+    else if (t === 'ap') this.loadAp(true)
+    else if (t === 'expense') this.loadExpenses(true)
   },
   filterAr(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.customer + ' ' + (x.item_name || '')).indexOf(kw) >= 0) : list },
   filterAp(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.supplier + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
@@ -177,6 +200,7 @@ Page({
   onPSupplier(e) { this.setData({ p_supplier: e.detail.value }) },
   onPAmount(e) { this.setData({ p_amount: e.detail.value }) },
   onPRemark(e) { this.setData({ p_remark: e.detail.value }) },
+  onPDue(e) { this.setData({ p_due: e.detail.value }) },
   onPOperator(e) { this.setData({ p_operator: e.detail.value }) },
   pickSupplier(e) { this.setData({ p_supplier: e.currentTarget.dataset.n }) },
   onECategory(e) { this.setData({ e_category: Number(e.detail.value) }) },
@@ -195,12 +219,12 @@ Page({
     })
   },
   addPayable() {
-    const { p_supplier, p_amount, p_remark, p_operator } = this.data
+    const { p_supplier, p_amount, p_remark, p_operator, p_due } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/payables', method: 'POST',
-      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator },
-      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '' }); this.refresh() }
+      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due },
+      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '' }); this.refresh() }
     })
   },
   addExpense() {
@@ -557,23 +581,65 @@ Page({
   exportCsv(e) {
     const type = e.currentTarget.dataset.type
     const names = { orders: '应收账单', payables: '应付账单', ledger: '全部收支流水' }
-    wx.showModal({
-      title: '导出 Excel',
-      content: '会把' + (names[type] || '数据') + '做成表格文本复制到剪贴板，粘贴到电脑记事本另存为 .csv 文件，再用 Excel 打开即可。',
+    this.req({
+      url: API_BASE + '/export', data: { type },
+      success: (res) => {
+        const text = res.data && res.data.text
+        if (!text) return wx.showToast({ title: '没有数据可导出', icon: 'none' })
+        const fname = (res.data && res.data.filename) || ('factory-' + type + '.csv')
+        const path = wx.env.USER_DATA_PATH + '/' + fname
+        wx.getFileSystemManager().writeFile({
+          filePath: path, data: text, encoding: 'utf8',
+          success: () => {
+            if (wx.shareFileMessage) {
+              wx.shareFileMessage({
+                filePath: path, fileName: names[type] + '.csv',
+                success: () => wx.showToast({ title: '已发出，选“文件传输助手”发给电脑', icon: 'none' }),
+                fail: () => this.exportFallback(text)
+              })
+            } else this.exportFallback(text)
+          },
+          fail: () => this.exportFallback(text)
+        })
+      }
+    })
+  },
+  exportFallback(text) {
+    wx.setClipboardData({
+      data: text,
+      success: () => wx.showToast({ title: '已复制表格内容，粘贴到记事本存成 .csv', icon: 'none' })
+    })
+  },
+  // 从微信聊天里选一个 csv/txt 文件读进导入框
+  chooseImportFile() {
+    if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，请用粘贴方式', icon: 'none' })
+    wx.chooseMessageFile({
+      count: 1, type: 'file', extension: ['csv', 'txt', 'CSV', 'TXT'],
       success: (r) => {
-        if (r.confirm) {
-          this.req({
-            url: API_BASE + '/export', data: { type },
-            success: (res) => {
-              if (res.data && res.data.text) {
-                wx.setClipboardData({
-                  data: res.data.text,
-                  success: () => wx.showToast({ title: '已复制，去电脑粘贴保存', icon: 'none' })
-                })
-              }
+        const f = (r.tempFiles || [])[0]
+        if (!f) return
+        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        wx.getFileSystemManager().readFile({
+          filePath: f.path, encoding: 'utf8',
+          success: (fr) => {
+            let t = String(fr.data || '').replace(/^\ufeff/, '')
+            if (t.indexOf('\ufffd') >= 0) {
+              wx.showModal({
+                title: '文件编码不对', content: 'Excel 存成了旧格式，中文会乱。请在 Excel 里“另存为 → CSV UTF-8（逗号分隔）”再发一次。', showCancel: false
+              })
+              return
             }
-          })
-        }
+            let lines = t.split(/\r?\n/).map((x) => x.trim()).filter((x) => x)
+            // 去掉表头行（含“金额/客户/供应商/日期/分类”等字样且不是数字开头）
+            if (lines.length && /金额|客户|供应商|日期|分类|备注|供应商/.test(lines[0]) && !/^\d/.test(lines[0])) lines = lines.slice(1)
+            // 去掉 Excel 导出时给每个字段加的引号
+            lines = lines.map((l) => l.split(',').map((x) => x.replace(/^"|"$/g, '').trim()).join(','))
+            if (!lines.length) return wx.showToast({ title: '文件里没读到内容', icon: 'none' })
+            this.setData({ import_text: lines.join('\n'), import_file_name: f.name || '表格文件' })
+            wx.showToast({ title: '读入 ' + lines.length + ' 行，检查后点开始导入', icon: 'none' })
+          },
+          fail: () => wx.showToast({ title: '读取失败，改用粘贴方式', icon: 'none' })
+        })
       }
     })
   },

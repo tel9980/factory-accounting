@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS payables (
   category TEXT,
   remark TEXT,
   operator TEXT,                        -- 经手人
+  due_date TEXT,                        -- 约定付款日
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);

@@ -56,6 +56,10 @@
     <text>⏰ {{due_soon_count}} 笔应收最近 7 天到期，点此查看</text>
   </view>
 
+  <view class="duesoon" wx:if="{{pay_soon_count > 0}}" bindtap="setTab" data-t="ap">
+    <text>⏰ {{pay_soon_count}} 笔应付款最近 7 天要付，点此查看</text>
+  </view>
+
   <view class="budgetbar" wx:if="{{budget_alert_count > 0}}" bindtap="setTab" data-t="report">
     <text>💰 {{budget_alert_count}} 项支出快超或已超预算：<text wx:for="{{budget_over}}" wx:key="category">{{item.category}}{{item.over?'超'+item.over_amt:'已用'+item.pct+'%'}} </text>，点此查看</text>
   </view>
@@ -113,6 +117,8 @@
         </view>
       </view>
       <view class="empty" wx:if="{{!ar_list.length}}">没有未结清的应收</view>
+      <view class="loadmore" wx:if="{{ar_more}}"><button class="btn" size="mini" bindtap="loadMoreTap">加载更早的</button></view>
+      <view class="tip" wx:if="{{ar_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
   </block>
 
@@ -121,6 +127,7 @@
       <input class="inp" placeholder="供应商/收款人" value="{{p_supplier}}" bindinput="onPSupplier"/>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount"/>
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
+      <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
       <input class="inp" placeholder="经手人(可选)" value="{{p_operator}}" bindinput="onPOperator"/>
       <button class="btn" size="mini" bindtap="addPayable">记一笔应付</button>
       <view class="chips" wx:if="{{contacts_ap.length}}">
@@ -134,7 +141,7 @@
     <view class="list">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="editPayable" data-id="{{item.id}}">改</button>
@@ -144,6 +151,8 @@
         </view>
       </view>
       <view class="empty" wx:if="{{!ap_list.length}}">没有未结清的应付</view>
+      <view class="loadmore" wx:if="{{ap_more}}"><button class="btn" size="mini" bindtap="loadMoreTap">加载更早的</button></view>
+      <view class="tip" wx:if="{{ap_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
   </block>
 
@@ -167,15 +176,20 @@
           <button size="mini" bindtap="delExpense" data-id="{{item.id}}">删</button>
         </view>
       </view>
+      <view class="empty" wx:if="{{!expense_list.length}}">暂无支出记录</view>
+      <view class="loadmore" wx:if="{{ex_more}}"><button class="btn" size="mini" bindtap="loadMoreTap">加载更早的</button></view>
+      <view class="tip" wx:if="{{ex_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
   </block>
 
   <block wx:if="{{tab=='import'}}">
     <view class="form">
       <picker range="{{import_types}}" bindchange="onImportType"><view class="picker">{{import_types[import_type]}} ▾</view></picker>
+      <button class="btn" size="mini" bindtap="chooseImportFile">📄 从微信聊天选表格文件</button>
+      <view class="tip" wx:if="{{import_file_name}}">已读入：{{import_file_name}}</view>
       <textarea class="ta" placeholder="{{import_hint}}" value="{{import_text}}" bindinput="onImportText"></textarea>
       <button class="btn" size="mini" bindtap="doImport">开始导入</button>
-      <view class="tip">可从 Excel 复制多行，直接粘贴到这里</view>
+      <view class="tip">两种方式：① 微信里把表格文件发给自己，点上面按钮选它；② 从 Excel 直接复制多行粘贴到这里</view>
     </view>
   </block>
 
@@ -235,9 +249,9 @@
       </view>
     </view>
     <view class="form">
-      <button class="btn" size="mini" bindtap="exportCsv" data-type="orders">导出应收</button>
-      <button class="btn" size="mini" bindtap="exportCsv" data-type="payables">导出应付</button>
-      <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水</button>
+      <button class="btn" size="mini" bindtap="exportCsv" data-type="orders">导出应收(文件)</button>
+      <button class="btn" size="mini" bindtap="exportCsv" data-type="payables">导出应付(文件)</button>
+      <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水(文件)</button>
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
       <button class="btn" size="mini" bindtap="cloudBackup">云端备份</button>
       <button class="btn" size="mini" bindtap="backupToNotes">备份到笔记站</button>

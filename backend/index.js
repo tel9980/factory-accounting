@@ -159,6 +159,7 @@ app.get('/dashboard', async (c) => {
   const todayS = new Date().toISOString().slice(0, 10)
   const soonS = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
   const dueSoon = await db.prepare("SELECT * FROM orders WHERE paid < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
+  const paySoon = await db.prepare("SELECT * FROM payables WHERE paid < amount AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
   const todayIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,10)=?").bind(todayS).first()
   const topCust = await db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price GROUP BY customer ORDER BY t DESC LIMIT 1').first()
   // 预算：按分类统计本月已花，超出或接近 90% 的提醒
@@ -189,6 +190,8 @@ app.get('/dashboard', async (c) => {
     overdue: overdue.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })),
     due_soon_count: dueSoon.results.length,
     due_soon: dueSoon.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
+    pay_soon_count: paySoon.results.length,
+    pay_soon: paySoon.results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
     recent: recent.results,
     budget_over: budgetOver,
     budget_alert_count: budgetOver.length
@@ -228,24 +231,63 @@ app.get('/profit-compare', async (c) => {
 })
 
 // 应收：未结清订单
+// 分页参数：offset 起始条数，limit 每页条数（默认 60，最多 200）
+const pageArgs = (c) => {
+  const u = new URL(c.req.url)
+  const off = Math.max(0, num(u.searchParams.get('offset'), 0))
+  let lim = num(u.searchParams.get('limit'), 60)
+  if (lim <= 0) lim = 60
+  if (lim > 200) lim = 200
+  return { off, lim }
+}
+
 app.get('/ar', async (c) => {
   const db = c.env.DB
-  const { results } = await db.prepare('SELECT * FROM orders WHERE paid < price ORDER BY id DESC LIMIT 200').all()
-  return c.json(results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })))
+  const { off, lim } = pageArgs(c)
+  const kw = (new URL(c.req.url).searchParams.get('kw') || '').trim()
+  const base = 'SELECT * FROM orders WHERE paid < price'
+  let rows
+  if (kw) {
+    const like = '%' + kw + '%'
+    rows = await db.prepare(base + " AND (customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,'') LIKE ?) ORDER BY id DESC LIMIT ? OFFSET ?")
+      .bind(like, like, like, lim, off).all()
+  } else {
+    rows = await db.prepare(base + ' ORDER BY id DESC LIMIT ? OFFSET ?').bind(lim, off).all()
+  }
+  return c.json(rows.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })))
 })
 
 // 应付：未结清应付单
 app.get('/ap', async (c) => {
   const db = c.env.DB
-  const { results } = await db.prepare('SELECT * FROM payables WHERE paid < amount ORDER BY id DESC LIMIT 200').all()
-  return c.json(results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid) })))
+  const { off, lim } = pageArgs(c)
+  const kw = (new URL(c.req.url).searchParams.get('kw') || '').trim()
+  const base = 'SELECT * FROM payables WHERE paid < amount'
+  let rows
+  if (kw) {
+    const like = '%' + kw + '%'
+    rows = await db.prepare(base + " AND (supplier LIKE ? OR COALESCE(remark,'') LIKE ? OR COALESCE(operator,'') LIKE ?) ORDER BY id DESC LIMIT ? OFFSET ?")
+      .bind(like, like, like, lim, off).all()
+  } else {
+    rows = await db.prepare(base + ' ORDER BY id DESC LIMIT ? OFFSET ?').bind(lim, off).all()
+  }
+  return c.json(rows.results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid), due_short: (r.due_date || '').slice(0, 10) })))
 })
 
 // 支出流水
 app.get('/expenses', async (c) => {
   const db = c.env.DB
-  const { results } = await db.prepare("SELECT * FROM ledger WHERE direction='out' ORDER BY id DESC LIMIT 100").all()
-  return c.json(results)
+  const { off, lim } = pageArgs(c)
+  const kw = (new URL(c.req.url).searchParams.get('kw') || '').trim()
+  let rows
+  if (kw) {
+    const like = '%' + kw + '%'
+    rows = await db.prepare("SELECT * FROM ledger WHERE direction='out' AND (COALESCE(remark,'') LIKE ? OR COALESCE(category,'') LIKE ? OR COALESCE(operator,'') LIKE ?) ORDER BY id DESC LIMIT ? OFFSET ?")
+      .bind(like, like, like, lim, off).all()
+  } else {
+    rows = await db.prepare("SELECT * FROM ledger WHERE direction='out' ORDER BY id DESC LIMIT ? OFFSET ?").bind(lim, off).all()
+  }
+  return c.json(rows.results)
 })
 
 // 记应收（加工订单）
@@ -370,12 +412,12 @@ app.post('/orders/:id/status', async (c) => {
 
 // 记应付
 app.post('/payables', async (c) => {
-  const { supplier, amount, category, remark, operator } = await c.req.json()
+  const { supplier, amount, category, remark, operator, due_date } = await c.req.json()
   if (!supplier || num(amount) <= 0) return c.json({ error: '供应商和金额必填' }, 400)
   const db = c.env.DB
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
-  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, created_at) VALUES (?,?,0,?,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, now()).run()
+  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || null, now()).run()
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
@@ -779,9 +821,9 @@ app.get('/export', async (c) => {
     const st = (s) => (s == 2 ? '已交付' : s == 1 ? '加工中' : '待加工')
     for (const o of results) rows.push([o.created_at.slice(0, 10), o.customer, o.item_name, o.price, o.paid, round2(o.price - o.paid), st(o.status), o.progress || '', (o.due_date || '').slice(0, 10), o.operator || ''])
   } else if (type === 'payables') {
-    rows.push(['日期', '供应商', '金额', '已付', '未付', '分类', '备注', '经手人'])
+    rows.push(['日期', '供应商', '金额', '已付', '未付', '分类', '备注', '约定付款日', '经手人'])
     const { results } = await db.prepare('SELECT * FROM payables ORDER BY id').all()
-    for (const p of results) rows.push([p.created_at.slice(0, 10), p.supplier, p.amount, p.paid, round2(p.amount - p.paid), p.category, p.remark, p.operator || ''])
+    for (const p of results) rows.push([p.created_at.slice(0, 10), p.supplier, p.amount, p.paid, round2(p.amount - p.paid), p.category, p.remark, (p.due_date || '').slice(0, 10), p.operator || ''])
   } else {
     rows.push(['日期', '方向', '金额', '分类', '备注', '经手人'])
     const { results } = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
@@ -983,15 +1025,16 @@ app.get('/orders/:id/processes', async (c) => {
 // 编辑应付单
 app.patch('/payables/:id', async (c) => {
   const id = c.req.param('id')
-  const { supplier, amount, remark } = await c.req.json()
+  const { supplier, amount, remark, due_date } = await c.req.json()
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
   const a = num(amount, p.amount)
   if (a < num(p.paid)) return c.json({ error: '金额不能小于已付款' }, 400)
-  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=? WHERE id=?')
-    .bind(supplier || p.supplier, a, remark !== undefined ? remark : p.remark, id).run()
+  const nd = due_date !== undefined ? (toIsoDate(due_date) || null) : (p.due_date || null)
+  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=?, due_date=? WHERE id=?')
+    .bind(supplier || p.supplier, a, remark !== undefined ? remark : p.remark, nd, id).run()
   await logAudit(db, '编辑应付', supplier || p.supplier, `${supplier || p.supplier} ¥${a}`)
   return c.json({ ok: true })
 })
@@ -1105,8 +1148,8 @@ app.post('/trash/:id/restore', async (c) => {
       await db.prepare('INSERT INTO orders (id,customer,item_name,price,status,paid,due_date,operator,progress,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
         .bind(d.id, d.customer, d.item_name, num(d.price), num(d.status), num(d.paid), d.due_date || null, d.operator || '', d.progress || '', d.created_at).run()
     } else if (r.type === 'payable') {
-      await db.prepare('INSERT INTO payables (id,supplier,amount,paid,category,remark,operator,created_at) VALUES (?,?,?,?,?,?,?,?)')
-        .bind(d.id, d.supplier, num(d.amount), num(d.paid), d.category || '', d.remark || '', d.operator || '', d.created_at).run()
+      await db.prepare('INSERT INTO payables (id,supplier,amount,paid,category,remark,operator,due_date,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .bind(d.id, d.supplier, num(d.amount), num(d.paid), d.category || '', d.remark || '', d.operator || '', d.due_date || null, d.created_at).run()
     } else if (r.type === 'ledger') {
       await db.prepare('INSERT INTO ledger (id,direction,ref_type,ref_id,amount,category,remark,operator,created_at) VALUES (?,?,?,?,?,?,?,?,?)')
         .bind(d.id, d.direction || 'out', d.ref_type || 'expense', d.ref_id || 0, num(d.amount), d.category || '', d.remark || '', d.operator || '', d.created_at).run()
@@ -1371,8 +1414,8 @@ app.post('/restore', async (c) => {
   }
   for (const p of payables) {
     if (!p.supplier || num(p.amount) <= 0) { skipped.payables++; continue }
-    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, created_at) VALUES (?,?,?,?,?,?,?,?)')
-      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.created_at || now()))
+    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.due_date || null, p.created_at || now()))
   }
   for (const l of ledger) {
     if (num(l.amount) <= 0 || !l.direction) { skipped.ledger++; continue }
