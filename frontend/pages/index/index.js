@@ -29,7 +29,7 @@ Page({
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
-    cmp_month: '', analysis_text: '',
+    cmp_month: '', analysis_text: '', ex_month: '',
     pc_month: '', pc: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
@@ -1235,6 +1235,31 @@ Page({
     })
   },
   onCmpMonth(e) { this.setData({ cmp_month: e.detail.value }) },
+  onExMonth(e) { this.setData({ ex_month: e.detail.value }) },
+  // 整月导出：一个 Excel 多个工作表
+  exportMonthXlsx() {
+    const m = (this.data.ex_month || '').trim()
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url: API_BASE + '/export-xlsx' + (m ? '?month=' + encodeURIComponent(m) : ''),
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.b64) return wx.showToast({ title: '没生成出来', icon: 'none' })
+        const f = wx.env.USER_DATA_PATH + '/' + (d.name || '导出.xlsx')
+        wx.getFileSystemManager().writeFile({
+          filePath: f, data: d.b64, encoding: 'base64',
+          success: () => {
+            if (wx.shareFileMessage) {
+              wx.shareFileMessage({ filePath: f, fileName: d.name || '导出.xlsx', fail: () => wx.openDocument({ filePath: f, showMenu: true }) })
+            } else wx.openDocument({ filePath: f, showMenu: true })
+          },
+          fail: () => wx.showToast({ title: '存文件失败', icon: 'none' })
+        })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
   genCredits() {
     this.req({
       url: API_BASE + '/credits',

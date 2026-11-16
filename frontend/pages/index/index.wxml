@@ -454,6 +454,9 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">整月全部数据导成一个 Excel（6 个表：总览/应收/应付/收付流水/借支/核销），直接发会计或存档</view>
+      <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{ex_month}}" bindinput="onExMonth"/>
+      <button class="btn" size="mini" bindtap="exportMonthXlsx">⬇ 导出整月 Excel（多表）</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="orders">导出应收(文件)</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="payables">导出应付(文件)</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水(文件)</button>

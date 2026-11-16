@@ -662,14 +662,24 @@ function sheetXml(rows) {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="8" width="16" customWidth="1"/></cols><sheetData>' + body + '</sheetData></worksheet>'
 }
 
-async function makeXlsx(rows) {
-  return zipMake([
-    { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>' },
+async function makeXlsxSheets(sheets) {
+  const enc = new TextEncoder()
+  const n = sheets.length
+  const ctOver = sheets.map((sh, i) => '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>').join('')
+  const wbSheets = sheets.map((sh, i) => '<sheet name="' + String(sh.name || 'Sheet' + (i + 1)).replace(/[\\\/\?\*\[\]:]/g, '-').slice(0, 28) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>').join('')
+  const wbRels = sheets.map((sh, i) => '<Relationship Id="rId' + (i + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>').join('')
+  const files = [
+    { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' + ctOver + '</Types>' },
     { name: '_rels/.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>' },
-    { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="导入数据" sheetId="1" r:id="rId1"/></sheets></workbook>' },
-    { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>' },
-    { name: 'xl/worksheets/sheet1.xml', data: sheetXml(rows) }
-  ])
+    { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + wbSheets + '</sheets></workbook>' },
+    { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + wbRels + '</Relationships>' }
+  ]
+  sheets.forEach((sh, i) => files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: sheetXml(sh.rows || []) }))
+  return zipMake(files)
+}
+
+async function makeXlsx(rows) {
+  return makeXlsxSheets([{ name: '导入数据', rows }])
 }
 
 function toB64(u8) {
@@ -719,6 +729,66 @@ app.post('/import-xlsx', async (c) => {
   if (!rows.length) return c.json({ error: 'Excel 里没有数据行' }, 400)
   const r = await importRows(c.env.DB, type, rows)
   return c.json(r)
+})
+
+
+// 导出整月全部数据成一个 Excel（多个工作表），直接发给会计或存档
+app.get('/export-xlsx', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const M = (sql) => db.prepare(sql).bind(month).all()
+  const orders = (await M("SELECT * FROM orders WHERE substr(created_at,1,7)=? ORDER BY id")).results
+  const payables = (await M("SELECT * FROM payables WHERE substr(created_at,1,7)=? ORDER BY id")).results
+  const ledger = (await M("SELECT * FROM ledger WHERE substr(created_at,1,7)=? ORDER BY id")).results
+  const writeoffs = (await M("SELECT * FROM writeoffs WHERE substr(created_at,1,7)=? ORDER BY id")).results
+  const loans = (await db.prepare('SELECT * FROM loans ORDER BY id').all()).results
+  const accs = await accountBalances(db)
+
+  let inSum = 0
+  let outSum = 0
+  for (const r of ledger) {
+    if (!num(r.cash)) continue
+    if (r.direction === 'in') inSum += num(r.amount)
+    else outSum += num(r.amount)
+  }
+  const arOpen = orders.reduce((a, r) => a + Math.max(0, num(r.price) - num(r.paid) - num(r.written_off)), 0)
+  const apOpen = payables.reduce((a, r) => a + Math.max(0, num(r.amount) - num(r.paid) - num(r.written_off)), 0)
+
+  const accName = {}
+  for (const a of accs || []) accName[a.id] = a.name
+  const S = [
+    { name: '总览', rows: [
+      ['项目', '金额/数量'],
+      ['账期', month],
+      ['本月收（现金）', round2(inSum)],
+      ['本月付（现金）', round2(outSum)],
+      ['本月结余', round2(inSum - outSum)],
+      ['本月新接单', round2(orders.reduce((a, r) => a + num(r.price), 0))],
+      ['本月新赊购', round2(payables.reduce((a, r) => a + num(r.amount), 0))],
+      ['这些单还没收', round2(arOpen)],
+      ['这些单还没付', round2(apOpen)],
+      ['手头现金合计', round2((accs || []).reduce((a, x) => a + num(x.balance), 0))],
+      ['导出时间', now()]
+    ] },
+    { name: '应收', rows: [['单号', '客户', '产品', '金额', '已收', '已核销', '未收', '状态', '约定收款日', '经手人', '开单日']].concat(
+      orders.map((r) => [r.id, r.customer, r.item_name, round2(num(r.price)), round2(num(r.paid)), round2(num(r.written_off)), round2(num(r.price) - num(r.paid) - num(r.written_off)), num(r.price) - num(r.paid) - num(r.written_off) <= 0 ? '已结清' : '未结清', (r.due_date || '').slice(0, 10), r.operator || '', (r.created_at || '').slice(0, 10)])
+    ) },
+    { name: '应付', rows: [['单号', '供应商', '金额', '已付', '已核销', '未付', '状态', '约定付款日', '备注', '经手人', '开单日']].concat(
+      payables.map((r) => [r.id, r.supplier, round2(num(r.amount)), round2(num(r.paid)), round2(num(r.written_off)), round2(num(r.amount) - num(r.paid) - num(r.written_off)), num(r.amount) - num(r.paid) - num(r.written_off) <= 0 ? '已结清' : '未结清', (r.due_date || '').slice(0, 10), r.remark || '', r.operator || '', (r.created_at || '').slice(0, 10)])
+    ) },
+    { name: '收付流水', rows: [['日期', '收/付', '金额', '分类', '备注', '账户', '是否动现金', '单据类型']].concat(
+      ledger.map((r) => [(r.created_at || '').slice(0, 10), r.direction === 'in' ? '收' : '付', round2(num(r.amount)), r.category || '', r.remark || '', accName[r.account_id] || '', num(r.cash) ? '是' : '否（抵扣/转账）', r.ref_type || ''])
+    ) },
+    { name: '借支', rows: [['员工', '借出', '已报销', '已退回', '还欠着', '备注', '日期']].concat(
+      loans.map((r) => [r.staff, round2(num(r.amount)), round2(num(r.used)), round2(num(r.returned)), round2(num(r.amount) - num(r.used) - num(r.returned)), r.remark || '', (r.created_at || '').slice(0, 10)])
+    ) },
+    { name: '核销记录', rows: [['日期', '类型', '单号', '金额', '原因']].concat(
+      writeoffs.map((r) => [(r.created_at || '').slice(0, 10), r.type === 'ar' ? '应收核销' : '应付豁免', r.ref_id, round2(num(r.amount)), r.reason || ''])
+    ) }
+  ]
+  const xlsx = await makeXlsxSheets(S)
+  const nm = '记账导出_' + month + '.xlsx'
+  return c.json({ ok: true, name: nm, b64: toB64(xlsx), month })
 })
 
 app.get('/import-template', async (c) => {
