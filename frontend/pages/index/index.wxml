@@ -91,7 +91,7 @@
       </view>
     </view>
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
-    <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
+    <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="issuebar" wx:if="{{issue_count>0}}" bindtap="showIssue">⚠ 数据自检发现 {{issue_count}} 处对不上（点开看）</view>
     <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
     <view class="cfcard" wx:if="{{role!='staff' && cf && cf.days}}" bindtap="showCashflow">
@@ -721,6 +721,18 @@
       <view class="kpi-row"><text>应收周转天数</text><text class="kpi-n">{{kpi.turn_days}} 天</text></view>
       <view class="kpi-row"><text>现金能撑几个月</text><text class="kpi-n {{kpi.cushion_months>=1?'ok':'bad'}}">{{kpi.cushion_months}} 个月</text></view>
       <view class="kpi-row" wx:if="{{kpi.top_customer}}"><text>最大客户占比</text><text class="kpi-n {{kpi.conc_pct>=60?'bad':''}}">{{kpi.top_customer}} {{kpi.conc_pct}}%</text></view>
+      <view class="kpi-row"><text>本月成本合计</text><text class="kpi-n">{{kpi.cost_total}}（现金 {{kpi.cash_cost}} + 摊销 {{kpi.amort}} + 折旧 {{kpi.dep}} + 预提息 {{kpi.accrue_int}}）</text></view>
+      <view class="kpi-row"><text>费用率（成本/接单）</text><text class="kpi-n {{kpi.expense_ratio>=100?'bad':''}}">{{kpi.expense_ratio}}%</text></view>
+      <view class="kpi-row" wx:if="{{kpi.break_even>0}}"><text>保本月收入</text><text class="kpi-n">约 {{kpi.break_even}} 元（低于这个数就亏）</text></view>
+      <view class="kpi-row"><text>净资产</text><text class="kpi-n {{kpi.net_worth<0?'bad':'ok'}}">{{kpi.net_worth}} 元</text></view>
+      <view class="kpi-sub">近 6 个月毛利趋势</view>
+      <view class="bar-line" wx:for="{{kpi.trend}}" wx:key="m">
+        <view class="bar-m">{{item.m}}</view>
+        <view class="bar-zone">
+          <view class="bar bar-in" style="width:{{item.margin>0?item.margin:0}}%"></view>
+          <text class="bar-num">{{item.profit}}（{{item.margin}}%）</text>
+        </view>
+      </view>
       <view class="tip">毛利率 = （本月接单 − 赊购 − 现金成本）/ 接单；现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
     </view>
 

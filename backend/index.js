@@ -1542,9 +1542,11 @@ app.post('/book-name', async (c) => {
 const accrualAdjust = async (db, m) => {
   const a = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='amort' AND substr(created_at,1,7)=?").bind(m).first()
   const b = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?").bind(m).first()
+  const c = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?").bind(m).first()
   const amort = round2(num(a && a.t))
   const acr = round2(num(b && b.t))
-  return { amort, accrue_int: acr, net: round2(amort + acr) }
+  const dep = round2(num(c && c.t))
+  return { amort, accrue_int: acr, dep, net: round2(amort + acr + dep) }
 }
 
 app.get('/dashboard', async (c) => {
@@ -1608,6 +1610,7 @@ app.get('/dashboard', async (c) => {
     month_expense_cash: expTotal,
     month_amort: accAdj.amort,
     month_accrue_int: accAdj.accrue_int,
+    month_dep: accAdj.dep,
     profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(payableAdd.t) - expTotal),
     pending_count: pending.n,
     today_income: round2(num(todayIn.t)),
@@ -1618,7 +1621,7 @@ app.get('/dashboard', async (c) => {
     due_soon_count: dueSoon.results.length,
     due_soon: dueSoon.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
     debt_total: hideProfit ? null : debts.total_principal,
-    net_worth: hideProfit ? null : round2(cashBal - debts.total_principal),
+    net_worth: hideProfit ? null : round2(cashBal + num(ar.total) - num(ap.total) - debts.total_principal),
     debt_month_interest: hideProfit ? null : debts.month_interest,
     debt_overdue_count: hideProfit ? 0 : debts.overdue_count,
     debt_soon_count: hideProfit ? 0 : debts.soon.length,
@@ -1801,6 +1804,7 @@ app.get('/profit-compare', async (c) => {
     expense_cash: round2(num(expCash) + accAdj.net),
     amort: accAdj.amort,
     accrue_int: accAdj.accrue_int,
+    dep: accAdj.dep,
     fixed_cash: round2(fixedCash),
     other_cash_out: otherCash,
     accrual_profit: accrual,
@@ -3599,8 +3603,32 @@ app.get('/kpi', async (c) => {
   const pAdd = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?").bind(m).first()).t)
   const cashCost = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='out' AND substr(created_at,1,7)=?").bind(m).first()).t)
   const cashIn = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='in' AND substr(created_at,1,7)=?").bind(m).first()).t)
-  const profit = round2(oAdd - pAdd - cashCost)
+  const adj = await accrualAdjust(db, m)
+  const costTotal = round2(cashCost + adj.net)
+  const profit = round2(oAdd - pAdd - costTotal)
   const margin = oAdd > 0 ? round2((profit / oAdd) * 100) : 0
+  const expenseRatio = oAdd > 0 ? round2((costTotal / oAdd) * 100) : 0
+  // 保本月收入：固定月成本（固定支出+摊销+折旧+预提）/ 毛利率
+  const fixedTotal = round2(num(adj.amort) + num(adj.dep) + num(adj.accrue_int))
+  const fixedRows = num((await db.prepare('SELECT COALESCE(SUM(amount),0) t FROM fixed_expenses').first()).t)
+  const breakEven = margin > 0 ? round2((fixedTotal + fixedRows) / (margin / 100)) : 0
+  // 近 6 个月趋势
+  const trend = []
+  for (const mm of monthList(6)) {
+    const oo = num((await db.prepare("SELECT COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?").bind(mm).first()).t)
+    const pp = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?").bind(mm).first()).t)
+    const cc = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='out' AND substr(created_at,1,7)=?").bind(mm).first()).t)
+    const ad = await accrualAdjust(db, mm)
+    const pf = round2(oo - pp - cc - ad.net)
+    trend.push({ m: mm, order_add: round2(oo), cost: round2(cc + ad.net), profit: pf, margin: oo > 0 ? round2((pf / oo) * 100) : 0 })
+  }
+  const netWorth = round2((await accountBalances(db)).reduce((s, a) => s + a.balance, 0))
+  // 净资产更准一点：现金 + 别人欠我 − 我欠别人 − 借款
+  const arOpen = num((await db.prepare('SELECT COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()).t)
+  const apOpen = num((await db.prepare('SELECT COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount').first()).t)
+  const debtOpen = num((await db.prepare("SELECT COALESCE(SUM(principal),0) t FROM debts WHERE status='open'").first()).t)
+  const debtRepaid = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM debt_repays WHERE kind='principal'").first()).t)
+  const nw = round2(netWorth + arOpen - apOpen - Math.max(debtOpen - debtRepaid, 0))
   // 平均回款天数：已收完的单 从开单到收清的平均天数
   const paidOrders = (await db.prepare("SELECT o.id, o.created_at, MAX(l.created_at) last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid >= o.price GROUP BY o.id").all()).results
   let sumD = 0, cntD = 0
@@ -3624,7 +3652,9 @@ app.get('/kpi', async (c) => {
   return c.json({
     month: m, order_add: round2(oAdd), payable_add: round2(pAdd), cash_cost: round2(cashCost), profit, margin,
     avg_days, ar_end: ar, turn_days: turnDays, cash_now: cashNow, cushion_months: cushion,
-    top_customer: topCust ? topCust.c : '', conc_pct: conc
+    top_customer: topCust ? topCust.c : '', conc_pct: conc,
+    cost_total: costTotal, expense_ratio: expenseRatio, break_even: breakEven,
+    amort: adj.amort, dep: adj.dep, accrue_int: adj.accrue_int, net_worth: nw, trend
   })
 })
 
@@ -3699,8 +3729,10 @@ const assetCalc = (a) => {
   const life = Math.max(num(a.life_years) || 5, 0.5)
   const residual = round2(cost * (num(a.residual_rate) / 100))
   const monthly = round2((cost - residual) / (life * 12))
-  const start = a.buy_date ? new Date(a.buy_date) : new Date()
-  const months = Math.max(0, Math.floor((Date.now() - start.getTime()) / (30.44 * 86400000)))
+  const buyM = String(a.buy_date || now()).slice(0, 7)
+  const curM = now().slice(0, 7)
+  const mGap = (Number(curM.slice(0, 4)) - Number(buyM.slice(0, 4))) * 12 + (Number(curM.slice(5, 7)) - Number(buyM.slice(5, 7)))
+  const months = buyM > curM ? 0 : Math.max(0, mGap + 1)
   const cap = Math.round(life * 12)
   const usedMonths = Math.min(months, cap)
   const depCap = round2(cost - residual)
@@ -3744,20 +3776,43 @@ app.delete('/assets/:id', async (c) => {
   return c.json({ ok: true })
 })
 
-// 把本月折旧记成一笔支出（防重复）
+// 按月自动折旧：每台设备每月一条（cash=0，不动现金，只进成本），当月已提过就跳过
+const runDepreciation = async (db) => {
+  const m = now().slice(0, 7)
+  const rows = (await db.prepare('SELECT * FROM assets').all()).results
+  let added = 0
+  let amount = 0
+  for (const a of rows) {
+    const v = assetCalc(a)
+    if (!(v.monthly > 0)) continue
+    const buyM = String(a.buy_date || now()).slice(0, 7)
+    if (buyM > m) continue
+    const depCap = round2(v.cost - v.residual)
+    const prev = num((await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='dep' AND ref_id=?").bind(a.id).first()).t)
+    let booked = prev
+    for (let k = 0; k < Math.round(v.life_years * 12); k += 1) {
+      const mm = monthOf(monthAdd(buyM + '-01', k))
+      if (mm > m) break
+      if (booked >= depCap - 0.01) break
+      const has = await db.prepare("SELECT id FROM ledger WHERE ref_type='dep' AND ref_id=? AND substr(created_at,1,7)=?").bind(a.id, mm).first()
+      if (has) continue
+      const amt = round2(Math.min(v.monthly, depCap - booked))
+      if (!(amt > 0)) break
+      await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','dep',?,?,?,?,?,0,?)")
+        .bind(a.id, amt, '折旧', '折旧：' + (a.name || '') + '（' + mm + '）', 0, mm + '-28').run()
+      booked = round2(booked + amt)
+      added += 1
+      amount = round2(amount + amt)
+    }
+  }
+  return { added, amount }
+}
+
 app.post('/assets/run-depreciation', async (c) => {
   const db = c.env.DB
-  const m = now().slice(0, 7)
-  const has = await db.prepare("SELECT 1 FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?").bind(m).first()
-  if (has) return c.json({ ok: true, added: 0, note: '本月折旧已经记过了' })
-  const rows = (await db.prepare('SELECT * FROM assets').all()).results.map(assetCalc).filter((a) => !a.done && a.monthly > 0)
-  const total = round2(rows.reduce((s, a) => s + a.monthly, 0))
-  if (total <= 0) return c.json({ ok: true, added: 0, note: '没有需要计提折旧的设备' })
-  const acc = await defaultAccountId(db)
-  await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','dep',0,?,?,?,?,1,?)")
-    .bind(total, '折旧', `本月固定资产折旧（${rows.length} 项）`, acc, now()).run()
-  await logAudit(db, '计提折旧', '固定资产', `${rows.length} 项 共 ¥${total}`)
-  return c.json({ ok: true, added: total })
+  const r = await runDepreciation(db)
+  if (r.added) await logAudit(db, '计提折旧', '固定资产', `${r.added} 项 共 ¥${r.amount}`)
+  return c.json({ ok: true, added: r.added, amount: r.amount, note: r.added ? '已计提本月折旧' : '本月折旧都提过了' })
 })
 
 // 银行流水对账
@@ -4039,6 +4094,7 @@ export default {
         await runFixed(db)
         await runAmort(db)
         await runAccrual(db)
+        await runDepreciation(db)
         const cron = (event && event.cron) || ''
         if (cron === '0 1 * * 1') await pushWeekly(db)
         else await runWxReminder(db)
