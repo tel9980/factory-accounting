@@ -690,11 +690,23 @@
         <view class="prev-row" wx:for="{{import_log.rows}}" wx:key="id" data-i="{{index}}">
           <text class="prev-t">{{item.kind_text}} · {{item.cnt}} 条 · {{item.total}} 元{{item.dup_count ? ' · 跳重复 ' + item.dup_count : ''}}</text>
           <text class="prev-n">{{item.time_text}} · {{item.src_text}}</text>
+          <view class="frow">
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="loadImportBatch">看这几笔</button>
+          </view>
           <view class="frow" wx:if="{{!item.undone}}">
             <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="undoImport">撤回这批</button>
             <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="delImportLog">删记录</button>
           </view>
           <text class="tip" wx:else>这批已撤回</text>
+        </view>
+        <view class="prev" wx:if="{{imp_docs}}">
+          <view class="prev-t">这批 {{imp_docs.cnt}} 笔 · 共 ¥{{imp_docs.total}} · 还欠 ¥{{imp_docs.left_total}}</view>
+          <view class="prev-n">{{imp_docs.at_text}}{{imp_docs.found}} 笔还在{{imp_docs.missing ? '，' + imp_docs.missing + ' 笔已被删' : ''}}{{imp_docs.paid_count ? '，' + imp_docs.paid_count + ' 笔已结清' : ''}}</view>
+          <view class="prev-row" wx:for="{{imp_docs.rows}}" wx:key="id">
+            <text class="prev-t">{{item.party}} · {{item.kind_text}} · ¥{{item.amount}}</text>
+            <text class="prev-n">{{item.date}}{{item.status ? ' · ' + item.status : ''}}{{item.done ? ' · 已结清' : ' · 还欠 ¥' + item.left}}</text>
+          </view>
+          <button class="btn ghost" size="mini" bindtap="closeImpDocs">收起</button>
         </view>
         <view class="tip">撤回只删「这一批」导入的单据；已经收过款、付过款或所在月份已结账的不会删，会告诉你几条没撤。</view>
       </view>

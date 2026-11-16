@@ -2909,6 +2909,14 @@ app.get('/ar-summary', async (c) => {
 })
 
 // 单据明细：收款/付款流水 + 核销记录
+// 单据上的批次号 → 这批是什么时候、从哪种方式导进来的（手工录的单返回 null）
+async function importOrigin(db, batch) {
+  if (!batch) return null
+  const r = await db.prepare('SELECT id, type, src, cnt, total, created_at, undone FROM import_log WHERE batch=?').bind(String(batch)).first()
+  if (!r) return { batch: String(batch), missing: true }
+  return { batch: String(batch), log_id: r.id, type: r.type, src: r.src || '', cnt: num(r.cnt), total: round2(num(r.total)), at: String(r.created_at || '').replace('T', ' ').slice(0, 16), undone: num(r.undone) }
+}
+
 app.get('/orders/:id/detail', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
@@ -2925,6 +2933,7 @@ app.get('/orders/:id/detail', async (c) => {
       account: x.cash === 0 ? '预收抵扣' : accName(x.account_id),
       cash: num(x.cash), remark: x.remark || ''
     })),
+    import_origin: await importOrigin(db, o.import_batch),
     writeoffs: wos.map((x) => ({ id: x.id, amount: round2(num(x.amount)), reason: x.reason || '', date: (x.created_at || '').slice(0, 10) }))
   })
 })
@@ -2940,6 +2949,7 @@ app.get('/payables/:id/detail', async (c) => {
   const wos = (await db.prepare("SELECT * FROM writeoffs WHERE ref_type='payable' AND ref_id=? ORDER BY id").bind(id).all()).results
   return c.json({
     ...fmtPayable(p),
+    import_origin: await importOrigin(db, p.import_batch),
     payments: pays.map((x) => ({
       id: x.id, date: (x.created_at || '').slice(0, 10), amount: round2(num(x.amount)),
       account: x.cash === 0 ? '预付抵扣' : accName(x.account_id),
@@ -3669,6 +3679,13 @@ async function importRows(db, type, rows, opts) {
   const ids = []
   let total = 0
   const t = now()
+  // 批次号：这批是哪天、第几次导的，单据上留一个，出问题能追回是哪一批
+  const batch = 'IM' + t.replace(/\D/g, '').slice(0, 14) + String(Math.floor(Math.random() * 90) + 10)
+  const tag = async (tbl, id) => {
+    if (!id) return
+    try { await db.prepare('UPDATE ' + tbl + ' SET import_batch=? WHERE id=?').bind(batch, id).run() } catch (e) { /* 老库没有这列也不影响导入 */ }
+  }
+
   // 第一行像表头才跳过（Excel 模板带表头）。判定要严：整行没有任何数字、且至少 2 个表头关键词，
   // 否则像“甲客户,加工,1000”这种正常数据行会被误当成表头吃掉。
   if (rows.length && rows[0] && rows[0].length) {
@@ -3697,8 +3714,8 @@ async function importRows(db, type, rows, opts) {
         const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(customer, num(price), from, dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar' }); continue }
         const dueIso = dueC && looksLikeDate(dueC) ? toIsoDate(dueC) : await termDue(db, customer, d)
-        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
-          .bind(customer, item || '批量导入', num(price), round2(num(cost)), dueIso || null, operC ? String(operC).trim() : null, d).run()
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, operator, created_at, import_batch) VALUES (?,?,?,0,0,?,?,?,?,?)')
+          .bind(customer, item || '批量导入', num(price), round2(num(cost)), dueIso || null, operC ? String(operC).trim() : null, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(price)
         n++
@@ -3706,8 +3723,8 @@ async function importRows(db, type, rows, opts) {
     } else if (type === 'ar_init') {
       const [customer, price] = p
       if (customer && num(price) > 0) {
-        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
-          .bind(customer, '期初欠款', num(price), d).run()
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at, import_batch) VALUES (?,?,?,0,0,?,?)')
+          .bind(customer, '期初欠款', num(price), d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(price)
         n++
@@ -3719,8 +3736,8 @@ async function importRows(db, type, rows, opts) {
         const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
         const dueIso = dueP && looksLikeDate(dueP) ? toIsoDate(dueP) : await termDue(db, supplier, d)
-        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, operator, created_at) VALUES (?,?,0,?,?,?,?,?)')
-          .bind(supplier, num(amount), '', remark || '', dueIso || null, operP ? String(operP).trim() : null, d).run()
+        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, operator, created_at, import_batch) VALUES (?,?,0,?,?,?,?,?,?)')
+          .bind(supplier, num(amount), '', remark || '', dueIso || null, operP ? String(operP).trim() : null, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
         n++
@@ -3728,8 +3745,8 @@ async function importRows(db, type, rows, opts) {
     } else if (type === 'ap_init') {
       const [supplier, amount] = p
       if (supplier && num(amount) > 0) {
-        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
-          .bind(supplier, num(amount), '', '期初欠款', d).run()
+        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at, import_batch) VALUES (?,?,0,?,?,?,?)')
+          .bind(supplier, num(amount), '', '期初欠款', d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
         n++
@@ -3741,8 +3758,8 @@ async function importRows(db, type, rows, opts) {
         const hit = await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type='expense' AND amount=? AND category=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(num(amount), category || '', addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: category || '支出', amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'expense' }); continue }
         const accI = await defaultAccountId(db)
-        const w = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,?,1,?)")
-          .bind(num(amount), category || '', remark || '', operE ? String(operE).trim() : null, accI, d).run()
+        const w = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at, import_batch) VALUES ('out','expense',0,?,?,?,?,?,1,?,?)")
+          .bind(num(amount), category || '', remark || '', operE ? String(operE).trim() : null, accI, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
         n++
@@ -3751,8 +3768,8 @@ async function importRows(db, type, rows, opts) {
       const [staff, amount, remark] = p
       if (staff && num(amount) > 0) {
         const accI = await defaultAccountId(db)
-        const r = await db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at) VALUES (?,?,0,0,?,?,?)')
-          .bind(staff, num(amount), remark || '', accI, d).run()
+        const r = await db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at, import_batch) VALUES (?,?,0,0,?,?,?,?)')
+          .bind(staff, num(amount), remark || '', accI, d, batch).run()
         const lid = r.meta && r.meta.last_row_id ? r.meta.last_row_id : 0
         if (lid) ids.push(lid)
         total += num(amount)
@@ -3770,7 +3787,7 @@ async function importRows(db, type, rows, opts) {
     }
   }
   await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`)
-  return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length, ids, total: round2(total) }
+  return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length, ids, total: round2(total), batch }
 }
 
 // ===== 账期 / 对账周期 / 催款清单 =====
@@ -4762,8 +4779,8 @@ async function logImport(db, type, r, src) {
   try {
     const cnt = num(r && r.imported)
     if (!cnt) return
-    await db.prepare('INSERT INTO import_log (type, cnt, total, dup_count, skipped_locked, ids, src, undone, created_at) VALUES (?,?,?,?,?,?,?,0,?)')
-      .bind(String(type), cnt, round2(num(r && r.total)), num(r && r.dup_count), num(r && r.skipped_locked), JSON.stringify((r && r.ids) || []), String(src || ''), now()).run()
+    await db.prepare('INSERT INTO import_log (type, cnt, total, dup_count, skipped_locked, ids, src, undone, created_at, batch) VALUES (?,?,?,?,?,?,?,0,?,?)')
+      .bind(String(type), cnt, round2(num(r && r.total)), num(r && r.dup_count), num(r && r.skipped_locked), JSON.stringify((r && r.ids) || []), String(src || ''), now(), String((r && r.batch) || '')).run()
   } catch (e) { /* 记录失败不影响导入本身 */ }
 }
 
@@ -4773,9 +4790,49 @@ app.get('/import-log', async (c) => {
   const out = rows.map((r) => {
     let n = 0
     try { n = (JSON.parse(r.ids || '[]') || []).length } catch (e) { n = 0 }
-    return { id: r.id, type: r.type, cnt: num(r.cnt), total: round2(num(r.total)), dup_count: num(r.dup_count), skipped_locked: num(r.skipped_locked), ids_count: n, src: r.src, undone: num(r.undone), created_at: r.created_at }
+    return { id: r.id, type: r.type, cnt: num(r.cnt), total: round2(num(r.total)), dup_count: num(r.dup_count), skipped_locked: num(r.skipped_locked), ids_count: n, src: r.src, undone: num(r.undone), created_at: r.created_at, batch: r.batch || '' }
   })
   return c.json({ ok: true, rows: out, count: out.length })
+})
+
+// 这一批导了哪几笔、现在什么状态（能追到单据，单据上也有批次号）
+app.get('/import-log/:id', async (c) => {
+  const db = c.env.DB
+  const lg = await db.prepare('SELECT * FROM import_log WHERE id=?').bind(c.req.param('id')).first()
+  if (!lg) return c.json({ error: '找不到这批导入记录' }, 404)
+  let ids = []
+  try { ids = JSON.parse(lg.ids || '[]') || [] } catch (e) { ids = [] }
+  const t = String(lg.type || '')
+  const rows = []
+  const push = (x, kind, party, amount, paid, written, date, status) => rows.push({
+    kind, id: x.id, party: party || '', amount: round2(num(amount)), paid: round2(num(paid)),
+    written_off: round2(num(written)), left: round2(num(amount) - num(paid) - num(written)),
+    date: String(date || '').slice(0, 10), status: status || '', done: num(paid) + num(written) >= num(amount) - 0.01
+  })
+  if (ids.length) {
+    const ph = ids.map(() => '?').join(',')
+    if (t === 'ar' || t === 'ar_init') {
+      const r = (await db.prepare(`SELECT * FROM orders WHERE id IN (${ph}) ORDER BY id`).bind(...ids).all()).results || []
+      r.forEach((x) => push(x, 'ar', x.customer, x.price, x.paid, x.written_off, x.created_at, x.item_name))
+    } else if (t === 'ap' || t === 'ap_init') {
+      const r = (await db.prepare(`SELECT * FROM payables WHERE id IN (${ph}) ORDER BY id`).bind(...ids).all()).results || []
+      r.forEach((x) => push(x, 'ap', x.supplier, x.amount, x.paid, x.written_off, x.created_at, x.remark))
+    } else if (t === 'expense') {
+      const r = (await db.prepare(`SELECT * FROM ledger WHERE id IN (${ph}) AND ref_type='expense' ORDER BY id`).bind(...ids).all()).results || []
+      r.forEach((x) => push(x, 'expense', x.category, x.amount, 0, 0, x.created_at, x.remark))
+    } else {
+      const r = (await db.prepare(`SELECT * FROM loans WHERE id IN (${ph}) ORDER BY id`).bind(...ids).all()).results || []
+      r.forEach((x) => push(x, 'loan', x.staff, x.amount, num(x.used) + num(x.returned), 0, x.created_at, x.remark))
+    }
+  }
+  const leftTotal = round2(rows.reduce((a, x) => a + (x.kind === 'expense' ? 0 : x.left), 0))
+  return c.json({
+    ok: true, id: lg.id, type: lg.type, batch: lg.batch || '', src: lg.src || '', undone: num(lg.undone),
+    created_at: lg.created_at, cnt: num(lg.cnt), total: round2(num(lg.total)),
+    ids_count: ids.length, found: rows.length, missing: Math.max(0, ids.length - rows.length),
+    paid_count: rows.filter((x) => x.done && x.kind !== 'expense').length, left_total: leftTotal,
+    rows
+  })
 })
 
 // 整批撤回：把这一批导入产生的单据/流水删掉（只删这一批，别的批次不动）
@@ -4848,7 +4905,7 @@ app.post('/import', async (c) => {
   const rows = lines.map((row) => row.split(/[,，\t]/).map((s) => s.trim()))
   const rr = await importRows(c.env.DB, type, rows, { confirmDup: !!cd })
   await logImport(c.env.DB, type, rr, 'paste')
-  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count), total: num(rr && rr.total) })
+  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count), total: num(rr && rr.total), batch: (rr && rr.batch) || '' })
 })
 
 // 年度流水报表
