@@ -1278,6 +1278,23 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">❓ 不懂就问：这些词啥意思（封存、核销、权责、账期、预提…… 搜一个词，或者往下翻）</view>
+      <input class="inp" placeholder="搜一下，比如：核销 / 账期 / 预提" value="{{gl_kw}}" bindinput="onGlKw" />
+      <view class="tip">{{gl ? gl.text : '在读词典…'}}</view>
+      <view class="glrow" wx:for="{{gl.items}}" wx:key="k" bindtap="toggleGl" data-k="{{item.k}}">
+        <view class="row1">
+          <text class="nm">{{item.t}}</text>
+          <text class="gls">{{item.s}}</text>
+        </view>
+        <view class="row2" wx:if="{{gl_open == item.k}}">
+          <view>{{item.d}}</view>
+          <view class="gltip" wx:if="{{item.tip}}">💡 {{item.tip}}</view>
+          <view class="glgo" wx:if="{{item.go}}" catchtap="glGo" data-go="{{item.go}}">去这个功能 ›</view>
+        </view>
+      </view>
+      <view class="tip" wx:if="{{gl && gl.items.length == 0}}">没找到这个词。换个说法试试，或者微信直接问我一句就行。</view>
+    </view>
+    <view class="form">
       <view class="tip">换手机不用备份：新手机装好小程序、输同一个访问口令，账就在云端。整库备份是防「误删、停机、想搬到别处」用的——包里不含访问口令，转发出去也安全。</view>
       <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>
       <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>

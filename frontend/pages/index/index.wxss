@@ -344,3 +344,12 @@
 
 /* 账本封存（只读）提示条 */
 .sealbar { margin: 8rpx 24rpx 0; padding: 14rpx 20rpx; border-radius: 10rpx; background: #f2f4f7; color: #4a4a4a; font-size: 24rpx; border: 1rpx solid #dfe3e8; }
+
+/* 不懂就问：名词小词典 */
+.glrow { border-bottom: 1px solid #f0f0f0; padding: 10px 0; }
+.glrow .row1 { display: flex; align-items: baseline; }
+.glrow .nm { font-size: 30rpx; color: #222; font-weight: 600; margin-right: 12rpx; }
+.glrow .gls { font-size: 24rpx; color: #8899a6; }
+.glrow .row2 { font-size: 26rpx; color: #444; line-height: 1.6; margin-top: 6rpx; }
+.gltip { margin-top: 8rpx; color: #b06a00; background: #fff8e8; padding: 8rpx 12rpx; border-radius: 8rpx; }
+.glgo { margin-top: 10rpx; color: #1f6feb; }

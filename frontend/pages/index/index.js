@@ -99,6 +99,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
+    gl: null, gl_kw: '', gl_open: '',
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -1316,9 +1317,33 @@ Page({
     } else if (t === 'contact') {
       this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal()
       this.loadEditReqs()
+    } else if (t === 'me') {
+      this.loadHelpKw()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadMyDay()
     }
+  },
+  // ── 不懂就问：名词小词典（搜一个词，看它啥意思） ──
+  onGlKw(e) {
+    this.setData({ gl_kw: e.detail.value })
+    clearTimeout(this._glT)
+    this._glT = setTimeout(() => this.loadHelpKw(), 350)
+  },
+  loadHelpKw() {
+    const kw = this.data.gl_kw || ''
+    this.req({
+      url: API_BASE + '/help?kw=' + encodeURIComponent(kw),
+      once: 'help', silent: true,
+      success: (r) => { if (r.data && r.data.ok) this.setData({ gl: r.data, gl_open: '' }) }
+    })
+  },
+  toggleGl(e) {
+    const k = e.currentTarget.dataset.k
+    this.setData({ gl_open: this.data.gl_open === k ? '' : k })
+  },
+  glGo(e) {
+    const go = e.currentTarget.dataset.go
+    if (go) this.jumpMap({ currentTarget: { dataset: { go } } })
   },
   // ── 找功能：输一个词，直接跳到那个功能 ──
   openFeatSearch() {
