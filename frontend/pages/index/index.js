@@ -32,7 +32,11 @@ Page({
     restore_text: '',
     fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: '',
     lock_month: '', month_locks: [],
-    audit_logs: []
+    audit_logs: [],
+    search_kw: '', search_res: null,
+    phrases: [], phrase_kind: 0,
+    budget_over: [], budget_alert_count: 0,
+    budgets: [], b_category: 0, b_amount: ''
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -99,6 +103,8 @@ Page({
     this.loadMonthLocks()
     this.loadAuditLogs()
     this.loadTrash()
+    this.loadPhrases()
+    this.loadBudgets()
   },
   loadCloudBackup() {
     this.req({
@@ -123,7 +129,8 @@ Page({
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
             due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || [],
             today_income: res.data.today_income || 0,
-            top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0
+            top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0,
+            budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0
           })
         }
       }
@@ -916,6 +923,59 @@ Page({
         }
       }
     })
+  },
+  // ── 全局搜索 ──
+  onSearchKw(e) {
+    const kw = e.detail.value
+    this.setData({ search_kw: kw })
+    if (!kw.trim()) { this.setData({ search_res: null }); return }
+    clearTimeout(this._st)
+    this._st = setTimeout(() => {
+      this.req({ url: API_BASE + '/search?kw=' + encodeURIComponent(kw.trim()), success: (res) => this.setData({ search_res: res.data || null }) })
+    }, 300)
+  },
+  clearSearch() { this.setData({ search_kw: '', search_res: null }) },
+  goSearchTab(e) {
+    const t = e.currentTarget.dataset.t
+    this.setData({ tab: t, search_kw: '', search_res: null })
+  },
+  // ── 常用短语 ──
+  loadPhrases() {
+    this.req({ url: API_BASE + '/phrases', success: (res) => this.setData({ phrases: res.data || [] }) })
+  },
+  pickPhrase(e) {
+    const t = e.currentTarget.dataset.t
+    this.setData({ q_text: t })
+  },
+  savePhrase() {
+    const t = (this.data.q_text || '').trim()
+    if (!t) return wx.showToast({ title: '先输入内容', icon: 'none' })
+    this.req({ url: API_BASE + '/phrases', method: 'POST', data: { text: t },
+      success: () => { this.loadPhrases(); wx.showToast({ title: '已存为常用', icon: 'success' }) } })
+  },
+  delPhrase(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({ url: API_BASE + '/phrases/' + id, method: 'DELETE', success: () => this.loadPhrases() })
+  },
+  // ── 支出预算 ──
+  loadBudgets() {
+    this.req({ url: API_BASE + '/budgets', success: (res) => this.setData({ budgets: res.data || [] }) })
+  },
+  onBCategory(e) { this.setData({ b_category: Number(e.detail.value) }) },
+  onBAmount(e) { this.setData({ b_amount: e.detail.value }) },
+  saveBudget() {
+    const amount = Number(this.data.b_amount)
+    if (!(amount > 0)) return wx.showToast({ title: '额度要大于 0', icon: 'none' })
+    this.req({ url: API_BASE + '/budgets', method: 'POST',
+      data: { category: this.data.categories[this.data.b_category], amount },
+      success: (res) => {
+        if (res.data && res.data.ok) { this.setData({ b_amount: '' }); this.loadBudgets(); this.loadDashboard(); wx.showToast({ title: '已保存', icon: 'success' }) }
+        else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+      } })
+  },
+  delBudget(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({ url: API_BASE + '/budgets/' + id, method: 'DELETE', success: () => { this.loadBudgets(); this.loadDashboard() } })
   },
   loadMonthLocks() {
     this.req({ url: API_BASE + '/month-locks', success: (res) => this.setData({ month_locks: res.data || [] }) })

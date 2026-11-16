@@ -129,6 +129,16 @@ app.get('/dashboard', async (c) => {
   const dueSoon = await db.prepare("SELECT * FROM orders WHERE paid < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
   const todayIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND substr(created_at,1,10)=?").bind(todayS).first()
   const topCust = await db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price GROUP BY customer ORDER BY t DESC LIMIT 1').first()
+  // 预算：按分类统计本月已花，超出或接近 90% 的提醒
+  const buds = await db.prepare('SELECT * FROM budgets ORDER BY id').all()
+  const budgetOver = []
+  for (const b of buds.results) {
+    const sp = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND COALESCE(NULLIF(category,''),'其他')=? AND substr(created_at,1,7)=?").bind(b.category, m).first()
+    const spent = round2(num(sp.t))
+    const limit = round2(num(b.amount))
+    const pct = limit > 0 ? Math.round((spent / limit) * 100) : 0
+    if (pct >= 90) budgetOver.push({ category: b.category, limit, spent, pct, over: spent > limit, over_amt: spent > limit ? round2(spent - limit) : 0 })
+  }
   return c.json({
     ar_total: round2(num(ar.total)),
     ap_total: round2(num(ap.total)),
@@ -147,7 +157,9 @@ app.get('/dashboard', async (c) => {
     overdue: overdue.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })),
     due_soon_count: dueSoon.results.length,
     due_soon: dueSoon.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
-    recent: recent.results
+    recent: recent.results,
+    budget_over: budgetOver,
+    budget_alert_count: budgetOver.length
   })
 })
 
@@ -399,6 +411,64 @@ app.post('/run-fixed', async (c) => {
   const n = await runFixed(c.env.DB)
   if (n) await logAudit(c.env.DB, '补记固定支出', '', `本月补记 ${n} 笔`)
   return c.json({ ok: true, added: n })
+})
+
+// ── 支出预算 ──
+app.get('/budgets', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM budgets ORDER BY id').all()
+  return c.json(results)
+})
+
+app.post('/budgets', async (c) => {
+  const { category, amount } = await c.req.json()
+  const cat = String(category || '').trim()
+  if (!cat) return c.json({ error: '请选分类' }, 400)
+  if (num(amount) <= 0) return c.json({ error: '额度要大于 0' }, 400)
+  const db = c.env.DB
+  const ex = await db.prepare('SELECT * FROM budgets WHERE category=?').bind(cat).first()
+  if (ex) await db.prepare('UPDATE budgets SET amount=? WHERE id=?').bind(num(amount), ex.id).run()
+  else await db.prepare('INSERT INTO budgets (category, amount, created_at) VALUES (?,?,?)').bind(cat, num(amount), now()).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/budgets/:id', async (c) => {
+  await c.env.DB.prepare('DELETE FROM budgets WHERE id=?').bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
+// ── 常用短语模板 ──
+app.get('/phrases', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM phrases ORDER BY id DESC LIMIT 30').all()
+  return c.json(results)
+})
+
+app.post('/phrases', async (c) => {
+  const { text, kind } = await c.req.json()
+  const t = String(text || '').trim()
+  if (!t) return c.json({ error: '内容不能为空' }, 400)
+  const db = c.env.DB
+  const ex = await db.prepare('SELECT * FROM phrases WHERE text=?').bind(t).first()
+  if (!ex) await db.prepare('INSERT INTO phrases (text, kind, created_at) VALUES (?,?,?)').bind(t, String(kind || ''), now()).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/phrases/:id', async (c) => {
+  await c.env.DB.prepare('DELETE FROM phrases WHERE id=?').bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
+// ── 全局搜索：应收/应付/支出一起查 ──
+app.get('/search', async (c) => {
+  const kw = String(c.req.query('kw') || '').trim()
+  if (!kw) return c.json({ kw: '', orders: [], payables: [], ledger: [], total: 0 })
+  const like = '%' + kw + '%'
+  const db = c.env.DB
+  const orders = await db.prepare('SELECT * FROM orders WHERE customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,\'\') LIKE ? ORDER BY id DESC LIMIT 20').bind(like, like, like).all()
+  const payables = await db.prepare('SELECT * FROM payables WHERE supplier LIKE ? OR COALESCE(remark,\'\') LIKE ? OR COALESCE(operator,\'\') LIKE ? ORDER BY id DESC LIMIT 20').bind(like, like, like).all()
+  const ledger = await db.prepare('SELECT * FROM ledger WHERE COALESCE(remark,\'\') LIKE ? OR COALESCE(category,\'\') LIKE ? OR COALESCE(operator,\'\') LIKE ? ORDER BY id DESC LIMIT 20').bind(like, like, like).all()
+  const o = orders.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) }))
+  const p = payables.results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid) }))
+  return c.json({ kw, orders: o, payables: p, ledger: ledger.results, total: o.length + p.length + ledger.results.length })
 })
 
 // ── 月度结账锁定 ──

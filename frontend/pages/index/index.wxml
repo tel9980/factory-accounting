@@ -1,7 +1,31 @@
 <view class="page">
   <view class="form">
+    <input class="inp" placeholder="全局搜索：输入客户名/产品/备注，查全部账" value="{{search_kw}}" bindinput="onSearchKw"/>
+    <button class="btn" size="mini" bindtap="clearSearch" wx:if="{{search_kw}}">清空</button>
+  </view>
+  <view class="searchres" wx:if="{{search_res}}">
+    <view class="tip">共 {{search_res.total}} 条结果</view>
+    <view class="item" wx:for="{{search_res.orders}}" wx:key="id" bindtap="goSearchTab" data-t="ar">
+      <view class="row1"><text class="tag tag-ar">应收</text>{{item.customer}} · {{item.item_name}} · ¥{{item.price}}</view>
+      <view class="row2">已收 ¥{{item.paid}} · 还欠 ¥{{item.unpaid}}</view>
+    </view>
+    <view class="item" wx:for="{{search_res.payables}}" wx:key="id" bindtap="goSearchTab" data-t="ap">
+      <view class="row1"><text class="tag tag-ap">应付</text>{{item.supplier}} · ¥{{item.amount}}</view>
+      <view class="row2">已付 ¥{{item.paid}} · 还欠 ¥{{item.unpaid}}</view>
+    </view>
+    <view class="item" wx:for="{{search_res.ledger}}" wx:key="id" bindtap="goSearchTab" data-t="expense">
+      <view class="row1"><text class="tag tag-ex">{{item.direction=='in'?'收':'付'}}</text>{{item.category}} · ¥{{item.amount}}</view>
+      <view class="row2">{{item.remark}} · {{item.created_at}}</view>
+    </view>
+    <view class="tip" wx:if="{{search_res.total == 0}}">没找到相关记录</view>
+  </view>
+  <view class="form">
     <input class="inp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
     <button class="btn" size="mini" bindtap="quick">记</button>
+    <button class="btn btn-ghost" size="mini" bindtap="savePhrase">存为常用</button>
+    <view class="chips" wx:if="{{phrases.length}}">
+      <view class="chip" wx:for="{{phrases}}" wx:key="id" bindtap="pickPhrase" data-t="{{item.text}}" bindlongpress="delPhrase" data-id="{{item.id}}">{{item.text}}</view>
+    </view>
     <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘的语音输入说话</view>
   </view>
   <view class="grid4">
@@ -29,6 +53,10 @@
   </view>
   <view class="duesoon" wx:if="{{due_soon_count > 0}}" bindtap="setTab" data-t="ar">
     <text>⏰ {{due_soon_count}} 笔应收最近 7 天到期，点此查看</text>
+  </view>
+
+  <view class="budgetbar" wx:if="{{budget_alert_count > 0}}" bindtap="setTab" data-t="report">
+    <text>💰 {{budget_alert_count}} 项支出快超或已超预算：<text wx:for="{{budget_over}}" wx:key="category">{{item.category}}{{item.over?'超'+item.over_amt:'已用'+item.pct+'%'}} </text>，点此查看</text>
   </view>
 
   <view class="tabs">
@@ -232,6 +260,20 @@
         <view class="item" wx:for="{{fixed_list}}" wx:key="id">
           <view class="row1">{{item.remark || item.category}} · 每月{{item.day}}号 · ¥{{item.amount}}</view>
           <view class="row2">{{item.category}}<button size="mini" bindtap="delFixed" data-id="{{item.id}}">删</button></view>
+        </view>
+      </view>
+    </view>
+    <view class="form">
+      <view class="tip">支出预算（按分类设月度额度，用到 90% 或超了首页提醒）</view>
+      <picker range="{{categories}}" value="{{b_category}}" bindchange="onBCategory">
+        <view class="inp picker">{{categories[b_category]}}</view>
+      </picker>
+      <input class="inp" placeholder="每月额度，如 5000" type="digit" value="{{b_amount}}" bindinput="onBAmount"/>
+      <button class="btn" size="mini" bindtap="saveBudget">保存预算</button>
+      <view class="list" wx:if="{{budgets.length}}">
+        <view class="item" wx:for="{{budgets}}" wx:key="id">
+          <view class="row1">{{item.category}} · 每月 ¥{{item.amount}}</view>
+          <view class="row2">设于 {{item.created_at}}<button size="mini" bindtap="delBudget" data-id="{{item.id}}">删</button></view>
         </view>
       </view>
     </view>

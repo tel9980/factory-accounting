@@ -102,3 +102,19 @@ CREATE TABLE IF NOT EXISTS trash (
   deleted_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trash_batch ON trash(batch);
+
+-- 支出预算（按分类设月度额度，超了首页提醒）
+CREATE TABLE IF NOT EXISTS budgets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+-- 常用短语模板（一句话记账/备注常用语，点一下填入）
+CREATE TABLE IF NOT EXISTS phrases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  text TEXT NOT NULL,
+  kind TEXT,                        -- 收 / 付 / 支 可选，仅作分组提示
+  created_at TEXT NOT NULL
+);
