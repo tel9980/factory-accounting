@@ -3773,6 +3773,101 @@ app.get('/month-pack', async (c) => {
   return c.json({ ok: true, month: m, name: '全套报表_' + m + '.xlsx', b64, sheets: sheets.map((x) => x.name), size: b64.length })
 })
 
+// ===== 手机端报表：手机上直接看，不用开 Excel =====
+app.get('/report-view', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || now().slice(0, 7))
+  if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份格式应为 YYYY-MM' }, 400)
+  const s = await monthSum(db, m)
+  const cats = (await db.prepare("SELECT category, COALESCE(SUM(amount),0) AS amt FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)=? GROUP BY category ORDER BY amt DESC").bind(m).all()).results || []
+  const pl = [
+    { label: '接单额（加工费）', value: s.orderAdd },
+    { label: '材料·外协成本', value: -s.orderCost },
+    { label: '毛利', value: s.gross, strong: true },
+    { label: '现金支出', value: -s.expCash },
+    { label: '折旧', value: -s.dep },
+    { label: '摊销', value: -s.amort },
+    { label: '预提利息', value: -s.accrual },
+    { label: '净利（权责）', value: s.net, strong: true, tone: s.net >= 0 ? 'ok' : 'bad' }
+  ]
+  const bs = {
+    assets: [{ label: '货币资金', value: s.cash }].concat(s.accounts.map((a) => ({ label: '　' + a.name, value: a.balance, sub: true }))).concat([{ label: '应收未收', value: s.arLeft }, { label: '资产合计', value: round2(s.cash + s.arLeft), strong: true }]),
+    liabilities: [{ label: '应付未付', value: s.apLeft }, { label: '借款余额', value: s.debtLeft }, { label: '负债合计', value: round2(s.apLeft + s.debtLeft), strong: true }],
+    equity: s.equity,
+    check: round2(s.apLeft + s.debtLeft + s.equity - (s.cash + s.arLeft))
+  }
+  const tips = []
+  if (s.net < 0) tips.push({ tone: 'bad', text: '这个月净利是负的（' + s.net + ' 元）：要么单少了，要么费用比赚的多。' })
+  if (s.gross > 0 && s.expCash > s.gross) tips.push({ tone: 'bad', text: '现金支出（' + s.expCash + '）超过毛利（' + s.gross + '），钱是从老底子里出的。' })
+  if (s.arLeft > 0 && s.inc === 0) tips.push({ tone: 'bad', text: '这个月一笔没收回来，但账上还挂着 ' + s.arLeft + ' 元应收 —— 去催款清单看看。' })
+  if (s.arLeft > 0 && s.cash < s.apLeft) tips.push({ tone: 'bad', text: '手头现金比欠别人的少，注意周转。' })
+  if (cats.length && cats[0].amt > s.orderAdd * 0.3) tips.push({ tone: 'warn', text: '「' + cats[0].category + '」花了 ' + round2(cats[0].amt) + ' 元，是这个月最大头。' })
+  if (!tips.length) tips.push({ tone: 'ok', text: '这个月账看着挺稳：有单、有收、费用没冒尖。' })
+  return c.json({ ok: true, month: m, pl, bs, cash: { inc: s.inc, out: s.out, net: round2(s.inc - s.out) }, cats: cats.map((x) => ({ name: x.category || '其他', amount: round2(num(x.amt)) })), tips })
+})
+
+// ===== 异常自动盯：某类费用突然冒尖 / 某家欠款突然翻倍 =====
+app.get('/anomaly', async (c) => {
+  const db = c.env.DB
+  const months = []
+  const d = new Date(now().slice(0, 7) + '-01T00:00:00.000Z')
+  for (let i = 0; i < 7; i++) { const dd = new Date(d); dd.setUTCMonth(dd.getUTCMonth() - i); months.push(dd.toISOString().slice(0, 7)) }
+  const cur = months[0]
+  const list = []
+  const catRows = (await db.prepare("SELECT substr(created_at,1,7) AS m, category, COALESCE(SUM(amount),0) AS amt FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)>=? GROUP BY m, category").bind(months[6]).all()).results || []
+  const map = {}
+  catRows.forEach((r) => { const k = r.category || '其他'; (map[k] = map[k] || {})[r.m] = num(r.amt) })
+  Object.keys(map).forEach((k) => {
+    const curAmt = map[k][cur] || 0
+    const prev = months.slice(1, 7).map((m) => map[k][m] || 0).filter((x) => x > 0)
+    if (!prev.length || curAmt <= 0) return
+    const avg = prev.reduce((a, x) => a + x, 0) / prev.length
+    if (curAmt > avg * 1.5 && curAmt - avg >= 200) list.push({ tone: 'bad', kind: 'cat', party: '', text: '「' + k + '」这个月花了 ' + round2(curAmt) + ' 元，平时平均 ' + round2(avg) + ' 元，多出 ' + round2(curAmt - avg) + ' 元。', cur: round2(curAmt), avg: round2(avg) })
+  })
+  const arRows = (await db.prepare("SELECT substr(created_at,1,7) AS m, customer, COALESCE(SUM(price),0) AS amt FROM orders WHERE substr(created_at,1,7)>=? GROUP BY m, customer").bind(months[6]).all()).results || []
+  const amap = {}
+  arRows.forEach((r) => { const k = r.customer || ''; (amap[k] = amap[k] || {})[r.m] = num(r.amt) })
+  Object.keys(amap).forEach((k) => {
+    const curAmt = amap[k][cur] || 0
+    const prev = months.slice(1, 7).map((m) => amap[k][m] || 0).filter((x) => x > 0)
+    if (!prev.length || curAmt <= 0) return
+    const avg = prev.reduce((a, x) => a + x, 0) / prev.length
+    if (curAmt > avg * 2 && curAmt - avg >= 1000) list.push({ tone: 'warn', kind: 'party', party: k, text: k + ' 这个月接单 ' + round2(curAmt) + ' 元，平时平均 ' + round2(avg) + ' 元，翻了一倍多 —— 别忘了留够产能、也留意他的信用额度。', cur: round2(curAmt), avg: round2(avg) })
+  })
+  const uncovered = (await db.prepare('SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS t, COUNT(*) AS c FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 AND COALESCE(cost,0)=0').first()) || {}
+  if (num(uncovered.c) > 0 && num(uncovered.t) >= 1000) list.push({ tone: 'warn', kind: 'nocost', party: '', text: '有 ' + num(uncovered.c) + ' 张单（合计 ' + round2(num(uncovered.t)) + ' 元）没填成本，毛利算不准 —— 补上成本才知道到底赚没赚。', cur: round2(num(uncovered.t)), avg: 0 })
+  list.sort((a, b) => (a.tone === 'bad' ? -1 : 1) - (b.tone === 'bad' ? -1 : 1))
+  return c.json({ ok: true, month: cur, list, count: list.length })
+})
+
+// ===== 年度总账：12 个月拼一张 =====
+app.get('/year-summary', async (c) => {
+  const db = c.env.DB
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const ms = []
+  for (let i = 1; i <= 12; i++) ms.push(y + '-' + String(i).padStart(2, '0'))
+  const rows = []
+  for (const m of ms) {
+    const s = await monthSum(db, m)
+    rows.push({ m, month_label: Number(m.slice(5, 7)) + '月', order_add: s.orderAdd, cost: s.orderCost, gross: s.gross, expense: round2(s.expCash + s.dep + s.amort + s.accrual), profit: s.net, cash_in: s.inc, cash_out: s.out, cash_net: round2(s.inc - s.out) })
+  }
+  const t = (k) => round2(rows.reduce((a, x) => a + num(x[k]), 0))
+  const active = rows.filter((x) => x.order_add > 0 || x.expense > 0 || x.cash_in > 0)
+  const best = active.length ? active.reduce((a, b) => (b.profit > a.profit ? b : a)) : null
+  const worst = active.length ? active.reduce((a, b) => (b.profit < a.profit ? b : a)) : null
+  const maxProfit = Math.max(1, ...rows.map((x) => Math.abs(x.profit)))
+  rows.forEach((x) => { x.bar_w = Math.round(Math.abs(x.profit) / maxProfit * 100); x.neg = x.profit < 0 })
+  return c.json({
+    ok: true, year: y, rows,
+    total: { order_add: t('order_add'), cost: t('cost'), gross: t('gross'), expense: t('expense'), profit: t('profit'), cash_in: t('cash_in'), cash_out: t('cash_out'), cash_net: t('cash_net') },
+    active_months: active.length,
+    best: best ? { month_label: best.month_label, profit: best.profit } : null,
+    worst: worst ? { month_label: worst.month_label, profit: worst.profit } : null,
+    avg_profit: active.length ? round2(t('profit') / active.length) : 0
+  })
+})
+
 async function runMonthPack(db, m) {
   const sheets = await packSheets(db, m)
   const b64 = toB64(await makeXlsxSheets(sheets))

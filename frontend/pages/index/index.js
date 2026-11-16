@@ -39,7 +39,7 @@ Page({
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
-    pc_month: '', pc: null,
+    pc_month: '', pc: null, rv_month: '', rv: null, ano: null, ys_year: '', ys: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
@@ -1892,6 +1892,38 @@ Page({
   },
   onReportYear(e) { this.setData({ report_year: e.detail.value }) },
   onPcMonth(e) { this.setData({ pc_month: e.detail.value }) },
+  onRvMonth(e) { this.setData({ rv_month: e.detail.value }) },
+  onYsYear(e) { this.setData({ ys_year: e.detail.value }) },
+  loadReportView() {
+    const m = (this.data.rv_month || '').trim()
+    if (m && !/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '月份写成 2026-11 这样', icon: 'none' })
+    this.req({
+      url: API_BASE + '/report-view' + (m ? '?month=' + m : ''),
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ rv: d }) },
+      fail: () => wx.showToast({ title: '看不了，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadAnomaly() {
+    this.req({
+      url: API_BASE + '/anomaly',
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return
+        this.setData({ ano: d })
+        wx.showToast({ title: d.count ? ('有 ' + d.count + ' 条要留意') : '没发现异常', icon: 'none' })
+      },
+      fail: () => wx.showToast({ title: '看不了，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadYearSummary() {
+    const y = (this.data.ys_year || '').trim()
+    if (y && !/^\d{4}$/.test(y)) return wx.showToast({ title: '年份写成 2026 这样', icon: 'none' })
+    this.req({
+      url: API_BASE + '/year-summary' + (y ? '?year=' + y : ''),
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ ys: d }) },
+      fail: () => wx.showToast({ title: '出不了，下拉刷新再试', icon: 'none' })
+    })
+  },
   loadProfitCompare() {
     const m = (this.data.pc_month || '').trim()
     this.req({

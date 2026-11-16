@@ -655,6 +655,56 @@
 
   <block wx:if="{{tab=='report'}}">
     <view class="form">
+      <view class="tip">手机看报表（不用开 Excel）　月份如 2026-11，不填=本月</view>
+      <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{rv_month}}" bindinput="onRvMonth"/>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="loadReportView">看这个月</button>
+        <button class="btn ghost" size="mini" bindtap="loadAnomaly">🔎 异常提醒</button>
+      </view>
+      <view wx:if="{{rv}}">
+        <view class="prev-h">利润表　{{rv.month}}</view>
+        <view class="plrow" wx:for="{{rv.pl}}" wx:key="label">
+          <text class="{{item.strong?'pll strong':'pll'}}">{{item.label}}</text>
+          <text class="{{item.value>=0?'plv ok':'plv bad'}}">{{item.value}}</text>
+        </view>
+        <view class="prev-h">家底　资产 {{rv.bs.assets[rv.bs.assets.length-1].value}} 元</view>
+        <view class="plrow" wx:for="{{rv.bs.assets}}" wx:key="label">
+          <text class="{{item.strong?'pll strong':'pll'}}">{{item.label}}</text>
+          <text class="plv">{{item.value}}</text>
+        </view>
+        <view class="plrow" wx:for="{{rv.bs.liabilities}}" wx:key="label">
+          <text class="{{item.strong?'pll strong':'pll'}}">{{item.label}}</text>
+          <text class="plv">{{item.value}}</text>
+        </view>
+        <view class="plrow">
+          <text class="pll strong">所有者权益</text>
+          <text class="plv ok">{{rv.bs.equity}}</text>
+        </view>
+        <view class="tip">平衡校验差额 {{rv.bs.check}}（0 = 账是平的）　本月现金：收 {{rv.cash.inc}} − 付 {{rv.cash.out}} = {{rv.cash.net}}</view>
+        <view class="tip">钱花在哪：<text wx:for="{{rv.cats}}" wx:key="name">{{item.name}} {{item.amount}}　</text></view>
+        <view class="aline {{item.tone}}" wx:for="{{rv.tips}}" wx:key="text">{{item.text}}</view>
+      </view>
+      <view wx:if="{{ano}}">
+        <view class="prev-h">异常提醒　{{ano.count}} 条（{{ano.month}}）</view>
+        <view class="tip" wx:if="{{!ano.count}}">没发现异常：费用没冒尖、欠款没突变、成本都填了。</view>
+        <view class="aline {{item.tone}}" wx:for="{{ano.list}}" wx:key="text">{{item.text}}</view>
+      </view>
+    </view>
+    <view class="form">
+      <view class="tip">年度总账：12 个月拼一张看全年</view>
+      <input class="inp" placeholder="年份，如 2026（不填=今年）" value="{{ys_year}}" bindinput="onYsYear"/>
+      <button class="btn" size="mini" bindtap="loadYearSummary">📅 出年度总账</button>
+      <view wx:if="{{ys}}">
+        <view class="tip">{{ys.year}} 年　接单 {{ys.total.order_add}}　毛利 {{ys.total.gross}}　费用 {{ys.total.expense}}　净利 {{ys.total.profit}}（{{ys.active_months}} 个月有账）</view>
+        <view class="plrow" wx:for="{{ys.rows}}" wx:key="m">
+          <text class="pll">{{item.month_label}}</text>
+          <text class="plv {{item.neg?'bad':'ok'}}">{{item.profit}}</text>
+          <view class="ybar"><view class="{{item.neg?'ybar-in bad':'ybar-in'}}" style="width:{{item.bar_w}}%"></view></view>
+        </view>
+        <view class="tip">最好 {{ys.best.month_label}} {{ys.best.profit}} 元　最差 {{ys.worst.month_label}} {{ys.worst.profit}} 元　月均 {{ys.avg_profit}} 元</view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">赚没赚（两种算法，看你想看什么）</view>
       <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{pc_month}}" bindinput="onPcMonth"/>
       <button class="btn" size="mini" bindtap="loadProfitCompare">算一下</button>

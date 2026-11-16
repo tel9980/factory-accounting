@@ -210,3 +210,18 @@
 .prev-n { color: #666; }
 .prev-row .ok { color: #12a150; }
 .prev-row .red { color: #d93026; }
+
+/* 手机报表预览 */
+.plrow { display: flex; align-items: center; padding: 8rpx 4rpx; border-bottom: 1rpx solid #f0f0f0; font-size: 26rpx; }
+.pll { flex: 1; color: #333; }
+.pll.strong { font-weight: 700; }
+.plv { min-width: 160rpx; text-align: right; color: #333; }
+.plv.ok { color: #1a7f37; }
+.plv.bad { color: #c62828; }
+.aline { padding: 12rpx 16rpx; margin: 8rpx 0; border-radius: 8rpx; font-size: 24rpx; line-height: 1.5; }
+.aline.bad { background: #fdecec; color: #a51e1e; border-left: 6rpx solid #e53935; }
+.aline.warn { background: #fff6e5; color: #8a5a00; border-left: 6rpx solid #f0a020; }
+.aline.ok { background: #eef8ef; color: #1a7f37; border-left: 6rpx solid #43a047; }
+.ybar { width: 200rpx; height: 16rpx; background: #f2f2f2; border-radius: 8rpx; margin-left: 12rpx; overflow: hidden; }
+.ybar-in { height: 16rpx; background: #2f6fed; border-radius: 8rpx; }
+.ybar-in.bad { background: #e53935; }
