@@ -5156,9 +5156,12 @@ Page({
           lines.push(mark + it.tip)
           if (it.after && it.tone !== 'ok') lines.push('     ↳ ' + it.after)
         })
-        const tail = (pc.blockers && pc.blockers.length)
-          ? '\n\n带 ✗ 的处理一下更稳；照样结账也行——锁上后要改，得先去「月结归档」解锁。'
-          : '\n\n结账会出快照并把这个月锁上：之后不能再增删改，要改先去「月结归档」解锁。'
+        const li = pc.lock_info
+        const tail = (li
+          ? '\n\n🔒 结账后会锁住：' + li.blocked + '\n✓ 不受影响：' + li.allowed + '\n🔓 ' + li.unlock
+          : (pc.blockers && pc.blockers.length)
+            ? '\n\n带 ✗ 的处理一下更稳；照样结账也行——锁上后要改，得先去「月结归档」解锁。'
+            : '\n\n结账会出快照并把这个月锁上：之后不能再增删改，要改先去「月结归档」解锁。')
         wx.showModal({
           title: '结账前自检 · ' + m,
           content: lines.join('\n') + tail,

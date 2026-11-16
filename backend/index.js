@@ -1299,6 +1299,12 @@ const snapOf = async (db, mm) => {
 }
 
 // 结账前自检：把「结账后就不许改」之前该做的事列清楚（结账不可怕，漏掉才可怕）
+// 结账锁定到底锁了什么：给小白一句说清楚的「会拦 / 不拦 / 怎么解锁」
+const LOCK_INFO = {
+  blocked: '记单、改单、删单、收款付款、批量导入、补记差异、固定支出自动记账、计提折旧/摊销/预提',
+  allowed: '查看任何页面、导出 Excel、打印对账单/月报/交接包、催款提醒、对账单、备份',
+  unlock: '要改这个月的账：报表 → 月结归档 → 点这个月旁边的「解锁」（删归档），改完再结一次会生成新快照'
+}
 async function closePrecheck(db, mm) {
   const [diff, anyRecon, summ, bk, unclosed, prevLock] = await Promise.all([
     db.prepare("SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=? AND done=0 AND COALESCE(state,'')<>'match'").bind(mm).first().catch(() => ({ n: 0 })),
@@ -1320,7 +1326,7 @@ async function closePrecheck(db, mm) {
   if (!num(biz && biz.n)) {
     return { month: mm, items: [{ k: 'empty', label: '本月还没有单据', count: 0, tone: 'ok',
       tip: '这个月还没有任何单据和流水，不用结账', after: '', fixable: 'yes', fix_how: '有账了再来结' }],
-      blockers: [], warns: [], can_close: true, empty: true,
+      blockers: [], warns: [], can_close: true, empty: true, lock_info: LOCK_INFO,
       text: '这个月还没有任何单据和流水，不用结账。' }
   }
   const items = []
@@ -1358,7 +1364,7 @@ async function closePrecheck(db, mm) {
   const blockers = items.filter((x) => x.k === 'recon_diff' && x.count > 0).map((x) => x.k)
     .concat(items.filter((x) => x.k === 'summary' && !x.count).map((x) => x.k))
   const warns = items.filter((x) => x.tone === 'warn').map((x) => x.k)
-  return { month: mm, items, blockers, warns, can_close: blockers.length === 0,
+  return { month: mm, items, blockers, warns, can_close: blockers.length === 0, lock_info: LOCK_INFO,
     text: items.filter((x) => x.tone !== 'ok').map((x) => '· ' + x.tip + (x.after ? '（' + x.after + '）' : '')).join('\n') || '该做的都做了，可以放心结账' }
 }
 
