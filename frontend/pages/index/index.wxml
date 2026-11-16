@@ -953,6 +953,31 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">数据体检：把「账记得对不对」列成清单。100 分不用管；哪项有数字就按后面的路径去补一下</view>
+      <button class="btn" size="mini" bindtap="loadHealth">🩺 体检一下{{health.score ? '（' + health.score + ' 分）' : ''}}</button>
+      <button class="btn" size="mini" bindtap="loadErrorLog">🐞 运行日志（看有没有报错）</button>
+    </view>
+    <view class="list" wx:if="{{health_done}}">
+      <view class="item">
+        <view class="row1"><text class="nm">{{health.clean ? '✅ 账目体检全部通过' : '共 ' + health.count + ' 项要补'}}</text><text class="amt">{{health.score}} 分</text></view>
+        <block wx:for="{{health.items}}" wx:key="k">
+          <view class="row2" wx:if="{{item.count>0}}" style="margin-top:10rpx">
+            <text class="red">● {{item.label}}：{{item.count}}</text>
+            <view class="pre">　{{item.tip}}</view>
+            <view class="pre">　去哪改：{{item.go}}</view>
+            <view class="pre" wx:if="{{item.list.length}}">　{{item.k === 'cost' ? '如：' : ''}}{{item.party || ''}}{{item.k === 'dup' ? (item.date + ' ' + item.amount) : ''}}</view>
+          </view>
+        </block>
+      </view>
+    </view>
+    <view class="list" wx:if="{{err_shown}}">
+      <view class="item">
+        <view class="row1"><text class="nm">近 {{err_days}} 天报错 {{err_count}} 次</text><text class="amt" bindtap="clearErrorLog">清空</text></view>
+        <view class="row2 pre" wx:for="{{err_groups}}" wx:key="path">{{item.path}} × {{item.count}}</view>
+        <view class="row2 pre" wx:for="{{err_rows}}" wx:key="id">{{item.when}} {{item.path}} [{{item.status}}] {{item.msg}}</view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">整月全部数据导成一个 Excel（6 个表：总览/应收/应付/收付流水/借支/核销），直接发会计或存档</view>
       <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{ex_month}}" bindinput="onExMonth"/>
       <button class="btn" size="mini" bindtap="exportMonthXlsx">⬇ 导出整月 Excel（多表）</button>

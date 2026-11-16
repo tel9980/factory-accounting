@@ -10,6 +10,28 @@ app.use('*', async (c, next) => {
 })
 app.options('*', (c) => c.text('', 204))
 
+// 出错留痕：线上报 500 时把路径/错误写进 error_log，报表页「数据体检」里能查到（不然用户只看到「加载失败」）
+async function logError(c, status, msg, ms) {
+  try {
+    const db = c.env && c.env.DB
+    if (!db) return
+    const u = new URL(c.req.url)
+    await db.prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,?,?)')
+      .bind(num(c.env.BOOK || 1), c.req.method, u.pathname, status, String(msg || '').slice(0, 300), ms, now()).run()
+  } catch (e) { /* 留痕失败不影响主流程 */ }
+}
+app.use('*', async (c, next) => {
+  const t0 = Date.now()
+  try {
+    await next()
+  } catch (e) {
+    await logError(c, 500, (e && (e.stack || e.message)) || e, Date.now() - t0)
+    throw e
+  }
+  const st = c.res ? c.res.status : 200
+  if (st >= 500) await logError(c, st, '', Date.now() - t0)
+})
+
 const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
@@ -4963,6 +4985,79 @@ async function selfCheck(db) {
     bad: mismatch + apMismatch + overpaid
   }
 }
+// 数据体检：把「账记得对不对」变成一张清单，一项项告诉你哪里要补
+app.get('/health-check', async (c) => {
+  const db = c.env.DB
+  const q1 = (sql) => db.prepare(sql).first().catch(() => ({}))
+  const qAll = (sql) => db.prepare(sql).all().then((r) => r.results || []).catch(() => [])
+  const items = []
+  const add = (k, label, count, tip, go, list) => { items.push({ k, label, count: num(count), tip, go: go || '', list: list || [] }) }
+  const since7 = new Date(Date.now() - 7 * 86400000).toISOString()
+
+  const [costMiss, payNoDue, arNoTerm, apNoTerm, noPhone, ledgerNoAcc, dupCnt, lastLock, errCnt, bkLast, wxCnt] = await Promise.all([
+    qAll("SELECT id, customer, item_name, price FROM orders WHERE COALESCE(cost,0)=0 AND price>0 ORDER BY id DESC LIMIT 5"),
+    q1("SELECT COUNT(*) AS c FROM payables WHERE paid<amount AND (due_date IS NULL OR due_date='')"),
+    qAll("SELECT DISTINCT customer AS party FROM orders WHERE paid<price AND COALESCE(written_off,0)<price-paid LIMIT 300"),
+    qAll("SELECT DISTINCT supplier AS party FROM payables WHERE paid<amount LIMIT 300"),
+    qAll("SELECT DISTINCT customer AS party FROM orders LIMIT 300"),
+    q1("SELECT COUNT(*) AS c FROM ledger WHERE COALESCE(account_id,0)=0"),
+    qAll("SELECT customer, price, substr(created_at,1,10) AS d, COUNT(*) AS c FROM orders GROUP BY customer, price, substr(created_at,1,10) HAVING c>1 LIMIT 5"),
+    qAll("SELECT month FROM month_lock ORDER BY month DESC LIMIT 1"),
+    db.prepare("SELECT COUNT(*) AS c FROM error_log WHERE created_at >= ?").bind(since7).first().catch(() => ({})),
+    qAll("SELECT created_at FROM backups ORDER BY id DESC LIMIT 1"),
+    q1("SELECT COUNT(*) AS c FROM wx_users"),
+  ])
+  const terms = new Set((await qAll('SELECT party FROM party_terms')).map((x) => x.party))
+  const phones = new Map((await qAll('SELECT party, phone FROM party_profiles')).map((x) => [x.party, x.phone || '']))
+  const arParties = (arNoTerm || []).map((x) => x.party)
+  const apParties = (apNoTerm || []).map((x) => x.party)
+  const allParties = Array.from(new Set([...arParties, ...apParties, ...(noPhone || []).map((x) => x.party)]))
+
+  add('cost', '单子没填材料/外协成本', costMiss.length, '不填成本就算不出真实毛利（现在按 0 算，毛利会偏高）', '记账 → 应收 → 编辑单据 → 填「成本」', costMiss)
+  add('due', '应付没约定付款日', payNoDue.c, '没约定日期就不会提醒你哪天该付，容易忘了付、被催', '记账 → 应付 → 编辑 → 填「约定付款日」')
+  const noTerm = allParties.filter((p) => !terms.has(p) && (arParties.includes(p) || apParties.includes(p)))
+  add('term', '往来单位没设账期', noTerm.length, '设了账期，新单会自动带出到期日，到期提醒才准', '设置 → 单位 → 账期', noTerm.slice(0, 5).map((p) => ({ party: p })))
+  const noPh = allParties.filter((p) => !phones.get(p))
+  add('phone', '往来单位没电话', noPh.length, '没电话就没法一键拨号催款，也对不上是谁', '设置 → 单位 → 档案 → 填电话', noPh.slice(0, 5).map((p) => ({ party: p })))
+  add('acc', '流水没挂资金账户', ledgerNoAcc.c, '没挂账户的流水会默认算进第一个账户，账户余额会不准', '记账 → 流水 → 删除重记并选账户')
+  const dups = (dupCnt || []).filter((x) => num(x.c) > 1)
+  add('dup', '同一天同金额的疑似重复单', dups.length, '同客户、同金额、同一天出现多张，可能重复录了', '记账 → 应收 → 核对一下', dups.map((x) => ({ party: x.customer, amount: num(x.price), date: x.d })))
+  const lastM = new Date(Date.now() - 86400000 * 35).toISOString().slice(0, 7)
+  const prevM = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
+  const lockedM = (lastLock[0] || {}).month || ''
+  add('lock', '上个月还没结账', lockedM >= prevM && lockedM ? 0 : 1, '月底结一次账，把报表定格存档，以后改单也不影响已出的报表', '报表 → 月结归档', [])
+  add('err', '近 7 天有接口报错', errCnt.c, '偶尔一次是网络抖动；连着多次说明某个功能坏了，把路径发我', '报表 → 数据体检 → 看运行日志')
+  const bkDays = (bkLast[0] && bkLast[0].created_at) ? Math.floor((Date.now() - Date.parse(bkLast[0].created_at)) / 86400000) : 999
+  add('backup', '最近没自动备份', bkDays > 7 ? 1 : 0, bkDays === 999 ? '还没有备份记录，先手动备份一次' : `上次备份在 ${bkDays} 天前`, '报表 → 云端备份')
+  add('wx', '微信提醒没开', num(wxCnt.c) > 0 ? 0 : 1, '开了之后每天 9 点自动推「今天该收/该付」，不用自己记', '设置 → 微信提醒')
+  void lastM
+
+  const warn = items.filter((x) => x.count > 0)
+  const score = Math.max(0, 100 - warn.reduce((a, x) => a + (x.k === 'err' ? 10 : x.k === 'backup' ? 10 : x.k === 'lock' ? 5 : 8), 0))
+  return c.json({ ok: true, score, clean: warn.length === 0, count: warn.length, items, at: now() })
+})
+
+// 运行日志（出错留痕查询）
+app.get('/error-log', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(60, Math.max(1, num(c.req.query('days'), 7)))
+  const since = new Date(Date.now() - days * 86400000).toISOString()
+  const rows = (await db.prepare('SELECT * FROM error_log WHERE created_at >= ? ORDER BY id DESC LIMIT 100').bind(since).all()).results
+  const byPath = {}
+  for (const r of rows) { const k = (r.method || 'GET') + ' ' + (r.path || ''); byPath[k] = (byPath[k] || 0) + 1 }
+  return c.json({
+    ok: true,
+    days,
+    count: rows.length,
+    grouped: Object.entries(byPath).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, n]) => ({ path: k, count: n })),
+    rows: rows.slice(0, 30).map((r) => ({ id: r.id, when: r.created_at, path: (r.method || '') + ' ' + (r.path || ''), status: r.status, ms: r.ms, msg: (r.msg || '').slice(0, 160) }))
+  })
+})
+app.delete('/error-log', async (c) => {
+  await c.env.DB.prepare('DELETE FROM error_log').run()
+  return c.json({ ok: true })
+})
+
 app.get('/selfcheck', async (c) => c.json(await selfCheck(c.env.DB)))
 
 // 编辑应收单

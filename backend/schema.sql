@@ -277,3 +277,16 @@ CREATE TABLE IF NOT EXISTS statement_log (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_statement_log_party ON statement_log(party);
+
+-- 运行出错留痕（线上 5xx 会记一条，报表页「数据体检」里能查）
+CREATE TABLE IF NOT EXISTS error_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book INTEGER,
+  method TEXT,
+  path TEXT,
+  status INTEGER,
+  msg TEXT,
+  ms INTEGER,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_error_created ON error_log(created_at);

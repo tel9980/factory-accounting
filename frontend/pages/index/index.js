@@ -33,6 +33,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
+    health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
     import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null,
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
@@ -977,6 +978,40 @@ Page({
   jumpTodo() {
     if (this.data.overdue_count > 0 || this.data.due_soon_count > 0) this.setData({ tab: 'ar' })
     else if (this.data.pay_soon_count > 0) this.setData({ tab: 'ap' })
+  },
+  loadHealth() {
+    this.req({
+      url: API_BASE + '/health-check',
+      success: (res) => {
+        const r = res.data || {}
+        if (!r.items) return
+        this.setData({ health: r, health_done: true })
+        wx.showToast({ title: r.clean ? '体检全部通过' : '有 ' + r.count + ' 项要补', icon: 'none' })
+      }
+    })
+  },
+  loadErrorLog() {
+    this.req({
+      url: API_BASE + '/error-log?days=7',
+      success: (res) => {
+        const r = res.data || {}
+        this.setData({ err_shown: true, err_days: r.days || 7, err_count: r.count || 0, err_groups: r.grouped || [], err_rows: r.rows || [] })
+      }
+    })
+  },
+  clearErrorLog() {
+    wx.showModal({
+      title: '清空报错记录',
+      content: '清空后如果还报错会重新记。继续？',
+      success: (x) => {
+        if (!x.confirm) return
+        this.req({
+          url: API_BASE + '/error-log',
+          method: 'DELETE',
+          success: () => this.setData({ err_shown: false, err_count: 0, err_groups: [], err_rows: [] })
+        })
+      }
+    })
   },
   explainProfit() {
     const d = this.data
