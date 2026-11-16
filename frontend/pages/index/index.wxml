@@ -40,6 +40,19 @@
       <view class="ab-t">今天要盯的款：{{due_brief}}</view>
       <view class="ab-a">去看 ›</view>
     </view>
+    <view class="card ob" wx:if="{{onboard && onboard.show && !onboard.all_done}}">
+      <view class="card-h">开账三步<text class="card-n">{{onboard.done}}/{{onboard.total}}</text></view>
+      <view class="ob-tip">先把底数填上，欠款合计、毛利、手头现金才准。三步做完一次就行。</view>
+      <view class="ob-item {{item.done?'done':''}}" wx:for="{{onboard.steps}}" wx:key="k" bindtap="onbGo" data-k="{{item.k}}">
+        <text class="ob-dot">{{item.done?'✓':'○'}}</text>
+        <view class="ob-body">
+          <view class="ob-t">{{item.t}}</view>
+          <view class="ob-d">{{item.d}}</view>
+        </view>
+        <text class="ob-a">{{item.done?'已完成':'去填 ›'}}</text>
+      </view>
+      <view class="ob-x" catchtap="onbDismiss">不再提示</view>
+    </view>
     <view class="card" wx:if="{{rem_items.length}}">
       <view class="card-h">今天要做的事<text class="card-n">{{rem_items.length}}</text></view>
       <view wx:for="{{rem_items}}" wx:key="text" wx:for-item="ri">

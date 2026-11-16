@@ -9,7 +9,7 @@ Page({
     overdue_count: 0, overdue: [],
     due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
     ar_list: [], ap_list: [], expense_list: [],
-    ar_all: [], ap_all: [], exp_all: [],
+    ar_all: [], ap_all: [], exp_all: [], onboard: null,
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
@@ -157,6 +157,7 @@ Page({
     this.loadLoans()
     this.loadBooks()
     this.loadReminders()
+    this.loadOnboard()
     this.loadAccounts()
     this.loadCategories()
     this.loadAdvances()
@@ -1981,6 +1982,26 @@ Page({
     })
   },
   // ── 第三档：提醒汇总 / 发票台账 / 固定资产 / 银行流水对账 ──
+  loadOnboard() {
+    this.req({
+      url: API_BASE + '/onboarding',
+      success: (res) => this.setData({ onboard: res.data || null })
+    })
+  },
+  onbGo(e) {
+    const k = e.currentTarget.dataset.k
+    if (k === 'acc') return this.setData({ group: 'me', tab: 'contact' })
+    this.setData({ group: 'bill', tab: 'import', import_type: k === 'ap' ? 6 : 5 })
+  },
+  onbDismiss() {
+    wx.showModal({
+      title: '不再提示？', content: '底数没填的话，欠款合计、毛利、手头现金都会不准。以后想补可以在设置里做。',
+      confirmText: '不再提示', success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/onboarding/dismiss', method: 'POST', success: () => this.setData({ onboard: null }) })
+      }
+    })
+  },
   loadReminders() {
     this.req({ url: API_BASE + '/reminders', success: (res) => this.setData({ rem_items: (res.data && res.data.items) || [] }) })
   },

@@ -156,3 +156,17 @@
 .todo-list { padding: 0 0 8rpx 26rpx; }
 .todo-li { font-size: 23rpx; color: #666; line-height: 1.7; }
 .todo-more { font-size: 22rpx; color: #1f6feb; padding-top: 4rpx; }
+
+/* 开账引导 */
+.ob { border: 2rpx solid #cfe0ff; }
+.ob-tip { font-size: 24rpx; color: #667; line-height: 1.5; margin: 6rpx 0 10rpx; }
+.ob-item { display: flex; align-items: center; padding: 14rpx 0; border-top: 1rpx solid #eef1f6; }
+.ob-item.done { opacity: 0.62; }
+.ob-dot { width: 40rpx; font-size: 30rpx; color: #b9bfc8; flex: none; }
+.ob-item.done .ob-dot { color: #17a24b; }
+.ob-body { flex: 1; }
+.ob-t { font-size: 27rpx; color: #222; font-weight: 600; }
+.ob-d { font-size: 23rpx; color: #888; margin-top: 2rpx; }
+.ob-a { font-size: 24rpx; color: #1f6feb; flex: none; margin-left: 12rpx; }
+.ob-item.done .ob-a { color: #17a24b; }
+.ob-x { text-align: center; font-size: 23rpx; color: #99a; padding-top: 12rpx; }

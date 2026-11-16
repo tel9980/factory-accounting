@@ -1174,6 +1174,35 @@ app.get('/last-deal', async (c) => {
 })
 
 
+
+// 开账引导：第一次用要先把"底数"填上，否则后面所有报表都不准
+app.get('/onboarding', async (c) => {
+  const db = c.env.DB
+  await ensureAccounts(db)
+  const accs = (await db.prepare('SELECT * FROM accounts').all()).results
+  const opening = round2(accs.reduce((a, x) => a + num(x.opening), 0))
+  const oRow = await db.prepare('SELECT COUNT(*) AS n FROM orders').first()
+  const pRow = await db.prepare('SELECT COUNT(*) AS n FROM payables').first()
+  const lRow = await db.prepare('SELECT COUNT(*) AS n FROM ledger').first()
+  const flag = (await db.prepare("SELECT value FROM settings WHERE key='onboard_done'").first()) || {}
+  const steps = [
+    { k: 'acc', t: '填一下账户余额', d: '现在手上的现金、银行卡、微信里各有多少钱', done: opening > 0, go: '设置 → 账户' },
+    { k: 'ar', t: '录"别人还欠我"的账', d: '外面还没收回来的加工费（期初应收）', done: num(oRow && oRow.n) > 0, go: '记账 → 导入 → 期初应收' },
+    { k: 'ap', t: '录"我还欠别人"的账', d: '还没付给供应商的钱（期初应付）', done: num(pRow && pRow.n) > 0, go: '记账 → 导入 → 期初应付' }
+  ]
+  const doneCount = steps.filter((x) => x.done).length
+  return c.json({
+    show: String(flag.value || '') !== '1',
+    steps, done: doneCount, total: steps.length, all_done: doneCount === 3,
+    opening, ledger_rows: num(lRow && lRow.n)
+  })
+})
+app.post('/onboarding/dismiss', async (c) => {
+  const db = c.env.DB
+  await db.prepare("INSERT INTO settings (key,value) VALUES ('onboard_done','1') ON CONFLICT(key) DO UPDATE SET value='1'").run()
+  return c.json({ ok: true })
+})
+
 // 账龄表：欠款按 30/60/90 天分档，一眼看出哪笔要坏
 app.get('/aging', async (c) => {
   const db = c.env.DB
