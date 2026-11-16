@@ -1,5 +1,6 @@
 <view class="page">
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
+  <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
 
   <view class="mtabs">

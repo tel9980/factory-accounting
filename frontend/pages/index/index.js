@@ -163,6 +163,7 @@ Page({
     budget_over: [], budget_alert_count: 0,
     budgets: [], b_category: 0, b_amount: '',
     pending_count: 0,
+    offline_at: '',
     btl: null,
     book: 1, book_name: '主账套', books: [], rename_text: '',
     nw: [], nw_max: 1, nw_latest: null, nws: null, pdup: null, pm_from: '', pm_to: '',
@@ -247,6 +248,7 @@ Page({
     // 一屏里的 GET 攒到一起发（弱网下 10 次往返 → 1 次），失败自动退回逐个发
     const method = (opts.method || 'GET').toUpperCase()
     const rel = opts.url && opts.url.indexOf(API_BASE) === 0 ? opts.url.slice(API_BASE.length) : ''
+    opts.__rel = rel
     const canBatch = method === 'GET' && rel && opts.batch !== false && !/^\/(batch|auth|track|statement-print|report-print|export|import-template|backup|restore)/.test(rel)
     if (canBatch) {
       this._bq = this._bq || []
@@ -256,6 +258,34 @@ Page({
     }
     this._send(opts, ak)
   },
+  // ── 断网看账：把最近一次的取数结果存在手机上 ──
+  _cacheKey(rel) {
+    const bk = String(wx.getStorageSync('book') || 1)
+    return 'c_' + bk + '_' + rel
+  },
+  _cachePut(rel, data) {
+    if (!rel) return
+    let str = ''
+    try { str = JSON.stringify(data) } catch (e) { return }
+    if (!str || str.length > 80000) return   // 大响应（导出之类）不占手机空间
+    try { wx.setStorage({ key: this._cacheKey(rel), data: { t: Date.now(), d: data } }) } catch (e) {}
+  },
+  _cacheGet(rel) {
+    if (!rel) return null
+    try {
+      const v = wx.getStorageSync(this._cacheKey(rel))
+      if (v && v.d !== undefined && v.d !== null) return v
+    } catch (e) {}
+    return null
+  },
+  _agoText(ts) {
+    const m = Math.max(0, Math.round((Date.now() - Number(ts || 0)) / 60000))
+    if (m < 1) return '刚刚'
+    if (m < 60) return m + ' 分钟前'
+    const h = Math.round(m / 60)
+    if (h < 24) return h + ' 小时前'
+    return Math.round(h / 24) + ' 天前'
+  },
   // 真正发请求（含 401 索赔口令、断网入队等处理）
   _send(opts, key) {
     this.__doReq(opts, key)
@@ -263,6 +293,9 @@ Page({
   __doReq(opts, key) {
     const bk = String(wx.getStorageSync('book') || 1)
     const ak = key
+    const rel = opts.__rel || ''
+    const isGet = (opts.method || 'GET').toUpperCase() === 'GET'
+    const useCache = isGet && rel && opts.cache !== false
     const doReq = (k) => {
       wx.request(Object.assign({}, opts, {
         // 断网时不丢单：标了 queue 的动作先存到手机上，联网后自动补发（后端按 client_id 去重，不会记两遍）
@@ -272,6 +305,14 @@ Page({
             wx.showModal({ title: '网络不好', content: '这笔记到手机上了，联网后会自动补上（不用重新录）', showCancel: false, confirmText: '知道了' })
             opts.queued && opts.queued()
             return
+          }
+          if (useCache) {
+            const hit = this._cacheGet(rel)
+            if (hit) {
+              if (!this._offShown) { this._offShown = true; this.setData({ offline_at: this._agoText(hit.t) }) }
+              opts.success && opts.success({ data: hit.d, statusCode: 200, fromCache: true })
+              return
+            }
           }
           if (!opts.silent) wx.showToast({ title: '网络不好，稍后再试', icon: 'none' })
           opts.fail && opts.fail(err)
@@ -344,6 +385,8 @@ Page({
             opts.fail && opts.fail(res)
             return
           }
+          if (useCache) this._cachePut(rel, res.data)
+          if (this._offShown) { this._offShown = false; this.setData({ offline_at: '' }) }
           opts.success && opts.success(res)
         }
       }))
@@ -370,10 +413,22 @@ Page({
         if (d.results.some((x) => x && (x.code === 'no_key' || x.code === 'bad_key'))) return fallback()
         d.results.forEach((val, i) => {
           const o = q[i].opts
+          this._cachePut(q[i].path, val)
           o.success && o.success({ data: val, statusCode: 200 })
         })
+        if (this._offShown) { this._offShown = false; this.setData({ offline_at: '' }) }
       },
-      fail: () => fallback()
+      fail: () => {
+        // 断网：能拿手机里上次数据的就先顶上，拿不到的再逐个发（逐个发里也会兜一次缓存）
+        const misses = []
+        q.forEach((it) => {
+          const hit = it.opts.cache === false ? null : this._cacheGet(it.path)
+          if (!hit) return misses.push(it)
+          if (!this._offShown) { this._offShown = true; this.setData({ offline_at: this._agoText(hit.t) }) }
+          it.opts.success && it.opts.success({ data: hit.d, statusCode: 200, fromCache: true })
+        })
+        if (misses.length) misses.forEach((it) => this._send(it.opts, ak))
+      }
     })
   },
 

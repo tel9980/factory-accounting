@@ -332,3 +332,6 @@
 /* 三个账本自检面板 */
 .bck-adv { font-size: 24rpx; color: #555; line-height: 1.6; margin: 4rpx 0 12rpx; }
 .row2.bck-tip { color: #c0392b; }
+
+/* 断网时看上次的数据 */
+.offbar { background: #fff4e5; color: #8a4b08; font-size: 24rpx; padding: 10rpx 20rpx; border-bottom: 1rpx solid #f0d3ae; }
