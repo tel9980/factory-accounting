@@ -134,7 +134,10 @@ app.post('/auth/setup', async (c) => {
   const existing = await getKey(db)
   if (existing) return c.json({ error: '口令已存在，请用修改功能' }, 400)
   await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(k).run()
-  return c.json({ ok: true })
+  // 顺手给一个恢复码：忘了口令时能自救（只显示这一次）
+  let code = ''
+  try { code = await saveRecoverCode(db) } catch (e) { /* 忽略 */ }
+  return c.json({ ok: true, recover_code: code })
 })
 
 app.post('/auth/change', async (c) => {
@@ -147,6 +150,104 @@ app.post('/auth/change', async (c) => {
   if (nk.length < 4) return c.json({ error: '新口令至少 4 位' }, 400)
   await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(nk).run()
   return c.json({ ok: true })
+})
+
+
+// ==================== 找回口令（恢复码）====================
+// 口令丢了就进不去，数据还在云端也打不开 —— 所以设口令时给一串「恢复码」，抄在纸上放着。
+// 恢复码只存哈希，不存明文；试错太多次会临时锁住。
+const REC_ALPHA = 'ACDEFGHJKLMNPQRTUVWXY34679'
+const genRecoverCode = () => {
+  const b = new Uint8Array(16)
+  crypto.getRandomValues(b)
+  const t = [...b].map((x) => REC_ALPHA[x % REC_ALPHA.length]).join('')
+  return t.slice(0, 4) + '-' + t.slice(4, 8) + '-' + t.slice(8, 12) + '-' + t.slice(12, 16)
+}
+const normCode = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
+const hashCode = async (v) => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('rc|' + normCode(v)))
+  return [...new Uint8Array(buf)].map((x) => x.toString(16).padStart(2, '0')).join('')
+}
+const setSettingRaw = async (db, k, v) => {
+  const r = await db.prepare('SELECT value FROM settings WHERE key=?').bind(k).first()
+  if (r) await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(String(v), k).run()
+  else await db.prepare('INSERT INTO settings (key, value) VALUES (?,?)').bind(k, String(v)).run()
+}
+const delSettingRaw = async (db, k) => { await db.prepare('DELETE FROM settings WHERE key=?').bind(k).run().catch(() => {}) }
+const saveRecoverCode = async (db) => {
+  const code = genRecoverCode()
+  await setSettingRaw(db, 'recover_hash', await hashCode(code))
+  await setSettingRaw(db, 'recover_at', now())
+  await delSettingRaw(db, 'recover_fail')
+  await delSettingRaw(db, 'recover_lock')
+  return code
+}
+
+app.get('/auth/recover-info', async (c) => {
+  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const h = await db.prepare("SELECT value FROM settings WHERE key='recover_hash'").first().catch(() => null)
+  const a = await db.prepare("SELECT value FROM settings WHERE key='recover_at'").first().catch(() => null)
+  const enabled = !!(h && h.value)
+  return c.json({
+    ok: true,
+    enabled,
+    at: (a && a.value) || '',
+    text: enabled
+      ? '已经设过恢复码（' + String((a && a.value) || '').slice(0, 10) + '）。万一忘了口令，用它就能重设。'
+      : '还没有恢复码。现在设一个，抄在纸上放进抽屉 —— 忘了口令时只有它能救。',
+    tips: [
+      '恢复码只显示一次，我们也不存明文，忘了就只能重设一个新的',
+      '重设恢复码后，旧的那张纸就没用了',
+      '恢复码和口令别放在同一个地方',
+    ],
+  })
+})
+
+app.post('/auth/recover-code', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(db)
+  if (!saved) return c.json({ error: '尚未设置口令', code: 'no_key' }, 400)
+  if (String(body.key || '') !== saved) return c.json({ error: '老板口令不对', code: 'bad_key' }, 403)
+  const code = await saveRecoverCode(db)
+  await logAudit(db, '重设恢复码', '口令', '生成了新的恢复码')
+  return c.json({ ok: true, code })
+})
+
+// 用恢复码重设口令（不需要旧口令；试错太多临时锁 10 分钟）
+app.post('/auth/recover', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(db)
+  if (!saved) return c.json({ error: '这本账还没设口令，直接设一个就行', code: 'no_key' }, 400)
+  const hRow = await db.prepare("SELECT value FROM settings WHERE key='recover_hash'").first().catch(() => null)
+  if (!hRow || !hRow.value) return c.json({ error: '这本账还没设过恢复码，只能用原口令进', code: 'no_recover' }, 400)
+  const lockRow = await db.prepare("SELECT value FROM settings WHERE key='recover_lock'").first().catch(() => null)
+  if (lockRow && lockRow.value) {
+    const left = 10 * 60 * 1000 - (Date.now() - new Date(lockRow.value).getTime())
+    if (left > 0) return c.json({ error: `试错太多次了，${Math.ceil(left / 60000)} 分钟后再试`, code: 'too_many' }, 429)
+  }
+  const code = String(body.code || '').trim()
+  const pw = String(body.password || '').trim()
+  if (normCode(code).length < 8) return c.json({ error: '恢复码是 16 位，像 ABCD-EFGH-JKLM-NPQR 这样', code: 'bad_code' }, 400)
+  const want = await hashCode(code)
+  if (want !== String(hRow.value)) {
+    const fRow = await db.prepare("SELECT value FROM settings WHERE key='recover_fail'").first().catch(() => null)
+    const n = num(fRow && fRow.value) + 1
+    await setSettingRaw(db, 'recover_fail', n)
+    if (n >= 8) {
+      await setSettingRaw(db, 'recover_lock', now())
+      await delSettingRaw(db, 'recover_fail')
+      return c.json({ error: '恢复码错了 8 次，先锁 10 分钟（防止别人乱试）', code: 'too_many' }, 429)
+    }
+    return c.json({ error: `恢复码不对（还能试 ${8 - n} 次）`, code: 'bad_code', left: 8 - n }, 403)
+  }
+  if (pw.length < 4) return c.json({ error: '新口令至少 4 位', code: 'bad_password' }, 400)
+  await setSettingRaw(db, 'access_key', pw)
+  await delSettingRaw(db, 'recover_fail')
+  await delSettingRaw(db, 'recover_lock')
+  await logAudit(db, '用恢复码重设口令', '口令', '恢复码验证通过，口令已重设').catch(() => {})
+  return c.json({ ok: true, key: pw })
 })
 
 const getStaffKey = async (db) => {

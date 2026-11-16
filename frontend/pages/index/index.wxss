@@ -358,3 +358,15 @@
 .caps{display:flex;flex-wrap:wrap;margin:6px 0 2px}
 .cap{font-size:12px;padding:5px 10px;margin:0 8px 8px 0;border-radius:14px;background:#f1f3f5;color:#444}
 .cap.on{background:#2d6cdf;color:#fff}
+
+/* 找回口令（恢复码） */
+.rec-panel { margin-top: 8px; padding: 10px; background: #f7f9fc; border: 1px solid #e3eaf5; border-radius: 8px; }
+.rec-t { font-size: 14px; font-weight: 600; color: #1f4e9c; margin-bottom: 4px; }
+.rec-st { font-size: 13px; line-height: 1.6; margin-bottom: 4px; }
+.rec-st.ok { color: #0a7d32; }
+.rec-st.no { color: #b3261e; }
+.rec-tip { font-size: 12px; color: #777; line-height: 1.6; }
+.rec-mask { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,.45); z-index: 300; display: flex; align-items: center; justify-content: center; }
+.rec-box { width: 620rpx; background: #fff; border-radius: 12px; padding: 24rpx; }
+.rec-h { font-size: 30rpx; font-weight: 600; margin-bottom: 10rpx; }
+.rec-d { font-size: 24rpx; color: #666; line-height: 1.6; margin: 8rpx 0; }

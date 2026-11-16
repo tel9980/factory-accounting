@@ -1236,6 +1236,19 @@
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
+      <view class="tip" wx:if="{{role!='staff'}}">🔑 恢复码：忘了口令时的唯一自救办法，抄在纸上放着（只显示一次，我们也不存）。</view>
+      <view class="hobtns" wx:if="{{role!='staff'}}">
+        <button class="btn" size="mini" bindtap="openRecoverPanel">🔑 找回口令 / 看恢复码</button>
+      </view>
+      <view class="rec-panel" wx:if="{{rec}}">
+        <view class="rec-t">恢复码</view>
+        <view class="rec-st {{rec.enabled?'ok':'no'}}">{{rec.text}}</view>
+        <view class="rec-tip" wx:for="{{rec.tips}}" wx:key="*this">· {{item}}</view>
+        <view class="hobtns">
+          <button class="btn" size="mini" bindtap="genRecoverCode">{{rec.enabled?'重设恢复码':'生成恢复码'}}</button>
+          <button class="btn gray" size="mini" bindtap="closeRecoverPanel">收起</button>
+        </view>
+      </view>
       <button class="btn ghost" size="mini" wx:if="{{role!='staff'}}" bindtap="loadStaffAct">👀 员工最近记了什么</button>
       <button class="btn ghost" size="mini" bindtap="toggleErList">{{role=='staff'?'📝 我提的修改申请':'📝 员工修改申请'}}{{er_pending?'（'+er_pending+' 条待处理）':''}}</button>
       <view wx:if="{{er_list_open}}">
@@ -2304,7 +2317,7 @@
       <view class="help-p">· 客户：单位页「发进度」生成链接，发微信就行，只读、只能看他自己的单。</view>
       <view class="help-h">换手机 / 丢了手机</view>
       <view class="help-p">· 数据在云上，换手机用同一个微信打开小程序、输老板口令即可，不用导出导入。</view>
-      <view class="help-p">· 口令忘了：找帮你搭系统的人，从后台数据库重新设。</view>
+      <view class="help-p">· 口令忘了：用恢复码自己重设（设置 → 🔑 找回口令 → 输入恢复码 + 新口令），不用求人。恢复码只显示一次，记得抄下来。</view>
       <view class="help-h">记错了怎么办</view>
       <view class="help-p">· 单子：点开改（金额不能小于已收的），删掉的在「设置 → 回收站」30 天内能找回。</view>
       <view class="help-p">· 收错了：明细里删掉那笔流水，单据的已收会自动退回。</view>
@@ -2313,4 +2326,19 @@
   </view>
 
   <canvas type="2d" id="reportCanvas" class="report-canvas"></canvas>
+
+<!-- 找回口令（恢复码）浮层：忘了口令时用 -->
+<view class="rec-mask" wx:if="{{rec_show}}" catchtap="closeRecover">
+  <view class="rec-box" catchtap="noop">
+    <view class="rec-h">用恢复码找回口令</view>
+    <view class="rec-d">输入当时抄下来的 16 位恢复码，再设一个新口令。恢复码不在这台手机上也没关系，纸上的就行。</view>
+    <input class="inp" placeholder="恢复码，如 ABCD-EFGH-JKLM-NPQR" value="{{rec_code}}" bindinput="onRecCode" />
+    <input class="inp" password placeholder="新口令（至少 4 位）" value="{{rec_pw}}" bindinput="onRecPw" />
+    <view class="rec-d">没有恢复码？那只能用原口令进；实在进不去，找帮你搭系统的人从后台处理。</view>
+    <view class="hobtns">
+      <button class="btn" size="mini" bindtap="doRecover" loading="{{rec_busy}}">重设口令</button>
+      <button class="btn gray" size="mini" bindtap="closeRecover">取消</button>
+    </view>
+  </view>
+</view>
 </view>

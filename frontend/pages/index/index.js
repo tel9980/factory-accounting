@@ -100,6 +100,8 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     gl: null, gl_kw: '', gl_open: '', gl_cat: '',
+    rec: null,
+    rec_show: false, rec_code: '', rec_pw: '', rec_busy: false,
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -341,8 +343,10 @@ Page({
                       data: { key: k },
                       success: (s) => {
                         done()
-                        if (s.data && s.data.ok) { wx.setStorageSync('ak', k); doReq(k) }
-                        else wx.showToast({ title: (s.data && s.data.error) || '设置失败', icon: 'none' })
+                        if (s.data && s.data.ok) {
+                          wx.setStorageSync('ak', k); doReq(k)
+                          if (s.data.recover_code) this.showRecoverCode(s.data.recover_code)
+                        } else wx.showToast({ title: (s.data && s.data.error) || '设置失败', icon: 'none' })
                       },
                       fail: () => { done(); wx.showToast({ title: '网络失败', icon: 'none' }) }
                     })
@@ -352,12 +356,13 @@ Page({
             } else {
               wx.showModal({
                 title: '访问口令', editable: true, placeholderText: '请输入访问口令',
+                cancelText: '忘了口令', confirmText: '确定',
                 success: (r) => {
                   if (r.confirm && r.content) {
                     const k = r.content.trim()
                     wx.setStorageSync('ak', k)
                     done(); doReq(k)
-                  } else done()
+                  } else { done(); this.openRecover() }
                 }
               })
             }
@@ -1349,6 +1354,71 @@ Page({
   glGo(e) {
     const go = e.currentTarget.dataset.go
     if (go) this.jumpMap({ currentTarget: { dataset: { go } } })
+  },
+  // ── 找回口令（恢复码）：忘了口令时不用求人 ──
+  showRecoverCode(code) {
+    wx.setClipboardData({ data: code })
+    wx.showModal({
+      title: '这串恢复码请抄下来',
+      content: code + '\n\n忘了口令时，用它就能重设口令。只显示这一次，我们也不存明文，抄在纸上放进抽屉（别和手机放一起）。',
+      showCancel: false, confirmText: '我抄好了',
+    })
+  },
+  openRecover() {
+    this.setData({ rec_show: true, rec_code: '', rec_pw: '', rec_busy: false })
+  },
+  closeRecover() { this.setData({ rec_show: false }) },
+  onRecCode(e) { this.setData({ rec_code: e.detail.value }) },
+  onRecPw(e) { this.setData({ rec_pw: e.detail.value }) },
+  doRecover() {
+    const code = String(this.data.rec_code || '').trim()
+    const pw = String(this.data.rec_pw || '').trim()
+    if (!code || !pw) { wx.showToast({ title: '恢复码和新口令都要填', icon: 'none' }); return }
+    if (pw.length < 4) { wx.showToast({ title: '新口令至少 4 位', icon: 'none' }); return }
+    if (this.data.rec_busy) return
+    this.setData({ rec_busy: true })
+    wx.request({
+      url: API_BASE + '/auth/recover', method: 'POST',
+      data: { code, password: pw },
+      header: { 'Content-Type': 'application/json' },
+      success: (r) => {
+        this.setData({ rec_busy: false })
+        const d = r.data || {}
+        if (d.ok) {
+          wx.setStorageSync('ak', d.key || pw)
+          this.setData({ rec_show: false, rec_code: '', rec_pw: '' })
+          wx.showToast({ title: '口令已重设', icon: 'success' })
+          this.refresh()
+        } else {
+          wx.showModal({ title: '没成功', content: d.error || '恢复码不对', showCancel: false })
+        }
+      },
+      fail: () => { this.setData({ rec_busy: false }); wx.showToast({ title: '网络不好', icon: 'none' }) }
+    })
+  },
+  loadRecoverInfo() {
+    this.req({
+      url: API_BASE + '/auth/recover-info',
+      success: (r) => { if (r.data && r.data.ok) this.setData({ rec: r.data }) },
+    })
+  },
+  openRecoverPanel() { this.loadRecoverInfo() },
+  closeRecoverPanel() { this.setData({ rec: null }) },
+  genRecoverCode() {
+    wx.showModal({
+      title: '重设恢复码', content: '生成新的恢复码后，旧那张纸就没用了。现在生成吗？',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({
+          url: API_BASE + '/auth/recover-code', method: 'POST', data: { key: wx.getStorageSync('ak') }, once: 'recover-gen',
+          success: (r) => {
+            const d = (r.data || {})
+            if (d.ok && d.code) { this.showRecoverCode(d.code); this.loadRecoverInfo() }
+            else wx.showToast({ title: d.error || '生成失败', icon: 'none' })
+          },
+        })
+      },
+    })
   },
   // ── 找功能：输一个词，直接跳到那个功能 ──
   openFeatSearch() {
