@@ -36,6 +36,10 @@ Page({
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
     contact_show: false, contact_title: '', contact_text: '',
     trash_list: [],
+    ar_filter: 'open', ar_sort: 'new', ar_sum: {}, ap_filter: 'open', ap_sort: 'new', ap_sum: {},
+    detail_show: false, detail_title: '', detail_head: '', detail_rows: [], detail_text: '',
+    ar_filters: [{ k: 'open', n: '全部未结' }, { k: 'overdue', n: '逾期 30 天+' }, { k: 'due', n: '7 天内到期' }, { k: 'closed', n: '已结清' }],
+    ar_sorts: [{ k: 'new', n: '最新' }, { k: 'old', n: '最久未结' }, { k: 'amount', n: '金额大' }, { k: 'due', n: '最近到期' }],
     cloud_backup_at: '',
     rem_items: [],
     inv_type: 'out', inv_month: '', inv_no: '', inv_party: '', inv_amount: '', inv_tax: '', inv_date: '', inv_remark: '',
@@ -136,6 +140,7 @@ Page({
     this.loadDashboard()
     this.loadAr()
     this.loadAp()
+    this.loadArSummary()
     this.loadExpenses()
     this.loadHistory()
     this.loadContacts()
@@ -481,9 +486,18 @@ Page({
   },
   PAGE: 60,
   // more=true 表示上拉加载下一页
+  loadArSummary() {
+    this.req({ url: API_BASE + '/ar-summary?type=ar', success: (res) => this.setData({ ar_sum: res.data || {} }) })
+    this.req({ url: API_BASE + '/ar-summary?type=ap', success: (res) => this.setData({ ap_sum: res.data || {} }) })
+  },
+  pickArFilter(e) { this.setData({ ar_filter: e.currentTarget.dataset.k }); this.loadAr() },
+  pickArSort(e) { this.setData({ ar_sort: e.currentTarget.dataset.k }); this.loadAr() },
+  pickApFilter(e) { this.setData({ ap_filter: e.currentTarget.dataset.k }); this.loadAp() },
+  pickApSort(e) { this.setData({ ap_sort: e.currentTarget.dataset.k }); this.loadAp() },
   loadAr(more) {
     const off = more ? this.data.ar_off : 0
-    this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
+    const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort
+    this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
       const all = more ? this.data.ar_all.concat(page) : page
       this.setData({ ar_all: all, ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw) })
@@ -491,7 +505,8 @@ Page({
   },
   loadAp(more) {
     const off = more ? this.data.ap_off : 0
-    this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
+    const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort
+    this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
       const all = more ? this.data.ap_all.concat(page) : page
       this.setData({ ap_all: all, ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw) })
@@ -1893,4 +1908,81 @@ Page({
     })
   },
 
+  // 一键收清 / 付清（先选资金账户，再确认）
+  receiveAll(e) {
+    this.settleAll(e, 'ar')
+  },
+  payAll(e) {
+    this.settleAll(e, 'ap')
+  },
+  settleAll(e, type) {
+    const { id, unpaid } = e.currentTarget.dataset
+    const accs = this.data.accounts || []
+    const isAr = type === 'ar'
+    const go = (acc) => {
+      wx.showModal({
+        title: isAr ? '收清这一单' : '付清这一笔',
+        content: (isAr ? '收 ' : '付 ') + '¥' + unpaid + (acc ? '，走「' + acc.name + '」' : '') + '，确认？',
+        success: (r) => {
+          if (!r.confirm) return
+          const url = API_BASE + (isAr ? '/orders/' : '/payables/') + id + (isAr ? '/receive' : '/pay')
+          this.req({ url, method: 'POST', data: { amount: unpaid, account_id: acc ? acc.id : 0 },
+            success: (res) => {
+              if (res.data && res.data.ok) { this.refresh(); wx.showToast({ title: isAr ? '已收清' : '已付清', icon: 'success' }) }
+              else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+            } })
+        }
+      })
+    }
+    if (!accs.length) return go(null)
+    wx.showActionSheet({
+      itemList: accs.map((a) => (isAr ? '收到 ' : '付自 ') + a.name + '（余额 ' + a.balance + '）'),
+      success: (a) => go(accs[a.tapIndex]),
+      fail: () => {}
+    })
+  },
+  // 改约定日期（应收/应付通用）
+  editDue(e) {
+    const { id, type, due } = e.currentTarget.dataset
+    wx.showModal({
+      title: type === 'ar' ? '约定收款日' : '约定付款日',
+      editable: true,
+      placeholderText: '如 11-20 或 2026-11-20，留空=清除',
+      content: due || '',
+      success: (r) => {
+        if (!r.confirm) return
+        const val = (r.content || '').trim()
+        const url = API_BASE + (type === 'ar' ? '/orders/' : '/payables/') + id
+        this.req({ url, method: 'PATCH', data: type === 'ar' ? { due_date: val } : { due_date: val },
+          success: (res) => {
+            if (res.data && res.data.ok) { this.refresh(); wx.showToast({ title: '已更新', icon: 'success' }) }
+            else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+          } })
+      }
+    })
+  },
+  // 单据明细
+  showDetail(e) {
+    const { id, type } = e.currentTarget.dataset
+    const url = API_BASE + (type === 'ar' ? '/orders/' : '/payables/') + id + '/detail'
+    this.req({ url, success: (res) => {
+      const d = res.data || {}
+      if (d.error) { wx.showToast({ title: d.error, icon: 'none' }); return }
+      const rows = (d.payments || []).map((x) => ({
+        k: x.date + '  ' + (x.cash === 0 ? x.account : '¥' + x.amount + '  ' + x.account),
+        v: x.cash === 0 ? '¥' + x.amount + '（抵扣）' : (x.remark || '')
+      }))
+      const wos = (d.writeoffs || []).map((x) => ({ k: x.date + '  核销', v: '¥' + x.amount + (x.reason ? '  ' + x.reason : '') }))
+      const head = type === 'ar'
+        ? d.customer + ' · ' + d.item_name + ' · 总 ' + d.price + ' · 已收 ' + d.paid + (d.written_off > 0 ? ' · 已核销 ' + d.written_off : '') + ' · 还欠 ' + d.unpaid
+        : d.supplier + ' · 总 ' + d.amount + ' · 已付 ' + d.paid + (d.written_off > 0 ? ' · 已核销 ' + d.written_off : '') + ' · 还欠 ' + d.unpaid
+      const text = head + '\n' + (rows.concat(wos).map((x) => x.k + '  ' + x.v).join('\n') || '还没有' + (type === 'ar' ? '收款' : '付款') + '记录')
+      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: rows.concat(wos), detail_text: text })
+    } })
+  },
+  noop() {},
+  closeDetail() { this.setData({ detail_show: false }) },
+  copyDetail() {
+    wx.setClipboardData({ data: this.data.detail_text, success: () => wx.showToast({ title: '已复制', icon: 'success' }) })
+  },
 })

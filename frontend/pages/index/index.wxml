@@ -112,14 +112,31 @@
         <text class="chip" wx:for="{{contacts_ar}}" wx:key="name" wx:if="{{index < 8}}" bindtap="pickRbCustomer" data-n="{{item.name}}">{{item.name}}</text>
       </view>
     </view>
+    <view class="sumstrip">
+      <view class="su"><view class="sun">{{ar_sum.open_amount || 0}}</view><view class="sul">未收合计 {{ar_sum.open_count || 0}} 单</view></view>
+      <view class="su"><view class="sun red">{{ar_sum.overdue_amount || 0}}</view><view class="sul">逾期30天+ {{ar_sum.overdue_count || 0}} 单</view></view>
+      <view class="su"><view class="sun org">{{ar_sum.due_amount || 0}}</view><view class="sul">7天内到期 {{ar_sum.due_count || 0}} 单</view></view>
+      <view class="su"><view class="sun green">{{ar_sum.month_settled || 0}}</view><view class="sul">本月已收 · 新单 {{ar_sum.month_new || 0}}</view></view>
+    </view>
     <view class="form">
       <input class="inp" placeholder="搜索客户/产品" value="{{ar_kw}}" bindinput="onArKw"/>
+      <view class="chips">
+        <text class="chip {{ar_filter==item.k?'on':''}}" wx:for="{{ar_filters}}" wx:key="k" bindtap="pickArFilter" data-k="{{item.k}}">{{item.n}}</text>
+      </view>
+      <view class="chips">
+        <text class="chip-label">排序：</text>
+        <text class="chip {{ar_sort==item.k?'on':''}}" wx:for="{{ar_sorts}}" wx:key="k" bindtap="pickArSort" data-k="{{item.k}}">{{item.n}}</text>
+      </view>
     </view>
     <view class="list">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.price}} · 已收{{item.paid}}{{item.written_off>0?' · 已核销'+item.written_off:''}} · 状态{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.price}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.settled?' · 已结清':''}}</view>
         <view class="btns">
+          <button size="mini" bindtap="receiveAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">收清</button>
+          <button size="mini" bindtap="showDetail" data-id="{{item.id}}" data-type="ar">明细</button>
+          <button size="mini" bindtap="editDue" data-id="{{item.id}}" data-type="ar" data-due="{{item.due_short}}">改期</button>
           <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
           <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
           <button size="mini" bindtap="editProgress" data-id="{{item.id}}">进度</button>
@@ -131,7 +148,7 @@
           <button size="mini" bindtap="delOrder" data-id="{{item.id}}">删</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ar_list.length}}">没有未结清的应收</view>
+      <view class="empty" wx:if="{{!ar_list.length}}">{{ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'}}</view>
       <view class="loadmore" wx:if="{{ar_more}}"><button class="btn" size="mini" bindtap="loadMoreTap">加载更早的</button></view>
       <view class="tip" wx:if="{{ar_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
@@ -161,14 +178,30 @@
         <text class="chip" wx:for="{{adv_out}}" wx:key="id" bindtap="delAdvance" data-id="{{item.id}}" bindlongpress="delAdvance">{{item.party}} ¥{{item.remain}}（长按删）</text>
       </view>
     </view>
+    <view class="sumstrip">
+      <view class="su"><view class="sun">{{ap_sum.open_amount || 0}}</view><view class="sul">未付合计 {{ap_sum.open_count || 0}} 笔</view></view>
+      <view class="su"><view class="sun red">{{ap_sum.overdue_amount || 0}}</view><view class="sul">超30天没付 {{ap_sum.overdue_count || 0}} 笔</view></view>
+      <view class="su"><view class="sun org">{{ap_sum.due_amount || 0}}</view><view class="sul">7天内要付 {{ap_sum.due_count || 0}} 笔</view></view>
+      <view class="su"><view class="sun green">{{ap_sum.month_settled || 0}}</view><view class="sul">本月已付 · 新增 {{ap_sum.month_new || 0}}</view></view>
+    </view>
     <view class="form">
       <input class="inp" placeholder="搜索供应商/备注" value="{{ap_kw}}" bindinput="onApKw"/>
+      <view class="chips">
+        <text class="chip {{ap_filter==item.k?'on':''}}" wx:for="{{ar_filters}}" wx:key="k" bindtap="pickApFilter" data-k="{{item.k}}">{{item.n}}</text>
+      </view>
+      <view class="chips">
+        <text class="chip-label">排序：</text>
+        <text class="chip {{ap_sort==item.k?'on':''}}" wx:for="{{ar_sorts}}" wx:key="k" bindtap="pickApSort" data-k="{{item.k}}">{{item.n}}</text>
+      </view>
     </view>
     <view class="list">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 已核销'+item.written_off:''}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
+          <button size="mini" bindtap="payAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">付清</button>
+          <button size="mini" bindtap="showDetail" data-id="{{item.id}}" data-type="ap">明细</button>
+          <button size="mini" bindtap="editDue" data-id="{{item.id}}" data-type="ap" data-due="{{item.due_short}}">改期</button>
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="applyAdvancePayable" data-id="{{item.id}}">预付抵</button>
           <button size="mini" bindtap="writeoffPayable" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
@@ -178,7 +211,7 @@
           <button size="mini" bindtap="delPayable" data-id="{{item.id}}">删</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ap_list.length}}">没有未结清的应付</view>
+      <view class="empty" wx:if="{{!ap_list.length}}">{{ap_filter=='closed'?'没有已结清的应付':'没有未结清的应付'}}</view>
       <view class="loadmore" wx:if="{{ap_more}}"><button class="btn" size="mini" bindtap="loadMoreTap">加载更早的</button></view>
       <view class="tip" wx:if="{{ap_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
@@ -682,6 +715,21 @@
       </view>
     </block>
   </block>
+
+  <view class="mask" wx:if="{{detail_show}}" bindtap="closeDetail">
+    <view class="modal" catchtap="noop">
+      <view class="modal-title">{{detail_title}}</view>
+      <scroll-view scroll-y class="modal-body">
+        <view class="pre">{{detail_head}}</view>
+        <view class="detail-line" wx:for="{{detail_rows}}" wx:key="index">{{item.k}}  {{item.v}}</view>
+        <view class="tip" wx:if="{{!detail_rows.length}}">还没有收付记录</view>
+      </scroll-view>
+      <view class="btns">
+        <button size="mini" bindtap="copyDetail">复制明细</button>
+        <button size="mini" bindtap="closeDetail">关闭</button>
+      </view>
+    </view>
+  </view>
 
   <view class="mask" wx:if="{{contact_show}}" bindtap="closeContact">
     <view class="modal" catchtap="">

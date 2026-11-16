@@ -626,37 +626,167 @@ const pageArgs = (c) => {
   return { off, lim }
 }
 
+// ── 应收 / 应付 列表公共件 ──
+const dayStr = (d) => d.toISOString().slice(0, 10)
+const dayAgo = (n) => dayStr(new Date(Date.now() - n * 86400000))
+const dayAfter = (n) => dayStr(new Date(Date.now() + n * 86400000))
+const daysSince = (iso) => {
+  const t = new Date(String(iso || '').slice(0, 10))
+  if (isNaN(t.getTime())) return 0
+  return Math.max(0, Math.floor((Date.now() - t.getTime()) / 86400000))
+}
+const fmtOrder = (r) => ({
+  ...r,
+  unpaid: round2(num(r.price) - num(r.paid) - num(r.written_off)),
+  written_off: round2(num(r.written_off)),
+  due_short: (r.due_date || '').slice(0, 10),
+  days: daysSince(r.created_at),
+  settled: round2(num(r.paid) + num(r.written_off)) >= round2(num(r.price))
+})
+const fmtPayable = (r) => ({
+  ...r,
+  unpaid: round2(num(r.amount) - num(r.paid) - num(r.written_off)),
+  written_off: round2(num(r.written_off)),
+  due_short: (r.due_date || '').slice(0, 10),
+  days: daysSince(r.created_at),
+  settled: round2(num(r.paid) + num(r.written_off)) >= round2(num(r.amount))
+})
+const listOpts = (c) => {
+  const sp = new URL(c.req.url).searchParams
+  const status = ['open', 'overdue', 'due', 'closed', 'all'].includes(sp.get('status')) ? sp.get('status') : 'open'
+  const sort = sp.get('sort') || 'new'
+  const orderBy = ({
+    new: 'id DESC',
+    old: 'created_at ASC, id ASC',
+    amount: '{A} DESC, id DESC',
+    due: "CASE WHEN due_date IS NULL OR due_date='' THEN 1 ELSE 0 END, due_date ASC, id DESC",
+    days: 'created_at ASC, id ASC'
+  })[sort] || 'id DESC'
+  return { status, sort, orderBy, kw: (sp.get('kw') || '').trim() }
+}
+
 app.get('/ar', async (c) => {
   const db = c.env.DB
   const { off, lim } = pageArgs(c)
-  const kw = (new URL(c.req.url).searchParams.get('kw') || '').trim()
-  const base = 'SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price'
-  let rows
-  if (kw) {
-    const like = '%' + kw + '%'
-    rows = await db.prepare(base + " AND (customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,'') LIKE ?) ORDER BY id DESC LIMIT ? OFFSET ?")
-      .bind(like, like, like, lim, off).all()
-  } else {
-    rows = await db.prepare(base + ' ORDER BY id DESC LIMIT ? OFFSET ?').bind(lim, off).all()
+  const { status, orderBy, kw } = listOpts(c)
+  const conds = []
+  const b = []
+  if (status === 'closed') conds.push('paid + COALESCE(written_off,0) >= price')
+  else if (status === 'all') conds.push('1=1')
+  else conds.push('paid + COALESCE(written_off,0) < price')
+  if (status === 'overdue') { conds.push('substr(created_at,1,10) <= ?'); b.push(dayAgo(30)) }
+  if (status === 'due') {
+    conds.push("due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) <= ?"); b.push(dayAfter(7))
   }
-  return c.json(rows.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid - num(r.written_off)), written_off: round2(num(r.written_off)), due_short: (r.due_date || '').slice(0, 10) })))
+  if (kw) {
+    conds.push('(customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,\'\') LIKE ?)')
+    b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
+  }
+  const payExpr = '(price - paid - COALESCE(written_off,0))'
+  const { results } = await db.prepare(`SELECT * FROM orders WHERE ${conds.join(' AND ')} ORDER BY ${orderBy.replace('{A}', payExpr)} LIMIT ? OFFSET ?`)
+    .bind(...b, lim, off).all()
+  return c.json(results.map(fmtOrder))
 })
 
-// 应付：未结清应付单
+// 应收 / 应付 页内汇总
+app.get('/ar-summary', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const m = now().slice(0, 7)
+  const today = now().slice(0, 10)
+  if (type === 'ar') {
+    const open = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()
+    const over = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= ?").bind(dayAgo(30)).first()
+    const due = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?").bind(today, dayAfter(7)).first()
+    const add = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
+    const got = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND substr(created_at,1,7)=?").bind(m).first()
+    const top = (await db.prepare('SELECT customer name, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 3').all()).results
+    return c.json({
+      type, open_amount: round2(num(open.t)), open_count: num(open.n),
+      overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
+      due_amount: round2(num(due.t)), due_count: num(due.n),
+      month_new: round2(num(add.t)), month_new_count: num(add.n), month_settled: round2(num(got.t)),
+      top: top.map((x) => ({ name: x.name, amount: round2(num(x.t)) }))
+    })
+  }
+  const open = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount').first()
+  const over = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND substr(created_at,1,10) <= ?").bind(dayAgo(30)).first()
+  const due = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?").bind(today, dayAfter(7)).first()
+  const add = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?').bind(m).first()
+  const paid = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND substr(created_at,1,7)=?").bind(m).first()
+  const top = (await db.prepare('SELECT supplier name, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount GROUP BY supplier ORDER BY t DESC LIMIT 3').all()).results
+  return c.json({
+    type, open_amount: round2(num(open.t)), open_count: num(open.n),
+    overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
+    due_amount: round2(num(due.t)), due_count: num(due.n),
+    month_new: round2(num(add.t)), month_new_count: num(add.n), month_settled: round2(num(paid.t)),
+    top: top.map((x) => ({ name: x.name, amount: round2(num(x.t)) }))
+  })
+})
+
+// 单据明细：收款/付款流水 + 核销记录
+app.get('/orders/:id/detail', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '订单不存在' }, 404)
+  const accs = (await db.prepare('SELECT id,name FROM accounts').all()).results
+  const accName = (aid) => (accs.find((a) => num(a.id) === num(aid)) || {}).name || '默认'
+  const pays = (await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id=? ORDER BY created_at, id").bind(id).all()).results
+  const wos = (await db.prepare("SELECT * FROM writeoffs WHERE ref_type='order' AND ref_id=? ORDER BY id").bind(id).all()).results
+  return c.json({
+    ...fmtOrder(o),
+    payments: pays.map((x) => ({
+      id: x.id, date: (x.created_at || '').slice(0, 10), amount: round2(num(x.amount)),
+      account: x.cash === 0 ? '预收抵扣' : accName(x.account_id),
+      cash: num(x.cash), remark: x.remark || ''
+    })),
+    writeoffs: wos.map((x) => ({ id: x.id, amount: round2(num(x.amount)), reason: x.reason || '', date: (x.created_at || '').slice(0, 10) }))
+  })
+})
+
+app.get('/payables/:id/detail', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
+  if (!p) return c.json({ error: '应付单不存在' }, 404)
+  const accs = (await db.prepare('SELECT id,name FROM accounts').all()).results
+  const accName = (aid) => (accs.find((a) => num(a.id) === num(aid)) || {}).name || '默认'
+  const pays = (await db.prepare("SELECT * FROM ledger WHERE ref_type='payable' AND ref_id=? ORDER BY created_at, id").bind(id).all()).results
+  const wos = (await db.prepare("SELECT * FROM writeoffs WHERE ref_type='payable' AND ref_id=? ORDER BY id").bind(id).all()).results
+  return c.json({
+    ...fmtPayable(p),
+    payments: pays.map((x) => ({
+      id: x.id, date: (x.created_at || '').slice(0, 10), amount: round2(num(x.amount)),
+      account: x.cash === 0 ? '预付抵扣' : accName(x.account_id),
+      cash: num(x.cash), remark: x.remark || ''
+    })),
+    writeoffs: wos.map((x) => ({ id: x.id, amount: round2(num(x.amount)), reason: x.reason || '', date: (x.created_at || '').slice(0, 10) }))
+  })
+})
+
+// 应付：应付单列表
 app.get('/ap', async (c) => {
   const db = c.env.DB
   const { off, lim } = pageArgs(c)
-  const kw = (new URL(c.req.url).searchParams.get('kw') || '').trim()
-  const base = 'SELECT * FROM payables WHERE paid + COALESCE(written_off,0) < amount'
-  let rows
-  if (kw) {
-    const like = '%' + kw + '%'
-    rows = await db.prepare(base + " AND (supplier LIKE ? OR COALESCE(remark,'') LIKE ? OR COALESCE(operator,'') LIKE ?) ORDER BY id DESC LIMIT ? OFFSET ?")
-      .bind(like, like, like, lim, off).all()
-  } else {
-    rows = await db.prepare(base + ' ORDER BY id DESC LIMIT ? OFFSET ?').bind(lim, off).all()
+  const { status, orderBy, kw } = listOpts(c)
+  const conds = []
+  const b = []
+  if (status === 'closed') conds.push('paid + COALESCE(written_off,0) >= amount')
+  else if (status === 'all') conds.push('1=1')
+  else conds.push('paid + COALESCE(written_off,0) < amount')
+  if (status === 'overdue') { conds.push('substr(created_at,1,10) <= ?'); b.push(dayAgo(30)) }
+  if (status === 'due') {
+    conds.push("due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) <= ?"); b.push(dayAfter(7))
   }
-  return c.json(rows.results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid - num(r.written_off)), written_off: round2(num(r.written_off)), due_short: (r.due_date || '').slice(0, 10) })))
+  if (kw) {
+    conds.push("(supplier LIKE ? OR COALESCE(remark,'') LIKE ? OR COALESCE(operator,'') LIKE ?)")
+    b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
+  }
+  const payExpr = '(amount - paid - COALESCE(written_off,0))'
+  const { results } = await db.prepare(`SELECT * FROM payables WHERE ${conds.join(' AND ')} ORDER BY ${orderBy.replace('{A}', payExpr)} LIMIT ? OFFSET ?`)
+    .bind(...b, lim, off).all()
+  return c.json(results.map(fmtPayable))
 })
 
 // 支出流水
@@ -1410,15 +1540,17 @@ app.get('/selfcheck', async (c) => {
 // 编辑应收单
 app.patch('/orders/:id', async (c) => {
   const id = c.req.param('id')
-  const { customer, item_name, price } = await c.req.json()
+  const { customer, item_name, price, due_date, operator } = await c.req.json()
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   const p = num(price, o.price)
   if (p < num(o.paid)) return c.json({ error: '金额不能小于已收款' }, 400)
-  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=? WHERE id=?')
-    .bind(customer || o.customer, item_name || o.item_name, p, id).run()
+  const nd = due_date !== undefined ? (toIsoDate(due_date) || null) : (o.due_date || null)
+  const op = operator !== undefined ? (String(operator).trim() || null) : (o.operator || null)
+  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=? WHERE id=?')
+    .bind(customer || o.customer, item_name || o.item_name, p, nd, op, id).run()
   await logAudit(db, '编辑应收', customer || o.customer, `${customer || o.customer} ${item_name || o.item_name} ¥${p}`)
   return c.json({ ok: true })
 })
