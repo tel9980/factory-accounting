@@ -187,6 +187,7 @@
       <input class="inp" placeholder="材料·外协成本(可选，填了才算真实毛利)" type="digit" value="{{o_cost}}" bindinput="onOCost"/>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
+      <view class="tip" wx:if="{{!o_due}}">{{term_default>0 ? '收款日留空：按账期自动算（默认 ' + term_default + ' 天）' : '收款日留空：这单就不会提醒你收钱，去「设置 → 单位」设个默认账期更省事'}}</view>
       <input class="inp" placeholder="经手人(可选)" value="{{o_operator}}" bindinput="onOOperator"/>
       <view class="dateRow">
         <picker mode="date" data-f="o_date" bindchange="onDatePick" class="datePick">
@@ -377,6 +378,7 @@
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
+      <view class="tip" wx:if="{{!p_due}}">{{term_default>0 ? '付款日留空：按账期自动算（默认 ' + term_default + ' 天）' : '付款日留空：这单就不会提醒你该付钱，去「设置 → 单位」设个默认账期更省事'}}</view>
       <input class="inp" placeholder="经手人(可选)" value="{{p_operator}}" bindinput="onPOperator"/>
       <view class="dateRow">
         <picker mode="date" data-f="p_date" bindchange="onDatePick" class="datePick">
@@ -1062,10 +1064,10 @@
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
       <button class="btn" size="mini" bindtap="cloudBackup">云端备份</button>
       <button class="btn" size="mini" bindtap="backupToNotes">备份到笔记站</button>
-      </view>
       <view class="frow">
-      <button class="btn" size="mini" bindtap="exportAll">📦 整库备份</button>
-      <button class="btn ghost" size="mini" bindtap="restoreAll">📦 从整库包恢复</button>
+        <button class="btn" size="mini" bindtap="exportAll">📦 整库备份</button>
+        <button class="btn ghost" size="mini" bindtap="restoreAll">📦 从整库包恢复</button>
+      </view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="copyWeekText">📋 复制上周经营速览</button>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
@@ -1076,6 +1078,18 @@
       <view class="tip">换手机不用备份：新手机装好小程序、输同一个访问口令，账就在云端。整库备份是防「误删、停机、想搬到别处」用的——包里不含访问口令，转发出去也安全。</view>
       <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>
       <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>
+    </view>
+    <view class="form">
+      <view class="tip">数据维护：长期用下来，运行日志、操作日志、导入记录会越积越多（不影响账，只是占地方）。业务单据、流水、备份不会被清。</view>
+      <view class="prev" wx:if="{{dbst}}">
+        <view class="prev-row" wx:for="{{dbst.rows}}" wx:key="k">
+          <text class="prev-t">{{item.label}}</text>
+          <text class="prev-n">{{item.n < 0 ? '读不到' : item.n + ' 行'}}</text>
+        </view>
+        <view class="tip">合计 {{dbst.total}} 行</view>
+      </view>
+      <button class="btn" size="mini" bindtap="loadDbStats">看看现在有多少数据</button>
+      <button class="btn ghost" size="mini" bindtap="cleanData">清理半年前的日志</button>
     </view>
     <view class="form">
       <view class="tip">固定支出（每月自动记一笔，如工资、房租）</view>

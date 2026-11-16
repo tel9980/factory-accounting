@@ -5007,6 +5007,51 @@ app.post('/import', async (c) => {
   return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count), total: num(rr && rr.total), batch: (rr && rr.batch) || '' })
 })
 
+// ===== 数据量体检与老日志清理（长期用下来表会越来越胖） =====
+const STAT_TABS = [
+  ['orders', '应收单'], ['payables', '应付单'], ['ledger', '收付流水'], ['audit_log', '操作日志'],
+  ['error_log', '运行日志'], ['import_log', '导入记录'], ['backups', '本地快照'], ['trash', '回收站'],
+  ['dunning_log', '催款记录'], ['statement_log', '对账单送达'], ['recon_log', '对账台账'], ['month_archive', '月结归档']
+]
+app.get('/db-stats', async (c) => {
+  const db = c.env.DB
+  const out = await Promise.all(STAT_TABS.map(async ([t, label]) => {
+    try {
+      const r = await db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).first()
+      return { k: t, label, n: num(r && r.n) }
+    } catch (e) { return { k: t, label, n: -1 } }
+  }))
+  const total = out.reduce((a, x) => a + Math.max(0, x.n), 0)
+  return c.json({ ok: true, rows: out, total })
+})
+
+// 只清「日志类」，业务数据一行不动；默认半年前
+app.post('/db-clean', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const days = Math.max(30, Math.min(3650, Math.round(num(b.days) || 180)))
+  const db = c.env.DB
+  const cut = new Date(Date.now() - days * 86400000).toISOString()
+  const targets = ['audit_log', 'error_log', 'import_log']
+  const deleted = {}
+  for (const t of targets) {
+    try {
+      const r = await db.prepare(`DELETE FROM ${t} WHERE created_at < ?`).bind(cut).run()
+      deleted[t] = (r.meta && r.meta.changes) || 0
+    } catch (e) { deleted[t] = -1 }
+  }
+  // 回收站只留 30 天（和每日 cron 同一口径，这里手动补一次）
+  try {
+    const cut30 = new Date(Date.now() - 30 * 86400000).toISOString()
+    const r = await db.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cut30).run()
+    deleted.trash = (r.meta && r.meta.changes) || 0
+  } catch (e) { deleted.trash = -1 }
+  try {
+    await db.prepare("DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 30)").run()
+  } catch (e) { /* 忽略 */ }
+  await logAudit(db, '数据维护', 'clean', `清理 ${days} 天前的日志：${JSON.stringify(deleted)}`)
+  return c.json({ ok: true, days, cut, deleted })
+})
+
 // ===== 整库备份 / 搬家：把每一张表原样导出成一个 JSON 包，换设备、换环境都能整包搬回去 =====
 const DUMP_SKIP = new Set(['sqlite_sequence', 'd1_migrations'])
 async function tableList(db) {

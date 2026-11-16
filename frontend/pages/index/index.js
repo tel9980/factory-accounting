@@ -34,7 +34,7 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, pipe: null,
+    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null,
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -179,6 +179,7 @@ Page({
     this.loadCashflow()
     this.loadTarget()
     this.loadPipeline()
+    this.loadTermDefault()
     // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
     this.enterTab(this.data.tab)
   },
@@ -3463,6 +3464,44 @@ Page({
             })
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '网络中断，没恢复成功', icon: 'none' }) }
+        })
+      }
+    })
+  },
+  // 数据量体检 / 清理老日志
+  loadDbStats() {
+    this.req({
+      url: API_BASE + '/db-stats',
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) { wx.showToast({ title: d.error, icon: 'none' }); return }
+        this.setData({ dbst: { rows: d.rows || [], total: d.total || 0 } })
+      }
+    })
+  },
+  cleanData() {
+    wx.showActionSheet({
+      itemList: ['清理半年前的日志', '清理一年前的日志'],
+      success: (a) => {
+        const days = a.tapIndex === 1 ? 365 : 180
+        wx.showModal({
+          title: '清理日志',
+          content: '把 ' + (days === 365 ? '一年' : '半年') + '前的操作日志、运行日志、导入记录删掉（回收站只留 30 天、本地快照只留 30 份）。单据和流水不动。',
+          confirmText: '清理',
+          success: (m) => {
+            if (!m.confirm) return
+            wx.showLoading({ title: '清理中…' })
+            this.req({
+              url: API_BASE + '/db-clean', method: 'POST', data: { days },
+              success: (r) => {
+                wx.hideLoading()
+                const d = (r.data && r.data.deleted) || {}
+                const txt = Object.keys(d).map((k) => k + ' ' + d[k]).filter((x) => !x.endsWith(' 0')).join('、') || '本来就很干净，没东西可清'
+                wx.showModal({ title: '清理完成', content: txt, showCancel: false, success: () => this.loadDbStats() })
+              },
+              fail: () => { wx.hideLoading(); wx.showToast({ title: '网络不给力，再试一次', icon: 'none' }) }
+            })
+          }
         })
       }
     })
