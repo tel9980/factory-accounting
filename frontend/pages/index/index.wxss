@@ -120,3 +120,32 @@
 .gitem { padding: 16rpx 24rpx; border-bottom: 1rpx dashed #eee; }
 .gitem:last-child { border-bottom: none; }
 .grp-b .btns { padding: 12rpx 24rpx 0; }
+
+/* 工作台式首页：一级导航 */
+.mtabs { display: flex; background: #fff; border-radius: 12rpx; overflow: hidden; margin-bottom: 12rpx; }
+.mtab { flex: 1; text-align: center; padding: 22rpx 0; font-size: 28rpx; color: #666; position: relative; }
+.mtab.on { color: #1f6feb; font-weight: 700; }
+.mtab.on::after { content: ''; position: absolute; left: 50%; bottom: 8rpx; transform: translateX(-50%); width: 44rpx; height: 6rpx; border-radius: 3rpx; background: #1f6feb; }
+.subtabs { display: flex; background: #fff; border-radius: 12rpx; padding: 8rpx; margin-bottom: 12rpx; }
+.sub { flex: 1; text-align: center; padding: 14rpx 0; font-size: 25rpx; color: #666; border-radius: 10rpx; }
+.sub.on { background: #eaf2ff; color: #1f6feb; font-weight: 700; }
+.sbadge { display: inline-block; margin-left: 6rpx; background: #e64646; color: #fff; font-size: 18rpx; line-height: 1; padding: 4rpx 8rpx; border-radius: 20rpx; vertical-align: top; }
+/* 卡片 */
+.card { background: #fff; border-radius: 14rpx; box-shadow: 0 2rpx 10rpx rgba(0,0,0,.05); margin-bottom: 16rpx; padding: 20rpx 24rpx 8rpx; }
+.card-h { font-size: 28rpx; font-weight: 700; color: #222; padding-bottom: 12rpx; }
+.card-n { display: inline-block; margin-left: 12rpx; background: #e64646; color: #fff; font-size: 20rpx; padding: 2rpx 12rpx; border-radius: 20rpx; }
+/* 待办行 */
+.todo { display: flex; align-items: center; padding: 18rpx 0; border-top: 1rpx solid #f2f3f5; }
+.todo-dot { width: 12rpx; height: 12rpx; border-radius: 6rpx; background: #f0a020; margin-right: 14rpx; flex: none; }
+.todo.lv-red .todo-dot { background: #e64646; }
+.todo.lv-gray .todo-dot { background: #b9bfc8; }
+.todo-t { flex: 1; font-size: 26rpx; color: #333; line-height: 1.5; }
+.todo-a { font-size: 24rpx; color: #1f6feb; flex: none; margin-left: 12rpx; }
+/* 一句话记账紧排 */
+.qinp { font-size: 28rpx; }
+.qrow { display: flex; gap: 12rpx; margin-top: 12rpx; }
+/* 常用宫格 */
+.qgrid { display: flex; flex-wrap: wrap; padding: 8rpx 0 12rpx; }
+.q { width: 25%; text-align: center; padding: 18rpx 0; }
+.qi { width: 76rpx; height: 76rpx; line-height: 76rpx; margin: 0 auto 10rpx; border-radius: 24rpx; background: #eaf2ff; color: #1f6feb; font-size: 34rpx; }
+.qn { font-size: 24rpx; color: #444; }

@@ -2,7 +2,7 @@ const API_BASE = 'https://jz.qy663.de5.net'
 
 Page({
   data: {
-    tab: 'ar',
+    tab: 'home', group: 'home',
     ar_total: 0, ap_total: 0,
     month_income: 0, month_outcome: 0, month_profit: 0,
     month_order_add: 0, month_payable_add: 0, profit_biz: 0,
@@ -602,9 +602,37 @@ Page({
   onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }); this.loadGroups('ar') },
   onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }); this.loadGroups('ap') },
   onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this.data.exp_all, e.detail.value) }) },
+  setGroup(e) {
+    const g = e.currentTarget.dataset.g
+    const keep = { bill: ['ar', 'ap', 'expense', 'import'], stat: ['report', 'asset', 'history'], me: ['contact'], home: ['home'] }
+    const t = (keep[g] || ['home']).indexOf(this.data.tab) >= 0 ? this.data.tab : (keep[g] || ['home'])[0]
+    this.setData({ group: g, tab: t })
+    wx.pageScrollTo({ scrollTop: 0, duration: 0 })
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
+    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
+    if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
+    if (t === 'expense') this.loadLoans()
+  },
+  // 工作台待办点击跳转（reminders 里的 tab: ar/ap/expense/nw/home）
+  goRem(e) {
+    const t0 = e.currentTarget.dataset.tab
+    const t = ({ nw: 'asset', home: 'report' })[t0] || t0 || 'home'
+    const g = ({ ar: 'bill', ap: 'bill', expense: 'bill', import: 'bill', report: 'stat', asset: 'stat', history: 'stat', contact: 'me' })[t] || 'home'
+    this.setData({ tab: t, group: g })
+    wx.pageScrollTo({ scrollTop: 0, duration: 0 })
+    if (t === 'ar') this.setData({ ar_filter: 'overdue' })
+    if (t === 'ap') this.setData({ ap_filter: 'overdue' })
+    if (t === 'ar') this.loadAr()
+    if (t === 'ap') this.loadAp()
+    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
+    if (t === 'expense') this.loadLoans()
+  },
   setTab(e) {
     const t = e.currentTarget.dataset.t
-    this.setData({ tab: t })
+    const g = ({ ar: 'bill', ap: 'bill', expense: 'bill', import: 'bill', report: 'stat', asset: 'stat', history: 'stat', contact: 'me', home: 'home' })[t] || 'home'
+    this.setData({ tab: t, group: g })
+    wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }

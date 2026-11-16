@@ -1,80 +1,111 @@
 <view class="page">
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
-  <view class="form">
-    <input class="inp" placeholder="全局搜索：输入客户名/产品/备注，查全部账" value="{{search_kw}}" bindinput="onSearchKw"/>
-    <button class="btn" size="mini" bindtap="clearSearch" wx:if="{{search_kw}}">清空</button>
-  </view>
-  <view class="searchres" wx:if="{{search_res}}">
-    <view class="tip">共 {{search_res.total}} 条结果</view>
-    <view class="item" wx:for="{{search_res.orders}}" wx:key="id" bindtap="goSearchTab" data-t="ar">
-      <view class="row1"><text class="tag tag-ar">应收</text>{{item.customer}} · {{item.item_name}} · ¥{{item.price}}</view>
-      <view class="row2">已收 ¥{{item.paid}} · 还欠 ¥{{item.unpaid}}</view>
-    </view>
-    <view class="item" wx:for="{{search_res.payables}}" wx:key="id" bindtap="goSearchTab" data-t="ap">
-      <view class="row1"><text class="tag tag-ap">应付</text>{{item.supplier}} · ¥{{item.amount}}</view>
-      <view class="row2">已付 ¥{{item.paid}} · 还欠 ¥{{item.unpaid}}</view>
-    </view>
-    <view class="item" wx:for="{{search_res.ledger}}" wx:key="id" bindtap="goSearchTab" data-t="expense">
-      <view class="row1"><text class="tag tag-ex">{{item.direction=='in'?'收':'付'}}</text>{{item.category}} · ¥{{item.amount}}</view>
-      <view class="row2">{{item.remark}} · {{item.created_at}}</view>
-    </view>
-    <view class="tip" wx:if="{{search_res.total == 0}}">没找到相关记录</view>
-  </view>
-  <view class="form">
-    <input class="inp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
-    <button class="btn" size="mini" bindtap="quick">记</button>
-    <button class="btn btn-ghost" size="mini" bindtap="savePhrase">存为常用</button>
-    <view class="chips" wx:if="{{phrases.length}}">
-      <view class="chip" wx:for="{{phrases}}" wx:key="id" bindtap="pickPhrase" data-t="{{item.text}}" bindlongpress="delPhrase" data-id="{{item.id}}">{{item.text}}</view>
-    </view>
-    <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘的语音输入说话</view>
-  </view>
-  <view class="grid4">
-    <view class="g4" bindtap="setTab" data-t="ar">
-      <view class="g4n">{{ar_total}}</view>
-      <view class="g4l">客户欠我</view>
-    </view>
-    <view class="g4" bindtap="setTab" data-t="ap">
-      <view class="g4n red">{{ap_total}}</view>
-      <view class="g4l">我欠别人</view>
-    </view>
-    <view class="g4">
-      <view class="g4n">{{today_income}}</view>
-      <view class="g4l">今天收到</view>
-    </view>
-    <view class="g4" bindtap="setTab" data-t="report">
-      <view class="g4n {{profit_biz < 0 ? 'red' : 'green'}}">{{profit_biz}}</view>
-      <view class="g4l">本月经营毛利</view>
-    </view>
-  </view>
-  <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
-  <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
-  <view class="topcust" wx:if="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}</view>
-  <view class="overdue" wx:if="{{overdue_count > 0}}" bindtap="setTab" data-t="ar">
-    <text>⚠ {{overdue_count}} 笔应收超过 30 天没结，点此查看</text>
-  </view>
-  <view class="duesoon" wx:if="{{due_soon_count > 0}}" bindtap="setTab" data-t="ar">
-    <text>⏰ {{due_soon_count}} 笔应收最近 7 天到期，点此查看</text>
+
+  <view class="mtabs">
+    <view class="mtab {{group=='home'?'on':''}}" bindtap="setGroup" data-g="home">工作台</view>
+    <view class="mtab {{group=='bill'?'on':''}}" bindtap="setGroup" data-g="bill">记账</view>
+    <view class="mtab {{group=='stat'?'on':''}}" bindtap="setGroup" data-g="stat">报表</view>
+    <view class="mtab {{group=='me'?'on':''}}" bindtap="setGroup" data-g="me">设置</view>
   </view>
 
-  <view class="duesoon" wx:if="{{pay_soon_count > 0}}" bindtap="setTab" data-t="ap">
-    <text>⏰ {{pay_soon_count}} 笔应付款最近 7 天要付，点此查看</text>
+  <view class="subtabs" wx:if="{{group=='bill'}}">
+    <view class="sub {{tab=='ar'?'on':''}}" bindtap="setTab" data-t="ar">应收<text class="sbadge" wx:if="{{ar_sum.open_count}}">{{ar_sum.open_count}}</text></view>
+    <view class="sub {{tab=='ap'?'on':''}}" bindtap="setTab" data-t="ap">应付<text class="sbadge" wx:if="{{ap_sum.open_count}}">{{ap_sum.open_count}}</text></view>
+    <view class="sub {{tab=='expense'?'on':''}}" bindtap="setTab" data-t="expense">支出</view>
+    <view class="sub {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">导入</view>
+  </view>
+  <view class="subtabs" wx:if="{{group=='stat'}}">
+    <view class="sub {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
+    <view class="sub {{tab=='asset'?'on':''}}" bindtap="setTab" data-t="asset">家底</view>
+    <view class="sub {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
+  </view>
+  <view class="subtabs" wx:if="{{group=='me'}}">
+    <view class="sub on" bindtap="setTab" data-t="contact">单位 · 账户 · 设置</view>
   </view>
 
-  <view class="budgetbar" wx:if="{{budget_alert_count > 0}}" bindtap="setTab" data-t="report">
-    <text>💰 {{budget_alert_count}} 项支出快超或已超预算：<text wx:for="{{budget_over}}" wx:key="category">{{item.category}}{{item.over?'超'+item.over_amt:'已用'+item.pct+'%'}} </text>，点此查看</text>
-  </view>
+  <block wx:if="{{tab=='home'}}">
+    <view class="form">
+      <input class="inp qinp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
+      <view class="qrow">
+        <button class="btn" size="mini" bindtap="quick">记</button>
+        <button class="btn btn-ghost" size="mini" bindtap="savePhrase">存为常用</button>
+      </view>
+      <view class="chips" wx:if="{{phrases.length}}">
+        <view class="chip" wx:for="{{phrases}}" wx:key="id" bindtap="pickPhrase" data-t="{{item.text}}" bindlongpress="delPhrase" data-id="{{item.id}}">{{item.text}}</view>
+      </view>
+      <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘语音说话</view>
+    </view>
 
-  <view class="tabs">
-    <view class="tab {{tab=='ar'?'on':''}}" bindtap="setTab" data-t="ar">应收</view>
-    <view class="tab {{tab=='ap'?'on':''}}" bindtap="setTab" data-t="ap">应付</view>
-    <view class="tab {{tab=='expense'?'on':''}}" bindtap="setTab" data-t="expense">支出</view>
-    <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">导入</view>
-    <view class="tab {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
-    <view class="tab {{tab=='asset'?'on':''}}" bindtap="setTab" data-t="asset">家底</view>
-    <view class="tab {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
-    <view class="tab {{tab=='contact'?'on':''}}" bindtap="setTab" data-t="contact">单位</view>
-  </view>
+    <view class="card" wx:if="{{rem_items.length}}">
+      <view class="card-h">今天要做的事<text class="card-n">{{rem_items.length}}</text></view>
+      <view class="todo lv-{{item.level}}" wx:for="{{rem_items}}" wx:key="text" bindtap="goRem" data-tab="{{item.tab}}">
+        <text class="todo-dot"></text>
+        <text class="todo-t">{{item.text}}</text>
+        <text class="todo-a">去处理 ›</text>
+      </view>
+    </view>
+    <view class="card" wx:if="{{!rem_items.length}}">
+      <view class="card-h">今天要做的事</view>
+      <view class="tip">没有到期欠款、没有超预算，账都是清的 👍</view>
+    </view>
+
+    <view class="grid4">
+      <view class="g4" bindtap="setTab" data-t="ar">
+        <view class="g4n">{{ar_total}}</view>
+        <view class="g4l">客户欠我</view>
+      </view>
+      <view class="g4" bindtap="setTab" data-t="ap">
+        <view class="g4n red">{{ap_total}}</view>
+        <view class="g4l">我欠别人</view>
+      </view>
+      <view class="g4" bindtap="setTab" data-t="expense">
+        <view class="g4n">{{today_income}}</view>
+        <view class="g4l">今天收到</view>
+      </view>
+      <view class="g4" bindtap="setTab" data-t="report">
+        <view class="g4n {{profit_biz < 0 ? 'red' : 'green'}}">{{profit_biz}}</view>
+        <view class="g4l">本月经营毛利</view>
+      </view>
+    </view>
+    <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
+    <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
+    <view class="topcust" wx:if="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}</view>
+
+    <view class="card">
+      <view class="card-h">常用</view>
+      <view class="qgrid">
+        <view class="q" bindtap="setTab" data-t="ar"><view class="qi">＋</view><view class="qn">记应收</view></view>
+        <view class="q" bindtap="setTab" data-t="ap"><view class="qi">＋</view><view class="qn">记应付</view></view>
+        <view class="q" bindtap="setTab" data-t="expense"><view class="qi">＋</view><view class="qn">记支出</view></view>
+        <view class="q" bindtap="setTab" data-t="ar"><view class="qi">收</view><view class="qn">收款核销</view></view>
+        <view class="q" bindtap="setTab" data-t="import"><view class="qi">⊞</view><view class="qn">批量导入</view></view>
+        <view class="q" bindtap="setTab" data-t="report"><view class="qi">▤</view><view class="qn">报表</view></view>
+        <view class="q" bindtap="setTab" data-t="asset"><view class="qi">◱</view><view class="qn">家底</view></view>
+        <view class="q" bindtap="setTab" data-t="contact"><view class="qi">☰</view><view class="qn">设置</view></view>
+      </view>
+    </view>
+
+    <view class="form">
+      <input class="inp" placeholder="全局搜索：客户名/产品/备注，查全部账" value="{{search_kw}}" bindinput="onSearchKw"/>
+      <button class="btn btn-ghost" size="mini" bindtap="clearSearch" wx:if="{{search_kw}}">清空搜索</button>
+    </view>
+    <view class="searchres" wx:if="{{search_res}}">
+      <view class="tip">共 {{search_res.total}} 条结果</view>
+      <view class="item" wx:for="{{search_res.orders}}" wx:key="id" bindtap="goSearchTab" data-t="ar">
+        <view class="row1"><text class="tag tag-ar">应收</text>{{item.customer}} · {{item.item_name}} · ¥{{item.price}}</view>
+        <view class="row2">已收 ¥{{item.paid}} · 还欠 ¥{{item.unpaid}}</view>
+      </view>
+      <view class="item" wx:for="{{search_res.payables}}" wx:key="id" bindtap="goSearchTab" data-t="ap">
+        <view class="row1"><text class="tag tag-ap">应付</text>{{item.supplier}} · ¥{{item.amount}}</view>
+        <view class="row2">已付 ¥{{item.paid}} · 还欠 ¥{{item.unpaid}}</view>
+      </view>
+      <view class="item" wx:for="{{search_res.ledger}}" wx:key="id" bindtap="goSearchTab" data-t="expense">
+        <view class="row1"><text class="tag tag-ex">{{item.direction=='in'?'收':'付'}}</text>{{item.category}} · ¥{{item.amount}}</view>
+        <view class="row2">{{item.remark}} · {{item.created_at}}</view>
+      </view>
+      <view class="tip" wx:if="{{search_res.total == 0}}">没找到相关记录</view>
+    </view>
+  </block>
 
   <block wx:if="{{tab=='ar'}}">
     <view class="form">
