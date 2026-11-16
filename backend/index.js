@@ -6670,6 +6670,62 @@ app.get('/invoices', async (c) => {
   })
 })
 
+// 发票与收款对照：钱收了票没开、票开了钱没到，一页看清
+app.get('/invoice-check', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  const title = await getTitle(db)
+  const orders = ((await db.prepare(`SELECT id, customer, COALESCE(NULLIF(item_name,''),'加工费') AS item, price, paid, COALESCE(written_off,0) AS wo, created_at, due_date
+    FROM orders WHERE substr(created_at,1,7)=? ORDER BY id DESC LIMIT 300`).bind(month).all()).results || [])
+  const invs = ((await db.prepare(`SELECT id, no, party, amount, COALESCE(tax,0) AS tax, date, order_id FROM invoices
+    WHERE type='out' AND substr(date,1,7)=? ORDER BY id DESC LIMIT 300`).bind(month).all()).results || [])
+  const invByOrder = {}
+  const invAll = ((await db.prepare("SELECT order_id, COALESCE(SUM(amount),0) a, COALESCE(SUM(tax),0) t FROM invoices WHERE type='out' AND order_id IS NOT NULL AND order_id>0 GROUP BY order_id").all()).results || [])
+  for (const r of invAll) invByOrder[num(r.order_id)] = { amount: round2(num(r.a)), tax: round2(num(r.t)) }
+
+  const rows = []
+  for (const o of orders) {
+    const price = round2(num(o.price))
+    const paid = round2(num(o.paid))
+    const left = round2(price - paid - round2(num(o.wo)))
+    const inv = invByOrder[num(o.id)] || { amount: 0, tax: 0 }
+    const state = inv.amount <= 0 ? 'none' : (inv.amount + 0.001 < price ? 'partial' : 'full')
+    rows.push({
+      id: num(o.id), party: o.customer, item: o.item, price, paid, left,
+      inv_amount: inv.amount, inv_tax: inv.tax, inv_left: round2(price - inv.amount), state,
+      date: String(o.created_at || '').slice(0, 10), due_date: String(o.due_date || '').slice(0, 10)
+    })
+  }
+  const noInv = rows.filter((r) => r.paid > 0 && r.inv_amount <= 0)
+  const partInv = rows.filter((r) => r.inv_amount > 0 && r.inv_amount + 0.001 < r.price)
+  const invNoMoney = rows.filter((r) => r.inv_amount > r.paid + 0.001)
+  const paidSum = round2(rows.reduce((a, r) => a + r.paid, 0))
+  const orderSum = round2(rows.reduce((a, r) => a + r.price, 0))
+  const invSum = round2(invs.reduce((a, r) => a + round2(num(r.amount)), 0))
+  const taxSum = round2(invs.reduce((a, r) => a + round2(num(r.tax)), 0))
+  const gap = round2(paidSum - invSum)
+  const lines = [
+    `【${title.title}】${month} 发票与收款对照`,
+    `本月接单 ${orderSum} 元，收到 ${paidSum} 元，开票 ${invSum} 元${taxSum > 0 ? `（其中税额 ${taxSum} 元）` : ''}，开票 ${invs.length} 张`,
+    `差额：${gap === 0 ? '收的钱和开的票对得上 ✓' : gap > 0 ? `还有 ${gap} 元收了没开票` : `多开了 ${Math.abs(gap)} 元票（钱还没到账）`}`,
+    noInv.length ? `· 收了钱没开票 ${noInv.length} 笔：${noInv.slice(0, 5).map((x) => `${x.party} ${x.paid}`).join('、')}${noInv.length > 5 ? ' 等' : ''}` : '· 没有「收了钱没开票」的单',
+    partInv.length ? `· 开了部分票 ${partInv.length} 笔：${partInv.slice(0, 3).map((x) => `${x.party} 已开 ${x.inv_amount}/共 ${x.price}`).join('、')}` : '',
+    invNoMoney.length ? `· 开了票钱没到 ${invNoMoney.length} 笔：${invNoMoney.slice(0, 3).map((x) => `${x.party} 票 ${x.inv_amount}/已收 ${x.paid}`).join('、')}` : ''
+  ].filter((x) => x)
+  return c.json({
+    ok: true, month, rows,
+    order_sum: orderSum, paid_sum: paidSum, inv_sum: invSum, tax_sum: taxSum, inv_count: invs.length, gap,
+    no_invoice: { count: noInv.length, amount: round2(noInv.reduce((a, x) => a + x.paid, 0)), list: noInv.slice(0, 20) },
+    part_invoice: { count: partInv.length, amount: round2(partInv.reduce((a, x) => a + x.inv_left, 0)), list: partInv.slice(0, 20) },
+    inv_no_money: { count: invNoMoney.length, amount: round2(invNoMoney.reduce((a, x) => a + (x.inv_amount - x.paid), 0)), list: invNoMoney.slice(0, 20) },
+    invoices: invs.slice(0, 50),
+    text: lines.join('\n'),
+    advice: gap === 0 && !noInv.length && !invNoMoney.length
+      ? '这个月收款和开票对得上，没有遗留。'
+      : (noInv.length ? `有 ${noInv.length} 笔收了钱没开票（共 ${round2(noInv.reduce((a, x) => a + x.paid, 0))} 元），对方要票就得补开。` : `有 ${invNoMoney.length} 笔开了票但钱没到账，记得催。`)
+  })
+})
+
 app.post('/invoices', async (c) => {
   const { type, no, party, amount, tax, date, remark, order_id } = await c.req.json()
   const t = type === 'in' ? 'in' : 'out'

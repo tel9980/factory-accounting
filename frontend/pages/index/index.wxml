@@ -1476,6 +1476,30 @@
       <button class="btn" size="mini" bindtap="addInvoice">记一张发票</button>
       <view class="tip">发票只做台账，不影响收支和利润（免得一笔钱算两次）。</view>
     </view>
+
+    <view class="form">
+      <view class="tip">钱和票对一下（收了钱没开票 / 开了票钱没到）</view>
+      <input class="inp" placeholder="月份，如 2026-11（留空=本月）" value="{{ic_month}}" bindinput="onIcMonth"/>
+      <button class="btn" size="mini" bindtap="loadInvoiceCheck">🧾 钱和票对一下</button>
+    </view>
+    <view class="list" wx:if="{{ic}}">
+      <view class="item">
+        <view class="row1"><text class="nm">本月接单</text><text class="amt">¥{{ic.order_sum}}</text></view>
+        <view class="row2">收到 ¥{{ic.paid_sum}} · 开票 {{ic.inv_count}} 张 ¥{{ic.inv_sum}}{{ic.tax_sum>0 ? '（税额 ' + ic.tax_sum + '）' : ''}}</view>
+        <view class="row2">差额：{{ic.gap==0 ? '收的钱和开的票对得上 ✓' : (ic.gap>0 ? '收了没开票 ¥' + ic.gap : '多开了票 ¥' + (0-ic.gap))}}</view>
+        <view class="row2" wx:if="{{ic.no_invoice.count}}">❗ 收了钱没开票 {{ic.no_invoice.count}} 笔 ¥{{ic.no_invoice.amount}}</view>
+        <view class="row2" wx:for="{{ic.no_invoice.list}}" wx:key="id" bindtap="openOrderFromPrice" data-id="{{item.id}}">· {{item.party}} {{item.item}} 已收 ¥{{item.paid}} / 共 ¥{{item.price}}</view>
+        <view class="row2" wx:if="{{ic.part_invoice.count}}">✂ 开了部分票 {{ic.part_invoice.count}} 笔，还差 ¥{{ic.part_invoice.amount}}</view>
+        <view class="row2" wx:for="{{ic.part_invoice.list}}" wx:key="id" bindtap="openOrderFromPrice" data-id="{{item.id}}">· {{item.party}} 已开 ¥{{item.inv_amount}} / 共 ¥{{item.price}}</view>
+        <view class="row2" wx:if="{{ic.inv_no_money.count}}">💰 开了票钱没到 {{ic.inv_no_money.count}} 笔 ¥{{ic.inv_no_money.amount}}</view>
+        <view class="row2" wx:for="{{ic.inv_no_money.list}}" wx:key="id" bindtap="openOrderFromPrice" data-id="{{item.id}}">· {{item.party}} 票 ¥{{item.inv_amount}} / 已收 ¥{{item.paid}}</view>
+        <view class="row2">{{ic.advice}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="copyInvoiceCheck">📋 复制给会计</button>
+          <button size="mini" bindtap="closeInvoiceCheck">收起</button>
+        </view>
+      </view>
+    </view>
     <view class="list" wx:if="{{inv_rows.length}}">
       <view class="item" wx:for="{{inv_rows}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.type=='out' ? '开出' : '收到'}} · {{item.party}}</text><text class="amt">¥{{item.amount}}</text></view>
