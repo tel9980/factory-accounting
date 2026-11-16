@@ -1104,6 +1104,77 @@ app.post('/recon-fix', async (c) => {
   return c.json({ ok: true, id: newId, mode, party, amount, month, type })
 })
 
+// 月度对账小结：这个月和谁对过、差多少、补了几笔、还有谁没对，一页说清
+async function reconMonthStat(db, m, type) {
+  const isAp = type === 'ap'
+  const T = isAp ? 'payables' : 'orders'
+  const P = isAp ? 'supplier' : 'customer'
+  const AMT = isAp ? 'amount' : 'price'
+  const L = `${AMT} - COALESCE(paid,0) - COALESCE(written_off,0)`
+  const logs = (await db.prepare('SELECT * FROM recon_log WHERE month=? AND type=? ORDER BY id').bind(m, type).all()).results
+  const debts = (await db.prepare(`SELECT ${P} AS party, COALESCE(SUM(CASE WHEN ${L}>0 THEN ${L} ELSE 0 END),0) AS left FROM ${T} GROUP BY ${P}`).all()).results.filter((x) => num(x.left) > 0.009)
+  let statements = 0; let disputes = 0; let disputesOpen = 0
+  try {
+    const st = (await db.prepare("SELECT COUNT(*) AS c FROM statement_log WHERE substr(created_at,1,7)=? AND type=?").bind(m, type).first()) || {}
+    statements = num(st.c)
+    const dp = (await db.prepare("SELECT COUNT(*) AS c FROM statement_log WHERE substr(created_at,1,7)=? AND type=? AND ack='doubt'").bind(m, type).first()) || {}
+    disputes = num(dp.c)
+    const dpo = (await db.prepare("SELECT COUNT(*) AS c FROM statement_log WHERE substr(created_at,1,7)=? AND type=? AND ack='doubt' AND (resolved_at IS NULL OR resolved_at='')").bind(m, type).first()) || {}
+    disputesOpen = num(dpo.c)
+  } catch (e) { /* 没建表就跳过 */ }
+  const seen = new Set()
+  let matchN = 0; let fixedN = 0; let fixedAmt = 0; let openN = 0
+  const diffParties = []
+  for (const r of logs) {
+    seen.add(r.party)
+    if (r.state === 'match') matchN += 1
+    else {
+      const note = String(r.note || '')
+      const mm = note.match(/补记\s*([\d.]+)/)
+      if (mm) { fixedN += 1; fixedAmt = round2(fixedAmt + num(mm[1])) } else diffParties.push(r.party)
+    }
+    if (!r.done) openN += 1
+  }
+  const never = debts.filter((x) => !seen.has(x.party))
+  const neverLeft = round2(never.reduce((a, x) => a + num(x.left), 0))
+  const days = Array.from(new Set(logs.map((r) => (r.created_at || '').slice(-16, -14) || ''))).filter(Boolean).sort()
+  const dayList = Array.from(new Set(logs.map((r) => Number((r.created_at || '').slice(8, 10)) || 0))).filter(Boolean).sort((a, b) => a - b)
+  const title = (await getTitle(db)).title || '加工费记账'
+  const NM = isAp ? '应付' : '应收'
+  const lines = []
+  lines.push(`【${title}】${m} 对账小结（${NM}）`)
+  lines.push(`对过账的单位：${logs.length} 家（一致 ${matchN} 家，有差异 ${logs.length - matchN} 家）`)
+  if (fixedN || fixedAmt) lines.push(`差异处理：补记 ${fixedN} 笔，合计 ¥${fixedAmt}`)
+  if (diffParties.length) lines.push(`有差异但不补的：${diffParties.slice(0, 6).join('、')}${diffParties.length > 6 ? ' 等 ' + diffParties.length + ' 家' : ''}`)
+  if (openN) lines.push(`还没处理完：${openN} 家（台账里点一下标记）`)
+  lines.push(`还没对过的：${never.length} 家${neverLeft ? `，欠 ¥${neverLeft}` : ''}${never.length ? '（' + never.slice(0, 4).map((x) => x.party).join('、') + (never.length > 4 ? ' 等' : '') + '）' : ''}`)
+  if (statements || disputes) lines.push(`发出对账单 ${statements} 份${disputes ? `，对方有异议 ${disputes} 份${disputesOpen ? `（还没处理 ${disputesOpen} 份）` : '（都处理完了）'}` : ''}`)
+  if (dayList.length) lines.push(`对账的日子：${dayList.map((d) => d + ' 号').join('、')}`)
+  let advice = ''
+  if (never.length) advice = `还有 ${never.length} 家没对（欠 ¥${neverLeft}），挑欠得最多的先对一遍`
+  else if (openN) advice = `这个月都对了，但有 ${openN} 家差异还没处理完，点一下标记就行`
+  else if (!logs.length) advice = '这个月还没对过账，先从欠款最多的 3 家开始'
+  else advice = '这个月对账做完了，差异都处理了，下个月照这个节奏'
+  lines.push(advice)
+  return {
+    ok: true, month: m, type, type_text: NM,
+    reconciled: logs.length, match: matchN, diff: logs.length - matchN,
+    diff_amount: round2(logs.reduce((a, r) => a + Math.abs(num(r.diff)), 0)),
+    fixed_count: fixedN, fixed_amount: fixedAmt, open_diff: openN,
+    never_count: never.length, never_left: neverLeft,
+    never: never.slice(0, 8).map((x) => ({ party: x.party, left: round2(num(x.left)) })),
+    statements, disputes, disputes_open: disputesOpen,
+    days: days.length, day_list: dayList,
+    text: lines.join('\n'), advice
+  }
+}
+
+app.get('/recon-month', async (c) => {
+  const m = (c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  return c.json(await reconMonthStat(c.env.DB, m, type))
+})
+
 app.get('/recon-log', async (c) => {
   const db = c.env.DB
   const month = String(c.req.query('month') || '').slice(0, 7)

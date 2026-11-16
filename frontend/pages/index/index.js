@@ -2268,6 +2268,26 @@ Page({
       }
     })
   },
+  loadReconMonth() {
+    const m = this.data.rsum_month || (new Date()).toISOString().slice(0, 7)
+    this.req({
+      url: API_BASE + '/recon-month?month=' + m + '&type=' + (this.data.rsum_type || 'ar'),
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: '读取失败', icon: 'none' })
+        this.setData({ rsum: d, rsum_text: d.text || '' })
+      }
+    })
+  },
+  copyReconMonth() {
+    if (!this.data.rsum_text) return
+    wx.setClipboardData({ data: this.data.rsum_text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+  },
+  makeReconMonthImage() {
+    if (!this.data.rsum_text) return
+    this.drawStatementImage({ text: this.data.rsum_text }, true)
+  },
+  closeReconMonth() { this.setData({ rsum: null, rsum_text: '' }) },
   loadDisputes() {
     this.req({
       url: API_BASE + '/disputes',

@@ -873,6 +873,21 @@
     </view>
     <view class="form">
       <view class="tip">对账单争议：对方说对不上的，专门一页处理（拖久了容易变死账）</view>
+      <view class="tip">月度对账小结：这个月和谁对过、差多少、补了几笔、还有谁没对，一页说清</view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="loadReconMonth">📋 出本月对账小结</button>
+      </view>
+      <view wx:if="{{rsum}}">
+        <view class="prev-h">{{rsum.month}} · {{rsum.type_text}} · 对过 {{rsum.reconciled}} 家（一致 {{rsum.match}} / 有差异 {{rsum.diff}}）</view>
+        <view class="aline {{rsum.never_count ? 'warn' : 'ok'}}">{{rsum.advice}}</view>
+        <view class="tip">补记 {{rsum.fixed_count}} 笔 ¥{{rsum.fixed_amount}}{{rsum.open_diff ? ' · 未处理 ' + rsum.open_diff + ' 家' : ''}}{{rsum.never_count ? ' · 没对过 ' + rsum.never_count + ' 家（欠 ¥' + rsum.never_left + '）' : ''}}</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyReconMonth">📋 复制文字</button>
+          <button class="btn ghost" size="mini" bindtap="makeReconMonthImage">🖼 存成图片</button>
+          <button class="btn ghost" size="mini" bindtap="closeReconMonth">收起</button>
+        </view>
+        <view class="tip">{{rsum_text}}</view>
+      </view>
       <button class="btn" size="mini" bindtap="loadDisputes">⚠ 看争议清单</button>
       <view wx:if="{{dp}}">
         <view class="tip">{{dp.count}} 份待处理，涉及欠款 ¥{{dp.total_left}}{{dp.oldest_days ? '，最久的拖了 ' + dp.oldest_days + ' 天' : ''}}</view>
