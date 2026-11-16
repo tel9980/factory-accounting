@@ -384,6 +384,7 @@
       </view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
+<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
       <view class="dateRow">

@@ -147,7 +147,15 @@ Page({
     doReq(ak)
   },
 
-  onShow() { this.refresh(); this.loadCloudBackup() },
+  onShow() {
+    // 第一次进来沿用上次记支出用的分类，少点一次
+    if (!this._catInit) {
+      this._catInit = true
+      const lc = wx.getStorageSync('last_cat')
+      if (lc !== '' && lc !== null && lc !== undefined) this.setData({ e_category: Number(lc) })
+    }
+    this.refresh(); this.loadCloudBackup()
+  },
   refresh() {
     this.loadDashboard()
     this.loadAr()
