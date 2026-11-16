@@ -3932,6 +3932,71 @@ app.get('/month-brief', async (c) => {
   return c.json(out)
 })
 
+// 全年 × 客户 对照：这一年从谁那儿赚的、谁在拖钱
+app.get('/year-customers', async (c) => {
+  const db = c.env.DB
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const { results: g } = await db.prepare(
+    `SELECT customer AS party, COUNT(*) AS cnt, COALESCE(SUM(price),0) AS income,
+            COALESCE(SUM(COALESCE(cost,0)),0) AS cost, COALESCE(SUM(paid),0) AS paid,
+            COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) AS unpaid,
+            MIN(substr(created_at,1,10)) AS first_day, MAX(substr(created_at,1,10)) AS last_day
+       FROM orders WHERE substr(created_at,1,4)=? GROUP BY customer ORDER BY income DESC`
+  ).bind(y).all()
+  const { results: bym } = await db.prepare(
+    "SELECT customer AS party, substr(created_at,1,7) AS m, COALESCE(SUM(price),0) AS s FROM orders WHERE substr(created_at,1,4)=? GROUP BY customer, m"
+  ).bind(y).all()
+  const map = {}
+  for (const r of bym) { (map[r.party] = map[r.party] || {})[r.m.slice(5)] = round2(num(r.s)) }
+  const totalIncome = round2(g.reduce((a, x) => a + num(x.income), 0))
+  const totalProfit = round2(g.reduce((a, x) => a + num(x.income) - num(x.cost), 0))
+  const totalUnpaid = round2(g.reduce((a, x) => a + num(x.unpaid), 0))
+  const rows = g.map((x, i) => {
+    const inc = num(x.income), cost = num(x.cost)
+    const profit = round2(inc - cost)
+    const mm = map[x.party] || {}
+    const best = Object.keys(mm).sort((a, b) => mm[b] - mm[a])[0] || ''
+    const days = x.first_day ? daysSince(x.first_day + 'T00:00:00.000Z') : 0
+    return {
+      rank: i + 1, party: x.party, cnt: num(x.cnt), income: inc, cost, profit,
+      margin_pct: inc > 0 ? round2(profit / inc * 100) : 0,
+      paid: round2(num(x.paid)), unpaid: round2(num(x.unpaid)),
+      share: totalIncome > 0 ? round2(inc / totalIncome * 100) : 0,
+      bar: totalIncome > 0 ? Math.max(2, Math.round(inc / totalIncome * 100)) : 0,
+      months_worked: Object.keys(mm).length, best_month: best, best_amount: best ? mm[best] : 0,
+      first_day: x.first_day, last_day: x.last_day, days_since_first: days,
+      no_cost: cost === 0
+    }
+  })
+  const top3 = round2(rows.slice(0, 3).reduce((a, x) => a + x.share, 0))
+  const advice = []
+  if (!rows.length) advice.push({ tone: 'warn', text: `${y} 年还没有单据，先记几笔再看。` })
+  else {
+    const r0 = rows[0]
+    if (top3 >= 70 && rows.length >= 4) advice.push({ tone: 'warn', text: `${y} 年 ${top3}% 的钱来自前 3 家（${rows.slice(0, 3).map((x) => x.party).join('、')}），太集中了——万一最大那家不做了，收入会掉一大块。` })
+    else if (rows.length < 4) advice.push({ tone: 'ok', text: `一共 ${rows.length} 家客户，最赚的是 ${r0.party}（¥${r0.income}，毛利 ¥${r0.profit}）。客户多了（4 家以上）才会看集中度。` })
+    else advice.push({ tone: 'ok', text: `前 3 家占 ${top3}%，客户还算分散。最赚的是 ${r0.party}（¥${r0.income}，毛利 ¥${r0.profit}）。` })
+    const bad = rows.filter((x) => x.income >= 1000 && x.margin_pct < 15).sort((a, b) => a.margin_pct - b.margin_pct)[0]
+    if (bad) advice.push({ tone: 'warn', text: `${bad.party} 做了 ¥${bad.income} 但毛利率只有 ${bad.margin_pct}%，几乎白干——下次报价往上提，或者少接。` })
+    const owed = rows.filter((x) => x.unpaid > 0).sort((a, b) => b.unpaid - a.unpaid)[0]
+    if (owed) advice.push({ tone: 'bad', text: `${owed.party} 还欠 ¥${owed.unpaid}（占今年这家的 ${round2(owed.unpaid / owed.income * 100)}%），最该催。` })
+    const one = rows.find((x) => x.cnt === 1)
+    if (one) advice.push({ tone: 'warn', text: `${one.party} 今年只做过 1 单（¥${one.income}），可以问一句明年还有没有活。` })
+  }
+  const text = [
+    `【${(await getTitle(db)).title}】${y} 年从谁那儿赚的`,
+    `全年接单 ¥${totalIncome}，毛利 ¥${totalProfit}，${rows.length} 家客户，还欠 ¥${totalUnpaid}`,
+    ...rows.slice(0, 10).map((x) => `${x.rank}. ${x.party}　¥${x.income}（占 ${x.share}%，毛利 ${x.margin_pct}%${x.unpaid > 0 ? `，欠 ¥${x.unpaid}` : ''}）`),
+    top3 >= 70 ? `· 前 3 家占 ${top3}%，客户偏集中` : `· 前 3 家占 ${top3}%`,
+    ...advice.slice(1).map((x) => '· ' + x.text)
+  ].join('\n')
+  return c.json({
+    ok: true, year: y, total_income: totalIncome, total_profit: totalProfit,
+    total_unpaid: totalUnpaid, count: rows.length, top3_share: top3,
+    rows: rows.slice(0, 30), advice, text
+  })
+})
+
 // 利润 → 现金 桥接：赚的钱为什么没变成现金
 app.get('/cash-bridge', async (c) => {
   const db = c.env.DB

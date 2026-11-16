@@ -1439,6 +1439,27 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
       </block>
+      <view class="tip">📅 全年 × 客户（这一年从谁那儿赚的、谁在拖钱）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="年份 YYYY（留空今年）" value="{{yc_year}}" bindinput="onYcYear" bindconfirm="loadYearCust"/>
+        <button class="btn half" size="mini" bindtap="loadYearCust">看全年</button>
+      </view>
+      <block wx:if="{{yc}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{yc.year}} 年</text><text class="amt">接单 {{yc.total_income}}</text></view>
+          <view class="row2">毛利 {{yc.total_profit}} · {{yc.count}} 家客户 · 还欠 {{yc.total_unpaid}} · 前3家占 {{yc.top3_share}}%</view>
+          <view class="item" wx:for="{{yc.rows}}" wx:key="party">
+            <view class="row1"><text class="nm">{{item.rank}}. {{item.party}}</text><text class="amt {{item.unpaid>0?'red':''}}">¥{{item.income}}</text></view>
+            <view class="bar-bg"><view class="bar" style="width:{{item.bar}}%"></view></view>
+            <view class="row2">占 {{item.share}}% · 毛利 {{item.margin_pct}}% · {{item.cnt}} 单 · 最忙 {{item.best_month}}<text wx:if="{{item.unpaid>0}}"> · 欠 ¥{{item.unpaid}}</text></view>
+          </view>
+        </view>
+        <view class="box" wx:if="{{yc.advice.length}}">
+          <view class="tip">看完能做点什么</view>
+          <view class="aline {{item.tone}}" wx:for="{{yc.advice}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="frow"><button class="btn" size="mini" bindtap="copyYearCust">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeYearCust">收起</button></view>
+      </block>
       <view class="tip">📄 本月一页纸（三句话说清这个月怎么样，可以直接发家人或合伙人）</view>
       <view class="frow">
         <input class="inp" placeholder="月份 YYYY-MM（留空本月）" value="{{mb_month}}" bindinput="onMbMonth" bindconfirm="loadMonthBrief"/>
