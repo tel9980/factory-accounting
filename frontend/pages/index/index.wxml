@@ -717,6 +717,26 @@
         <picker mode="date" value="{{ex_to}}" bindchange="onExTo"><view class="picker">到 {{ex_to || '选日期'}} ▾</view></picker>
       </view>
       <button class="btn" size="mini" bindtap="exportRangeXlsx">⬇ 导出这段时间 Excel（含明细）</button>
+      <view class="tip" style="margin-top:16rpx">📦 月度报表包（每月 1 号自动生成上月，一个 Excel 装全套：总览/利润表/资产负债表/应收/应付/流水/账龄/到期表）</view>
+      <button class="btn" size="mini" bindtap="genMonthPack">⚙️ 现在生成上月报表包</button>
+      <view class="item" wx:for="{{packs}}" wx:key="id" data-i="{{index}}" bindtap="downloadPack">
+        <view class="row1"><text class="nm">{{item.month}} 全套报表</text><text class="amt">{{item.kb}} KB</text></view>
+        <view class="row2">{{item.created}} 生成　点一下下载</view>
+      </view>
+      <view class="tip" wx:if="{{packs.length==0}}">还没有自动生成的报表包。每月 1 号会自动生成上个月的；也可以点上面按钮立刻生成。</view>
+
+      <view class="tip" style="margin-top:16rpx">📈 回款预测（按账期排到未来几个月，再按历史回款率打折）</view>
+      <button class="btn" size="mini" bindtap="loadForecast">看看未来 3 个月能回多少</button>
+      <view class="prev" wx:if="{{fc}}">
+        <view class="prev-h">回款率 {{fc.rate_pct}}%　{{fc.rate_basis}}</view>
+        <view class="prev-row" wx:for="{{fc.months}}" wx:key="month">
+          <text class="prev-t">{{item.month}}</text>
+          <text class="prev-n">应收 {{item.ar}}（账面 {{item.ar_raw}}） · 应付 {{item.ap}}</text>
+          <text class="{{item.net>=0?'ok':'red'}}">净 {{item.net}}</text>
+        </view>
+        <view class="tip">未来 {{fc.months.length}} 个月预计收回 {{fc.total_ar}} 元、要付 {{fc.total_ap}} 元，净进 {{fc.net}} 元；已逾期没收回 {{fc.overdue}} 元另算。{{fc.note}}</view>
+        <view class="frow"><button class="btn" size="mini" bindtap="copyForecast">📋 复制预测</button></view>
+      </view>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="orders">导出应收(文件)</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="payables">导出应付(文件)</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水(文件)</button>

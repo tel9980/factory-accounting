@@ -3568,8 +3568,12 @@ async function dueRows(db, type, months, party) {
     let due = r.due_date ? String(r.due_date).slice(0, 10) : ''
     let guess = false
     if (!due) {
-      const td = tmap[norm(r.party)]
-      if (td > 0) { const d = new Date(String(r.created_at).slice(0, 10) + 'T00:00:00.000Z'); d.setUTCDate(d.getUTCDate() + td); due = d.toISOString().slice(0, 10); guess = true }
+      const td0 = tmap[norm(r.party)]
+      const td = td0 > 0 ? td0 : 30
+      const d = new Date(String(r.created_at).slice(0, 10) + 'T00:00:00.000Z')
+      d.setUTCDate(d.getUTCDate() + td)
+      due = d.toISOString().slice(0, 10)
+      guess = true
     }
     const days = due ? dayDiff(due) : null
     let state = '没有到期日'
@@ -3639,6 +3643,160 @@ app.get('/risk-list', async (c) => {
   const badTotal = round2(bad.reduce((a, x) => a + x.left, 0))
   const level = type === 'ap' ? (badTotal > 0 ? '我欠别人超 90 天的有 ' + round2(badTotal) + ' 元，先安排这笔' : '没有拖过 90 天的应付') : (badTotal > 0 ? '超过 90 天没收回的有 ' + round2(badTotal) + ' 元（' + bad.length + ' 家），建议走坏账核销或专人跟' : '没有超过 90 天的欠款，账很干净')
   return c.json({ ok: true, type, buckets: b, parties, bad, bad_total: badTotal, bad_count: bad.length, level })
+})
+
+// ===== 回款预测：按账期把未结单排到未来几个月，再按历史回款率打折 =====
+async function histRate(db) {
+  const six = new Date(Date.now() - 183 * 86400000).toISOString().slice(0, 7)
+  const add = num((await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)>=?').bind(six).first() || {}).t)
+  const got = num((await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND ref_type='order' AND substr(created_at,1,7)>=?").bind(six).first() || {}).t)
+  const rate = add > 0 ? Math.min(1, Math.max(0.3, got / add)) : 0.8
+  return { rate: Math.round(rate * 100) / 100, order_add: round2(add), got: round2(got), months: 6 }
+}
+
+app.get('/forecast', async (c) => {
+  const db = c.env.DB
+  const n = Math.min(6, Math.max(1, num(c.req.query('months')) || 3))
+  const hr = await histRate(db)
+  const ar = await dueRows(db, 'ar', 12, '')
+  const ap = await dueRows(db, 'ap', 12, '')
+  const base = new Date()
+  const buckets = []
+  for (let i = 0; i < n; i++) {
+    const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + i, 1))
+    buckets.push({ month: d.toISOString().slice(0, 7), ar_raw: 0, ap_raw: 0, ar_soon: 0 })
+  }
+  const thisMonth = now().slice(0, 7)
+  let overdue = 0
+  ar.rows.forEach((r) => {
+    const due = r.due || ''
+    if (!due) return
+    if (due.slice(0, 7) < thisMonth || (r.days !== null && r.days > 0 && due.slice(0, 7) <= thisMonth)) { overdue = round2(overdue + r.left); return }
+    const b = buckets.find((x) => x.month === due.slice(0, 7))
+    if (b) { b.ar_raw = round2(b.ar_raw + r.left); if (r.days !== null && r.days <= 0 && r.days >= -7) b.ar_soon = round2(b.ar_soon + r.left) }
+  })
+  ap.rows.forEach((r) => {
+    const due = r.due || ''
+    if (!due) return
+    const b = buckets.find((x) => x.month === due.slice(0, 7))
+    if (b) b.ap_raw = round2(b.ap_raw + r.left)
+  })
+  const months = buckets.map((b) => ({
+    month: b.month,
+    ar: round2(b.ar_raw * hr.rate), ar_raw: b.ar_raw, ar_soon: b.ar_soon,
+    ap: b.ap_raw, net: round2(b.ar_raw * hr.rate - b.ap_raw)
+  }))
+  const totalAr = round2(months.reduce((a, x) => a + x.ar, 0))
+  const totalAp = round2(months.reduce((a, x) => a + x.ap, 0))
+  return c.json({
+    ok: true, rate: hr.rate, rate_basis: '近 6 个月：开单 ' + hr.order_add + ' 元、实收 ' + hr.got + ' 元', months,
+    overdue, total_ar: totalAr, total_ap: totalAp, net: round2(totalAr - totalAp),
+    note: '回款按历史回款率 ' + Math.round(hr.rate * 100) + '% 打折估算（不是承诺，逾期越多实际会越低）；应付按到期全额算。'
+  })
+})
+
+// ===== 月度报表包：一个 Excel 装下全套（利润表/资产负债表/应收/应付/流水/账龄/到期表） =====
+async function monthSum(db, m) {
+  const one = async (sql, ...b) => num(((await db.prepare(sql).bind(...b).first()) || {}).t)
+  const inc = await one("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", m)
+  const out = await one("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", m)
+  const orderAdd = await one('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?', m)
+  const orderCost = await one('SELECT COALESCE(SUM(COALESCE(cost,0)),0) AS t FROM orders WHERE substr(created_at,1,7)=?', m)
+  const payableAdd = await one('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?', m)
+  const expCash = await one("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)=?", m)
+  const dep = await one("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=0 AND ref_type='dep' AND substr(created_at,1,7)=?", m)
+  const amort = await one("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=0 AND ref_type='prepaid' AND substr(created_at,1,7)=?", m)
+  const accrual = await one("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=0 AND ref_type='debt_int' AND substr(created_at,1,7)=?", m)
+  const arLeft = await one('SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price')
+  const apLeft = await one('SELECT COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) AS t FROM payables WHERE paid + COALESCE(written_off,0) < amount')
+  const accounts = await accountBalances(db)
+  const debtRows = (await db.prepare('SELECT * FROM debts').all()).results || []
+  const debtReps = (await db.prepare('SELECT * FROM debt_repays').all()).results || []
+  const debtLeft = round2(debtRows.map((d) => debtView(d, debtReps.filter((r) => r.debt_id === d.id))).filter((x) => x.status === 'open').reduce((a, x) => a + x.remain, 0))
+  const cash = round2(accounts.reduce((a, x) => a + x.balance, 0))
+  const gross = round2(orderAdd - orderCost)
+  const net = round2(gross - expCash - dep - amort - accrual)
+  return { m, inc: round2(inc), out: round2(out), orderAdd: round2(orderAdd), orderCost: round2(orderCost), payableAdd: round2(payableAdd), expCash: round2(expCash), dep: round2(dep), amort: round2(amort), accrual: round2(accrual), gross, net, arLeft: round2(arLeft), apLeft: round2(apLeft), debtLeft, cash, accounts, equity: round2(cash + arLeft - apLeft - debtLeft) }
+}
+
+async function packSheets(db, m) {
+  const s = await monthSum(db, m)
+  const sheets = []
+  sheets.push({ name: '总览', rows: [
+    ['账期', m], ['收款（现金）', s.inc], ['付款/支出（现金）', s.out], ['结余', round2(s.inc - s.out)],
+    ['接单额', s.orderAdd], ['材料外协成本', s.orderCost], ['毛利', s.gross],
+    ['现金支出', s.expCash], ['折旧', s.dep], ['摊销', s.amort], ['预提利息', s.accrual], ['净利（权责）', s.net],
+    [], ['应收未收', s.arLeft], ['应付未付', s.apLeft], ['借款余额', s.debtLeft], ['手头现金', s.cash], ['净资产', s.equity]
+  ] })
+  sheets.push({ name: '利润表', rows: [
+    ['项目', '本月', '说明'], ['接单额（加工费）', s.orderAdd, '本月开单金额'], ['材料·外协成本', s.orderCost, '单据上填的成本'], ['毛利', s.gross, '接单 − 成本'],
+    ['减：现金支出', s.expCash, '工资水电房租采购等实际付出的'], ['减：折旧', s.dep, '设备按月计提'], ['减：摊销', s.amort, '长期费用按月摊'], ['减：预提利息', s.accrual, '借款利息按月计提'],
+    ['净利（权责口径）', s.net, '毛利 − 各项费用'], [], ['现金视角：收 − 付', round2(s.inc - s.out), '只看到账的钱']
+  ] })
+  const bsRows = [['资产', '金额'], ['货币资金', s.cash]]
+  s.accounts.forEach((a) => bsRows.push(['　' + a.name, a.balance]))
+  bsRows.push(['应收未收', s.arLeft], ['资产合计', round2(s.cash + s.arLeft)], [])
+  bsRows.push(['负债', '金额'], ['应付未付', s.apLeft], ['借款余额', s.debtLeft], ['负债合计', round2(s.apLeft + s.debtLeft)], [])
+  bsRows.push(['所有者权益', s.equity], ['负债 + 权益', round2(s.apLeft + s.debtLeft + s.equity)])
+  sheets.push({ name: '资产负债表', rows: bsRows })
+  const ars = (await db.prepare('SELECT * FROM orders ORDER BY id').all()).results || []
+  sheets.push({ name: '应收明细', rows: [['单号', '客户', '产品', '金额', '成本', '已收', '核销', '未收', '开单日', '到期日', '状态']].concat(
+    ars.map((o) => [o.id, o.customer, o.item_name, num(o.price), num(o.cost), num(o.paid), num(o.written_off), round2(num(o.price) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || '', num(o.paid) + num(o.written_off) >= num(o.price) ? '已结清' : (num(o.paid) > 0 ? '部分收' : '未收')])
+  ) })
+  const aps = (await db.prepare('SELECT * FROM payables ORDER BY id').all()).results || []
+  sheets.push({ name: '应付明细', rows: [['单号', '供应商', '说明', '金额', '已付', '核销', '未付', '开单日', '到期日']].concat(
+    aps.map((o) => [o.id, o.supplier, o.remark || '', num(o.amount), num(o.paid), num(o.written_off), round2(num(o.amount) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || ''])
+  ) })
+  const led = (await db.prepare("SELECT * FROM ledger WHERE substr(created_at,1,7)=? ORDER BY id").bind(m).all()).results || []
+  sheets.push({ name: '收付流水', rows: [['日期', '方向', '金额', '分类', '账户', '摘要', '是否动现金']].concat(
+    led.map((l) => [String(l.created_at).slice(0, 10), l.direction === 'in' ? '收' : '付', num(l.amount), l.category || '', l.account_id || '', l.remark || '', num(l.cash) ? '是' : '否（内部结转）'])
+  ) })
+  const ag = await db.prepare('SELECT id, customer AS party, price AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM orders WHERE price-paid-COALESCE(written_off,0) > 0').all()
+  const bk = { a: [0, 0], b: [0, 0], c: [0, 0], d: [0, 0], e: [0, 0] }
+  ;(ag.results || []).forEach((r) => {
+    const days = daysSince(r.due_date ? String(r.due_date).slice(0, 10) : String(r.created_at).slice(0, 10))
+    const left = round2(num(r.amount) - num(r.paid) - num(r.wo))
+    const k = days <= 30 ? 'a' : days <= 60 ? 'b' : days <= 90 ? 'c' : days <= 180 ? 'd' : 'e'
+    bk[k][0] = round2(bk[k][0] + left); bk[k][1] += 1
+  })
+  sheets.push({ name: '账龄', rows: [['账龄档', '金额', '笔数'], ['未超 30 天', bk.a[0], bk.a[1]], ['31-60 天', bk.b[0], bk.b[1]], ['61-90 天', bk.c[0], bk.c[1]], ['91-180 天', bk.d[0], bk.d[1]], ['超 180 天', bk.e[0], bk.e[1]]] })
+  const ds = await dueRows(db, 'ar', 6, '')
+  sheets.push({ name: '应收到期表', rows: [['单号', '客户', '产品', '未结', '到期日', '状态']].concat(ds.rows.map((x) => [x.id, x.party, x.item, x.left, x.due || '', x.state])) })
+  return sheets
+}
+
+app.get('/month-pack', async (c) => {
+  const m = String(c.req.query('month') || now().slice(0, 7))
+  if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份格式应为 YYYY-MM' }, 400)
+  const sheets = await packSheets(c.env.DB, m)
+  const b64 = toB64(await makeXlsxSheets(sheets))
+  return c.json({ ok: true, month: m, name: '全套报表_' + m + '.xlsx', b64, sheets: sheets.map((x) => x.name), size: b64.length })
+})
+
+async function runMonthPack(db, m) {
+  const sheets = await packSheets(db, m)
+  const b64 = toB64(await makeXlsxSheets(sheets))
+  if (b64.length > 1400000) return { ok: false, month: m, size: b64.length, error: '文件太大（' + Math.round(b64.length / 1024) + 'KB），请在报表页单月导出' }
+  await db.prepare('INSERT INTO month_report (month, name, b64, size, created_at) VALUES (?,?,?,?,?)').bind(m, '全套报表_' + m + '.xlsx', b64, b64.length, now()).run()
+  return { ok: true, month: m, size: b64.length }
+}
+
+app.get('/month-reports', async (c) => {
+  const rows = (await c.env.DB.prepare('SELECT id, month, name, size, created_at FROM month_report ORDER BY id DESC LIMIT 24').all()).results || []
+  return c.json({ ok: true, rows })
+})
+
+app.get('/month-report', async (c) => {
+  const m = String(c.req.query('month') || '')
+  const r = await c.env.DB.prepare('SELECT * FROM month_report WHERE month=? ORDER BY id DESC LIMIT 1').bind(m).first()
+  if (!r) return c.json({ error: '这个月还没有自动生成的报表包' }, 404)
+  return c.json({ ok: true, month: r.month, name: r.name, b64: r.b64 })
+})
+
+app.post('/month-pack-run', async (c) => {
+  const m = String((await c.req.json().catch(() => ({}))).month || now().slice(0, 7))
+  const r = await runMonthPack(c.env.DB, m)
+  return c.json(r)
 })
 
 // ===== 导入批次留痕：记下这一次导了哪些单据，导错了能整批撤回 =====
@@ -5094,8 +5252,17 @@ export default {
         await runDepreciation(db)
         const cron = (event && event.cron) || ''
         if (cron === '0 1 * * 1') await pushWeekly(db)
-        else if (cron === '0 2 1 * *') await pushReconRemind(db)
-        else await runWxReminder(db)
+        else if (cron === '0 2 1 * *') {
+          await pushReconRemind(db)
+          // 每月 1 号：把上个月的全套报表打包存好，并推一条「报表已生成」
+          try {
+            const pm = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
+            const rp = await runMonthPack(db, pm)
+            if (rp && rp.ok) await pushMonthPack(db, pm)
+          } catch (e) {
+            console.error('month pack failed book' + bid, e)
+          }
+        } else await runWxReminder(db)
       } catch (e) {
         console.error('scheduled fixed failed book' + bid, e)
       }
@@ -5126,6 +5293,19 @@ export default {
     } catch (e) {
       console.error('scheduled push-to-notes failed', e)
     }
+  }
+}
+
+// 月度报表包生成后推一条微信：告诉老板去哪里下载
+async function pushMonthPack(db, m) {
+  try {
+    await wxPush(db, {
+      title: m + ' 全套报表已生成',
+      time: m,
+      note: '利润表/资产负债表/应收/应付/流水/账龄/到期表 都打包好了，报表页「月度报表包」点下载'
+    })
+  } catch (e) {
+    /* 没配微信通知就算了，报表已经存好 */
   }
 }
 

@@ -34,7 +34,8 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null,
-    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', collect: null, due: null, risk: null,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', collect: null,
+    packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -364,6 +365,61 @@ Page({
     wx.setClipboardData({ data: lines.join('\n') })
   },
   closeCollect() { this.setData({ collect: null }) },
+  // 月度报表包：每月 1 号自动生成，一个 Excel 装全套
+  loadPacks() {
+    this.req({
+      url: API_BASE + '/month-reports', fail: () => {},
+      success: (res) => {
+        const rows = (res.data || {}).rows || []
+        this.setData({ packs: rows.map((r) => ({ id: r.id, month: r.month, name: r.name, kb: Math.round((r.size || 0) / 1024), created: String(r.created_at || '').slice(0, 16).replace('T', ' ') })) })
+      }
+    })
+  },
+  genMonthPack() {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1)
+    const m = d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2)
+    wx.showLoading({ title: '打包 ' + m + '…' })
+    this.req({
+      url: API_BASE + '/month-pack-run', method: 'POST', data: { month: m }, fail: () => wx.hideLoading(),
+      success: (res) => {
+        wx.hideLoading()
+        const d2 = res.data || {}
+        if (!d2.ok) return wx.showModal({ title: '没生成成功', content: d2.error || '稍后再试一次', showCancel: false })
+        wx.showToast({ title: '已生成 ' + m, icon: 'success' })
+        this.loadPacks()
+      }
+    })
+  },
+  downloadPack(e) {
+    const p = (this.data.packs || [])[e.currentTarget.dataset.i]
+    if (!p) return
+    wx.showLoading({ title: '取文件…' })
+    this.req({
+      url: API_BASE + '/month-report?month=' + encodeURIComponent(p.month), fail: () => wx.hideLoading(),
+      success: (res) => { wx.hideLoading(); this.saveXlsxFile(res.data || {}) }
+    })
+  },
+  // 回款预测
+  loadForecast() {
+    wx.showLoading({ title: '算一下…' })
+    this.req({
+      url: API_BASE + '/forecast?months=3', fail: () => wx.hideLoading(),
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.months) return wx.showToast({ title: d.error || '算不出来', icon: 'none' })
+        this.setData({ fc: Object.assign({}, d, { rate_pct: Math.round((d.rate || 0) * 100) }) })
+      }
+    })
+  },
+  copyForecast() {
+    const f = this.data.fc
+    if (!f) return
+    const lines = ['【回款预测】' + f.months.length + ' 个月', '回款率 ' + f.rate_pct + '%（' + f.rate_basis + '）', '']
+    f.months.forEach((m) => lines.push(m.month + '　应收 ' + m.ar + '（原 ' + m.ar_raw + '）　应付 ' + m.ap + '　净 ' + m.net))
+    lines.push('', '合计：收回 ' + f.total_ar + '　要付 ' + f.total_ap + '　净进 ' + f.net, '已逾期未收 ' + f.overdue, f.note)
+    wx.setClipboardData({ data: lines.join('\n') })
+  },
   loadAccounts() {
     this.req({
       url: API_BASE + '/accounts',
@@ -889,7 +945,7 @@ Page({
     const t = (keep[g] || ['home']).indexOf(this.data.tab) >= 0 ? this.data.tab : (keep[g] || ['home'])[0]
     this.setData({ group: g, tab: t })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms() }
     if (t === 'expense') this.loadLoans()
@@ -911,7 +967,7 @@ Page({
     if (t === 'ar') this.loadAr()
     if (t === 'ap') this.loadAp()
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
     if (t === 'expense') this.loadLoans()
   },
   setTab(e) {
@@ -919,7 +975,7 @@ Page({
     const g = ({ ar: 'bill', ap: 'bill', expense: 'bill', import: 'bill', report: 'stat', asset: 'stat', history: 'stat', contact: 'me', home: 'home' })[t] || 'home'
     this.setData({ tab: t, group: g })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms() }
     if (t === 'expense') this.loadLoans()
@@ -1410,7 +1466,7 @@ Page({
             wx.hideLoading()
             const d2 = res.data || {}
             if (!d2.text) return wx.showToast({ title: d2.error || '生成失败', icon: 'none' })
-            this.statementActions(d2)
+            this.statementActions(d2, { type, name })
           },
           fail: () => wx.hideLoading()
         })
@@ -1418,12 +1474,29 @@ Page({
     })
   },
   // 对账单：选“存图片/直接发对方/复制文字”
-  statementActions(d) {
+  statementActions(d, ctx) {
     wx.showActionSheet({
-      itemList: ['存成图片（可保存/转发）', '直接发给对方', '复制文字'],
+      itemList: ['存成图片（可保存/转发）', '直接发给对方', '复制文字', '打印页链接（电脑浏览器存 PDF）'],
       success: (r) => {
         if (r.tapIndex === 2) {
           wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+          return
+        }
+        if (r.tapIndex === 3) {
+          const party = (ctx && ctx.name) || d.party || ''
+          const stype = (ctx && ctx.type) || d.type || 'ar'
+          if (!party) return wx.showToast({ title: '这份对账单没有单位名，改用图片', icon: 'none' })
+          wx.showLoading({ title: '生成链接…' })
+          this.req({
+            url: API_BASE + '/statement-link?type=' + (stype === 'ap' ? 'ap' : 'ar') + '&party=' + encodeURIComponent(party),
+            fail: () => wx.hideLoading(),
+            success: (res) => {
+              wx.hideLoading()
+              const u = (res.data || {}).url
+              if (!u) return wx.showToast({ title: '没生成出来', icon: 'none' })
+              this.copyPrintLink(u)
+            }
+          })
           return
         }
         this.drawStatementImage(d, r.tapIndex === 1)
