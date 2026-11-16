@@ -91,6 +91,8 @@ Page({
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
     role: 'owner', staff_enabled: false, cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
+    er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
+    er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
     prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
     month_amort: 0, month_accrue_int: 0, month_dep: 0, month_expense_cash: 0,
@@ -1304,6 +1306,7 @@ Page({
       this.loadFlows()
     } else if (t === 'contact') {
       this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups()
+      this.loadEditReqs()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadMyDay()
     }
@@ -1782,6 +1785,130 @@ Page({
           success: () => {
             this.refresh()
             this._afterPay(id, amt, remain, 'ap')
+          }
+        })
+      }
+    })
+  },
+  // ===== 员工提「改单申请」，老板点同意才生效（第63轮）=====
+  openEditReq(e) {
+    const kind = e.currentTarget.dataset.kind
+    const id = Number(e.currentTarget.dataset.id)
+    let row = null
+    if (kind === 'ar') row = (this.data.ar_all || []).filter((x) => x.id === id)[0]
+    else if (kind === 'ap') row = (this.data.ap_all || []).filter((x) => x.id === id)[0]
+    else row = (this.data.expense_list || []).filter((x) => x.id === id)[0]
+    if (!row) return wx.showToast({ title: '这张单没找到，下拉刷新再试', icon: 'none' })
+    const title = kind === 'ar'
+      ? (row.customer || '') + ' · ' + (row.item_name || '加工')
+      : kind === 'ap' ? (row.supplier || '') + ' · 应付' : '支出 · ' + (row.category || '')
+    this.setData({
+      er_open: true, er_kind: kind, er_id: id, er_title: title,
+      er_item: kind === 'ar' ? (row.item_name || '') : '',
+      er_amount: String(kind === 'ar' ? (row.price || '') : (row.amount || '')),
+      er_cost: (kind === 'ar' && row.cost !== null && row.cost !== undefined) ? String(row.cost) : '',
+      er_due: (row.due_short || String(row.due_date || '').slice(5, 10) || ''),
+      er_operator: row.operator || '', er_remark: row.remark || '', er_cat: row.category || '', er_reason: '',
+      er_orig: {
+        item_name: String(row.item_name || ''), price: String(row.price === undefined ? '' : row.price),
+        cost: row.cost === null || row.cost === undefined ? '' : String(row.cost),
+        due: (row.due_short || String(row.due_date || '').slice(5, 10) || ''),
+        operator: String(row.operator || ''), amount: String(row.amount === undefined ? '' : row.amount),
+        remark: String(row.remark || ''), category: String(row.category || '')
+      }
+    })
+    wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+  },
+  closeEditReq() { this.setData({ er_open: false, er_reason: '' }) },
+  onErItem(e) { this.setData({ er_item: e.detail.value }) },
+  onErAmount(e) { this.setData({ er_amount: e.detail.value }) },
+  onErCost(e) { this.setData({ er_cost: e.detail.value }) },
+  onErDue(e) { this.setData({ er_due: e.detail.value }) },
+  onErOperator(e) { this.setData({ er_operator: e.detail.value }) },
+  onErRemark(e) { this.setData({ er_remark: e.detail.value }) },
+  onErCat(e) { this.setData({ er_cat: e.detail.value }) },
+  onErReason(e) { this.setData({ er_reason: e.detail.value }) },
+  submitEditReq() {
+    const d = this.data
+    const kind = d.er_kind
+    const ch = {}
+    const o = d.er_orig || {}
+    const diff = (v, k) => String(v || '') !== String(o[k] === undefined ? '' : o[k])
+    if (kind === 'ar') {
+      if (d.er_item && diff(d.er_item, 'item_name')) ch.item_name = d.er_item
+      if (d.er_amount !== '' && diff(d.er_amount, 'price')) ch.price = d.er_amount
+      if (d.er_cost !== '' && diff(d.er_cost, 'cost')) ch.cost = d.er_cost
+      if (d.er_due && diff(d.er_due, 'due')) ch.due_date = d.er_due
+      if (d.er_operator && diff(d.er_operator, 'operator')) ch.operator = d.er_operator
+    } else if (kind === 'ap') {
+      if (d.er_amount !== '' && diff(d.er_amount, 'amount')) ch.amount = d.er_amount
+      if (d.er_remark && diff(d.er_remark, 'remark')) ch.remark = d.er_remark
+      if (d.er_due && diff(d.er_due, 'due')) ch.due_date = d.er_due
+    } else {
+      if (d.er_amount !== '' && diff(d.er_amount, 'amount')) ch.amount = d.er_amount
+      if (d.er_cat && diff(d.er_cat, 'category')) ch.category = d.er_cat
+      if (d.er_remark && diff(d.er_remark, 'remark')) ch.remark = d.er_remark
+    }
+    if (!Object.keys(ch).length) return wx.showToast({ title: '先把要改的地方填上', icon: 'none' })
+    this.req({
+      url: API_BASE + '/edit-request', method: 'POST',
+      data: { kind, id: d.er_id, changes: ch, reason: d.er_reason },
+      success: (res) => {
+        const r = res.data || {}
+        if (!r.ok) return wx.showToast({ title: r.error || '提交没成功', icon: 'none' })
+        this.setData({ er_open: false })
+        wx.showToast({ title: '申请已提交，等老板同意', icon: 'none' })
+        this.loadEditReqs()
+      }
+    })
+  },
+  toggleErList() {
+    const open = !this.data.er_list_open
+    this.setData({ er_list_open: open })
+    if (open) this.loadEditReqs()
+  },
+  loadEditReqs() {
+    this.req({
+      url: API_BASE + '/edit-requests?status=' + (this.data.role === 'staff' ? 'all' : 'pending'),
+      success: (res) => {
+        const d = res.data || {}
+        const ST = { pending: '等老板处理', ok: '已同意', no: '已驳回' }
+        const rows = (d.rows || []).map((r) => Object.assign({}, r, { status_text: ST[r.status] || r.status }))
+        this.setData({ ers: rows, er_pending: this.data.role === 'staff' ? 0 : (d.count || 0) })
+      }, silent: true
+    })
+  },
+  approveEr(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '同意这次改动？', content: '同意后单据会按申请改掉，操作日志里会留痕。',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/edit-requests/' + id + '/approve', method: 'POST', data: {},
+          success: (res) => {
+            const d = res.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
+            wx.showToast({ title: '改好了', icon: 'success' })
+            this.loadEditReqs(); this.refresh()
+          }
+        })
+      }
+    })
+  },
+  rejectEr(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '驳回这条申请', editable: true, placeholderText: '跟员工说一句为什么（可不填）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/edit-requests/' + id + '/reject', method: 'POST', data: { note: r.content || '' },
+          success: (res) => {
+            const d = res.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没处理成', icon: 'none' })
+            wx.showToast({ title: '已驳回', icon: 'none' })
+            this.loadEditReqs()
           }
         })
       }

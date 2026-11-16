@@ -219,6 +219,7 @@ app.use('*', async (c, next) => {
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
       || /^\/(schema-check|books-check)/.test(path)
+      || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
   c.set('role', role)
@@ -6856,6 +6857,149 @@ app.delete('/error-log', async (c) => {
 app.get('/selfcheck', async (c) => c.json(await selfCheck(c.env.DB)))
 
 // 编辑应收单
+// ── 员工改单申请：员工不能直接删改，改成「提申请 → 老板一键同意/驳回」 ──
+const ER_FIELDS = {
+  ar: { table: 'orders', party: 'customer', fields: ['customer', 'item_name', 'price', 'cost', 'due_date', 'operator'] },
+  ap: { table: 'payables', party: 'supplier', fields: ['supplier', 'amount', 'remark', 'due_date', 'operator'] },
+  expense: { table: 'ledger', party: 'category', fields: ['amount', 'category', 'remark'] }
+}
+const ER_LABEL = { customer: '客户', item_name: '产品', price: '金额', amount: '金额', cost: '成本', due_date: '到期日', operator: '经手人', supplier: '供应商', remark: '备注', category: '分类' }
+async function erLoadRow(db, kind, id) {
+  const spec = ER_FIELDS[kind]
+  if (!spec) return null
+  if (kind === 'expense') {
+    const r = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type IN ('expense','fixed')").bind(id).first()
+    return r || null
+  }
+  return (await db.prepare('SELECT * FROM ' + spec.table + ' WHERE id=?').bind(id).first()) || null
+}
+const erSlim = (v) => (v === null || v === undefined ? '' : String(v))
+app.post('/edit-request', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json()
+  const kind = ['ar', 'ap', 'expense'].includes(b.kind) ? b.kind : ''
+  const id = num(b.id)
+  if (!kind || !id) return c.json({ ok: false, error: '没说要改哪一张' }, 400)
+  const row = await erLoadRow(db, kind, id)
+  if (!row) return c.json({ ok: false, error: '这张单找不到了（可能已被删）' }, 404)
+  const spec = ER_FIELDS[kind]
+  const changes = {}
+  const incoming = b.changes || {}
+  for (const f of spec.fields) {
+    if (incoming[f] === undefined) continue
+    let v = incoming[f]
+    if (f === 'price' || f === 'amount' || f === 'cost') v = round2(num(v))
+    if (f === 'due_date') v = toIsoDate(v) || null
+    if (typeof v === 'string') v = v.trim()
+    if (erSlim(v) === erSlim(row[f])) continue
+    changes[f] = v
+  }
+  if (!Object.keys(changes).length) return c.json({ ok: false, error: '没改任何内容' }, 400)
+  const reason = String(b.reason || '').trim().slice(0, 200)
+  const by = (c.get('role') === 'staff') ? '员工' : '老板'
+  const dup = await db.prepare("SELECT id FROM edit_requests WHERE kind=? AND ref_id=? AND status='pending' ORDER BY id DESC LIMIT 1").bind(kind, id).first().catch(() => null)
+  if (dup) return c.json({ ok: false, error: '这张单已经有一条申请在等了，等老板处理完再提', code: 'has_pending' }, 409)
+  await db.prepare('INSERT INTO edit_requests (kind,ref_id,changes,reason,by,status,created_at) VALUES (?,?,?,?,?,\'pending\',?)')
+    .bind(kind, id, JSON.stringify(changes), reason, by, now()).run()
+  await logAudit(db, '提修改申请', (kind === 'ar' ? row.customer : kind === 'ap' ? row.supplier : row.category) || '', `${Object.keys(changes).map((f) => (ER_LABEL[f] || f) + ' → ' + erSlim(changes[f])).join('；')}${reason ? '（' + reason + '）' : ''}`, `${kind}:${id}`, by)
+  return c.json({ ok: true })
+})
+app.get('/edit-requests', async (c) => {
+  const db = c.env.DB
+  const u = new URL(c.req.url)
+  const st = ['pending', 'ok', 'no', 'all'].includes(u.searchParams.get('status')) ? u.searchParams.get('status') : 'pending'
+  const role = c.get('role') || 'owner'
+  const cond = st === 'all' ? '1=1' : 'status=?'
+  const binds = st === 'all' ? [] : [st]
+  if (role === 'staff') {
+    // 员工能看到自己提的申请处理到哪一步了（看不到别人提的、也看不到审批按钮）
+    const mine = (await db.prepare("SELECT * FROM edit_requests WHERE by='员工' ORDER BY id DESC LIMIT 20").all()).results || []
+    const mrows = []
+    for (const r of mine) {
+      let ch = {}
+      try { ch = JSON.parse(r.changes || '{}') } catch (e) { ch = {} }
+      mrows.push({
+        id: r.id, kind: r.kind, ref_id: r.ref_id, by: r.by || '', status: r.status, note: r.note || '',
+        title: ER_LABEL[r.kind] + ' #' + r.ref_id,
+        date: (r.created_at || '').slice(0, 16).replace('T', ' '), done_at: (r.done_at || '').slice(0, 16).replace('T', ' '),
+        diffs: Object.keys(ch).map((f) => ({ f, label: ER_LABEL[f] || f, from: '', to: erSlim(ch[f]) })),
+        gone: false, mine: true
+      })
+    }
+    return c.json({ ok: true, count: mrows.length, rows: mrows, staff: true })
+  }
+  const rs = (await db.prepare('SELECT * FROM edit_requests WHERE ' + cond + ' ORDER BY id DESC LIMIT 60').bind(...binds).all()).results || []
+  const rows = []
+  for (const r of rs) {
+    let ch = {}
+    try { ch = JSON.parse(r.changes || '{}') } catch (e) { ch = {} }
+    const row = await erLoadRow(db, r.kind, r.ref_id)
+    const diffs = Object.keys(ch).map((f) => ({ f, label: ER_LABEL[f] || f, from: erSlim(row ? row[f] : '（已删）'), to: erSlim(ch[f]) }))
+    const title = !row ? '（单据已删除）' : (r.kind === 'ar' ? (row.customer || '') + ' · ' + (row.item_name || '加工') : r.kind === 'ap' ? (row.supplier || '') + ' · 应付' : '支出 · ' + (row.category || ''))
+    rows.push({ id: r.id, kind: r.kind, ref_id: r.ref_id, title, reason: r.reason || '', by: r.by || '', status: r.status, note: r.note || '',
+      date: (r.created_at || '').slice(0, 16).replace('T', ' '), done_at: (r.done_at || '').slice(0, 16).replace('T', ' '), diffs, gone: !row })
+  }
+  return c.json({ ok: true, count: rows.length, rows })
+})
+app.post('/edit-requests/:id/approve', async (c) => {
+  const db = c.env.DB
+  const id = c.req.param('id')
+  const er = await db.prepare('SELECT * FROM edit_requests WHERE id=?').bind(id).first()
+  if (!er) return c.json({ ok: false, error: '这条申请不在了' }, 404)
+  if (er.status !== 'pending') return c.json({ ok: false, error: '这条已经处理过了' }, 409)
+  const row = await erLoadRow(db, er.kind, er.ref_id)
+  if (!row) return c.json({ ok: false, error: '这张单已经删了，没法改' }, 409)
+  let ch = {}
+  try { ch = JSON.parse(er.changes || '{}') } catch (e) { ch = {} }
+  const spec = ER_FIELDS[er.kind]
+  const month = String(row.created_at || '').slice(0, 7)
+  if (await isMonthLocked(db, month)) return c.json({ ok: false, error: `${month} 已结账锁定，先解锁再改` }, 403)
+  if (er.kind === 'ar' || er.kind === 'ap') {
+    const amtF = er.kind === 'ar' ? 'price' : 'amount'
+    if (ch[amtF] !== undefined) {
+      const floor = round2(num(row.paid) + num(row.written_off))
+      if (round2(num(ch[amtF])) < floor) {
+        return c.json({ ok: false, error: `这张单已经收了 ${round2(num(row.paid))} 元、核销 ${round2(num(row.written_off))} 元，金额不能改成比 ${floor} 少` }, 400)
+      }
+    }
+  }
+  const sets = []
+  const binds = []
+  for (const f of Object.keys(ch)) {
+    if (spec.fields.indexOf(f) < 0) continue
+    sets.push(f + '=?')
+    binds.push(ch[f])
+  }
+  if (!sets.length) return c.json({ ok: false, error: '这条申请里的字段都不认识了（可能是旧版本）' }, 400)
+  if (er.kind !== 'expense') sets.push('rev=COALESCE(rev,0)+1')
+  await db.prepare('UPDATE ' + spec.table + ' SET ' + sets.join(', ') + ' WHERE id=?').bind(...binds, er.ref_id).run()
+  const d = diffText(Object.keys(ch).filter((f) => spec.fields.indexOf(f) >= 0).map((f) => [ER_LABEL[f] || f, erSlim(row[f]), erSlim(ch[f])]))
+  await db.prepare("UPDATE edit_requests SET status='ok', done_at=?, done_by='老板', note=? WHERE id=?").bind(now(), String(er.reason || ''), id).run()
+  await logAudit(db, '同意修改申请', er.kind + ':' + er.ref_id, (d || '（没改动）') + (er.by ? `（${er.by}提的）` : ''), `${er.kind}:${er.ref_id}`, '老板')
+  return c.json({ ok: true, changed: d })
+})
+app.post('/edit-requests/:id/reject', async (c) => {
+  const db = c.env.DB
+  const id = c.req.param('id')
+  const b = await c.req.json().catch(() => ({}))
+  const er = await db.prepare('SELECT * FROM edit_requests WHERE id=?').bind(id).first()
+  if (!er) return c.json({ ok: false, error: '这条申请不在了' }, 404)
+  if (er.status !== 'pending') return c.json({ ok: false, error: '这条已经处理过了' }, 409)
+  const note = String(b.note || '').trim().slice(0, 120)
+  await db.prepare("UPDATE edit_requests SET status='no', done_at=?, done_by='老板', note=? WHERE id=?").bind(now(), note, id).run()
+  await logAudit(db, '驳回修改申请', er.kind + ':' + er.ref_id, note || '（没写原因）', `${er.kind}:${er.ref_id}`, '老板')
+  return c.json({ ok: true })
+})
+app.post('/edit-requests/:id/cancel', async (c) => {
+  const db = c.env.DB
+  const id = c.req.param('id')
+  const er = await db.prepare('SELECT * FROM edit_requests WHERE id=?').bind(id).first()
+  if (!er) return c.json({ ok: false, error: '这条申请不在了' }, 404)
+  if (c.get('role') === 'staff' && er.by !== '员工') return c.json({ ok: false, error: '这条不是你提的' }, 403)
+  await db.prepare("UPDATE edit_requests SET status='no', done_at=?, done_by=?, note=? WHERE id=?").bind(now(), c.get('role') === 'staff' ? '员工撤回' : '老板撤回', '撤回', id).run()
+  return c.json({ ok: true })
+})
+
 app.patch('/orders/:id', async (c) => {
   const id = c.req.param('id')
   const { customer, item_name, price, due_date, operator, rev, cost } = await c.req.json()
@@ -8345,6 +8489,13 @@ app.get('/reminders', async (c) => {
   const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm, advRows] = R
   const items = []
   const push = (level, text, tab, list) => items.push({ level, text, tab, list: list || [] })
+  // 员工提的改单申请：老板点了同意才生效，别忘了
+  try {
+    if ((c.get('role') || 'owner') !== 'staff') {
+      const erN = await db.prepare("SELECT COUNT(*) n FROM edit_requests WHERE status='pending'").first()
+      if (num(erN && erN.n) > 0) push('yellow', `${num(erN.n)} 条员工改单申请等你处理`, 'me')
+    }
+  } catch (e) {}
   const odR = rows0(od)
   if (odR.length) {
     const t = odR.reduce((a, r) => a + num(r.unpaid), 0)

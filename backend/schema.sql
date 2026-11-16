@@ -337,3 +337,20 @@ CREATE TABLE IF NOT EXISTS assets (
   dispose_amount REAL DEFAULT 0,  -- 卖了多少钱（报废填 0）
   created_at TEXT NOT NULL
 );
+
+
+-- 员工改单申请（员工不能直接删改单据，提申请由老板一键同意/驳回）
+CREATE TABLE IF NOT EXISTS edit_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,              -- ar | ap | expense
+  ref_id INTEGER NOT NULL,
+  changes TEXT,                    -- JSON：要改成什么
+  reason TEXT,
+  by TEXT,                         -- 员工 | 老板
+  status TEXT DEFAULT 'pending',   -- pending | ok | no
+  note TEXT,
+  created_at TEXT,
+  done_at TEXT,
+  done_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_edit_req ON edit_requests(status, kind, ref_id);

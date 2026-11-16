@@ -3,6 +3,31 @@
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
 
+  <view class="card" wx:if="{{er_open}}">
+        <view class="ct">📝 申请改一下这张单</view>
+        <view class="tip">{{er_title}}。改了要老板点「同意」才会生效。</view>
+        <block wx:if="{{er_kind=='ar'}}">
+          <input class="inp" placeholder="产品/工序" value="{{er_item}}" bindinput="onErItem"/>
+          <input class="inp" type="digit" placeholder="金额" value="{{er_amount}}" bindinput="onErAmount"/>
+          <input class="inp" type="digit" placeholder="成本（材料·外协，可不填）" value="{{er_cost}}" bindinput="onErCost"/>
+        </block>
+        <block wx:if="{{er_kind=='ap'}}">
+          <input class="inp" type="digit" placeholder="应付金额" value="{{er_amount}}" bindinput="onErAmount"/>
+        </block>
+        <block wx:if="{{er_kind=='expense'}}">
+          <input class="inp" type="digit" placeholder="金额" value="{{er_amount}}" bindinput="onErAmount"/>
+          <input class="inp" placeholder="分类" value="{{er_cat}}" bindinput="onErCat"/>
+        </block>
+        <input class="inp" wx:if="{{er_kind!='expense'}}" placeholder="约定收/付款日（如 12-20，可不填）" value="{{er_due}}" bindinput="onErDue"/>
+        <input class="inp" wx:if="{{er_kind=='ar'}}" placeholder="经手人" value="{{er_operator}}" bindinput="onErOperator"/>
+        <input class="inp" wx:if="{{er_kind=='ap'}}" placeholder="备注" value="{{er_remark}}" bindinput="onErRemark"/>
+        <input class="inp" wx:if="{{er_kind=='expense'}}" placeholder="备注" value="{{er_remark}}" bindinput="onErRemark"/>
+        <input class="inp" placeholder="为什么改（如 单价记错了）" value="{{er_reason}}" bindinput="onErReason"/>
+        <view class="btns">
+          <button class="btn" size="mini" bindtap="submitEditReq">提交申请</button>
+          <button class="btn ghost" size="mini" bindtap="closeEditReq">取消</button>
+        </view>
+      </view>
   <view class="mtabs">
     <view class="mtab {{group=='home'?'on':''}}" bindtap="setGroup" data-g="home">工作台</view>
     <view class="mtab {{group=='bill'?'on':''}}" bindtap="setGroup" data-g="bill">记账</view>
@@ -469,6 +494,7 @@
           <button size="mini" bindtap="writeoffOrder" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
           <button size="mini" bindtap="againOrder" data-id="{{item.id}}">再来一单</button>
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="editOrder" data-id="{{item.id}}">改</button>
+          <button size="mini" wx:if="{{role=='staff'}}" bindtap="openEditReq" data-kind="ar" data-id="{{item.id}}">申请改</button>
           <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.customer}}">月结</button>
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="delOrder" data-id="{{item.id}}">删</button>
@@ -645,6 +671,7 @@
           <button size="mini" bindtap="writeoffPayable" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
           <button size="mini" bindtap="againPayable" data-id="{{item.id}}">再来一笔</button>
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="editPayable" data-id="{{item.id}}">改</button>
+          <button size="mini" wx:if="{{role=='staff'}}" bindtap="openEditReq" data-kind="ap" data-id="{{item.id}}">申请改</button>
           <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ap" data-name="{{item.supplier}}">月结</button>
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="delPayable" data-id="{{item.id}}">删</button>
@@ -718,6 +745,7 @@
         <view class="row2">{{item.remark}} · {{item.created_at}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="editExpense" data-id="{{item.id}}">改</button>
+          <button size="mini" wx:if="{{role=='staff'}}" bindtap="openEditReq" data-kind="expense" data-id="{{item.id}}">申请改</button>
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="delExpense" data-id="{{item.id}}">删</button>
         </view>
       </view>
@@ -1208,6 +1236,22 @@
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
       <button class="btn ghost" size="mini" wx:if="{{role!='staff'}}" bindtap="loadStaffAct">👀 员工最近记了什么</button>
+      <button class="btn ghost" size="mini" bindtap="toggleErList">{{role=='staff'?'📝 我提的修改申请':'📝 员工修改申请'}}{{er_pending?'（'+er_pending+' 条待处理）':''}}</button>
+      <view wx:if="{{er_list_open}}">
+        <view class="tip">{{role=='staff'?'你提的申请要等老板点同意才生效，同意后单据才会改。':'员工记错了会提申请过来，你点「同意」才真的改单（改完留痕在操作日志里）。'}}</view>
+        <view class="item" wx:for="{{ers}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.title}}</text><text class="amt">{{item.status_text}}</text></view>
+          <view class="row2" wx:for="{{item.diffs}}" wx:for-item="d" wx:key="f">{{d.label}}：{{d.from}} → {{d.to}}</view>
+          <view class="row2" wx:if="{{item.reason}}">原因：{{item.reason}}</view>
+          <view class="row2">{{item.by}}提 · {{item.date}}{{item.note?' · 处理说明：'+item.note:''}}</view>
+          <view class="btns" wx:if="{{role!='staff' && item.status=='pending'}}">
+            <button size="mini" bindtap="approveEr" data-id="{{item.id}}">同意</button>
+            <button size="mini" bindtap="rejectEr" data-id="{{item.id}}">驳回</button>
+          </view>
+        </view>
+        <view class="empty" wx:if="{{!ers.length}}">{{role=='staff'?'还没提过修改申请':'没有待处理的修改申请'}}</view>
+        <button class="btn ghost" size="mini" bindtap="toggleErList">收起</button>
+      </view>
       <view wx:if="{{sad}}">
         <view class="tip">{{sad.advice}}</view>
         <view class="item" wx:for="{{sad.rows}}" wx:key="index">
