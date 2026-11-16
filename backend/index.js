@@ -928,10 +928,11 @@ app.post('/import-rows', async (c) => {
     if (type === 'reimb') return [r.party, num(r.amount), r.category || '', r.item || '', date]
     return [r.party, num(r.amount), date]
   })
-  const r = await importRows(db, type, arr)
+  const r = await importRows(db, type, arr, { confirmDup: !!b.confirm_dup })
   const n = (r && typeof r === 'object') ? num(r.imported) : num(r)
   const locked = (r && typeof r === 'object') ? num(r.skipped_locked) : 0
-  return c.json({ ok: true, imported: n, skipped_locked: locked, count: rows.length })
+  const dup = (r && typeof r === 'object' && Array.isArray(r.dup)) ? r.dup : []
+  return c.json({ ok: true, imported: n, skipped_locked: locked, dup, dup_count: dup.length, count: rows.length })
 })
 
 // 对账核对：粘贴「客户 金额」，和系统里当前未结金额比
@@ -974,6 +975,66 @@ app.post('/reconcile', async (c) => {
   const type = String(b.type || 'ar')
   const rows = parseImportRows(type === 'ap' ? 'ap' : 'ar', b.text).filter((r) => r.ok)
   return c.json(await reconcileCore(c.env.DB, type, rows))
+})
+
+// ===== 对账台账：每次核对的结果留一条，月底能看「谁对过、还差几家」 =====
+app.post('/recon-save', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const type = String(b.type || 'ar')
+  const month = String(b.month || now().slice(0, 7)).slice(0, 7)
+  const rows = Array.isArray(b.rows) ? b.rows : []
+  if (!rows.length) return c.json({ error: '没有核对结果可保存' }, 400)
+  let n = 0
+  for (const r of rows) {
+    const party = String(r.party || '').trim()
+    if (!party) continue
+    const imported = round2(num(r.imported))
+    const system = round2(num(r.system))
+    await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,0,?,?)')
+      .bind(month, type, party, imported, system, round2(imported - system), String(r.state || ''), '', now()).run()
+    n++
+  }
+  await logAudit(db, '对账台账', type, `${month} 记 ${n} 家核对结果`)
+  return c.json({ ok: true, saved: n, month, type })
+})
+
+app.get('/recon-log', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const type = String(c.req.query('type') || '')
+  const where = []
+  const args = []
+  if (month) { where.push('month=?'); args.push(month) }
+  if (type === 'ar' || type === 'ap') { where.push('type=?'); args.push(type) }
+  const w = where.length ? ' WHERE ' + where.join(' AND ') : ''
+  const rows = (await db.prepare('SELECT * FROM recon_log' + w + ' ORDER BY id DESC LIMIT 200').bind(...args).all()).results || []
+  const months = (await db.prepare("SELECT month, type, COUNT(*) AS cnt, SUM(CASE WHEN state<>'match' THEN 1 ELSE 0 END) AS diff_cnt, SUM(CASE WHEN done=1 THEN 1 ELSE 0 END) AS done_cnt, MAX(created_at) AS last_at FROM recon_log GROUP BY month, type ORDER BY month DESC, type LIMIT 24").all()).results || []
+  const open = (await db.prepare("SELECT COUNT(*) AS c FROM recon_log WHERE done=0 AND state<>'match'").first()) || { c: 0 }
+  return c.json({ ok: true, rows, months, open_diff: num(open.c) })
+})
+
+app.patch('/recon-log/:id', async (c) => {
+  const id = num(c.req.param('id'))
+  const b = await c.req.json()
+  const cur = await c.env.DB.prepare('SELECT * FROM recon_log WHERE id=?').bind(id).first()
+  if (!cur) return c.json({ error: '这条核对记录不存在' }, 404)
+  const done = b.done === undefined ? num(cur.done) : (b.done ? 1 : 0)
+  const note = b.note === undefined ? String(cur.note || '') : String(b.note)
+  await c.env.DB.prepare('UPDATE recon_log SET done=?, note=? WHERE id=?').bind(done, note, id).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/recon-log/:id', async (c) => {
+  await c.env.DB.prepare('DELETE FROM recon_log WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/recon-log', async (c) => {
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  if (!month) return c.json({ error: '要指定月份' }, 400)
+  await c.env.DB.prepare('DELETE FROM recon_log WHERE month=?').bind(month).run()
+  return c.json({ ok: true })
 })
 
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
@@ -1734,7 +1795,7 @@ async function zipMake(entries) {
   return out
 }
 
-function sheetXml(rows) {
+function sheetXml(rows, dv) {
   const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   const colName = (i) => {
     let s = ''
@@ -1743,7 +1804,12 @@ function sheetXml(rows) {
     return s
   }
   const body = rows.map((r, ri) => '<row r="' + (ri + 1) + '">' + r.map((v, ci) => '<c r="' + colName(ci) + (ri + 1) + '" t="inlineStr"><is><t xml:space="preserve">' + esc(v) + '</t></is></c>').join('') + '</row>').join('')
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="8" width="16" customWidth="1"/></cols><sheetData>' + body + '</sheetData></worksheet>'
+  // 下拉选择（防止把「工资」手打成「工資」造成分类分叉）
+  let dvs = ''
+  if (Array.isArray(dv) && dv.length) {
+    dvs = '<dataValidations count="' + dv.length + '">' + dv.map((x) => '<dataValidation type="list" allowBlank="1" showErrorMessage="1" errorTitle="请从下拉里选" error="别手打，从下拉列表里选一个" sqref="' + x.sq + '"><formula1>"' + String(x.list.join(',')).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;') + '"</formula1></dataValidation>').join('') + '</dataValidations>'
+  }
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="8" width="16" customWidth="1"/></cols><sheetData>' + body + '</sheetData>' + dvs + '</worksheet>'
 }
 
 async function makeXlsxSheets(sheets) {
@@ -1758,7 +1824,7 @@ async function makeXlsxSheets(sheets) {
     { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + wbSheets + '</sheets></workbook>' },
     { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + wbRels + '</Relationships>' }
   ]
-  sheets.forEach((sh, i) => files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: sheetXml(sh.rows || []) }))
+  sheets.forEach((sh, i) => files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: sheetXml(sh.rows || [], sh.dv) }))
   return zipMake(files)
 }
 
@@ -1795,8 +1861,18 @@ const IMPORT_TEMPLATES = {
 app.get('/import-template-xlsx', async (c) => {
   const t = String(c.req.query('type') || 'ar')
   const T = IMPORT_TEMPLATES[t] || IMPORT_TEMPLATES.ar
-  const xlsx = await makeXlsx(T.rows)
-  return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx) })
+  let dv = []
+  if (t === 'expense' || t === 'reimb') {
+    let list = []
+    try {
+      const r = await c.env.DB.prepare("SELECT name FROM categories WHERE type='out' ORDER BY sort, id").all()
+      list = (r.results || []).map((x) => String(x.name || '').trim()).filter((x) => x && x.indexOf(',') < 0)
+    } catch (e) { list = [] }
+    if (!list.length) list = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
+    dv = [{ sq: 'C2:C200', list }]
+  }
+  const xlsx = await makeXlsxSheets([{ name: t === 'expense' ? '支出' : t === 'reimb' ? '报销' : '导入', rows: T.rows, dv }])
+  return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx), dv: dv.length > 0 })
 })
 
 // 直接上传 Excel 文件导入
@@ -1820,8 +1896,9 @@ app.post('/import-xlsx', async (c) => {
     if (!list.length) return c.json({ error: '这个表格里没认出「单位 + 金额」两列' }, 400)
     return c.json({ ok: true, recon: await reconcileCore(c.env.DB, type === 'recon_ap' ? 'ap' : 'ar', list) })
   }
-  const r = await importRows(c.env.DB, type, rows)
-  return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked) })
+  const r = await importRows(c.env.DB, type, rows, { confirmDup: !!body.confirm_dup })
+  const dup = (r && Array.isArray(r.dup)) ? r.dup : []
+  return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked), dup, dup_count: dup.length })
 })
 
 
@@ -3110,9 +3187,11 @@ app.post('/quick', async (c) => {
 
 // 批量导入
 // 批量导入核心：rows = [[单元格, ...], ...]（首行若是表头会自动跳过）
-async function importRows(db, type, rows) {
+async function importRows(db, type, rows, opts) {
   let n = 0
   let skippedLocked = 0
+  const o = opts || {}
+  const dups = []
   const t = now()
   // 第一行像表头才跳过（Excel 模板带表头）。判定要严：整行没有任何数字、且至少 2 个表头关键词，
   // 否则像“甲客户,加工,1000”这种正常数据行会被误当成表头吃掉。
@@ -3137,6 +3216,10 @@ async function importRows(db, type, rows) {
     if (type === 'ar') {
       const [customer, item, price, cost] = p
       if (customer && num(price) > 0) {
+        const dk = (d || t).slice(0, 10)
+        const from = addDaysIso(dk, -7)
+        const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(customer, num(price), from, dk).first()
+        if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar' }); continue }
         await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, created_at) VALUES (?,?,?,0,0,?,?)')
           .bind(customer, item || '批量导入', num(price), round2(num(cost)), d).run()
         n++
@@ -3151,6 +3234,9 @@ async function importRows(db, type, rows) {
     } else if (type === 'ap') {
       const [supplier, amount, remark] = p
       if (supplier && num(amount) > 0) {
+        const dk = (d || t).slice(0, 10)
+        const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
+        if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
         await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
           .bind(supplier, num(amount), '', remark || '', d).run()
         n++
@@ -3165,6 +3251,9 @@ async function importRows(db, type, rows) {
     } else if (type === 'expense') {
       const [amount, category, remark] = p
       if (num(amount) > 0) {
+        const dk = (d || t).slice(0, 10)
+        const hit = await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type='expense' AND amount=? AND category=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(num(amount), category || '', addDaysIso(dk, -7), dk).first()
+        if (hit && !o.confirmDup) { dups.push({ party: category || '支出', amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'expense' }); continue }
         const accI = await defaultAccountId(db)
         await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
           .bind(num(amount), category || '', remark || '', accI, d).run()
@@ -3190,18 +3279,17 @@ async function importRows(db, type, rows) {
       }
     }
   }
-  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}`)
-  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}`)
-  return { imported: n, skipped_locked: skippedLocked }
+  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`)
+  return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length }
 }
 
 app.post('/import', async (c) => {
-  const { type, text } = await c.req.json()
+  const { type, text, confirm_dup: cd } = await c.req.json()
   const lines = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean)
   if (!lines.length) return c.json({ error: '没有可导入的内容' }, 400)
   const rows = lines.map((row) => row.split(/[,，\t]/).map((s) => s.trim()))
-  const rr = await importRows(c.env.DB, type, rows)
-  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked) })
+  const rr = await importRows(c.env.DB, type, rows, { confirmDup: !!cd })
+  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count) })
 })
 
 // 年度流水报表

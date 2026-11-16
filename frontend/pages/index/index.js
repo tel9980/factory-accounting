@@ -33,7 +33,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
-    import_type: 0, import_text: '', import_preview: null, recon: null,
+    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -473,22 +473,8 @@ Page({
           filePath: f.path, encoding: 'base64',
           success: (fr) => {
             wx.showLoading({ title: '导入中…' })
-            this.req({
-              url: API_BASE + '/import-xlsx', method: 'POST',
-              data: { type: t, b64: fr.data },
-              success: (res) => {
-                wx.hideLoading()
-                const d = res.data || {}
-                this.setData({ import_file_name: f.name || 'Excel 文件' })
-                wx.showModal({
-                  title: '导入完成',
-                  content: '成功导入 ' + (d.imported || 0) + ' 条' + (d.skipped_locked ? '，跳过已结账月份 ' + d.skipped_locked + ' 条' : '') + '。金额和客户名请在列表里抽两条核对。',
-                  showCancel: false,
-                  success: () => this.refresh()
-                })
-              },
-              fail: () => wx.hideLoading()
-            })
+            this.setData({ import_file_name: f.name || 'Excel 文件' })
+            this.postXlsx(t, fr.data, false)
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) }
         })
@@ -756,6 +742,7 @@ Page({
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
+    if (t === 'import') this.loadReconLog()
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
@@ -1393,21 +1380,119 @@ Page({
     })
   },
   confirmImport() {
-    const { import_type, import_text, import_preview } = this.data
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const { import_preview } = this.data
     const good = ((import_preview && import_preview.rows) || []).filter((r) => r.ok)
+    this.postImportRows(good, false)
+  },
+  // Excel 文件入账；命中「同家同额 7 天内已记过」时先问一句
+  postXlsx(type, b64, force) {
+    this.req({
+      url: API_BASE + '/import-xlsx', method: 'POST',
+      data: { type, b64, confirm_dup: !!force },
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        const dup = d.dup || []
+        if (dup.length && !force) {
+          const lines = dup.slice(0, 5).map((x) => x.party + ' ' + x.amount + ' 元' + (x.date ? '（' + x.date + ' 已记过）' : '')).join('\n')
+          return wx.showModal({
+            title: '导入 ' + (d.imported || 0) + ' 条，' + dup.length + ' 条像重复',
+            content: lines + '\n\n这些先没进账。确实还没记过就点「仍然导入」。',
+            confirmText: '仍然导入', cancelText: '先不导',
+            success: (m) => { if (m.confirm) this.postXlsx(type, b64, true); else this.refresh() }
+          })
+        }
+        wx.showModal({
+          title: '导入完成',
+          content: '成功导入 ' + (d.imported || 0) + ' 条' + (d.skipped_locked ? '，跳过已结账月份 ' + d.skipped_locked + ' 条' : '') + (dup.length ? '，跳过重复 ' + dup.length + ' 条' : '') + '。金额和客户名请在列表里抽两条核对。',
+          showCancel: false,
+          success: () => this.refresh()
+        })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  // 入账；dup 不空时先问一句「好像记过了」，再决定是否强制导入
+  postImportRows(good, force) {
+    const { import_type } = this.data
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
     this.req({
       url: API_BASE + '/import-rows', method: 'POST',
-      data: { type: types[import_type], rows: good },
+      data: { type: types[import_type], rows: good, confirm_dup: !!force },
       success: (res) => {
-        const n = (res.data && res.data.imported) || 0
-        wx.showToast({ title: '已入账 ' + n + ' 条', icon: 'none' })
+        const d = res.data || {}
+        const n = d.imported || 0
+        const dup = d.dup || []
+        if (dup.length && !force) {
+          const lines = dup.slice(0, 5).map((x) => x.party + ' ' + x.amount + ' 元' + (x.date ? '（' + x.date + ' 已记过）' : '')).join('\n')
+          return wx.showModal({
+            title: '这 ' + dup.length + ' 条好像记过了',
+            content: '同一家、同一金额、7 天内已经有一笔：\n' + lines + '\n\n多半是重复粘贴。确定要再导一次吗？',
+            confirmText: '仍然导入', cancelText: '跳过这些',
+            success: (m) => {
+              if (m.confirm) this.postImportRows(good.map((r) => Object.assign({}, r, { confirm: true })), true)
+              else { wx.showToast({ title: '已跳过重复 ' + dup.length + ' 条', icon: 'none' }); this.setData({ import_text: '', import_preview: null }); this.refresh() }
+            }
+          })
+        }
+        wx.showToast({ title: '已入账 ' + n + ' 条' + (dup.length ? '，跳过重复 ' + dup.length : ''), icon: 'none' })
         this.setData({ import_text: '', import_preview: null })
         this.refresh()
       }
     })
   },
   cancelPreview() { this.setData({ import_preview: null }) },
+  // 把这次核对结果记进对账台账（月底能看谁对过、还差几家没处理）
+  saveRecon() {
+    const { recon, import_type } = this.data
+    if (!recon || !recon.rows || !recon.rows.length) return wx.showToast({ title: '先核对一次', icon: 'none' })
+    const type = (import_type === 1 || import_type === 3 || import_type === 6) ? 'ap' : 'ar'
+    this.req({
+      url: API_BASE + '/recon-save', method: 'POST',
+      data: { type, month: (recon.month || ''), rows: recon.rows },
+      success: (res) => {
+        const d = res.data || {}
+        wx.showToast({ title: '已记入台账 ' + (d.saved || 0) + ' 家', icon: 'none' })
+        this.loadReconLog()
+      }
+    })
+  },
+  loadReconLog() {
+    this.req({
+      url: API_BASE + '/recon-log',
+      success: (res) => {
+        const d = res.data || {}
+        const rows = (d.rows || []).map((r) => {
+          let st = '一致'
+          if (r.state === 'more') st = '我少记 ' + r.diff
+          else if (r.state === 'less') st = '我多记 ' + Math.abs(r.diff)
+          else if (r.state === 'new') st = '没这家'
+          return Object.assign({}, r, { state_text: st, bad: r.state !== 'match' && !r.done, done_text: r.done ? '已处理' : '待处理' })
+        })
+        this.setData({ recon_log: { rows, months: d.months || [], open_diff: d.open_diff || 0 } })
+      }
+    })
+  },
+  toggleReconDone(e) {
+    const r = (this.data.recon_log.rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    this.req({
+      url: API_BASE + '/recon-log/' + r.id, method: 'PATCH', data: { done: !r.done },
+      success: () => this.loadReconLog()
+    })
+  },
+  delReconLog(e) {
+    const r = (this.data.recon_log.rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    wx.showModal({
+      title: '删掉这条核对记录？', content: '只删台账记录，不动单据。',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({ url: API_BASE + '/recon-log/' + r.id, method: 'DELETE', success: () => this.loadReconLog() })
+      }
+    })
+  },
   reconView(d) {
     const rows = (d.rows || []).map((r) => {
       let st = '一致'

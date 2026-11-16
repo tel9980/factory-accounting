@@ -210,3 +210,19 @@ CREATE TABLE IF NOT EXISTS month_archive (
   data TEXT,
   created_at TEXT
 );
+
+-- 对账台账：每次核对留一条，月底能看谁对过、还差几家没处理
+CREATE TABLE IF NOT EXISTS recon_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT,
+  type TEXT,
+  party TEXT,
+  imported REAL DEFAULT 0,
+  system REAL DEFAULT 0,
+  diff REAL DEFAULT 0,
+  state TEXT,
+  done INTEGER DEFAULT 0,
+  note TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recon_log_month ON recon_log(month);

@@ -487,6 +487,20 @@
         </view>
         <view class="tip">「我少记」= 客户的数比系统里大，可能漏单或漏记收款；「我多记」= 系统里偏大，可能记重了或对方已付没记。</view>
         <view class="tip">核对完可以直接改单，不用重复导入。</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="saveRecon">📌 记进对账台账</button>
+          <button class="btn ghost" size="mini" bindtap="loadReconLog">看已记的台账</button>
+        </view>
+      </view>
+
+      <view class="prev" wx:if="{{recon_log}}">
+        <view class="prev-h">对账台账　{{recon_log.rows.length}} 条　还差 {{recon_log.open_diff}} 条没处理</view>
+        <view class="prev-row" wx:for="{{recon_log.rows}}" wx:key="id" data-i="{{index}}" bindtap="toggleReconDone" bindlongpress="delReconLog">
+          <text class="prev-t">{{item.month}} {{item.type=='ap'?'应付':'应收'}} · {{item.party}}</text>
+          <text class="prev-n">单上 {{item.imported}} / 我这 {{item.system}}</text>
+          <text class="{{item.bad?'red':'ok'}}">{{item.state_text}} · {{item.done_text}}</text>
+        </view>
+        <view class="tip">点一下 = 标记已处理／未处理；长按 = 删掉这条记录（不动单据）。每月对完一次，月底看「还差几家没处理」就知道有没有漏。</view>
       </view>
       <view class="tip">最省事的两步：① 点「下载 Excel 模板」→ 转发到电脑，用 Excel/WPS 填几行（表头别删，日期可留空）→ 微信发回给自己；② 回到这里点「选 Excel 文件直接导入」。Excel 存什么编码都能读，不用另存 CSV。也可以直接从 Excel 复制多行粘到上面的框里。</view>
     </view>
