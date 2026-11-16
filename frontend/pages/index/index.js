@@ -2907,6 +2907,20 @@ Page({
     this.jumpMap({ currentTarget: { dataset: { go: it.tab } } })
     if (it.k === 'chase' || it.k === 'soon') wx.showToast({ title: '点那一行「收钱」就行', icon: 'none' })
   },
+  showNextAll() {
+    const ns = this.data.ns || {}
+    const others = ns.others || []
+    if (!others.length) return wx.showToast({ title: '没有别的了', icon: 'none' })
+    wx.showActionSheet({
+      itemList: others.map((o) => o.title + (o.why ? '（' + o.why.slice(0, 14) + '）' : '')).slice(0, 6),
+      success: (r) => {
+        const it = others[r.tapIndex]
+        if (!it) return
+        if (it.tab) return this.jumpMap({ currentTarget: { dataset: { go: it.tab } } })
+        wx.showToast({ title: it.title, icon: 'none' })
+      }
+    })
+  },
   loadMyWork() {
     this.req({
       url: API_BASE + '/my-work',

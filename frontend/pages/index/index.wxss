@@ -314,3 +314,10 @@
 .ns-r { margin-top:14rpx; font-size:28rpx; font-weight:600; text-align:right; }
 .ns-more { font-size:24rpx; font-weight:400; opacity:.85; }
 .nsnone { margin:16rpx 24rpx; padding:20rpx 24rpx; border-radius:14rpx; background:#eef7ee; color:#2f7d32; font-size:26rpx; }
+
+/* 今天的活：一条重点 + 明细 */
+.mwrow.pri { background: #f5f9ff; border-radius: 8rpx; padding: 12rpx 10rpx; align-items: flex-start; }
+.mwdot.blue { background: #2f6df6; color: #fff; }
+.mwmain2 { flex: 1; display: flex; flex-direction: column; }
+.ns-t2 { font-size: 26rpx; color: #1a1a1a; font-weight: 600; }
+.ns-w2 { font-size: 22rpx; color: #666; margin-top: 4rpx; }

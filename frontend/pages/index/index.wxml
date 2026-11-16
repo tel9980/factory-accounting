@@ -42,13 +42,6 @@
       <view class="ab-t">今天要盯的款：{{due_brief}}</view>
       <view class="ab-a">去看 ›</view>
     </view>
-    <view class="nscard" wx:if="{{ns && ns.item}}" bindtap="goNext">
-      <view class="ns-k">👉 现在先做这一件</view>
-      <view class="ns-t">{{ns.item.title}}</view>
-      <view class="ns-w">{{ns.item.why}}</view>
-      <view class="ns-r">去做 ›<text class="ns-more" wx:if="{{ns.rest>0}}">　还有 {{ns.rest}} 件</text></view>
-    </view>
-    <view class="nsnone" wx:if="{{ns && !ns.item}}">{{ns.text}}</view>
     <view class="hstrip {{hc.score>=90?'good':hc.score>=75?'mid':'bad'}}" wx:if="{{hc}}" bindtap="openHealth">
       <view class="hs-l">
         <text class="hs-score">{{hc.score}}</text>
@@ -140,8 +133,20 @@
     </view>
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
     <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
-    <view class="card" wx:if="{{mw && mw.count>0}}">
-      <view class="card-h">我的活　<text class="tip">{{mw.text}}</text></view>
+    <view class="card" wx:if="{{ns || (mw && mw.count>0)}}">
+      <view class="card-h">今天的活<text class="card-n" wx:if="{{ns.rest>0}}" bindtap="showNextAll">还有 {{ns.rest}} 件 ›</text></view>
+      <view class="mwrow pri" wx:if="{{ns && ns.item}}" bindtap="goNext">
+        <text class="mwdot blue">急</text>
+        <view class="mwmain2">
+          <text class="ns-t2">{{ns.item.title}}</text>
+          <text class="ns-w2">{{ns.item.why}}</text>
+        </view>
+        <text class="mwside">去做 ›</text>
+      </view>
+      <view class="mwrow" wx:if="{{(!mw || !mw.count) && ns && !ns.item}}">
+        <text class="mwdot">☕</text>
+        <text class="mwmain">{{ns.text}}</text>
+      </view>
       <view class="mwrow" wx:for="{{mw.recv}}" wx:key="id" bindtap="setTab" data-t="ar">
         <text class="mwdot red">收</text>
         <text class="mwmain">{{item.party}} · {{item.item}}　还欠 ¥{{item.left_amt}}</text>
