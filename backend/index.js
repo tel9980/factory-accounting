@@ -798,7 +798,7 @@ async function closePrecheck(db, mm) {
   const [diff, anyRecon, summ, bk, unclosed, prevLock] = await Promise.all([
     db.prepare("SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=? AND done=0 AND COALESCE(state,'')<>'match'").bind(mm).first().catch(() => ({ n: 0 })),
     db.prepare('SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=?').bind(mm).first().catch(() => ({ n: 0 })),
-    db.prepare("SELECT v FROM settings WHERE key='pipeline_summary'").bind().first().catch(() => null),
+    db.prepare("SELECT value AS v FROM settings WHERE key='pipeline_summary'").first().catch(() => null),
     db.prepare('SELECT MAX(created_at) t FROM backups').bind().first().catch(() => null),
     db.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,7)=? AND price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005) + (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,7)=? AND amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005) n")
       .bind(mm, mm).first().catch(() => ({ n: 0 })),
@@ -1713,14 +1713,27 @@ app.get('/my-work', async (c) => {
   const R = rows(recv).map(r => ({ ...r, days: daysSince(r.due_date), late: daysSince(r.due_date) > 0 })),
     P = rows(pay).map(r => ({ ...r, days: daysSince(r.due_date), late: daysSince(r.due_date) > 0 })),
     G = rows(prog).map(r => ({ ...r, status_text: r.status === 1 ? '加工中' : '待加工', no_progress: !r.progress }))
-  const count = R.length + P.length + G.filter(g => g.no_progress).length
+  const { results: nd } = await db.prepare(
+    `SELECT (SELECT COUNT(*) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='')) +
+            (SELECT COUNT(*) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date='')) AS cnt,
+            (SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='')) AS ar_amt,
+            (SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date='')) AS ap_amt`
+  ).all()
+  const noDueCnt = num(nd && nd[0] && nd[0].cnt),
+    noDueAmt = round2(num(nd && nd[0] && nd[0].ar_amt) + num(nd && nd[0] && nd[0].ap_amt))
+  const todo = R.length + P.length + G.filter(g => g.no_progress).length
+  const count = todo + (noDueCnt > 0 ? 1 : 0)
+  let text = ''
+  if (todo) text = `今天有 ${todo} 件事：该收 ${R.length} 笔、该付 ${P.length} 笔、${G.filter(g => g.no_progress).length} 张单还没更新进度`
+  if (noDueCnt > 0) text += `${text ? '；' : '今天有 1 件事：'}还有 ${noDueCnt} 笔单子没约定收付款日（¥${noDueAmt}），设了账期到点才会提醒你`
+  if (!text) text = '今天没有非办不可的事 👍'
   return c.json({
     ok: true, role, today,
     recv: R, pay: P, prog: G,
     recv_total: round2(R.reduce((a, r) => a + num(r.left_amt), 0)),
     pay_total: round2(P.reduce((a, r) => a + num(r.left_amt), 0)),
-    count,
-    text: count ? `今天有 ${count} 件事：该收 ${R.length} 笔、该付 ${P.length} 笔、${G.filter(g => g.no_progress).length} 张单还没更新进度` : '今天没有非办不可的事 👍'
+    no_due_count: noDueCnt, no_due_amount: noDueAmt,
+    count, text
   })
 })
 

@@ -52,7 +52,7 @@
       <view class="hs-r">{{hc.clean?'账本干干净净':hc.count+' 处可以改好'}} ›</view>
     </view>
     <view class="card ob" wx:if="{{onboard && onboard.show && !onboard.all_done}}">
-      <view class="card-h">开账三步<text class="card-n">{{onboard.done}}/{{onboard.total}}</text></view>
+      <view class="card-h">开账引导（照着填几步就能用）<text class="card-n">{{onboard.done}}/{{onboard.total}}</text></view>
       <view class="ob-tip">先把底数填上，欠款合计、毛利、手头现金才准。三步做完一次就行。</view>
       <view class="ob-item {{item.done?'done':''}}" wx:for="{{onboard.steps}}" wx:key="k" bindtap="onbGo" data-k="{{item.k}}">
         <text class="ob-dot">{{item.done?'✓':'○'}}</text>
@@ -143,6 +143,11 @@
         <text class="mwdot red">付</text>
         <text class="mwmain">{{item.party}} · {{item.item || '货款'}}　还差 ¥{{item.left_amt}}</text>
         <text class="mwside {{item.late?'red':''}}">{{item.late ? '超 '+item.days+' 天' : '今天/3天内'}} ›</text>
+      </view>
+      <view class="mwrow" wx:if="{{mw.no_due_count>0}}" bindtap="setTab" data-t="contact">
+        <text class="mwdot">期</text>
+        <text class="mwmain">还有 {{mw.no_due_count}} 笔没约定收付款日（¥{{mw.no_due_amount}}）</text>
+        <text class="mwside">去设账期 ›</text>
       </view>
       <view class="mwrow" wx:for="{{mw.prog}}" wx:key="id" bindtap="showDetail" data-id="{{item.id}}" data-type="ar">
         <text class="mwdot">工</text>
