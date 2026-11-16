@@ -2060,11 +2060,11 @@ function fromB64(b64) {
 }
 
 const IMPORT_TEMPLATES = {
-  ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '成本(可空)', '日期(可空)'], ['张老板', '外壳加工', 5000, 3000, '11-05'], ['李老板', '法兰件', 3200, '', '']] },
+  ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '成本(可空)', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['张老板', '外壳加工', 5000, 3000, '12-05', '小王', '11-05'], ['李老板', '法兰件', 3200, '', '', '', '']] },
   ar_init: { name: '期初应收模板', rows: [['客户', '金额', '日期(可空)'], ['张老板', 5000, ''], ['李老板', 3000, '07-01']] },
-  ap: { name: '应付导入模板', rows: [['供应商', '金额', '备注', '日期(可空)'], ['王五金', 2000, '螺丝款', '11-05'], ['李钢材', 5000, '钢板', '']] },
+  ap: { name: '应付导入模板', rows: [['供应商', '金额', '备注', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['王五金', 2000, '螺丝款', '11-30', '小王', '11-05'], ['李钢材', 5000, '钢板', '', '', '']] },
   ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
-  expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '日期(可空)'], [1200, '房租', '8月房租', '11-01'], [300, '水电', '电费', '']] },
+  expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '经手人(可空)', '日期(可空)'], [1200, '房租', '8月房租', '', '11-01'], [300, '水电', '电费', '', '']] },
   loan: { name: '员工借支模板', rows: [['员工', '金额', '备注', '日期(可空)'], ['张三', 1000, '买辅料', '11-05'], ['李四', 500, '加油', '']] },
   recon: { name: '对账模板（客户/供应商对账单）', rows: [['单位', '金额'], ['张老板', 5000], ['李老板', 4000], ['王老板', 35000]] },
   reimb: { name: '报销模板', rows: [['员工', '金额', '分类', '备注', '日期(可空)'], ['张三', 800, '采购', '买螺丝', '11-06'], ['张三', 200, '运费', '送货油费', '']] }
@@ -2082,7 +2082,7 @@ app.get('/import-template-xlsx', async (c) => {
       list = (r.results || []).map((x) => String(x.name || '').trim()).filter((x) => x && x.indexOf(',') < 0)
     } catch (e) { list = [] }
     if (!list.length) list = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
-    dv = [{ sq: 'C2:C200', list }]
+    dv = [{ sq: t === 'expense' ? 'B2:B200' : 'C2:C200', list }]
   }
   const xlsx = await makeXlsxSheets([{ name: t === 'expense' ? '支出' : t === 'reimb' ? '报销' : '导入', rows: T.rows, dv }])
   return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx), dv: dv.length > 0 })
@@ -3582,14 +3582,15 @@ async function importRows(db, type, rows, opts) {
     }
     if (await isMonthLocked(db, (d || '').slice(0, 7))) { skippedLocked++; continue }
     if (type === 'ar') {
-      const [customer, item, price, cost] = p
+      const [customer, item, price, cost, dueC, operC] = p
       if (customer && num(price) > 0) {
         const dk = (d || t).slice(0, 10)
         const from = addDaysIso(dk, -7)
         const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(customer, num(price), from, dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar' }); continue }
-        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, created_at) VALUES (?,?,?,0,0,?,?)')
-          .bind(customer, item || '批量导入', num(price), round2(num(cost)), d).run()
+        const dueIso = dueC && looksLikeDate(dueC) ? toIsoDate(dueC) : await termDue(db, customer, d)
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
+          .bind(customer, item || '批量导入', num(price), round2(num(cost)), dueIso || null, operC ? String(operC).trim() : null, d).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(price)
         n++
@@ -3604,13 +3605,14 @@ async function importRows(db, type, rows, opts) {
         n++
       }
     } else if (type === 'ap') {
-      const [supplier, amount, remark] = p
+      const [supplier, amount, remark, dueP, operP] = p
       if (supplier && num(amount) > 0) {
         const dk = (d || t).slice(0, 10)
         const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
-        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
-          .bind(supplier, num(amount), '', remark || '', d).run()
+        const dueIso = dueP && looksLikeDate(dueP) ? toIsoDate(dueP) : await termDue(db, supplier, d)
+        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, operator, created_at) VALUES (?,?,0,?,?,?,?,?)')
+          .bind(supplier, num(amount), '', remark || '', dueIso || null, operP ? String(operP).trim() : null, d).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
         n++
@@ -3625,14 +3627,14 @@ async function importRows(db, type, rows, opts) {
         n++
       }
     } else if (type === 'expense') {
-      const [amount, category, remark] = p
+      const [amount, category, remark, operE] = p
       if (num(amount) > 0) {
         const dk = (d || t).slice(0, 10)
         const hit = await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type='expense' AND amount=? AND category=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(num(amount), category || '', addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: category || '支出', amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'expense' }); continue }
         const accI = await defaultAccountId(db)
-        const w = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
-          .bind(num(amount), category || '', remark || '', accI, d).run()
+        const w = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,?,1,?)")
+          .bind(num(amount), category || '', remark || '', operE ? String(operE).trim() : null, accI, d).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
         n++
