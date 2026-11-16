@@ -151,6 +151,7 @@
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}（已自动填好，改金额直接记）</view>
       <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem"/>
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
+      <input class="inp" placeholder="材料·外协成本(可选，填了才算真实毛利)" type="digit" value="{{o_cost}}" bindinput="onOCost"/>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
       <input class="inp" placeholder="经手人(可选)" value="{{o_operator}}" bindinput="onOOperator"/>
@@ -242,6 +243,7 @@
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
         <view class="row2">总{{item.price}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2" wx:if="{{item.cost>0}}">成本 {{item.cost}} · 毛利 {{item.gross}}（{{item.gross_pct}}%）</view>
         <view class="row2">{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.settled?' · 已结清':''}}</view>
         <view class="btns">
           <button size="mini" bindtap="receiveAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">收清</button>
@@ -742,6 +744,33 @@
         </view>
       </view>
       <view class="tip">毛利率 = （本月接单 − 赊购 − 现金成本）/ 接单；现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
+    </view>
+
+    <view class="form">
+      <view class="tip">💰 毛利分析（按单里填的「材料·外协成本」算真实毛利）</view>
+      <view class="btns">
+        <view class="seg {{mb_type=='customer'?'on':''}}" bindtap="setMbType" data-t="customer">按客户</view>
+        <view class="seg {{mb_type=='product'?'on':''}}" bindtap="setMbType" data-t="product">按产品</view>
+      </view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份，如 2026-11（留空=全部）" value="{{mb_month}}" bindinput="onMbMonth" bindconfirm="loadMarginBy"/>
+        <button class="btn half" size="mini" bindtap="loadMarginBy">查一下</button>
+      </view>
+      <view wx:if="{{mb}}">
+        <view class="kpi-row"><text>合计收入</text><text class="kpi-n">{{mb.revenue}} 元（{{mb.count}} 单）</text></view>
+        <view class="kpi-row"><text>材料·外协成本</text><text class="kpi-n">{{mb.cost}} 元</text></view>
+        <view class="kpi-row"><text>毛利</text><text class="kpi-n {{mb.profit>=0?'ok':'bad'}}">{{mb.profit}} 元 · 毛利率 {{mb.margin_pct}}%</text></view>
+        <view class="duesoon" wx:if="{{mb.missing_cost>0}}">{{mb.hint}}</view>
+        <view class="list">
+          <view class="item" wx:for="{{mb.list}}" wx:key="name">
+            <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.profit<0?'red':''}}">{{item.profit}}</text></view>
+            <view class="row2">{{item.cnt}} 单 · 收入 {{item.revenue}} · 成本 {{item.cost}} · 毛利率 {{item.margin_pct}}%<text wx:if="{{item.no_cost>0}}"> · {{item.no_cost}} 单没填成本</text></view>
+            <view class="row2" wx:if="{{item.unpaid>0}}">还没收 {{item.unpaid}} 元</view>
+          </view>
+        </view>
+        <view class="tip" wx:if="{{mb.worst.length}}">最不赚钱：{{mb.worst[0].name}}（毛利 {{mb.worst[0].profit}}，毛利率 {{mb.worst[0].margin_pct}}%）</view>
+      </view>
+      <view class="tip" wx:else>点「查一下」看这个月哪个客户 / 哪个产品最赚钱。录入应收时填了成本才算得准；不填就按 0 成本算，毛利会偏高。</view>
     </view>
 
     <view class="form">

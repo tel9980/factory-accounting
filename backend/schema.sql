@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS process_log (
 );
 CREATE INDEX IF NOT EXISTS idx_process_order ON process_log(order_id);
 
+-- orders.cost：这一单的材料/外协成本（算真实毛利用）
+-- ALTER TABLE orders ADD COLUMN cost REAL DEFAULT 0;
+
 -- 应付来源：应付单
 CREATE TABLE IF NOT EXISTS payables (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

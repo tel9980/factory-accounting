@@ -13,7 +13,8 @@ Page({
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
-    o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '', o_date: '',
+    o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_operator: '', o_date: '',
+    mb_type: 'customer', mb_month: '', mb: null,
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
@@ -720,7 +721,7 @@ Page({
     const t = (keep[g] || ['home']).indexOf(this.data.tab) >= 0 ? this.data.tab : (keep[g] || ['home'])[0]
     this.setData({ group: g, tab: t })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
@@ -742,7 +743,7 @@ Page({
     if (t === 'ar') this.loadAr()
     if (t === 'ap') this.loadAp()
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
     if (t === 'expense') this.loadLoans()
   },
   setTab(e) {
@@ -750,7 +751,7 @@ Page({
     const g = ({ ar: 'bill', ap: 'bill', expense: 'bill', import: 'bill', report: 'stat', asset: 'stat', history: 'stat', contact: 'me', home: 'home' })[t] || 'home'
     this.setData({ tab: t, group: g })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
+    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
@@ -861,6 +862,7 @@ Page({
   },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
   onOPrice(e) { this.setData({ o_price: e.detail.value }) },
+  onOCost(e) { this.setData({ o_cost: e.detail.value }) },
   onODue(e) { this.setData({ o_due: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
   pickCustomer(e) { const n = e.currentTarget.dataset.n; this.setData({ o_customer: n }); this.applyLastDeal('ar', n) },
@@ -880,13 +882,13 @@ Page({
   onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
   onImportText(e) { this.setData({ import_text: e.detail.value }) },
   addOrder() {
-    const { o_customer, o_item, o_price, o_due, o_operator, o_date } = this.data
+    const { o_customer, o_item, o_price, o_cost, o_due, o_operator, o_date } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST',
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price), due_date: o_due, operator: o_operator, date: o_date },
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, operator: o_operator, date: o_date },
       success: (res) => {
-        this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', o_date: '', last_tip: '' })
+        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' })
         this.refresh(); this.loadSuggest()
         const w = res.data && res.data.warn
         if (w) {
@@ -1065,14 +1067,14 @@ Page({
     const it = this.data.ar_all.find((x) => x.id === id) || {}
     wx.showModal({
       title: '改应收单', editable: true,
-      placeholderText: '客户,产品,金额',
-      content: [it.customer, it.item_name, it.price].join(','),
+      placeholderText: '客户,产品,金额,成本(可空)',
+      content: [it.customer, it.item_name, it.price, it.cost || ''].join(','),
       success: (r) => {
         if (r.confirm && r.content) {
           const p = r.content.split(/[,，]/).map((s) => s.trim())
           this.req({
             url: API_BASE + '/orders/' + id, method: 'PATCH',
-            data: { customer: p[0], item_name: p[1], price: Number(p[2]), rev: it.rev },
+            data: { customer: p[0], item_name: p[1], price: Number(p[2]), cost: p[3] === undefined || p[3] === '' ? undefined : Number(p[3]), rev: it.rev },
             success: (res) => {
               if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
               else this.refresh()
@@ -1947,6 +1949,22 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         this.req({ url: API_BASE + '/debts/' + id, method: 'DELETE', success: () => { this.loadDebts(); this.refresh() } })
+      }
+    })
+  },
+  // ===== 毛利分析（按客户 / 按产品） =====
+  setMbType(e) { this.setData({ mb_type: e.currentTarget.dataset.t }, () => this.loadMarginBy()) },
+  onMbMonth(e) { this.setData({ mb_month: e.detail.value }) },
+  loadMarginBy() {
+    const d = this.data
+    const m = String(d.mb_month || '').trim()
+    let url = API_BASE + '/margin-by?type=' + d.mb_type
+    if (/^\d{4}-\d{2}$/.test(m)) url += '&month=' + m
+    this.req({
+      url,
+      success: (res) => {
+        const x = res.data || {}
+        this.setData({ mb: x.list ? x : null })
       }
     })
   },

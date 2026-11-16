@@ -1606,7 +1606,7 @@ function fromB64(b64) {
 }
 
 const IMPORT_TEMPLATES = {
-  ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '日期(可空)'], ['张老板', '外壳加工', 5000, '11-05'], ['李老板', '法兰件', 3200, '']] },
+  ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '成本(可空)', '日期(可空)'], ['张老板', '外壳加工', 5000, 3000, '11-05'], ['李老板', '法兰件', 3200, '', '']] },
   ar_init: { name: '期初应收模板', rows: [['客户', '金额', '日期(可空)'], ['张老板', 5000, ''], ['李老板', 3000, '07-01']] },
   ap: { name: '应付导入模板', rows: [['供应商', '金额', '备注', '日期(可空)'], ['王五金', 2000, '螺丝款', '11-05'], ['李钢材', 5000, '钢板', '']] },
   ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
@@ -2052,6 +2052,9 @@ const daysSince = (iso) => {
 }
 const fmtOrder = (r) => ({
   ...r,
+  cost: round2(num(r.cost)),
+  gross: round2(num(r.price) - num(r.cost)),
+  gross_pct: num(r.price) > 0 ? round2(((num(r.price) - num(r.cost)) / num(r.price)) * 100) : 0,
   unpaid: round2(num(r.price) - num(r.paid) - num(r.written_off)),
   written_off: round2(num(r.written_off)),
   due_short: (r.due_date || '').slice(0, 10),
@@ -2379,14 +2382,14 @@ app.get('/expenses', async (c) => {
 
 // 记应收（加工订单）
 app.post('/orders', async (c) => {
-  const { customer, item_name, price, due_date, operator, date } = await c.req.json()
+  const { customer, item_name, price, due_date, operator, date, cost } = await c.req.json()
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
   const created = stampOf(date)
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date)
-  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?)')
-    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, created).run()
+  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
   // 超信用额度提醒（不拦，只提醒）
   let warn = null
@@ -2948,10 +2951,10 @@ async function importRows(db, type, rows) {
     }
     if (await isMonthLocked(db, (d || '').slice(0, 7))) { skippedLocked++; continue }
     if (type === 'ar') {
-      const [customer, item, price] = p
+      const [customer, item, price, cost] = p
       if (customer && num(price) > 0) {
-        await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
-          .bind(customer, item || '批量导入', num(price), d).run()
+        await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, created_at) VALUES (?,?,?,0,0,?,?)')
+          .bind(customer, item || '批量导入', num(price), round2(num(cost)), d).run()
         n++
       }
     } else if (type === 'ar_init') {
@@ -3250,7 +3253,7 @@ app.get('/selfcheck', async (c) => c.json(await selfCheck(c.env.DB)))
 // 编辑应收单
 app.patch('/orders/:id', async (c) => {
   const id = c.req.param('id')
-  const { customer, item_name, price, due_date, operator, rev } = await c.req.json()
+  const { customer, item_name, price, due_date, operator, rev, cost } = await c.req.json()
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
@@ -3262,8 +3265,9 @@ app.patch('/orders/:id', async (c) => {
   if (p < num(o.paid)) return c.json({ error: '金额不能小于已收款' }, 400)
   const nd = due_date !== undefined ? (toIsoDate(due_date) || null) : (o.due_date || null)
   const op = operator !== undefined ? (String(operator).trim() || null) : (o.operator || null)
-  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(customer || o.customer, item_name || o.item_name, p, nd, op, id).run()
+  const nc = cost !== undefined ? round2(num(cost)) : round2(num(o.cost))
+  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, rev=COALESCE(rev,0)+1 WHERE id=?')
+    .bind(customer || o.customer, item_name || o.item_name, p, nd, op, nc, id).run()
   await logAudit(db, '编辑应收', customer || o.customer, `${customer || o.customer} ${item_name || o.item_name} ¥${p}`)
   return c.json({ ok: true })
 })
@@ -3812,6 +3816,45 @@ app.get('/month-report', async (c) => {
 })
 
 // 财务指标
+// 客户 / 产品毛利分析（按单填的「材料·外协成本」算真实毛利）
+app.get('/margin-by', async (c) => {
+  const db = c.env.DB
+  const type = String(c.req.query('type') || 'customer') === 'product' ? 'product' : 'customer'
+  let from = String(c.req.query('from') || '').slice(0, 10)
+  let to = String(c.req.query('to') || '').slice(0, 10)
+  const m = String(c.req.query('month') || '').slice(0, 7)
+  if (/^\d{4}-\d{2}$/.test(m)) { from = m + '-01'; to = m + '-31' }
+  const rows = (await db.prepare("SELECT * FROM orders WHERE (?='' OR substr(created_at,1,10)>=?) AND (?='' OR substr(created_at,1,10)<=?)").bind(from, from, to, to).all()).results
+  const key = type === 'customer' ? 'customer' : 'item_name'
+  const map = new Map()
+  let missing = 0
+  for (const r of rows) {
+    const k = String(r[key] || (type === 'customer' ? '（没写客户）' : '（没写产品）'))
+    const g = map.get(k) || { name: k, cnt: 0, revenue: 0, cost: 0, profit: 0, unpaid: 0, no_cost: 0 }
+    g.cnt += 1
+    g.revenue = round2(g.revenue + num(r.price))
+    g.cost = round2(g.cost + num(r.cost))
+    g.profit = round2(g.revenue - g.cost)
+    g.unpaid = round2(g.unpaid + Math.max(0, num(r.price) - num(r.paid) - num(r.written_off)))
+    if (!num(r.cost)) { g.no_cost += 1; missing += 1 }
+    map.set(k, g)
+  }
+  const list = Array.from(map.values())
+    .map((g) => ({ ...g, margin_pct: g.revenue > 0 ? round2((g.profit / g.revenue) * 100) : 0 }))
+    .sort((a, b) => b.profit - a.profit)
+  const revenue = round2(list.reduce((a, x) => a + x.revenue, 0))
+  const cost = round2(list.reduce((a, x) => a + x.cost, 0))
+  const profit = round2(revenue - cost)
+  return c.json({
+    type, from, to, month: m || '', count: rows.length,
+    revenue, cost, profit, margin_pct: revenue > 0 ? round2((profit / revenue) * 100) : 0,
+    missing_cost: missing,
+    hint: missing > 0 ? `有 ${missing} 张单没填「材料·外协成本」，这些单的毛利会偏高（按 0 成本算）` : '',
+    list: list.slice(0, 50),
+    worst: list.filter((x) => x.cnt > 0).slice(-3).reverse()
+  })
+})
+
 app.get('/kpi', async (c) => {
   const db = c.env.DB
   let m = String(c.req.query('month') || '').slice(0, 7)
