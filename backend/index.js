@@ -6281,9 +6281,16 @@ app.get('/health-check', async (c) => {
   add('wx', '微信提醒没开', num(wxCnt.c) > 0 ? 0 : 1, '开了之后每天 9 点自动推「今天该收/该付」，不用自己记', '设置 → 微信提醒')
   void lastM
 
+  // 空账本：还没记过任何单子和流水时，「没备份」「上月没结账」「微信没开」都不算问题，
+  // 否则新用户一进来就看到 77 分和一堆要处理的事，反而不想看。
+  const totRow = await db.prepare('SELECT (SELECT COUNT(*) FROM orders)+(SELECT COUNT(*) FROM payables)+(SELECT COUNT(*) FROM ledger) AS tot').first().catch(() => ({ tot: 0 }))
+  const emptyBook = num(totRow && totRow.tot) === 0
+  let items2 = items
+  if (emptyBook) items2 = items.filter((x) => !['lock', 'backup', 'wx', 'err'].includes(x.k))
+
   const GO = { cost: 'ar', due: 'ap', term: 'contact', phone: 'contact', acc: 'flows', dup: 'ar', lock: 'report', err: 'report', backup: 'report', wx: 'contact' }
-  for (const it of items) it.tab = GO[it.k] || 'home'
-  const warn = items.filter((x) => x.count > 0)
+  for (const it of items2) it.tab = GO[it.k] || 'home'
+  const warn = items2.filter((x) => x.count > 0)
   const wOf = (x) => (x.k === 'err' ? 10 : x.k === 'backup' ? 10 : x.k === 'lock' ? 5 : 8)
   const score = Math.max(0, 100 - warn.reduce((a, x) => a + wOf(x), 0))
   const grade = score >= 90 ? '好' : score >= 75 ? '还行' : '要处理一下'
@@ -6291,7 +6298,7 @@ app.get('/health-check', async (c) => {
   // 健康分历史（每天只记一条，留着看趋势）
   const today = now().slice(0, 10)
   let hist = []
-  try { hist = JSON.parse((await db.prepare("SELECT v FROM settings WHERE key='health_hist'").first() || {}).v || '[]') } catch (e) { hist = [] }
+  try { hist = JSON.parse((await db.prepare("SELECT value AS v FROM settings WHERE key='health_hist'").first() || {}).v || '[]') } catch (e) { hist = [] }
   if (!Array.isArray(hist)) hist = []
   const last = hist[hist.length - 1]
   let needWrite = false
@@ -6300,12 +6307,12 @@ app.get('/health-check', async (c) => {
   hist = hist.slice(-8)
   if (needWrite) {
     try {
-      await db.prepare("INSERT INTO settings (key, v) VALUES ('health_hist', ?) ON CONFLICT(key) DO UPDATE SET v=excluded.v").bind(JSON.stringify(hist)).run()
+      await db.prepare("INSERT INTO settings (key, value) VALUES ('health_hist', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(hist)).run()
     } catch (e) { /* 记不上不影响结果 */ }
   }
   const prevRec = hist.filter((x) => x.d !== today).slice(-1)[0]
   const delta = prevRec ? round2(score - num(prevRec.s)) : 0
-  return c.json({ ok: true, score, grade, clean: warn.length === 0, count: warn.length, items, top, hist, delta, at: now() })
+  return c.json({ ok: true, score, grade, clean: warn.length === 0, count: warn.length, items: items2, top, hist, delta, empty: emptyBook, at: now() })
 })
 
 // 运行日志（出错留痕查询）
