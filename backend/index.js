@@ -3012,22 +3012,33 @@ app.get('/reminders', async (c) => {
   const db = c.env.DB
   const today = now().slice(0, 10)
   const items = []
-  const push = (level, text, tab) => items.push({ level, text, tab })
-  const od = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= date(?, '-30 day')").bind(today).first()
-  if (num(od.n) > 0) push('red', `${num(od.n)} 张应收逾期超 30 天，共 ¥${round2(num(od.t))}`, 'ar')
-  const ds = await db.prepare("SELECT COUNT(*) n FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date BETWEEN ? AND date(?, '+7 day')").bind(today, today).first()
-  if (num(ds.n) > 0) push('yellow', `${num(ds.n)} 张应收 7 天内到期`, 'ar')
-  const ps = await db.prepare("SELECT COUNT(*) n FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date BETWEEN ? AND date(?, '+7 day')").bind(today, today).first()
-  if (num(ps.n) > 0) push('yellow', `${num(ps.n)} 笔应付 7 天内要付`, 'ap')
+  const push = (level, text, tab, list) => items.push({ level, text, tab, list: list || [] })
+  // 应收逾期超 30 天：带上具体是哪个客户、多少、拖了几天，首页直接能看到名字
+  const od = await db.prepare("SELECT id, customer, (price-paid-COALESCE(written_off,0)) AS unpaid, created_at FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= date(?, '-30 day') ORDER BY created_at LIMIT 50").bind(today).all()
+  if (od.results.length) {
+    const t = od.results.reduce((a, r) => a + num(r.unpaid), 0)
+    push('red', `${od.results.length} 张应收逾期超 30 天，共 ¥${round2(t)}`, 'ar',
+      od.results.slice(0, 3).map((r) => ({ party: r.customer || '', amount: round2(num(r.unpaid)), note: `已 ${daysSince(r.created_at)} 天` })))
+  }
+  const ds = await db.prepare("SELECT id, customer, (price-paid-COALESCE(written_off,0)) AS unpaid, due_date FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date BETWEEN ? AND date(?, '+7 day') ORDER BY due_date LIMIT 50").bind(today, today).all()
+  if (ds.results.length) {
+    push('yellow', `${ds.results.length} 张应收 7 天内到期`, 'ar',
+      ds.results.slice(0, 3).map((r) => ({ party: r.customer || '', amount: round2(num(r.unpaid)), note: (r.due_date || '').slice(5, 10) + ' 到期' })))
+  }
+  const ps = await db.prepare("SELECT id, supplier, (amount-paid-COALESCE(written_off,0)) AS unpaid, due_date FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date BETWEEN ? AND date(?, '+7 day') ORDER BY due_date LIMIT 50").bind(today, today).all()
+  if (ps.results.length) {
+    push('yellow', `${ps.results.length} 笔应付 7 天内要付`, 'ap',
+      ps.results.slice(0, 3).map((r) => ({ party: r.supplier || '', amount: round2(num(r.unpaid)), note: (r.due_date || '').slice(5, 10) + ' 要付' })))
+  }
   const bo = await db.prepare("SELECT COUNT(*) n FROM budgets WHERE amount > 0 AND (SELECT COALESCE(SUM(l.amount),0) FROM ledger l WHERE l.direction='out' AND l.cash=1 AND l.ref_type<>'transfer' AND COALESCE(NULLIF(l.category,''),'其他')=budgets.category AND substr(l.created_at,1,7)=?) >= budgets.amount").bind(now().slice(0, 7)).first()
   if (num(bo.n) > 0) push('yellow', `${num(bo.n)} 个分类已经花超预算`, 'home')
-  const un = await db.prepare("SELECT COUNT(*) n FROM bank_flows WHERE matched_type IS NULL").first()
+  const un = await db.prepare('SELECT COUNT(*) n FROM bank_flows WHERE matched_type IS NULL').first()
   if (num(un.n) > 0) push('yellow', `${num(un.n)} 笔银行流水还没认领`, 'nw')
   const lo = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount-used-returned),0) t FROM loans').first()
   if (num(lo.n) > 0 && num(lo.t) > 0) push('yellow', `员工借支还有 ¥${round2(num(lo.t))} 没清`, 'expense')
-  const iv = await db.prepare("SELECT COUNT(*) n FROM orders o WHERE o.paid > 0 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.order_id=o.id)").first()
+  const iv = await db.prepare('SELECT COUNT(*) n FROM orders o WHERE o.paid > 0 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.order_id=o.id)').first()
   if (num(iv.n) > 0) push('gray', `${num(iv.n)} 张已收款的单还没开发票`, 'nw')
-  return c.json({ items, count: items.length })
+  return c.json({ items, count: items.length, today })
 })
 
 // ── 第四档：坏账核销 / 账户内部转账 ──

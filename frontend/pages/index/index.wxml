@@ -36,12 +36,22 @@
       <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘语音说话</view>
     </view>
 
+    <view class="alertbar" wx:if="{{overdue_count > 0 || due_soon_count > 0 || pay_soon_count > 0}}" bindtap="jumpTodo">
+      <view class="ab-t">今天要盯的款：{{due_brief}}</view>
+      <view class="ab-a">去看 ›</view>
+    </view>
     <view class="card" wx:if="{{rem_items.length}}">
       <view class="card-h">今天要做的事<text class="card-n">{{rem_items.length}}</text></view>
-      <view class="todo lv-{{item.level}}" wx:for="{{rem_items}}" wx:key="text" bindtap="goRem" data-tab="{{item.tab}}">
-        <text class="todo-dot"></text>
-        <text class="todo-t">{{item.text}}</text>
-        <text class="todo-a">去处理 ›</text>
+      <view wx:for="{{rem_items}}" wx:key="text" wx:for-item="ri">
+        <view class="todo lv-{{ri.level}}" bindtap="goRem" data-tab="{{ri.tab}}">
+          <text class="todo-dot"></text>
+          <text class="todo-t">{{ri.text}}</text>
+          <text class="todo-a">去处理 ›</text>
+        </view>
+        <view class="todo-list" wx:if="{{ri.list.length}}">
+          <view class="todo-li" wx:for="{{ri.list}}" wx:for-item="li" wx:key="party">{{li.party}} ¥{{li.amount}} · {{li.note}}</view>
+          <view class="todo-more" wx:if="{{ri.list.length >= 3}}">点上面这行进列表看全部 ›</view>
+        </view>
       </view>
     </view>
     <view class="card" wx:if="{{!rem_items.length}}">

@@ -552,6 +552,11 @@ Page({
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
             due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || [],
             pay_soon_count: res.data.pay_soon_count || 0, pay_soon: res.data.pay_soon || [],
+            due_brief: [
+              res.data.overdue_count ? '逾期 ' + res.data.overdue_count + ' 单' : '',
+              res.data.due_soon_count ? '7天内到期 ' + res.data.due_soon_count + ' 单' : '',
+              res.data.pay_soon_count ? '要付 ' + res.data.pay_soon_count + ' 笔' : ''
+            ].filter((x) => x).join(' · '),
             today_income: res.data.today_income || 0,
             top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0,
             budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0,
@@ -689,6 +694,10 @@ Page({
     if (t === 'ar' || t === 'ap' || t === 'expense') this.loadSuggest()
   },
   // 工作台待办点击跳转（reminders 里的 tab: ar/ap/expense/nw/home）
+  jumpTodo() {
+    if (this.data.overdue_count > 0 || this.data.due_soon_count > 0) this.setData({ tab: 'ar' })
+    else if (this.data.pay_soon_count > 0) this.setData({ tab: 'ap' })
+  },
   goRem(e) {
     const t0 = e.currentTarget.dataset.tab
     const t = ({ nw: 'asset', home: 'report' })[t0] || t0 || 'home'

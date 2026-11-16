@@ -149,3 +149,10 @@
 .q { width: 25%; text-align: center; padding: 18rpx 0; }
 .qi { width: 76rpx; height: 76rpx; line-height: 76rpx; margin: 0 auto 10rpx; border-radius: 24rpx; background: #eaf2ff; color: #1f6feb; font-size: 34rpx; }
 .qn { font-size: 24rpx; color: #444; }
+
+.alertbar { display: flex; align-items: center; justify-content: space-between; background: linear-gradient(90deg,#ffe9e9,#fff4e6); border-left: 8rpx solid #e64646; border-radius: 12rpx; padding: 18rpx 20rpx; margin-bottom: 12rpx; }
+.ab-t { flex: 1; font-size: 27rpx; font-weight: 700; color: #b02525; line-height: 1.45; }
+.ab-a { font-size: 25rpx; color: #b02525; flex: none; margin-left: 12rpx; }
+.todo-list { padding: 0 0 8rpx 26rpx; }
+.todo-li { font-size: 23rpx; color: #666; line-height: 1.7; }
+.todo-more { font-size: 22rpx; color: #1f6feb; padding-top: 4rpx; }
