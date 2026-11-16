@@ -186,3 +186,16 @@ CREATE TABLE IF NOT EXISTS advances (
 CREATE INDEX IF NOT EXISTS idx_ledger_account ON ledger(account_id);
 CREATE INDEX IF NOT EXISTS idx_advances_party ON advances(type, party);
 CREATE INDEX IF NOT EXISTS idx_categories_type ON categories(type);
+
+-- 员工借支与报销（借支=现金先给员工，不冲成本；报销=按分类记支出，冲借支不动现金）
+CREATE TABLE IF NOT EXISTS loans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  staff TEXT NOT NULL,
+  amount REAL NOT NULL DEFAULT 0,
+  used REAL NOT NULL DEFAULT 0,
+  returned REAL NOT NULL DEFAULT 0,
+  remark TEXT,
+  account_id INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_loans_staff ON loans(staff);

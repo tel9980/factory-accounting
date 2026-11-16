@@ -18,12 +18,14 @@ Page({
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0,
+    l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
+    cur_loan: 0, cur_loan_name: '', rl_amount: '', rl_category: 0, rl_remark: '',
     cash_balance: 0, accounts: [], acc_names: [], acc_idx: 0, acc_id: 0, acc_name: '',
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
-    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
+    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
     import_type: 0, import_text: '',
-    import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
+    import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '',
     pc_month: '', pc: null,
@@ -134,6 +136,7 @@ Page({
     this.loadTrash()
     this.loadPhrases()
     this.loadBudgets()
+    this.loadLoans()
     this.loadBooks()
     this.loadAccounts()
     this.loadCategories()
@@ -246,6 +249,127 @@ Page({
         if (!r.confirm) return
         this.req({ url: API_BASE + '/payables/' + id + '/apply-advance', method: 'POST', data: {}, success: () => this.refresh() })
       }
+    })
+  },
+  // ── 员工借支 / 报销 ──
+  loadLoans() {
+    this.req({ url: API_BASE + '/loans', success: (res) => {
+      if (res.data && !res.data.error) {
+        this.setData({
+          loans: res.data.list || [],
+          loan_staff: res.data.staff || [],
+          loan_open: res.data.open_total || 0
+        })
+      }
+    }})
+  },
+  onLStaff(e) { this.setData({ l_staff: e.detail.value }) },
+  onLAmount(e) { this.setData({ l_amount: e.detail.value }) },
+  onLRemark(e) { this.setData({ l_remark: e.detail.value }) },
+  addLoan() {
+    const staff = (this.data.l_staff || '').trim()
+    const amount = Number(this.data.l_amount) || 0
+    if (!staff) return wx.showToast({ title: '填员工姓名', icon: 'none' })
+    if (amount <= 0) return wx.showToast({ title: '填借出金额', icon: 'none' })
+    this.req({
+      url: API_BASE + '/loans', method: 'POST',
+      data: { staff, amount, remark: this.data.l_remark || '', account_id: this.data.acc_id || 0 },
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          this.setData({ l_staff: '', l_amount: '', l_remark: '' })
+          this.loadLoans(); this.refresh()
+          wx.showToast({ title: '已借出 ' + amount, icon: 'none' })
+        } else {
+          wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+        }
+      }
+    })
+  },
+  startReimburse(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    const name = e.currentTarget.dataset.name || ''
+    const remain = Number(e.currentTarget.dataset.remain) || 0
+    this.setData({ cur_loan: id, cur_loan_name: name, rl_amount: String(remain), rl_category: this.data.e_category || 0, rl_remark: '' })
+  },
+  cancelReimburse() { this.setData({ cur_loan: 0, cur_loan_name: '', rl_amount: '', rl_remark: '' }) },
+  onRlAmount(e) { this.setData({ rl_amount: e.detail.value }) },
+  onRlCategory(e) { this.setData({ rl_category: Number(e.detail.value) }) },
+  onRlRemark(e) { this.setData({ rl_remark: e.detail.value }) },
+  doReimburse() {
+    const id = this.data.cur_loan
+    if (!id) return
+    const amount = Number(this.data.rl_amount) || 0
+    const category = (this.data.categories || [])[this.data.rl_category] || '其他'
+    this.req({
+      url: API_BASE + '/loans/' + id + '/reimburse', method: 'POST',
+      data: { amount, category, remark: this.data.rl_remark || '' },
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          this.setData({ cur_loan: 0, cur_loan_name: '', rl_amount: '', rl_remark: '' })
+          this.loadLoans(); this.refresh()
+          wx.showToast({ title: '报销 ¥' + res.data.amount, icon: 'none' })
+        } else {
+          wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+        }
+      }
+    })
+  },
+  returnLoan(e) {
+    const id = e.currentTarget.dataset.id
+    const remain = Number(e.currentTarget.dataset.remain) || 0
+    wx.showModal({
+      title: '退回余款', content: '员工把没花完的钱交回来，默认退 ¥' + remain,
+      editable: true, placeholderText: String(remain),
+      success: (r) => {
+        if (!r.confirm) return
+        const a = Number((r.content || '').trim() || remain) || remain
+        this.req({
+          url: API_BASE + '/loans/' + id + '/return', method: 'POST',
+          data: { amount: a, account_id: this.data.acc_id || 0 },
+          success: () => { this.loadLoans(); this.refresh(); wx.showToast({ title: '已退回 ' + a, icon: 'none' }) }
+        })
+      }
+    })
+  },
+  delLoan(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删借支', content: '删掉这笔借支记录（钱也一起撤销）', confirmColor: '#e64340',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/loans/' + id, method: 'DELETE',
+          success: (res) => {
+            if (res.data && res.data.ok) { this.loadLoans(); this.refresh() }
+            else wx.showToast({ title: (res.data && res.data.error) || '不能删', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  // 导出导入模板（CSV，微信发到电脑用 Excel 填）
+  exportTemplate() {
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const t = types[this.data.import_type] || 'ar'
+    const url = API_BASE + '/import-template?type=' + t
+    wx.showLoading({ title: '生成模板…' })
+    wx.downloadFile({
+      url,
+      header: { 'X-Access-Key': wx.getStorageSync('key') || '', 'X-Book': String(wx.getStorageSync('book') || 1) },
+      success: (r) => {
+        wx.hideLoading()
+        if (r.statusCode !== 200) return wx.showToast({ title: '生成失败', icon: 'none' })
+        const dst = wx.env.USER_DATA_PATH + '/导入模板_' + t + '.csv'
+        try {
+          wx.getFileSystemManager().copyFileSync(r.tempFilePath, dst)
+        } catch (err) { return wx.showToast({ title: '保存失败', icon: 'none' }) }
+        if (wx.shareFileMessage) {
+          wx.shareFileMessage({ filePath: dst, fileName: '导入模板_' + t + '.csv', fail: () => wx.showToast({ title: '已存到手机，可转发文件传输助手', icon: 'none' }) })
+        } else {
+          wx.showToast({ title: '已保存到手机', icon: 'none' })
+        }
+      },
+      fail: () => { wx.hideLoading(); wx.showToast({ title: '下载失败', icon: 'none' }) }
     })
   },
   onEAcc(e) {
@@ -395,6 +519,7 @@ Page({
     this.setData({ tab: t })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
     if (t === 'asset') this.loadAsset()
+    if (t === 'expense') this.loadLoans()
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
@@ -720,7 +845,7 @@ Page({
   },
   doImport() {
     const { import_type, import_text, import_types } = this.data
-    const types = ['ar', 'ap', 'expense', 'ar_init', 'ap_init']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
     this.req({
       url: API_BASE + '/import', method: 'POST',
@@ -1001,7 +1126,7 @@ Page({
       })
   },
   // ── 家底 / 账龄 / 财务指标 / 月度归档 / 报表抬头 ──
-  loadAsset() { this.loadNetworth(); this.loadKpi(); this.loadAging(); this.loadHead() },
+  loadAsset() { this.loadNetworth(); this.loadKpi(); this.loadAging(); this.loadHead(); this.loadLoans() },
   loadNetworth() {
     this.req({
       url: API_BASE + '/networth?months=12',

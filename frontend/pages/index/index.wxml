@@ -191,6 +191,38 @@
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
       <button class="btn" size="mini" bindtap="addExpense">记支出</button>
     </view>
+
+    <view class="form">
+      <view class="tip">员工借支 / 报销（借出先记账不冲成本，报销时按分类记支出，冲借支不动现金）<text wx:if="{{loan_open}}"> · 未清 ¥{{loan_open}}</text></view>
+      <input class="inp" placeholder="员工姓名" value="{{l_staff}}" bindinput="onLStaff"/>
+      <input class="inp" placeholder="借出金额(元)" type="digit" value="{{l_amount}}" bindinput="onLAmount"/>
+      <input class="inp" placeholder="用途备注(可选)" value="{{l_remark}}" bindinput="onLRemark"/>
+      <button class="btn" size="mini" bindtap="addLoan">借出</button>
+
+      <view class="reimb" wx:if="{{cur_loan}}">
+        <view class="tip">正在报销：{{cur_loan_name}}</view>
+        <picker range="{{categories}}" bindchange="onRlCategory"><view class="picker">分类：{{categories[rl_category] || '其他'}} ▾</view></picker>
+        <input class="inp" placeholder="报销金额(默认全部结清)" type="digit" value="{{rl_amount}}" bindinput="onRlAmount"/>
+        <input class="inp" placeholder="备注(可选)" value="{{rl_remark}}" bindinput="onRlRemark"/>
+        <view class="btns">
+          <button size="mini" bindtap="doReimburse">确认报销</button>
+          <button size="mini" bindtap="cancelReimburse">取消</button>
+        </view>
+      </view>
+
+      <view class="list">
+        <view class="item" wx:for="{{loans}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.staff}}</text><text class="amt out">借 {{item.amount}}</text></view>
+          <view class="row2">已报 {{item.used}} · 退回 {{item.returned}} · 未清 {{item.remain}}{{item.remark?' · '+item.remark:''}}</view>
+          <view class="btns">
+            <button size="mini" wx:if="{{item.remain>0}}" bindtap="startReimburse" data-id="{{item.id}}" data-name="{{item.staff}}" data-remain="{{item.remain}}">报销</button>
+            <button size="mini" wx:if="{{item.remain>0}}" bindtap="returnLoan" data-id="{{item.id}}" data-remain="{{item.remain}}">退回余款</button>
+            <button size="mini" wx:if="{{item.used==0 && item.returned==0}}" bindtap="delLoan" data-id="{{item.id}}">删</button>
+          </view>
+        </view>
+        <view class="empty" wx:if="{{!loans.length}}">还没有员工借支</view>
+      </view>
+    </view>
     <view class="form">
       <input class="inp" placeholder="搜索分类/备注" value="{{ex_kw}}" bindinput="onExKw"/>
     </view>
@@ -212,11 +244,12 @@
   <block wx:if="{{tab=='import'}}">
     <view class="form">
       <picker range="{{import_types}}" bindchange="onImportType"><view class="picker">{{import_types[import_type]}} ▾</view></picker>
+      <button class="btn ghost" size="mini" bindtap="exportTemplate">⬇ 导出这一类的导入模板（CSV）</button>
       <button class="btn" size="mini" bindtap="chooseImportFile">📄 从微信聊天选表格文件</button>
       <view class="tip" wx:if="{{import_file_name}}">已读入：{{import_file_name}}</view>
       <textarea class="ta" placeholder="{{import_hint}}" value="{{import_text}}" bindinput="onImportText"></textarea>
       <button class="btn" size="mini" bindtap="doImport">开始导入</button>
-      <view class="tip">两种方式：① 微信里把表格文件发给自己，点上面按钮选它；② 从 Excel 直接复制多行粘贴到这里</view>
+      <view class="tip">两种方式：① 点「导出导入模板」→ 发到电脑用 Excel 填好 → 存成 CSV UTF-8 → 微信发给自己 → 点「从微信聊天选表格文件」；② 从 Excel 直接复制多行粘贴到这里</view>
     </view>
   </block>
 
