@@ -328,3 +328,7 @@
 
 /* 月底收尾提示行 */
 .mwrow.mtip { background: #fff8ec; }
+
+/* 三个账本自检面板 */
+.bck-adv { font-size: 24rpx; color: #555; line-height: 1.6; margin: 4rpx 0 12rpx; }
+.row2.bck-tip { color: #c0392b; }

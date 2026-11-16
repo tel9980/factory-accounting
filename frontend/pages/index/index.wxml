@@ -2095,6 +2095,21 @@
       </view>
       <input class="inp" placeholder="给当前账套改名，如 一车间" value="{{rename_text}}" bindinput="onRenameText"/>
       <button class="btn" size="mini" bindtap="renameBook">改当前账套名</button>
+      <button class="btn" size="mini" bindtap="loadBooksCheck">🧾 看看三个账本都在干嘛</button>
+      <block wx:if="{{bck}}">
+        <view class="card">
+          <view class="bck-adv">{{bck.advice}}</view>
+          <view class="item" wx:for="{{bck.rows}}" wx:key="id">
+            <view class="row1"><text class="nm">{{item.name}}{{item.current?'（当前在用）':''}}</text><text class="amt">{{item.used ? (item.orders + item.payables) + ' 张单' : '空'}}</text></view>
+            <view class="row2">流水 {{item.ledger}} 笔 · 账户 {{item.accounts}} 个 · 分类 {{item.cats}} 个 · 期初合计 {{item.opening}}{{item.last ? ' · 最后动账 ' + item.last : ''}}</view>
+            <view class="row2 bck-tip" wx:for="{{item.tips}}" wx:for-item="tp" wx:key="*this">· {{tp}}</view>
+            <view class="btns">
+              <button size="mini" wx:if="{{!item.current}}" bindtap="switchBook" data-id="{{item.id}}">切到这本</button>
+            </view>
+          </view>
+        </view>
+        <view class="frow"><button class="btn" size="mini" bindtap="closeBooksCheck">收起</button></view>
+      </block>
     </view>
     <view class="form">
       <view class="seg {{contact_type=='ar'?'on':''}}" bindtap="setContactType" data-t="ar">客户</view>

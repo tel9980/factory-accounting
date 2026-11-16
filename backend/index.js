@@ -218,6 +218,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
+      || /^\/(schema-check|books-check)/.test(path)
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
   c.set('role', role)
@@ -3025,6 +3026,111 @@ app.get('/import-template', async (c) => {
 })
 
 // ── 多账套 ──
+// 结构自检：三个账本的表/列是否齐全（改过数据库后最容易漏改第二、第三本）
+const REQ_SCHEMA = {
+  ledger: ['account_id', 'cash', 'ref_type', 'direction'],
+  orders: ['cost', 'written_off', 'rev', 'due_date', 'operator', 'progress'],
+  payables: ['written_off', 'rev', 'due_date', 'operator'],
+  advances: ['used', 'account_id'],
+  accounts: ['opening', 'kind'],
+  statement_log: ['ack', 'ack_at', 'resolved_at'],
+  party_terms: ['recon_day', 'term_days'],
+  audit_log: ['by'],
+  dunning_log: ['promise_date'],
+  month_archive: ['data', 'month'],
+  net_snapshots: ['net'],
+  op_dedupe: ['client_id']
+}
+app.get('/schema-check', async (c) => {
+  const all = c.env.ENV_ALL || c.env
+  const defs = [['1', all.DB, '主账本'], ['2', all.DB2, '第二本'], ['3', all.DB3, '第三本']]
+  const books = []
+  for (const [id, db, def] of defs) {
+    if (!db) continue
+    const names = Object.keys(REQ_SCHEMA)
+    const info = await Promise.all(names.map((t) =>
+      db.prepare('PRAGMA table_info(' + t + ')').all().catch(() => null)))
+    const miss = []
+    names.forEach((t, i) => {
+      const cols = info[i] && info[i].results ? info[i].results.map((x) => x.name) : null
+      if (!cols || !cols.length) return miss.push({ table: t, missing: ['整张表'] })
+      const lack = REQ_SCHEMA[t].filter((cl) => cols.indexOf(cl) < 0)
+      if (lack.length) miss.push({ table: t, missing: lack })
+    })
+    books.push({ id, name: def, ok: miss.length === 0, issues: miss })
+  }
+  const bad = books.filter((b) => !b.ok)
+  return c.json({ ok: true, clean: bad.length === 0, books, bad_count: bad.length,
+    text: bad.length === 0
+      ? '三个账本的结构都是齐的。'
+      : books.filter((b) => !b.ok).map((b) => b.name + '：' + b.issues.map((x) => x.table + ' 少 ' + x.missing.join('/')).join('，')).join('；') })
+})
+
+// 三个账本都在干嘛：谁在用、谁是空的、谁的账户/分类还没配
+app.get('/books-check', async (c) => {
+  const all = c.env.ENV_ALL || c.env
+  const role = c.get('role') || 'owner'
+  const defs = [['1', all.DB, '主账本'], ['2', all.DB2, '第二本'], ['3', all.DB3, '第三本']]
+  const today = now().slice(0, 10)
+  const rows = []
+  for (const [id, db, def] of defs) {
+    if (!db) continue
+    const g = (sql) => db.prepare(sql).first().catch(() => null)
+    const [nm, cnt, acc, cat, lastR, opening] = await Promise.all([
+      g("SELECT value FROM settings WHERE key='book_name'"),
+      g("SELECT (SELECT COUNT(*) FROM orders) o, (SELECT COUNT(*) FROM payables) p, (SELECT COUNT(*) FROM ledger) l"),
+      g("SELECT COUNT(*) c FROM accounts"),
+      g("SELECT COUNT(*) c FROM categories"),
+      g("SELECT MAX(created_at) AS t FROM ledger"),
+      g("SELECT COALESCE(SUM(opening),0) AS t FROM accounts")
+    ])
+    const o = num(cnt && cnt.o), p = num(cnt && cnt.p), l = num(cnt && cnt.l)
+    const last = (lastR && lastR.t) ? String(lastR.t).slice(0, 10) : ''
+    const days = last ? daysSince(last) : -1
+    const isCur = String(c.env.BOOK || '1') === id
+    const tips = []
+    if (o + p + l === 0) tips.push('这本还没记过东西')
+    else {
+      if (num(acc && acc.c) <= 0) tips.push('没有资金账户，钱都算在「未指定」里')
+      if (num(cat && cat.c) <= 0) tips.push('还没设自己的支出分类（用的默认那几类）')
+      if (!last) tips.push('还没有现金流水')
+      else if (days > 90) tips.push(`最后一次动账是 ${last}，已经 ${days} 天没用了`)
+      if (num(opening && opening.t) === 0) tips.push('账户期初都是 0（如果这本是接着老账记的，期初要补）')
+    }
+    rows.push({ id, name: (nm && nm.value) ? String(nm.value) : def, current: isCur,
+      orders: o, payables: p, ledger: l, accounts: num(acc && acc.c), cats: num(cat && cat.c),
+      opening: round2(num(opening && opening.t)), last, last_days: days,
+      used: o + p + l > 0, tips })
+  }
+  const usedCount = rows.filter((r) => r.used).length
+  const empty = rows.filter((r) => !r.used).map((r) => r.name)
+  let advice = ''
+  if (usedCount === 0) advice = '三个账本都还是空的。一开始只用当前这本就行，等分厂/分项目了再开第二本。'
+  else if (usedCount === 1) advice = `现在只有「${rows.find((r) => r.used).name}」在用，其它空账本留着随时能开，互不影响。`
+  else advice = `${usedCount} 本都在用：各本的账、账户、分类都是独立的，报表也只统计当前这本。切换在「设置 → 账本」。`
+  if (empty.length) advice += ` 空着的：${empty.join('、')}。`
+  // 结构差异：直接在账本列表里标出来（改库漏改第二/三本会在这里露头）
+  const schemaBad = []
+  for (const r of rows) {
+    const db = { '1': all.DB, '2': all.DB2, '3': all.DB3 }[r.id]
+    if (!db) continue
+    const names = Object.keys(REQ_SCHEMA)
+    const info = await Promise.all(names.map((t) => db.prepare('PRAGMA table_info(' + t + ')').all().catch(() => null)))
+    const miss = []
+    names.forEach((t, i) => {
+      const cols = info[i] && info[i].results ? info[i].results.map((x) => x.name) : null
+      if (!cols || !cols.length) return miss.push({ table: t, missing: ['整张表'] })
+      const lack = REQ_SCHEMA[t].filter((cl) => cols.indexOf(cl) < 0)
+      if (lack.length) miss.push({ table: t, missing: lack })
+    })
+    if (miss.length) { r.tips.push('结构没跟上：' + miss.map((x) => x.table + ' 少 ' + x.missing.join('/')).join('，')); schemaBad.push(r.name) }
+  }
+  if (schemaBad.length) advice = '（有账本结构没跟上，可能某个功能在上面会用不了）' + advice
+  const warn = rows.some((r) => r.used && r.tips.some((t) => /没有资金账户|期初都是 0/.test(t)))
+  return c.json({ ok: true, role, current: String(c.env.BOOK || '1'), count: rows.length, used_count: usedCount,
+    empty: empty, rows, advice, warn, schema_bad: schemaBad })
+})
+
 app.get('/books', async (c) => {
   const all = c.env.ENV_ALL || c.env
   const list = []
