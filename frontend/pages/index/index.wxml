@@ -16,7 +16,7 @@
   </view>
   <view class="subtabs" wx:if="{{group=='stat'}}">
     <view class="sub {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
-    <view class="sub {{tab=='asset'?'on':''}}" bindtap="setTab" data-t="asset">家底</view>
+    <view class="sub {{tab=='asset'?'on':''}}" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="asset">家底</view>
     <view class="sub {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
   </view>
   <view class="subtabs" wx:if="{{group=='me'}}">
@@ -85,13 +85,23 @@
         <view class="g4n">{{today_income}}</view>
         <view class="g4l">今天收到</view>
       </view>
-      <view class="g4" bindtap="setTab" data-t="report">
+      <view class="g4" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="report">
         <view class="g4n {{profit_biz < 0 ? 'red' : 'green'}}">{{profit_biz}}</view>
         <view class="g4l">本月经营毛利</view>
       </view>
     </view>
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
+    <view class="issuebar" wx:if="{{issue_count>0}}" bindtap="showIssue">⚠ 数据自检发现 {{issue_count}} 处对不上（点开看）</view>
     <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
+    <view class="cfcard" wx:if="{{role!='staff' && cf && cf.days}}" bindtap="showCashflow">
+      <view class="cfh">未来 {{cf.days}} 天现金　<text class="cfl">点开看明细</text></view>
+      <view class="cfrow"><text>手头现金</text><text class="{{cf.cash<0?'red':'green'}}">¥{{cf.cash}}</text></view>
+      <view class="cfrow"><text>预计收进来（{{cf.in_count}} 笔）</text><text class="green">+¥{{cf.inflow}}</text></view>
+      <view class="cfrow"><text>预计付出去（{{cf.out_count}} 笔）</text><text class="red">-¥{{cf.outflow}}</text></view>
+      <view class="cfrow"><text>{{cf.days}} 天后预计</text><text class="{{cf.end<0?'red':'green'}}">¥{{cf.end}}</text></view>
+      <view class="cfwarn" wx:if="{{cf.risk}}">⚠ 按现在的收付，{{cf.min_date}} 会缺钱，最低见底 ¥{{cf.min_balance}}。提前催收或把付款往后挪。</view>
+      <view class="cfwarn ok" wx:elif="{{cf.inflow+cf.outflow>0}}">✔ 未来 {{cf.days}} 天不会缺钱</view>
+    </view>
     <view class="topcust" wx:if="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}</view>
 
     <view class="card">
@@ -103,7 +113,7 @@
         <view class="q" bindtap="setTab" data-t="ar"><view class="qi">收</view><view class="qn">收款核销</view></view>
         <view class="q" bindtap="setTab" data-t="import"><view class="qi">⊞</view><view class="qn">批量导入</view></view>
         <view class="q" bindtap="setTab" data-t="report"><view class="qi">▤</view><view class="qn">报表</view></view>
-        <view class="q" bindtap="setTab" data-t="asset"><view class="qi">◱</view><view class="qn">家底</view></view>
+        <view class="q" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="asset"><view class="qi">◱</view><view class="qn">家底</view></view>
         <view class="q" bindtap="setTab" data-t="contact"><view class="qi">☰</view><view class="qn">设置</view></view>
       </view>
     </view>
@@ -140,6 +150,7 @@
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}（已自动填好，改金额直接记）</view>
       <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem"/>
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
+<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
       <input class="inp" placeholder="经手人(可选)" value="{{o_operator}}" bindinput="onOOperator"/>
       <view class="dateRow">
@@ -241,10 +252,11 @@
           <button size="mini" bindtap="editProgress" data-id="{{item.id}}">进度</button>
           <button size="mini" bindtap="applyAdvanceOrder" data-id="{{item.id}}">预收抵</button>
           <button size="mini" bindtap="writeoffOrder" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
-          <button size="mini" bindtap="editOrder" data-id="{{item.id}}">改</button>
+          <button size="mini" bindtap="againOrder" data-id="{{item.id}}">再来一单</button>
+          <button size="mini" wx:if="{{role!='staff'}}" bindtap="editOrder" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.customer}}">月结</button>
-          <button size="mini" bindtap="delOrder" data-id="{{item.id}}">删</button>
+          <button size="mini" wx:if="{{role!='staff'}}" bindtap="delOrder" data-id="{{item.id}}">删</button>
         </view>
       </view>
       <view class="empty" wx:if="{{!ar_list.length}}">{{ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'}}</view>
@@ -262,6 +274,7 @@
       </view>
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}</view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount"/>
+<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
       <input class="inp" placeholder="经手人(可选)" value="{{p_operator}}" bindinput="onPOperator"/>
@@ -348,10 +361,11 @@
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="applyAdvancePayable" data-id="{{item.id}}">预付抵</button>
           <button size="mini" bindtap="writeoffPayable" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
-          <button size="mini" bindtap="editPayable" data-id="{{item.id}}">改</button>
+          <button size="mini" bindtap="againPayable" data-id="{{item.id}}">再来一笔</button>
+          <button size="mini" wx:if="{{role!='staff'}}" bindtap="editPayable" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ap" data-name="{{item.supplier}}">月结</button>
-          <button size="mini" bindtap="delPayable" data-id="{{item.id}}">删</button>
+          <button size="mini" wx:if="{{role!='staff'}}" bindtap="delPayable" data-id="{{item.id}}">删</button>
         </view>
       </view>
       <view class="empty" wx:if="{{!ap_list.length}}">{{ap_filter=='closed'?'没有已结清的应付':'没有未结清的应付'}}</view>
@@ -369,6 +383,7 @@
         <text class="chip" wx:for="{{sug_ex}}" wx:key="index" bindtap="fillSug" data-t="ex" data-i="{{index}}">{{item.party}} {{item.amount}}</text>
       </view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
+<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
       <view class="dateRow">
@@ -419,8 +434,8 @@
         <view class="row1"><text class="nm">{{item.category}}</text><text class="amt out">{{item.amount}}</text></view>
         <view class="row2">{{item.remark}} · {{item.created_at}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
-          <button size="mini" bindtap="editExpense" data-id="{{item.id}}">改</button>
-          <button size="mini" bindtap="delExpense" data-id="{{item.id}}">删</button>
+          <button size="mini" wx:if="{{role!='staff'}}" bindtap="editExpense" data-id="{{item.id}}">改</button>
+          <button size="mini" wx:if="{{role!='staff'}}" bindtap="delExpense" data-id="{{item.id}}">删</button>
         </view>
       </view>
       <view class="empty" wx:if="{{!expense_list.length}}">暂无支出记录</view>
@@ -508,7 +523,11 @@
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
       <button class="btn" size="mini" bindtap="cloudBackup">云端备份</button>
       <button class="btn" size="mini" bindtap="backupToNotes">备份到笔记站</button>
-      <button class="btn" size="mini" bindtap="changeKey">改口令</button>
+      <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="copyWeekText">📋 复制上周经营速览</button>
+      <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
+      <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
+      <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
+      <view class="tip" wx:if="{{role=='staff'}}">你现在用的是员工口令：能记账、收款付款、查欠款；毛利、删单、改设置需要老板口令。</view>
     </view>
     <view class="form">
       <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>

@@ -8,7 +8,7 @@ database_name = "factory-db"
 database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
 
 [triggers]
-crons = ["0 16 * * *", "0 1 * * *"]
+crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1"]
 
 [vars]
 NOTES_BASE = "https://md.1211.cc.cd"

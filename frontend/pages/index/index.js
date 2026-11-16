@@ -26,6 +26,8 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
+    role: 'owner', staff_enabled: false, cf: null, issue_count: 0, issue_at: '',
+    amts: [50, 100, 200, 500, 1000, 2000],
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
@@ -114,6 +116,14 @@ Page({
           }
           if (res.statusCode >= 400) {
             const d = res.data || {}
+            if (d.code === 'conflict') {
+              wx.showModal({
+                title: '这笔刚有变化', content: d.error, confirmText: '刷新看看', cancelText: '知道了',
+                success: (r3) => { if (r3.confirm) this.refresh() }
+              })
+              opts.fail && opts.fail(res)
+              return
+            }
             if (d.dup && opts.dupRetry) {
               wx.showModal({
                 title: '可能重复了', content: d.error, confirmText: '再记一笔',
@@ -148,6 +158,8 @@ Page({
     this.loadExpenses()
     this.loadHistory()
     this.loadContacts()
+    this.loadMe()
+    this.loadCashflow()
     this.loadFixed()
     this.loadMonthLocks()
     this.loadAuditLogs()
@@ -561,7 +573,9 @@ Page({
             today_income: res.data.today_income || 0,
             top_customer: res.data.top_customer || '', top_unpaid: res.data.top_unpaid || 0,
             budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0,
-            cash_balance: res.data.cash_balance || 0
+            cash_balance: res.data.cash_balance || 0,
+            role: res.data.role || 'owner',
+            issue_count: res.data.issue_count || 0, issue_at: res.data.issue_at || ''
           })
         }
       }
@@ -787,6 +801,46 @@ Page({
     }
     wx.showToast({ title: '已填好，核对金额即可', icon: 'none' })
   },
+  // 常用面额一键填金额
+  fillAmt(e) {
+    const { f, v } = e.currentTarget.dataset
+    const cur = String(this.data[f] || '')
+    const nv = cur && Number(cur) ? String(Number(cur) + Number(v)) : String(v)
+    this.setData({ [f]: nv })
+  },
+  // 再来一单：把上次同样的客户/产品/单价带出来
+  againOrder(e) {
+    const id = e.currentTarget.dataset.id
+    const it = (this.data.ar_all || []).find((x) => String(x.id) === String(id)) || {}
+    this.req({
+      url: API_BASE + '/last-deal?type=ar&party=' + encodeURIComponent(it.customer || ''),
+      success: (r) => {
+        const d = r.data || {}
+        this.setData({
+          o_customer: it.customer || '', o_item: d.item || it.item_name || '',
+          o_price: String(d.amount || it.price || ''), o_operator: d.operator || it.operator || '', o_due: '', o_date: '', last_tip: '已带出上次的单价，改数量/金额即可'
+        })
+        wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+        wx.showToast({ title: '填好了，核对后记一笔', icon: 'none' })
+      }
+    })
+  },
+  againPayable(e) {
+    const id = e.currentTarget.dataset.id
+    const it = (this.data.ap_all || []).find((x) => String(x.id) === String(id)) || {}
+    this.req({
+      url: API_BASE + '/last-deal?type=ap&party=' + encodeURIComponent(it.supplier || ''),
+      success: (r) => {
+        const d = r.data || {}
+        this.setData({
+          p_supplier: it.supplier || '', p_amount: String(d.amount || it.amount || ''),
+          p_remark: d.item || it.remark || '', p_operator: d.operator || it.operator || '', p_due: '', p_date: ''
+        })
+        wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+        wx.showToast({ title: '填好了，核对后记一笔', icon: 'none' })
+      }
+    })
+  },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
   onOPrice(e) { this.setData({ o_price: e.detail.value }) },
   onODue(e) { this.setData({ o_due: e.detail.value }) },
@@ -831,7 +885,7 @@ Page({
     this.req({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true,
       data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date },
-      success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
+      success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   // 找某一单还剩多少没结（先从当前列表里查）
@@ -990,7 +1044,7 @@ Page({
           const p = r.content.split(/[,，]/).map((s) => s.trim())
           this.req({
             url: API_BASE + '/orders/' + id, method: 'PATCH',
-            data: { customer: p[0], item_name: p[1], price: Number(p[2]) },
+            data: { customer: p[0], item_name: p[1], price: Number(p[2]), rev: it.rev },
             success: (res) => {
               if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
               else this.refresh()
@@ -1053,7 +1107,7 @@ Page({
           const p = r.content.split(/[,，]/).map((s) => s.trim())
           this.req({
             url: API_BASE + '/payables/' + id, method: 'PATCH',
-            data: { supplier: p[0], amount: Number(p[1]), remark: p[2] || '' },
+            data: { supplier: p[0], amount: Number(p[1]), remark: p[2] || '', rev: it.rev },
             success: (res) => {
               if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
               else this.refresh()
@@ -1686,6 +1740,89 @@ Page({
             }
           })
         }
+      }
+    })
+  },
+  // 员工口令：设一个给员工，权限受限
+  setStaffKey() {
+    const tip = this.data.staff_enabled ? '输入新的员工口令（至少 4 位）；输空并确定=关闭员工登录' : '给员工用的口令（至少 4 位，别和你的口令一样）；输空并确定=关闭'
+    wx.showModal({
+      title: this.data.staff_enabled ? '修改员工口令' : '设置员工口令',
+      content: tip, editable: true, placeholderText: '员工口令',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/auth/staff', method: 'POST',
+          data: { key: wx.getStorageSync('ak'), password: String(r.content || '').trim() },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) {
+              this.setData({ staff_enabled: !!d.enabled })
+              wx.showToast({ title: d.enabled ? '员工口令已保存' : '员工登录已关闭', icon: 'none' })
+              this.loadMe()
+            } else wx.showToast({ title: d.error || '设置失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  // 上周经营速览（复制成文字，可发微信）
+  copyWeekText() {
+    this.req({
+      url: API_BASE + '/weekly-text',
+      success: (res) => {
+        const d = res.data || {}
+        const txt = d.text || d.t || ''
+        if (!txt) return wx.showToast({ title: '没有数据', icon: 'none' })
+        wx.setClipboardData({ data: txt, success: () => wx.showToast({ title: '已复制，去微信粘贴', icon: 'none' }) })
+      }
+    })
+  },
+  // 数据自检红点详情
+  showIssue() {
+    this.req({
+      url: API_BASE + '/selfcheck',
+      success: (res) => {
+        const d = res.data || {}
+        const lines = (d.issues || []).slice(0, 8).join('\n')
+        wx.showModal({
+          title: d.ok ? '数据对得上' : '有 ' + (d.bad || 0) + ' 处对不上',
+          content: (lines || '两张单据的已收付金额和流水记录不一致，建议逐笔核对。').slice(0, 800),
+          showCancel: false,
+          confirmText: '知道了',
+          success: () => this.refresh()
+        })
+      }
+    })
+  },
+  // 现金流预测（未来 45 天会不会缺钱）
+  loadCashflow() {
+    if (this.data.role === 'staff') return
+    this.req({ url: API_BASE + '/cashflow?days=45', success: (res) => this.setData({ cf: res.data || null }) })
+  },
+  showCashflow() {
+    const cf = this.data.cf || {}
+    if (!cf.days) return
+    const ins = (cf.in_items || []).map((x) => `· ${x.date.slice(5)} 收 ${x.party} ¥${x.amount}${x.overdue ? '（已逾期）' : ''}`).join('\n')
+    const outs = (cf.out_items || []).map((x) => `· ${x.date.slice(5)} 付 ${x.party} ¥${x.amount}`).join('\n')
+    const body = [
+      `手头现金：¥${cf.cash}`,
+      `未来 ${cf.days} 天预计进：+¥${cf.inflow}（${cf.in_count} 笔）`,
+      ins || '（没有安排中的收款）',
+      `未来 ${cf.days} 天预计出：-¥${cf.outflow}（${cf.out_count} 笔）`,
+      outs || '（没有安排中的付款）',
+      `${cf.days} 天后预计：¥${cf.end}`,
+      cf.risk ? `⚠ ${cf.min_date} 最低 ¥${cf.min_balance}，需要提前安排` : '✔ 这段时间不会缺钱'
+    ].join('\n')
+    wx.showModal({ title: '未来 ' + cf.days + ' 天现金', content: body.slice(0, 900), showCancel: false })
+  },
+  // 当前身份（老板/员工）
+  loadMe() {
+    this.req({
+      url: API_BASE + '/me',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ role: d.role === 'staff' ? 'staff' : 'owner', staff_enabled: !!d.staff_enabled })
       }
     })
   },
