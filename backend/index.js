@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 const app = new Hono()
 
 app.use('*', async (c, next) => {
+  failBucket.length = 0
   c.header('Access-Control-Allow-Origin', '*')
   c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS')
   c.header('Access-Control-Allow-Headers', 'Content-Type,X-Access-Key,X-Book')
@@ -26,10 +27,19 @@ app.use('*', async (c, next) => {
     await next()
   } catch (e) {
     await logError(c, 500, (e && (e.stack || e.message)) || e, Date.now() - t0)
-    throw e
+    // 不往外抛：抛出去 Cloudflare 只会回一句空白「Internal Server Error」，手机上看起来像卡死
+    return c.json({ ok: false, code: 'server_error', error: '服务器出了点问题，已经记下来了（设置 → 数据体检 → 🐞 运行日志）' }, 500)
   }
   const st = c.res ? c.res.status : 200
-  if (st >= 500) await logError(c, st, '', Date.now() - t0)
+  // 500 时把「哪条统计失败了」一起记下来（noteFail 收集的），不然日志里只剩一个 500 没有原因
+  if (st >= 500) await logError(c, st, failBucket.join(' | '), Date.now() - t0)
+})
+
+// 兜底：真正的 500 也要把错误原文记下来，并给前端一句人话（不然只看到「加载失败」）
+app.onError(async (err, c) => {
+  const t0 = Date.now()
+  try { await logError(c, 500, (err && (err.stack || err.message)) || err, Date.now() - t0) } catch (e) {}
+  return c.json({ ok: false, code: 'server_error', error: '服务器出了点问题，已经记下来了（设置 → 数据体检 → 🐞 运行日志）' }, 500)
 })
 
 const now = () => new Date().toISOString()
@@ -40,6 +50,15 @@ const round2 = (x) => Math.round(x * 100) / 100
 // ===== 统一口径（全站同一个"赚了多少"，避免不同页面数字打架）=====
 // 净利（权责）= 本月接单额 − 本月单子上的材料·外协成本 − 本月现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息
 // 赊购（应付）只影响欠款和现金流，不重复算成本；付给供应商的钱若已算在单子成本里也不再算一次。
+// 静默失败的“留痕”：并发查询里 try/catch 不能把错误吃掉，否则界面上只是数字变成 0
+const failBucket = []
+function noteFail(e, tag) {
+  try {
+    const msg = String((e && (e.message || e.error)) || e || 'unknown').slice(0, 200)
+    const t = tag ? `${tag}: ${msg}` : msg
+    if (failBucket.indexOf(t) < 0 && failBucket.length < 20) failBucket.push(t)
+  } catch (_) {}
+}
 const CASH_EXP_WHERE = "direction='out' AND cash=1 AND ref_type IN ('expense','fixed')"
 async function monthPL(db, mm) {
   const sql = `SELECT
@@ -2779,17 +2798,17 @@ app.get('/dashboard', async (c) => {
     (SELECT order_add FROM targets WHERE month=?) AS tgt_order,
     (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE substr(created_at,1,7)=?) AS order_cost`
   const [aggR, recentR, overdueR, dueSoonR, paySoonR, topCustR, budsR, spendR, debtRowsR, debtRepsR, accList] = await Promise.all([
-    db.prepare(aggSql).bind(m, m, m, m, m, todayS, m, m, m, m, m, m).first(),
-    db.prepare('SELECT * FROM ledger ORDER BY id DESC LIMIT 10').all(),
-    db.prepare('SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all(),
-    db.prepare("SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all(),
-    db.prepare("SELECT * FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all(),
-    db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 1').first(),
-    db.prepare('SELECT * FROM budgets ORDER BY id').all(),
-    db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') AS c, COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=? GROUP BY 1").bind(m).all(),
-    db.prepare('SELECT * FROM debts').all(),
-    db.prepare('SELECT * FROM debt_repays').all(),
-    accountBalances(db)
+    db.prepare(aggSql).bind(m, m, m, m, m, todayS, m, m, m, m, m, m).first().catch((e) => { noteFail(e, '首页汇总'); return null }),
+    db.prepare('SELECT * FROM ledger ORDER BY id DESC LIMIT 10').all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare('SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare("SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare("SELECT * FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 1').first().catch((e) => { noteFail(e, '首页客户'); return null }),
+    db.prepare('SELECT * FROM budgets ORDER BY id').all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') AS c, COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=? GROUP BY 1").bind(m).all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare('SELECT * FROM debts').all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    db.prepare('SELECT * FROM debt_repays').all().catch((e) => { noteFail(e, '首页明细'); return null }),
+    accountBalances(db).catch((e) => { noteFail(e, '账户余额'); return null })
   ])
   const agg = aggR || {}
   const ar = { total: agg.ar }, ap = { total: agg.ap }, inc = { total: agg.inc }, out = { total: agg.outt }
@@ -2799,9 +2818,11 @@ app.get('/dashboard', async (c) => {
   const accAdj = { amort: round2(num(agg.amort)), accrue_int: round2(num(agg.acr)), dep: round2(num(agg.dep)) }
   accAdj.net = round2(accAdj.amort + accAdj.accrue_int + accAdj.dep)
   const expTotal = round2(num(expCash.t) + accAdj.net)
-  const recent = recentR, overdue = overdueR, dueSoon = dueSoonR, paySoon = paySoonR
-  const topCust = topCustR, buds = budsR
-  const debtRows = (debtRowsR.results || []), debtReps = (debtRepsR.results || [])
+  // 任何一条明细查询失败都不能把首页整页打挂：拿不到就当空，并在 degraded 里说明
+  const R0 = (x) => x || { results: [] }
+  const recent = R0(recentR), overdue = R0(overdueR), dueSoon = R0(dueSoonR), paySoon = R0(paySoonR)
+  const topCust = topCustR || {}, buds = R0(budsR)
+  const debtRows = R0(debtRowsR).results, debtReps = R0(debtRepsR).results
   const debts = (() => {
     const list = debtRows.map((d) => debtView(d, debtReps.filter((r) => r.debt_id === d.id))).filter((x) => x.status === 'open')
     return { total_principal: round2(list.reduce((a, x) => a + x.remain, 0)), month_interest: round2(list.reduce((a, x) => a + x.monthly_interest, 0)), overdue_count: list.filter((x) => x.overdue).length, soon: list.filter((x) => !x.overdue && x.days_to_due !== null && x.days_to_due >= 0 && x.days_to_due <= 7) }
@@ -2811,7 +2832,7 @@ app.get('/dashboard', async (c) => {
   const tgtRow = { receive: num(agg.tgt_receive), order_add: num(agg.tgt_order) }
   // 预算：一次分组查出本月各分类已花，再和预算比（原来每个预算查一次）
   const spendMap = {}
-  for (const r of (spendR.results || [])) spendMap[String(r.c || '')] = round2(num(r.t))
+  for (const r of (R0(spendR).results)) spendMap[String(r.c || '')] = round2(num(r.t))
   const budgetOver = []
   for (const b of (buds.results || [])) {
     const spent = round2(num(spendMap[b.category]))
@@ -2819,13 +2840,14 @@ app.get('/dashboard', async (c) => {
     const pct = limit > 0 ? Math.round((spent / limit) * 100) : 0
     if (pct >= 90) budgetOver.push({ category: b.category, limit, spent, pct, over: spent > limit, over_amt: spent > limit ? round2(spent - limit) : 0 })
   }
-  const cashBal = round2(accList.reduce((s2, a) => s2 + a.balance, 0))
+  const cashBal = round2((accList || []).reduce((s2, a) => s2 + num(a && a.balance), 0))
   const role = c.get('role') || 'owner'
   const hideProfit = role === 'staff'
   const scRow = { value: agg.sc_cnt }, scAt = { value: agg.sc_at }
   return c.json({
     role,
     hide_profit: hideProfit,
+    degraded: failBucket.slice(),
     issue_count: hideProfit ? 0 : Number((scRow && scRow.value) || 0),
     issue_at: (scAt && scAt.value) || '',
     ar_total: round2(num(ar.total)),
@@ -5390,7 +5412,7 @@ async function monthSum(db, m) {
     accountBalances(db),
     db.prepare('SELECT * FROM debts').all(),
     db.prepare('SELECT * FROM debt_repays').all()
-  ].map((x) => x.catch(() => null))
+  ].map((x) => x.catch((e) => { noteFail(e); return null }))
   const [aggR, accounts, dR, rR] = await Promise.all(jobs)
   const agg = aggR || {}
   const accs = accounts || []
@@ -5468,7 +5490,7 @@ app.get('/trend', async (c) => {
   const jobs = [
     db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) a, COALESCE(SUM(COALESCE(cost,0)),0) c FROM orders WHERE substr(created_at,1,7)>=? GROUP BY mk').bind(mons[0]).all(),
     db.prepare(`SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) o, COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) i FROM ledger WHERE cash=1 AND substr(created_at,1,7)>=? GROUP BY mk`).bind(mons[0]).all()
-  ].map((x) => x.catch(() => null))
+  ].map((x) => x.catch((e) => { noteFail(e); return null }))
   const [oR, lR] = await Promise.all(jobs)
   const rowsOf = (r) => (r && r.results) || []
   const oMap = {}, eMap = {}, iMap = {}
@@ -6154,7 +6176,7 @@ app.get('/compare', async (c) => {
     db.prepare("SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END),0) i, COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0) o FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7) IN (?,?,?) GROUP BY mk").bind(base, prev, lastYear).all(),
     db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7) IN (?,?,?) GROUP BY mk').bind(base, prev, lastYear).all(),
     db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7) IN (?,?,?) GROUP BY mk').bind(base, prev, lastYear).all()
-  ].map((x) => x.catch(() => null))
+  ].map((x) => x.catch((e) => { noteFail(e); return null }))
   const [lR, oR, pR] = await Promise.all(jobs)
   const rowsOf = (r) => (r && r.results) || []
   const li = {}, lo = {}, oa = {}, pa = {}
@@ -6185,7 +6207,7 @@ async function selfCheck(db) {
     db.prepare('SELECT COALESCE(SUM(price),0) AS a, COALESCE(SUM(paid),0) AS p FROM orders').first(),
     db.prepare("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END),0) AS i, COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0) AS o FROM ledger WHERE cash=1 AND ref_type<>'transfer'").first(),
     db.prepare('SELECT COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) AS t FROM payables WHERE paid + COALESCE(written_off,0) < amount').first()
-  ].map((x) => x.catch(() => null))
+  ].map((x) => x.catch((e) => { noteFail(e); return null }))
   const [oR, inR, pR, outR, arRow, arFlow, flR, apRow] = await Promise.all(jobs)
   const orders = (oR && oR.results) || []
   const inSum = (inR && inR.results) || []
@@ -6237,8 +6259,8 @@ async function selfCheck(db) {
 // 数据体检：把「账记得对不对」变成一张清单，一项项告诉你哪里要补
 app.get('/health-check', async (c) => {
   const db = c.env.DB
-  const q1 = (sql) => db.prepare(sql).first().catch(() => ({}))
-  const qAll = (sql) => db.prepare(sql).all().then((r) => r.results || []).catch(() => [])
+  const q1 = (sql) => db.prepare(sql).first().catch((e) => { noteFail(e, '数据体检'); return {} })
+  const qAll = (sql) => db.prepare(sql).all().then((r) => r.results || []).catch((e) => { noteFail(e, '数据体检'); return [] })
   const items = []
   const add = (k, label, count, tip, go, list) => { items.push({ k, label, count: num(count), tip, go: go || '', list: list || [] }) }
   const since7 = new Date(Date.now() - 7 * 86400000).toISOString()
@@ -6252,7 +6274,7 @@ app.get('/health-check', async (c) => {
     q1("SELECT COUNT(*) AS c FROM ledger WHERE COALESCE(account_id,0)=0"),
     qAll("SELECT customer, price, substr(created_at,1,10) AS d, COUNT(*) AS c FROM orders GROUP BY customer, price, substr(created_at,1,10) HAVING c>1 LIMIT 5"),
     qAll("SELECT month FROM month_lock ORDER BY month DESC LIMIT 1"),
-    db.prepare("SELECT COUNT(*) AS c FROM error_log WHERE created_at >= ?").bind(since7).first().catch(() => ({})),
+    db.prepare("SELECT COUNT(*) AS c FROM error_log WHERE created_at >= ?").bind(since7).first().catch((e) => { noteFail(e, '数据体检'); return {} }),
     qAll("SELECT created_at FROM backups ORDER BY id DESC LIMIT 1"),
     q1("SELECT COUNT(*) AS c FROM wx_users"),
   ])
@@ -6312,7 +6334,9 @@ app.get('/health-check', async (c) => {
   }
   const prevRec = hist.filter((x) => x.d !== today).slice(-1)[0]
   const delta = prevRec ? round2(score - num(prevRec.s)) : 0
-  return c.json({ ok: true, score, grade, clean: warn.length === 0, count: warn.length, items: items2, top, hist, delta, empty: emptyBook, at: now() })
+  const fails = failBucket.slice()
+  if (fails.length) items2.unshift({ k: 'fail', label: '有统计查询失败了', count: fails.length, tip: '某项统计没算出来（会显示成 0）。把下面这条发给开发：', go: '报表 → 🐞 运行日志', tab: 'report', list: fails.slice(0, 3).map((x) => ({ party: '', amount: 0, note: x })), party: String(fails[0] || '').slice(0, 60) })
+  return c.json({ ok: true, score, grade, clean: warn.length === 0, count: warn.length, items: items2, top, hist, delta, empty: emptyBook, degraded: fails, at: now() })
 })
 
 // 运行日志（出错留痕查询）
@@ -6951,7 +6975,7 @@ app.get('/networth', async (c) => {
     db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(amount - COALESCE(written_off,0)),0) t FROM payables GROUP BY mk').all(),
     db.prepare('SELECT * FROM debts').all(),
     db.prepare('SELECT * FROM debt_repays').all()
-  ].map((x) => x.catch(() => null))
+  ].map((x) => x.catch((e) => { noteFail(e); return null }))
   const [openR, lR, oR, pR, dR, rR] = await Promise.all(jobs)
   const rowsOf = (r) => (r && r.results) || []
   const opening = num(openR && openR.t)
@@ -7127,7 +7151,7 @@ app.get('/kpi', async (c) => {
     db.prepare("SELECT o.id, o.created_at, MAX(l.created_at) last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid >= o.price GROUP BY o.id").all(),
     db.prepare("SELECT o.customer c, SUM(l.amount) t FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,7)=? GROUP BY o.customer ORDER BY t DESC").bind(m).all(),
     accountBalances(db)
-  ].map((x) => x.catch(() => null))
+  ].map((x) => x.catch((e) => { noteFail(e); return null }))
   const [aggR, oTR, pTR, lTR, paidR, byCustR, accs] = await Promise.all(jobs)
   const agg = aggR || {}
   const rowsOf = (r) => (r && r.results) || []
@@ -7573,7 +7597,7 @@ app.get('/reminders', async (c) => {
     db.prepare("SELECT COUNT(*) n FROM (SELECT 1 FROM orders WHERE paid + COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='') UNION ALL SELECT 1 FROM payables WHERE paid + COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date=''))").first(),
     db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
   ]
-  const R = await Promise.all(jobs.map((j) => j.catch(() => null)))
+  const R = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e); return null })))
   const rows0 = (x) => ((x && x.results) || [])
   const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm] = R
   const items = []
@@ -7673,7 +7697,7 @@ app.get('/reminders', async (c) => {
       if (due.length) push('yellow', `${due.length} 家到了该对账的日子`, 'import', due.slice(0, 3))
     }
   } catch (e) {}
-  return c.json({ items, count: items.length, today })
+  return c.json({ items, count: items.length, today, degraded: failBucket.slice() })
 })
 
 // ── 第四档：坏账核销 / 账户内部转账 ──
