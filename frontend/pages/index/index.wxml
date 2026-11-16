@@ -1439,6 +1439,30 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
       </block>
+      <view class="tip">📄 本月一页纸（三句话说清这个月怎么样，可以直接发家人或合伙人）</view>
+      <view class="frow">
+        <input class="inp" placeholder="月份 YYYY-MM（留空本月）" value="{{mb_month}}" bindinput="onMbMonth" bindconfirm="loadMonthBrief"/>
+        <button class="btn half" size="mini" bindtap="loadMonthBrief">看一眼</button>
+      </view>
+      <block wx:if="{{mbr}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{mbr.month}} · {{mbr.title}}</text><text class="amt {{mbr.profit<0?'red':''}}">赚 {{mbr.profit}}</text></view>
+          <view class="aline {{item.tone}}" wx:for="{{mbr.sentences}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="box" wx:if="{{mbr.events.length}}">
+          <view class="tip">本月最大的三件事</view>
+          <view class="row2" wx:for="{{mbr.events}}" wx:key="text">{{index+1}}. {{item.date}} {{item.text}}</view>
+        </view>
+        <view class="box">
+          <view class="tip">近 6 个月赚的钱</view>
+          <view class="bar-line" wx:for="{{mbr.trend}}" wx:key="m">
+            <text class="bar-lb">{{item.m}}</text>
+            <view class="bar-bg"><view class="bar {{item.neg?'neg':''}}" style="width:{{item.bar}}%"></view></view>
+            <text class="bar-v">{{item.profit}}</text>
+          </view>
+        </view>
+        <view class="frow"><button class="btn half" size="mini" bindtap="copyMonthBrief">📋 复制</button><button class="btn half" size="mini" bindtap="saveMonthBriefImage">🖼 存图</button><button class="btn half" size="mini" bindtap="closeMonthBrief">收起</button></view>
+      </block>
       <view class="tip">🧭 利润去哪了（净利对不对得上现金变化：钱压在应收、还是还了借款）</view>
       <view class="frow">
         <input class="inp" placeholder="月份 YYYY-MM（留空本月）" value="{{cb2_month}}" bindinput="onCb2Month" bindconfirm="loadCashBridge"/>

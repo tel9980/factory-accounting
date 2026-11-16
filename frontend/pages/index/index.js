@@ -34,7 +34,7 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
+    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', mbr: null, mb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -2481,6 +2481,31 @@ Page({
         this.setData({ cb: d })
       }
     })
+  },
+  onMbMonth(e) { this.setData({ mb_month: e.detail.value }) },
+  loadMonthBrief() {
+    this.req({
+      url: API_BASE + '/month-brief?month=' + encodeURIComponent(this.data.mb_month || this.data.today_month || ''),
+      success: (r) => {
+        if (!r.data || !r.data.ok) return wx.showToast({ title: '取不出来', icon: 'none' })
+        this.setData({ mbr: r.data })
+      }
+    })
+  },
+  closeMonthBrief() { this.setData({ mbr: null }) },
+  copyMonthBrief() {
+    const d = this.data.mbr
+    if (!d) return
+    wx.setClipboardData({ data: d.text || '', success: () => wx.showToast({ title: '已复制，去微信粘贴', icon: 'none' }) })
+  },
+  saveMonthBriefImage() {
+    const d = this.data.mbr
+    if (!d) return
+    const lines = [d.title + '　' + d.month, '']
+      .concat(d.sentences.map((x) => '· ' + x.text))
+      .concat(d.events.length ? ['', '本月最大的三件事'] : [])
+      .concat(d.events.map((e, i) => (i + 1) + '. ' + e.date + ' ' + e.text))
+    this.drawStatementImage({ text: lines.join('\n') }, true)
   },
   onCb2Month(e) { this.setData({ cb2_month: e.detail.value }) },
   loadCashBridge() {

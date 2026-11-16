@@ -3874,6 +3874,64 @@ app.get('/audit-logs', async (c) => {
 // 对账单（按单位）
 // 一句话对账：某家到底欠我多少（截至今天，含未结清单、争议、对账进度）
 // 现金流水账：这个月钱怎么变的（按账户列期初/进/出/期末 + 大额 + 对不上检查）
+// 某月现金进/出/期末余额（cash=1 且不含内部转账）
+async function cashMonth(db, m) {
+  const r = await db.prepare("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END),0) AS i, COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0) AS o FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?").bind(m).first()
+  const bal = await accountBalances(db)
+  return { in: round2(num(r && r.i)), out: round2(num(r && r.o)), balance: round2((bal || []).reduce((a, x) => a + num(x.balance), 0)) }
+}
+
+// 老板版月度一页纸：三句话 + 最大的三件事 + 趋势（给人看的，不是给会计的）
+app.get('/month-brief', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const prev = monthAdd(m + '-01', -1).slice(0, 7)
+  const title = (await getTitle(db)).title || '加工厂'
+  const [cur, pre, cash, prevCash] = await Promise.all([monthPL(db, m), monthPL(db, prev), cashMonth(db, m), cashMonth(db, prev)])
+  const q1 = async (sql, ...b) => num(((await db.prepare(sql).bind(...b).first()) || {}).v)
+  const [topIn, topOut, topOrder, overCust, dueAp] = await Promise.all([
+    db.prepare("SELECT amount, remark, created_at FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=? ORDER BY amount DESC LIMIT 1").bind(m).first(),
+    db.prepare("SELECT amount, category, remark, created_at FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=? ORDER BY amount DESC LIMIT 1").bind(m).first(),
+    db.prepare("SELECT customer, item_name, price, created_at FROM orders WHERE substr(created_at,1,7)=? ORDER BY price DESC LIMIT 1").bind(m).first(),
+    db.prepare("SELECT customer, SUM(price - paid - COALESCE(written_off,0)) AS left, MIN(created_at) AS oldest FROM orders WHERE price > paid + COALESCE(written_off,0) GROUP BY customer ORDER BY left DESC LIMIT 1").first(),
+    db.prepare("SELECT supplier, SUM(amount - paid - COALESCE(written_off,0)) AS left, MIN(due_date) AS due FROM payables WHERE amount > paid + COALESCE(written_off,0) GROUP BY supplier ORDER BY left DESC LIMIT 1").first()
+  ])
+  const dCash = round2(cash.in - cash.out)
+  const dProfit = round2(cur.profit - pre.profit)
+  const sa = []
+  if (cur.income === 0 && cur.profit === 0) sa.push({ tone: 'warn', text: '这个月还没记单子，先把接的单、收的钱记上，一页纸才有内容。' })
+  else {
+    sa.push({ tone: cur.profit >= 0 ? 'ok' : 'bad', text: `这个月赚了 ¥${cur.profit}（接单 ¥${cur.income}，料和现金费用花了 ¥${round2(cur.mat + cur.cash_exp)}）${pre.income > 0 && Math.abs(dProfit) >= 1 ? `，比上月${dProfit > 0 ? '多' : '少'} ¥${Math.abs(dProfit)}` : ''}。` })
+    if (cash.in === 0 && cash.out === 0) sa.push({ tone: 'warn', text: `这个月没有进出的现金记录，手头账户里一共 ¥${cash.balance}。` })
+    else sa.push({ tone: dCash >= 0 ? 'ok' : 'warn', text: `手头的钱${dCash >= 0 ? '多了' : '少了'} ¥${Math.abs(dCash)}（进 ¥${cash.in}、出 ¥${cash.out}），现在账户里一共 ¥${cash.balance}。` })
+    const bills = []
+    if (overCust && num(overCust.left) > 0) bills.push(`${overCust.customer} 欠得最多（¥${num(overCust.left)}，最老一笔 ${daysSince(overCust.oldest)} 天）`)
+    if (dueAp && num(dueAp.left) > 0) bills.push(`${dueAp.supplier} 的钱该付了（¥${num(dueAp.left)}${dueAp.due ? '，约定 ' + String(dueAp.due).slice(5, 10) : ''}）`)
+    sa.push({ tone: bills.length ? 'warn' : 'ok', text: bills.length ? `最该管的一件事：${bills[0]}。` : '没有特别该催的，保持这个节奏。' })
+  }
+  const events = []
+  if (topIn) events.push({ k: 'in', text: `最大一笔进账 ¥${num(topIn.amount)}（${String(topIn.remark || '收款').slice(0, 20)}）`, date: String(topIn.created_at).slice(5, 10) })
+  if (topOut) events.push({ k: 'out', text: `最大一笔花销 ¥${num(topOut.amount)}（${topOut.category || topOut.remark || '支出'}）`, date: String(topOut.created_at).slice(5, 10) })
+  if (topOrder) events.push({ k: 'order', text: `最大一张单：${topOrder.customer} ${topOrder.item_name || ''} ¥${num(topOrder.price)}`, date: String(topOrder.created_at).slice(5, 10) })
+  const trend = []
+  for (let i = 5; i >= 0; i--) {
+    const mm = monthAdd(m + '-01', -i).slice(0, 7)
+    const p0 = i === 0 ? cur : await monthPL(db, mm)
+    trend.push({ m: mm, profit: p0.profit, cash: 0 })
+  }
+  const mx = Math.max(1, ...trend.map((x) => Math.abs(x.profit)))
+  trend.forEach((x) => { x.bar = Math.round(Math.abs(x.profit) / mx * 100); x.neg = x.profit < 0 })
+  const out = {
+    ok: true, month: m, title,
+    profit: cur.profit, income: cur.income, mat: cur.mat, cash_exp: cur.cash_exp, margin: cur.margin,
+    cash_in: cash.in, cash_out: cash.out, cash_delta: dCash, cash_balance: cash.balance,
+    prev_profit: pre.profit, d_profit: dProfit,
+    sentences: sa, events, trend,
+    text: [`【${title}】${m} 一句话汇报`, '· ' + sa.map((x) => x.text).join('\n· '), events.length ? '本月最大的三件事：' : '', ...events.map((e, i) => `${i + 1}. ${e.date} ${e.text}`)].filter(Boolean).join('\n')
+  }
+  return c.json(out)
+})
+
 // 利润 → 现金 桥接：赚的钱为什么没变成现金
 app.get('/cash-bridge', async (c) => {
   const db = c.env.DB
