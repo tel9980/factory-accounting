@@ -27,6 +27,8 @@ Page({
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
     role: 'owner', staff_enabled: false, cf: null,
+    prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
+    month_amort: 0, month_accrue_int: 0, month_expense_cash: 0,
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
@@ -171,6 +173,7 @@ Page({
     this.loadMe()
     this.loadCashflow()
     this.loadDebts()
+    this.loadPrepaids()
     this.loadLimits()
     this.loadFixed()
     this.loadMonthLocks()
@@ -574,6 +577,8 @@ Page({
             month_profit: res.data.month_profit,
             month_order_add: res.data.month_order_add, month_payable_add: res.data.month_payable_add,
             profit_biz: res.data.profit_biz,
+            month_amort: res.data.month_amort || 0, month_accrue_int: res.data.month_accrue_int || 0,
+            month_expense_cash: res.data.month_expense_cash || 0,
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
             due_soon_count: res.data.due_soon_count, due_soon: res.data.due_soon || [],
             pay_soon_count: res.data.pay_soon_count || 0, pay_soon: res.data.pay_soon || [],
@@ -1941,6 +1946,76 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         this.req({ url: API_BASE + '/debts/' + id, method: 'DELETE', success: () => { this.loadDebts(); this.refresh() } })
+      }
+    })
+  },
+  // ===== 待摊费用（房租/保险一次付多月，按月摊） =====
+  loadPrepaids() {
+    this.req({
+      url: API_BASE + '/prepaids',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({
+          prepaids: d.prepaids || [],
+          prepaid_sum: { open_count: d.open_count || 0, total_left: d.total_left || 0, month_amount: d.month_amount || 0 }
+        })
+      }
+    })
+  },
+  onPPName(e) { this.setData({ pp_name: e.detail.value }) },
+  onPPTotal(e) { this.setData({ pp_total: e.detail.value }) },
+  onPPMonths(e) { this.setData({ pp_months: e.detail.value }) },
+  onPPCat(e) { this.setData({ pp_cat: e.detail.value }) },
+  onPPStart(e) { this.setData({ pp_start: e.detail.value }) },
+  addPrepaid() {
+    const d = this.data
+    if (!(Number(d.pp_total) > 0)) return wx.showToast({ title: '总金额要大于 0', icon: 'none' })
+    if (!(Number(d.pp_months) >= 1)) return wx.showToast({ title: '摊几个月要填', icon: 'none' })
+    this.req({
+      url: API_BASE + '/prepaids', method: 'POST',
+      data: { name: d.pp_name || d.pp_cat, total: Number(d.pp_total), months: Number(d.pp_months), category: d.pp_cat || '房租', start_date: d.pp_start || '' },
+      success: () => {
+        wx.showToast({ title: '已记上，按月摊销', icon: 'none' })
+        this.setData({ pp_name: '', pp_total: '', pp_start: '' })
+        this.loadPrepaids(); this.refresh()
+      }
+    })
+  },
+  togglePrepaid(e) {
+    const ds = e.currentTarget.dataset
+    const on = ds.active !== 'open'
+    this.req({
+      url: API_BASE + '/prepaids/' + ds.id, method: 'PATCH', data: { active: on },
+      success: () => { this.loadPrepaids(); this.refresh() }
+    })
+  },
+  delPrepaid(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删掉这笔待摊？', content: '会连带删掉已摊销的流水（当月成本会变少）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/prepaids/' + id, method: 'DELETE', success: () => { this.loadPrepaids(); this.refresh() } })
+      }
+    })
+  },
+  runAmort() {
+    this.req({
+      url: API_BASE + '/run-amort', method: 'POST',
+      success: (res) => {
+        const d = res.data || {}
+        wx.showToast({ title: d.added ? '补摊了 ' + d.added + ' 个月，共 ' + d.amount + ' 元' : '没有要补的月份', icon: 'none' })
+        this.loadPrepaids(); this.refresh()
+      }
+    })
+  },
+  runAccrual() {
+    this.req({
+      url: API_BASE + '/run-accrual', method: 'POST',
+      success: (res) => {
+        const d = res.data || {}
+        wx.showToast({ title: d.added ? '已预提本月利息 ' + d.amount + ' 元' : '本月已经提过了', icon: 'none' })
+        this.loadDebts(); this.refresh()
       }
     })
   },

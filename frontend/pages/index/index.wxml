@@ -91,6 +91,7 @@
       </view>
     </view>
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
+    <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="issuebar" wx:if="{{issue_count>0}}" bindtap="showIssue">⚠ 数据自检发现 {{issue_count}} 处对不上（点开看）</view>
     <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
     <view class="cfcard" wx:if="{{role!='staff' && cf && cf.days}}" bindtap="showCashflow">
@@ -655,6 +656,7 @@
         </view>
         <input class="inp" placeholder="备注（可不填）" value="{{d_remark}}" bindinput="onDRemark"/>
         <button class="btn" size="mini" bindtap="addDebt">记一笔借款（钱进账户）</button>
+        <button class="btn" size="mini" bindtap="runAccrual">补提本月利息（自动记成本）</button>
       </view>
       <view class="list" wx:if="{{debts.length}}">
         <view class="item" wx:for="{{debts}}" wx:key="id">
@@ -670,6 +672,35 @@
         </view>
       </view>
       <view class="tip" wx:else>还没有借款记录。有银行贷款或亲友借款就记一笔，每月利息会自动算，到期前提醒你。</view>
+    </view>
+
+    <view class="form">
+      <view class="tip">🗓 待摊费用（房租/保险一次付几个月，按月摊进成本）{{prepaid_sum.open_count ? '：' + prepaid_sum.open_count + ' 项在摊，每月约 ' + prepaid_sum.month_amount + ' 元，还没摊完 ' + prepaid_sum.total_left + ' 元' : ''}}</view>
+      <view class="debt-add" wx:if="{{role!='staff'}}">
+        <input class="inp" placeholder="名称（如 一年厂房房租）" value="{{pp_name}}" bindinput="onPPName"/>
+        <view class="frow">
+          <input class="inp half" placeholder="一共付了多少" type="digit" value="{{pp_total}}" bindinput="onPPTotal"/>
+          <input class="inp half" placeholder="摊几个月" type="number" value="{{pp_months}}" bindinput="onPPMonths"/>
+        </view>
+        <view class="frow">
+          <input class="inp half" placeholder="分类（房租/保险…）" value="{{pp_cat}}" bindinput="onPPCat"/>
+          <picker mode="date" value="{{pp_start}}" bindchange="onPPStart"><view class="picker">付款日：{{pp_start || '今天'}} ▾</view></picker>
+        </view>
+        <button class="btn" size="mini" bindtap="addPrepaid">记待摊（钱先付出去，成本按月摊）</button>
+        <button class="btn" size="mini" bindtap="runAmort">补摊本月（有漏掉的月份就点这里）</button>
+      </view>
+      <view class="list" wx:if="{{prepaids.length}}">
+        <view class="item" wx:for="{{prepaids}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{item.active=='open' ? '还没摊 ' + item.remain : '已摊完'}}</text></view>
+          <view class="row2">总额 {{item.total}} · 每月 {{item.per_month}} · 已摊 {{item.amortized}}（{{item.done_months}}/{{item.months}} 个月）</view>
+          <view class="row2" wx:if="{{item.next_month}}">下次摊销 {{item.next_month}} 约 {{item.per_month}} 元</view>
+          <view class="btns">
+            <button size="mini" wx:if="{{role!='staff'}}" bindtap="togglePrepaid" data-id="{{item.id}}" data-active="{{item.active}}">{{item.active=='open' ? '停摊' : '继续摊'}}</button>
+            <button size="mini" wx:if="{{role!='staff'}}" bindtap="delPrepaid" data-id="{{item.id}}">删</button>
+          </view>
+        </view>
+      </view>
+      <view class="tip" wx:else>还没有待摊费用。比如一次交了 1 年房租 1.2 万，记成 12 个月摊：钱当天出账，成本每月只算 1000，利润不会某个月特别难看。</view>
     </view>
 
     <view class="chart" wx:if="{{nw.length}}">

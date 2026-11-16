@@ -124,6 +124,8 @@ app.use('*', async (c, next) => {
       (/^\/budgets/.test(path) && m !== 'GET') ||
       (/^\/fixed/.test(path) && m !== 'GET' && path !== '/run-fixed') ||
       ((/^\/debts/.test(path) || /^\/credit-limits/.test(path)) && m !== 'OPTIONS') ||
+      (/^\/prepaids/.test(path) && m !== 'GET') ||
+      (/^\/run-(amort|accrual)$/.test(path)) ||
       (/^\/transfers/.test(path) && m !== 'GET') ||
       (/^\/writeoffs/.test(path) && m !== 'GET') ||
       (/^\/assets/.test(path) && m !== 'GET') ||
@@ -255,6 +257,7 @@ ${t.note ? '<div style="font-size:12.5px;color:#555;margin-top:10px">备注：' 
 // ==================== 借款台账（银行/亲友借款 + 利息 + 还款计划） ====================
 const DEBT_KIND = { bank: '银行贷款', person: '个人借款', other: '其他' }
 const PAY_KIND = { interest: '按月付息到期还本', equal: '等额本息', end: '到期一次还本付息' }
+const monthOf = (iso) => String(iso || '').slice(0, 7)
 const monthAdd = (iso, k) => {
   const d = new Date(iso + 'T00:00:00Z')
   const day = d.getUTCDate()
@@ -435,6 +438,150 @@ app.delete('/credit-limits/:id', async (c) => {
   const db = c.env.DB
   await db.prepare('DELETE FROM credit_limits WHERE id=?').bind(c.req.param('id')).run()
   return c.json({ ok: true })
+})
+
+// ==================== 待摊费用（房租/保险等一次付多月，按月摊） ====================
+const PREPAID_CAT = '待摊费用'
+const amortPerMonth = (p) => round2(num(p.total) / Math.max(1, num(p.months)))
+const prepaidView = async (db, p) => {
+  const months = Math.max(1, num(p.months))
+  const start = (p.start_date || p.created_at || now()).slice(0, 10)
+  const done = (await db.prepare("SELECT created_at FROM ledger WHERE ref_type='amort' AND ref_id=?").bind(p.id).all()).results
+  const doneMonths = done.map((r) => (r.created_at || '').slice(0, 7))
+  const amortized = round2(amortPerMonth(p) * Math.min(months, doneMonths.length))
+  let nextMonth = ''
+  for (let k = 0; k < months; k += 1) {
+    const m = monthOf(monthAdd(start, k))
+    if (!doneMonths.includes(m)) { nextMonth = m; break }
+  }
+  return {
+    id: p.id, name: p.name || '', total: num(p.total), months, per_month: amortPerMonth(p),
+    start_date: start, category: p.category || '', account_id: num(p.account_id), remark: p.remark || '',
+    active: num(p.active) ? 'open' : 'closed', amortized, remain: round2(num(p.total) - amortized),
+    done_months: doneMonths.length, next_month: nextMonth, end_month: monthOf(monthAdd(start, months - 1))
+  }
+}
+
+// 按月生成摊销流水（cash=0，不动现金，只进成本）
+const runAmort = async (db) => {
+  const list = (await db.prepare('SELECT * FROM prepaids WHERE active=1').all()).results
+  let added = 0
+  let amount = 0
+  const today = now().slice(0, 10)
+  for (const p of list) {
+    const months = Math.max(1, num(p.months))
+    const start = (p.start_date || p.created_at || today).slice(0, 10)
+    const per = amortPerMonth(p)
+    for (let k = 0; k < months; k += 1) {
+      const dueMonth = monthOf(monthAdd(start, k))
+      const dueDate = monthAdd(start, k).slice(0, 10)
+      if (dueDate > today) break
+      const has = await db.prepare("SELECT id FROM ledger WHERE ref_type='amort' AND ref_id=? AND substr(created_at,1,7)=?").bind(p.id, dueMonth).first()
+      if (has) continue
+      await db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,?,?,?,0,?)")
+        .bind(per, p.category || PREPAID_CAT, '摊销：' + (p.name || ''), 'amort', p.id, num(p.account_id) || 0, dueDate).run()
+      added += 1
+      amount = round2(amount + per)
+    }
+  }
+  return { added, amount }
+}
+
+app.get('/prepaids', async (c) => {
+  const db = c.env.DB
+  const rows = (await db.prepare('SELECT * FROM prepaids ORDER BY id DESC').all()).results
+  const list = []
+  for (const p of rows) list.push(await prepaidView(db, p))
+  const open = list.filter((x) => x.active === 'open')
+  return c.json({
+    prepaids: list, count: list.length, open_count: open.length,
+    total_left: round2(open.reduce((a, x) => a + x.remain, 0)),
+    month_amount: round2(open.filter((x) => x.next_month === month() || !x.next_month).reduce((a, x) => a + x.per_month, 0))
+  })
+})
+
+app.post('/prepaids', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const total = num(b.total)
+  const months = Math.max(1, num(b.months))
+  if (!(total > 0)) return c.json({ error: '总金额要大于 0' }, 400)
+  const cat = String(b.category || '房租').trim() || '房租'
+  const acc = num(b.account_id) || (await defaultAccountId(db))
+  const start = String(b.start_date || now()).slice(0, 10)
+  const r = await db.prepare('INSERT INTO prepaids (name, total, months, start_date, category, account_id, remark, active, created_at) VALUES (?,?,?,?,?,?,?,1,?)')
+    .bind(String(b.name || cat), total, months, start, cat, acc, String(b.remark || ''), now()).run()
+  const id = r.meta && r.meta.last_row_id
+  // 付款流水：现金流出，分类「待摊费用」（不算当月成本，按月摊）
+  await db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,?,?,?,1,?)")
+    .bind(total, PREPAID_CAT, '预付 ' + String(b.name || cat) + '（' + months + ' 个月）', 'prepaid', id, acc, start).run()
+  const run = await runAmort(db)
+  return c.json({ ok: true, id, per_month: round2(total / months), amort: run })
+})
+
+app.patch('/prepaids/:id', async (c) => {
+  const id = c.req.param('id')
+  const b = await c.req.json()
+  const db = c.env.DB
+  const p = await db.prepare('SELECT * FROM prepaids WHERE id=?').bind(id).first()
+  if (!p) return c.json({ error: '没找到' }, 404)
+  if (b.active !== undefined) await db.prepare('UPDATE prepaids SET active=? WHERE id=?').bind(b.active ? 1 : 0, id).run()
+  if (b.name !== undefined) await db.prepare('UPDATE prepaids SET name=? WHERE id=?').bind(String(b.name), id).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/prepaids/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  await db.prepare('DELETE FROM prepaids WHERE id=?').bind(id).run()
+  await db.prepare("DELETE FROM ledger WHERE ref_type IN ('prepaid','amort') AND ref_id=?").bind(id).run()
+  return c.json({ ok: true })
+})
+
+app.post('/run-amort', async (c) => {
+  const db = c.env.DB
+  const r = await runAmort(db)
+  return c.json({ ok: true, added: r.added, amount: r.amount })
+})
+
+// ==================== 预提利息（借款每月自动计息，不用手点） ====================
+const runAccrual = async (db) => {
+  const rows = (await db.prepare("SELECT * FROM debts WHERE status='open'").all()).results
+  const reps = (await db.prepare('SELECT * FROM debt_repays').all()).results
+  const today = now().slice(0, 10)
+  const cur = month()
+  let added = 0
+  let amount = 0
+  for (const d of rows) {
+    const v = debtView(d, reps.filter((r) => r.debt_id === d.id))
+    if (!v.monthly_interest || v.monthly_interest <= 0 || v.status === 'closed') continue
+    // 只提本月（当月最后一次还款日之前也算）；已有本期「付息」流水则不再提
+    const paidThisMonth = reps.some((r) => r.debt_id === d.id && r.kind !== 'principal' && (r.rdate || r.created_at || '').slice(0, 7) === cur)
+    const has = await db.prepare("SELECT id FROM ledger WHERE ref_type='debt_int' AND ref_id=? AND substr(created_at,1,7)=?").bind(d.id, cur).first()
+    if (paidThisMonth || has) continue
+    const start = (d.start_date || d.created_at || today).slice(0, 10)
+    if (start.slice(0, 7) >= cur) continue
+    await db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,?,?,?,0,?)")
+      .bind(v.monthly_interest, '利息', '预提利息：' + (d.lender || ''), 'debt_int', d.id, num(d.account_id) || 0, today).run()
+    added += 1
+    amount = round2(amount + v.monthly_interest)
+  }
+  return { added, amount }
+}
+
+app.post('/run-accrual', async (c) => {
+  const db = c.env.DB
+  const r = await runAccrual(db)
+  return c.json({ ok: true, added: r.added, amount: r.amount })
+})
+
+app.get('/accruals', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || month()).slice(0, 7)
+  const { results } = await db.prepare("SELECT * FROM ledger WHERE ref_type IN ('amort','debt_int') AND substr(created_at,1,7)=? ORDER BY id").bind(m).all()
+  const amort = round2(results.filter((r) => r.ref_type === 'amort').reduce((a, r) => a + num(r.amount), 0))
+  const interest = round2(results.filter((r) => r.ref_type === 'debt_int').reduce((a, r) => a + num(r.amount), 0))
+  return c.json({ month: m, rows: results, amort, interest, total: round2(amort + interest) })
 })
 
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
@@ -1391,6 +1538,15 @@ app.post('/book-name', async (c) => {
   return c.json({ ok: true })
 })
 
+// 权责调整：把「按月摊的费用 + 预提利息」补进当月成本（现金口径本身不含它们）
+const accrualAdjust = async (db, m) => {
+  const a = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='amort' AND substr(created_at,1,7)=?").bind(m).first()
+  const b = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?").bind(m).first()
+  const amort = round2(num(a && a.t))
+  const acr = round2(num(b && b.t))
+  return { amort, accrue_int: acr, net: round2(amort + acr) }
+}
+
 app.get('/dashboard', async (c) => {
   const db = c.env.DB
   const m = month()
@@ -1403,6 +1559,8 @@ app.get('/dashboard', async (c) => {
   const orderAdd = await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
   const payableAdd = await db.prepare('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?').bind(m).first()
   const expCash = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND ref_type='expense' AND substr(created_at,1,7)=?").bind(m).first()
+  const accAdj = await accrualAdjust(db, m)
+  const expTotal = round2(num(expCash.t) + accAdj.net)
   const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
   const overdue = await db.prepare('SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all()
   const todayS = new Date().toISOString().slice(0, 10)
@@ -1447,8 +1605,10 @@ app.get('/dashboard', async (c) => {
     month_profit: hideProfit ? null : round2(num(inc.total) - num(out.total)),
     month_order_add: round2(num(orderAdd.t)),
     month_payable_add: round2(num(payableAdd.t)),
-    month_expense_cash: round2(num(expCash.t)),
-    profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(payableAdd.t) - num(expCash.t)),
+    month_expense_cash: expTotal,
+    month_amort: accAdj.amort,
+    month_accrue_int: accAdj.accrue_int,
+    profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(payableAdd.t) - expTotal),
     pending_count: pending.n,
     today_income: round2(num(todayIn.t)),
     top_customer: topCust ? topCust.nm : '',
@@ -1625,11 +1785,12 @@ app.get('/profit-compare', async (c) => {
   const payableAdd = await q('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?')
   const expCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND ref_type='expense' AND substr(created_at,1,7)=?")
   const fixedCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND ref_type='fixed' AND substr(created_at,1,7)=?")
+  const accAdj = await accrualAdjust(db, m)
   // 现金口径：本月实际收到的钱 − 本月实际付出的钱
   const cash = num(inc) - num(out)
   // 权责口径：本月接的活 − 本月赊的料 − 本月花的现金成本（工资水电等）
   const otherCash = round2(num(out) - expCash - fixedCash) // 还供应商/其它付出
-  const accrual = round2(num(orderAdd) - num(payableAdd) - expCash - fixedCash)
+  const accrual = round2(num(orderAdd) - num(payableAdd) - expCash - fixedCash - accAdj.net)
   return c.json({
     month: m,
     cash_income: round2(num(inc)),
@@ -1637,7 +1798,9 @@ app.get('/profit-compare', async (c) => {
     cash_profit: round2(cash),
     order_add: round2(num(orderAdd)),
     payable_add: round2(num(payableAdd)),
-    expense_cash: round2(expCash),
+    expense_cash: round2(num(expCash) + accAdj.net),
+    amort: accAdj.amort,
+    accrue_int: accAdj.accrue_int,
     fixed_cash: round2(fixedCash),
     other_cash_out: otherCash,
     accrual_profit: accrual,
@@ -3874,6 +4037,8 @@ export default {
       if (!db) continue
       try {
         await runFixed(db)
+        await runAmort(db)
+        await runAccrual(db)
         const cron = (event && event.cron) || ''
         if (cron === '0 1 * * 1') await pushWeekly(db)
         else await runWxReminder(db)
