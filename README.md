@@ -577,11 +577,15 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - ✓ 不受影响：查看任何页面、导出 Excel、打印对账单/月报/交接包、催款提醒、对账单、备份；
    - 🔓 想改这个月的账：报表 → 月结归档 → 点这个月旁边的「解锁」（删归档），改完再结一次会生成新快照。
    - 后端 `closePrecheck` 返回 `lock_info`（空账本和正常两种情况都带），前端结账弹窗直接渲染。
+205. ✅ **没设账期的单位主动提醒 + 一键补账期**：单位页顶部新增黄色提醒条——「⚠ 还有 N 家没设账期（共 ¥X）」，点「一键补账期」统一按默认天数（或指定天数）给这些单位设账期，并顺手把未结单的到期日补上，让首页 7 天内到期提醒真正生效：
+   - `GET /term-gap`：列出所有在 orders/payables 出现过、但还没设账期的单位（按欠款倒序），含每家应收/应付类别、总单数、未结单数、欠款额，附白话总结；
+   - `POST /term-gap/apply {term_days?, parties?}`：给没设账期的单位（或指定名单）批量写入账期，并把其未结单按「单据日期 + 账期天数」补上到期日，返回 updated/filled；
+   - 顺带修正 schema.sql 里 party_terms 缺 `recon_day` 列的历史漂移。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 284 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 286 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -827,6 +831,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 - `GET /term-default`
 - `POST /term-default`
+
+**term-gap**（2）
+
+- `GET /term-gap`
+- `POST /term-gap/apply`
 
 **wx-config**（2）
 

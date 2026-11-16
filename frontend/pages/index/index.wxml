@@ -2117,6 +2117,14 @@
 
   <block wx:if="{{tab=='contact'}}">
     <view class="form">
+      <view class="termgap" wx:if="{{tg && tg.count}}">
+        <view class="row1"><text class="nm">⚠ 还有 {{tg.count}} 家没设账期</text><text class="amt red">共 ¥{{tg.open_sum}}</text></view>
+        <view class="row2">{{tg.text}}</view>
+        <view class="frow">
+          <button class="btn warn" size="mini" bindtap="applyTermGap">一键补账期（默认 {{tg.default_term}} 天）</button>
+          <button class="btn ghost" size="mini" bindtap="closeTermGap">收起</button>
+        </view>
+      </view>
       <view class="tip">默认账期（不单独设的单位都按这个算，比如 30 天；设了以后新单自动带出到期日）</view>
       <view class="frow">
         <input class="inp" placeholder="默认账期天数，0=不设" type="number" value="{{term_default}}" bindinput="onTermDefault"/>

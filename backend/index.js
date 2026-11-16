@@ -6020,6 +6020,75 @@ app.get('/collect-list', async (c) => {
   return c.json({ ok: true, type, total, count: list.length, list: out })
 })
 
+// ── 没设账期的单位：主动列出来 + 一键补上（到期提醒靠账期）──
+app.get('/term-gap', async (c) => {
+  const db = c.env.DB
+  const dt = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
+  const def = num(dt && dt.value) || 30
+  const [terms, ar, ap] = await Promise.all([
+    db.prepare('SELECT party FROM party_terms').all().catch(() => ({ results: [] })),
+    db.prepare("SELECT customer party, COUNT(*) total, SUM(CASE WHEN price-COALESCE(paid,0)-COALESCE(written_off,0)>0 THEN 1 ELSE 0 END) open_cnt, COALESCE(SUM(MAX(0, price-COALESCE(paid,0)-COALESCE(written_off,0))),0) left_amt FROM orders GROUP BY customer").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT supplier party, COUNT(*) total, SUM(CASE WHEN amount-COALESCE(paid,0)-COALESCE(written_off,0)>0 THEN 1 ELSE 0 END) open_cnt, COALESCE(SUM(MAX(0, amount-COALESCE(paid,0)-COALESCE(written_off,0))),0) left_amt FROM payables GROUP BY supplier").all().catch(() => ({ results: [] }))
+  ])
+  const known = new Set((terms.results || []).map((t) => t.party))
+  const map = {}
+  const add = (r, kind) => {
+    const p = String(r.party || '').trim()
+    if (!p || known.has(p)) return
+    const e = map[p] || (map[p] = { party: p, kind: [], total: 0, open_cnt: 0, left: 0 })
+    if (kind === 'ar') e.kind.push('ar')
+    if (kind === 'ap') e.kind.push('ap')
+    e.total += num(r.total); e.open_cnt += num(r.open_cnt); e.left += num(r.left_amt)
+  }
+  for (const r of (ar.results || [])) add(r, 'ar')
+  for (const r of (ap.results || [])) add(r, 'ap')
+  const rows = Object.values(map).sort((a, b) => b.left - a.left || b.open_cnt - a.open_cnt)
+    .map((e) => ({ ...e, kind: e.kind.includes('ar') && e.kind.includes('ap') ? 'both' : e.kind[0] || 'ar', left: round2(e.left) }))
+  const openSum = round2(rows.reduce((a, r) => a + r.left, 0))
+  const text = rows.length
+    ? `还有 ${rows.length} 家没设账期，其中 ${rows.filter((r) => r.open_cnt > 0).length} 家还欠着钱（共 ¥${openSum}）。没账期到点就不会提醒你收/付钱，建议点下面「一键补账期」。`
+    : '该设账期的单位都设好了，到期提醒都能正常工作。'
+  return c.json({ ok: true, count: rows.length, open_sum: openSum, default_term: def, rows, text })
+})
+
+// 一键补账期：给没设账期的单位统一设天数，并顺手把未结单的到期日补上
+app.post('/term-gap/apply', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json()
+  const dt = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
+  const days = Math.max(1, Math.min(180, Math.round(num(b.term_days) || num(dt && dt.value) || 30)))
+  const parties = Array.isArray(b.parties) ? b.parties.map((x) => String(x).trim()).filter(Boolean) : []
+  const [terms, ar, ap] = await Promise.all([
+    db.prepare('SELECT party FROM party_terms').all().catch(() => ({ results: [] })),
+    db.prepare("SELECT customer party FROM orders GROUP BY customer").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT supplier party FROM payables GROUP BY supplier").all().catch(() => ({ results: [] }))
+  ])
+  const known = new Set((terms.results || []).map((t) => t.party))
+  const want = new Set()
+  for (const r of (ar.results || [])) if (!known.has(r.party)) want.add(r.party)
+  for (const r of (ap.results || [])) if (!known.has(r.party)) want.add(r.party)
+  let done = 0, filled = 0
+  for (const p of (parties.length ? parties : Array.from(want))) {
+    const hasAr = (ar.results || []).some((x) => x.party === p)
+    const hasAp = (ap.results || []).some((x) => x.party === p)
+    const kind = hasAr && hasAp ? 'ar' : hasAp ? 'ap' : 'ar'
+    await db.prepare('INSERT INTO party_terms (party, kind, term_days, recon_cycle, recon_day, note, created_at) VALUES (?,?,?,0,0,\'\',?) ON CONFLICT(party) DO UPDATE SET kind=excluded.kind, term_days=excluded.term_days').bind(p, kind, days, now()).run()
+    done++
+    // 顺手给这家未结单补到期日（按单据日期 + 账期天数）
+    for (const tbl of ['orders', 'payables']) {
+      const col = tbl === 'orders' ? 'customer' : 'supplier'
+      const amt = tbl === 'orders' ? 'price' : 'amount'
+      const rs = (await db.prepare(`SELECT id, created_at FROM ${tbl} WHERE ${col}=? AND ${amt}-COALESCE(paid,0)-COALESCE(written_off,0)>0 AND (due_date IS NULL OR due_date='')`).bind(p).all()).results || []
+      for (const r of rs) {
+        await db.prepare(`UPDATE ${tbl} SET due_date=? WHERE id=?`).bind(addDaysIso((r.created_at || now()).slice(0, 10), days) + 'T00:00:00.000Z', r.id).run()
+        filled++
+      }
+    }
+  }
+  await logAudit(db, '一键补账期', 'party_terms', `给 ${done} 家设 ${days} 天账期，补 ${filled} 个到期日`)
+  return c.json({ ok: true, updated: done, filled, term_days: days })
+})
+
 // ===== 催款记录：哪天跟谁催过、说了什么，避免一周催三次同一家 =====
 app.get('/dunning-log', async (c) => {
   const db = c.env.DB

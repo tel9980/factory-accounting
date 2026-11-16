@@ -251,6 +251,7 @@ CREATE TABLE IF NOT EXISTS party_terms (
   kind TEXT DEFAULT 'ar',
   term_days INTEGER DEFAULT 0,
   recon_cycle INTEGER DEFAULT 0,
+  recon_day INTEGER DEFAULT 0,
   note TEXT,
   created_at TEXT
 );

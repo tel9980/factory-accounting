@@ -136,7 +136,7 @@ Page({
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
     hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
-    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, tg: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
@@ -510,6 +510,36 @@ Page({
           due_text: r.recon_due ? '该对账了' : (r.last_recon ? '对过 ' + r.recon_times + ' 次' : '没对过')
         }))
         this.setData({ terms: rows, terms_unset: d.unset || [] })
+      }
+    })
+  },
+
+  loadTermGap() {
+    this.req({
+      url: API_BASE + '/term-gap',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ tg: d }) }
+    })
+  },
+  closeTermGap() { this.setData({ tg: null }) },
+  applyTermGap() {
+    const d = this.data.tg
+    if (!d || !d.count) return
+    const days = Math.max(1, Math.min(180, Math.round(Number(d.default_term) || 30)))
+    wx.showModal({
+      title: '给 ' + d.count + ' 家补账期',
+      content: '统一按 ' + days + ' 天账期设置，并顺手把还没到期日的未结单补上到期日。',
+      confirmText: '一键补上',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({
+          url: API_BASE + '/term-gap/apply', method: 'POST', data: { term_days: days },
+          success: (r) => {
+            const x = r.data || {}
+            if (x.error) return wx.showToast({ title: x.error, icon: 'none' })
+            wx.showToast({ title: '设了 ' + (x.updated || 0) + ' 家、补 ' + (x.filled || 0) + ' 个到期日', icon: 'none' })
+            this.loadTermGap(); this.loadPartyTerms(); this.refresh()
+          }
+        })
       }
     })
   },
@@ -1325,7 +1355,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTermGap(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal()
       this.loadEditReqs()
     } else if (t === 'me') {
       this.loadHelpKw()
