@@ -2162,6 +2162,7 @@
           <button size="mini" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 记发对账单</button>
           <button size="mini" bindtap="openStLog" data-p="{{item.party}}">📄 送达/回音</button>
           <button size="mini" bindtap="openProfile" data-p="{{item.party}}">改档案</button>
+          <button size="mini" bindtap="openCustCard" data-p="{{item.party}}">📇 画像</button>
         </view>
       </view>
     </view>
@@ -2188,6 +2189,27 @@
         <button class="btn ghost" size="mini" bindtap="closePartyBalance">收起</button>
       </view>
       <view class="tip">直接发微信给对方：「你说的总数我算了一下」，有争议的对方一看就知道是哪一笔。</view>
+    </view>
+    <view class="form" wx:if="{{cc}}">
+      <view class="tip">📇 客户画像 · {{cc.party}}</view>
+      <view class="cc-verdict {{cc.tone}}">{{cc.verdict}}</view>
+      <view class="cc-grid">
+        <view class="cc-k">做了 <text class="cc-v">{{cc.cnt}}</text> 单</view>
+        <view class="cc-k">合计 <text class="cc-v">¥{{cc.income}}</text></view>
+        <view class="cc-k">料钱 <text class="cc-v">¥{{cc.cost}}</text></view>
+        <view class="cc-k">毛利 <text class="cc-v">¥{{cc.profit}}（{{cc.margin_pct}}%）</text></view>
+        <view class="cc-k">单均 <text class="cc-v">¥{{cc.avg_per_order}}</text></view>
+        <view class="cc-k">付款速度 <text class="cc-v">{{cc.pay.avg_days===null?'还没结清过':cc.pay.avg_days+' 天'}}</text></view>
+      </view>
+      <view class="row2" wx:if="{{cc.pay.avg_days!==null}}">最快 {{cc.pay.fastest}} 天、最慢 {{cc.pay.slowest}} 天，按 {{cc.pay.settled_cnt}} 单已结清的算</view>
+      <view class="row2">现在欠 ¥{{cc.unpaid}}{{cc.oldest_days?'，最老一笔 '+cc.oldest_days+' 天':''}}{{cc.overdue_cnt?'，'+cc.overdue_cnt+' 笔已过期':''}}</view>
+      <view class="row2" wx:if="{{cc.dun_times||cc.statements}}">催过 {{cc.dun_times}} 次、发过 {{cc.statements}} 份对账单{{cc.disputes?'，'+cc.disputes+' 份有争议':''}}</view>
+      <view class="cc-adv" wx:for="{{cc.advice}}" wx:key="*this">· {{item}}</view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="copyCustCard">复制这张卡</button>
+        <button class="btn ghost" size="mini" bindtap="openStatementFromCard">发对账单</button>
+        <button class="btn gray" size="mini" bindtap="closeCustCard">收起</button>
+      </view>
     </view>
     <view class="form">
       <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>

@@ -106,7 +106,7 @@ Page({
     gl: null, gl_kw: '', gl_open: '', gl_cat: '',
     rec: null,
     rec_show: false, rec_code: '', rec_pw: '', rec_busy: false,
-    ag: null, ag_tab: 'newphone', ar2: null,
+    ag: null, ag_tab: 'newphone', cc: null, ar2: null,
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -2324,6 +2324,29 @@ Page({
     const d = this.data.pbal
     if (!d) return
     wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'success' }) })
+  },
+  // ── 客户画像 ──
+  openCustCard(e) {
+    const p = e.currentTarget.dataset.p
+    if (!p) return
+    this.req({
+      url: '/customer-card?party=' + encodeURIComponent(p),
+      success: (res) => { if (res.data && res.data.ok) this.setData({ cc: res.data }) },
+    })
+  },
+  closeCustCard() { this.setData({ cc: null }) },
+  copyCustCard() {
+    const cc = this.data.cc
+    if (!cc) return
+    wx.setClipboardData({ data: cc.text, success: () => wx.showToast({ title: '已复制' }) })
+  },
+  openStatementFromCard() {
+    const cc = this.data.cc
+    if (!cc) return
+    this.req({
+      url: '/statement?type=' + (cc.type || 'ar') + '&name=' + encodeURIComponent(cc.party),
+      success: (res) => { if (res.data && res.data.text) this.statementActions(res.data, { type: cc.type || 'ar', name: cc.party }) },
+    })
   },
   partyBalanceDetail() {
     const d = this.data.pbal

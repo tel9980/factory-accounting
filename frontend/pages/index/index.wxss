@@ -381,3 +381,13 @@
 .ag-step { font-size: 13px; color: #333; line-height: 1.75; margin-bottom: 4px; }
 
 .warnc { color: #b8860b; }
+
+/* 客户画像 */
+.cc-verdict { font-size: 15px; font-weight: 600; margin: 6px 0 8px; }
+.cc-verdict.good { color: #0a7d32; }
+.cc-verdict.watch { color: #a15c00; }
+.cc-verdict.bad { color: #b3261e; }
+.cc-grid { display: flex; flex-wrap: wrap; }
+.cc-k { width: 50%; font-size: 13px; color: #666; padding: 3px 0; }
+.cc-v { color: #222; font-weight: 600; }
+.cc-adv { font-size: 13px; color: #444; line-height: 1.7; }

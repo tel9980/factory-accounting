@@ -452,7 +452,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check)/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
@@ -5258,6 +5258,101 @@ app.get('/cashbook', async (c) => {
   if (bigs.length) { lines.push(`大额支出（≥${big}）：`); for (const b of bigs.slice(0, 8)) lines.push(`  ${b.date} ${b.category || b.remark || '支出'} ¥${b.amount}`) }
   for (const it of issues) lines.push('注意：' + it.text)
   return c.json({ ok: true, month: m, rows, total_open: totalOpen, total_in: totalIn, total_out: totalOut, total_end: totalEnd, big, bigs, cats: cats.map((x) => ({ k: x.k, s: round2(num(x.s)) })), issues, text: lines.join('\n') })
+})
+
+// ── 客户画像：这家客户到底值不值得继续做（一家一张卡）──
+app.get('/customer-card', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  if (!party) return c.json({ error: '要看哪一家？在单位页点客户名字旁边的「📇 画像」' }, 400)
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const today = todayIso()
+  const TGT = 25   // 目标毛利率（%）
+  const [orR, payR, dunR, stR] = await Promise.all([
+    db.prepare(`SELECT COUNT(*) cnt, COALESCE(SUM(price),0) income, COALESCE(SUM(COALESCE(cost,0)),0) cost,
+        COALESCE(SUM(CASE WHEN COALESCE(cost,0)=0 THEN 1 ELSE 0 END),0) no_cost_cnt,
+        MIN(created_at) first_day, MAX(created_at) last_day FROM orders WHERE customer=?`).bind(party).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) unpaid,
+        COALESCE(SUM(CASE WHEN paid+COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date<>'' AND substr(due_date,1,10)<? THEN 1 ELSE 0 END),0) overdue_cnt,
+        MIN(CASE WHEN paid+COALESCE(written_off,0) < price THEN created_at END) oldest_open FROM orders WHERE customer=?`).bind(today, party).first().catch(() => null),
+    db.prepare("SELECT COUNT(*) n, MAX(created_at) last FROM dunning_log WHERE party=?").bind(party).first().catch(() => null),
+    db.prepare("SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN ack='doubt' AND resolved_at IS NULL THEN 1 ELSE 0 END),0) doubt FROM statement_log WHERE party=? AND type=?").bind(party, type).first().catch(() => null)
+  ])
+  // 回款速度：只在「已经结清」的单上看（从开单到他付清花了几天）
+  const hp = await db.prepare(`SELECT o.created_at c_at, MAX(l.created_at) last_pay FROM orders o
+      JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in'
+      WHERE o.customer=? AND o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id`).bind(party).all().catch(() => ({ results: [] }))
+  const ds = []
+  for (const h of (hp.results || [])) {
+    const a = Date.parse(h.c_at || ''), b = Date.parse(h.last_pay || '')
+    if (!a || !b || b < a) continue
+    ds.push(Math.round((b - a) / 86400000))
+  }
+  ds.sort((x, y) => x - y)
+  const avgDays = ds.length ? Math.round(ds.reduce((x, y) => x + y, 0) / ds.length) : null
+  const last = await db.prepare('SELECT item_name, price, cost, created_at FROM orders WHERE customer=? ORDER BY price DESC LIMIT 1').bind(party).first().catch(() => null)
+
+  const cnt = num(orR && orR.cnt), income = round2(num(orR && orR.income)), cost = round2(num(orR && orR.cost))
+  const noCost = num(orR && orR.no_cost_cnt)
+  const profit = round2(income - cost)
+  const margin = income > 0 ? Math.round((profit / income) * 1000) / 10 : 0
+  const unpaid = round2(num(payR && payR.unpaid))
+  const overdueCnt = num(payR && payR.overdue_cnt)
+  const oldest = (payR && payR.oldest_open) ? daysSince(payR.oldest_open) : 0
+  const dunTimes = num(dunR && dunR.n)
+  const stN = num(stR && stR.n)
+  const disputes = num(stR && stR.doubt)
+  const daysSinceLast = (orR && orR.last_day) ? daysSince(orR.last_day) : null
+
+  // 想把毛利率补到 TGT，单价大概要涨多少（按现在的成本结构算）
+  let priceUpPct = 0
+  if (income > 0 && cost > 0 && margin < TGT) {
+    const need = cost / (1 - TGT / 100)
+    priceUpPct = Math.round((need / income - 1) * 1000) / 10
+    if (priceUpPct > 300) priceUpPct = 300
+  }
+
+  const advice = []
+  let tone = 'good'
+  if (income <= 0) {
+    tone = 'watch'
+    advice.push('这家还没有单据，先记一笔才能看出赚不赚钱')
+  } else {
+    if (margin < 10) { tone = 'bad'; advice.push(`毛利率只有 ${margin}%，基本白干——按现在的成本，单价要涨 ${priceUpPct}% 才有 ${TGT}% 毛利`) }
+    else if (margin < TGT) { tone = tone === 'bad' ? 'bad' : 'watch'; advice.push(`毛利率 ${margin}%，低于 ${TGT}%——不急，但新单可以试着报高 ${Math.min(priceUpPct, 30)}%`) }
+    else advice.push(`毛利率 ${margin}%，价格是合适的`)
+    if (noCost > 0) advice.push(`有 ${noCost} 张单没填料钱，毛利算不准，补上成本才能看清`)
+    if (avgDays === null) advice.push('还没有结清过的单，看不出他付款快不快')
+    else if (avgDays > 45) { tone = 'bad'; advice.push(`平均 ${avgDays} 天才付清（最慢 ${ds[ds.length - 1]} 天），钱压得久——下次可以要定金或缩短账期`) }
+    else if (avgDays > 30) advice.push(`平均 ${avgDays} 天付清，比一般慢一点，跟紧点`)
+    else advice.push(`平均 ${avgDays} 天就付清，付款爽快`)
+    if (unpaid > 0 && oldest > 60) { tone = 'bad'; advice.push(`还欠 ¥${unpaid}，最老一笔挂了 ${oldest} 天，先催这笔`) }
+    else if (unpaid > 0) advice.push(`还欠 ¥${unpaid}${overdueCnt ? `，其中 ${overdueCnt} 笔已过期` : ''}`)
+    if (disputes > 0) advice.push(`有 ${disputes} 份对账单对方说对不上，还没了结——先把这个弄清`)
+    if (dunTimes >= 3) advice.push(`催过 ${dunTimes} 次了，下次开单前先说清付款日`)
+    if (daysSinceLast !== null && daysSinceLast > 90) advice.push(`${daysSinceLast} 天没下新单了，可以打个电话问问还有没有活`)
+  }
+  const verdict = tone === 'good' ? '这家客户值得继续做' : (tone === 'bad' ? '这家要盯紧，别越做越亏' : '能做，但有几处要留意')
+  const L = []
+  L.push(`【${party}】${verdict}`)
+  L.push(`做了 ${cnt} 单，共 ¥${income}${last && last.item_name ? `；最大一单「${last.item_name}」¥${round2(num(last.price))}` : ''}`)
+  L.push(`料钱 ¥${cost}，毛利 ¥${profit}（${margin}%）`)
+  L.push(avgDays === null ? '付款速度：还没有结清的单' : `付款速度：平均 ${avgDays} 天付清（最快 ${ds[0]} 天，最慢 ${ds[ds.length - 1]} 天，共 ${ds.length} 单）`)
+  L.push(`现在欠 ¥${unpaid}${oldest ? `，最老一笔 ${oldest} 天` : ''}${overdueCnt ? `，${overdueCnt} 笔已过期` : ''}`)
+  if (dunTimes || stN) L.push(`催过 ${dunTimes} 次，发过 ${stN} 份对账单${disputes ? `，${disputes} 份有争议` : ''}`)
+  advice.forEach((x) => L.push('· ' + x))
+  return c.json({
+    ok: true, party, type, verdict, tone, advice, text: L.join('\n'),
+    cnt, income, cost, profit, margin_pct: margin, no_cost_cnt: noCost,
+    avg_per_order: cnt > 0 ? round2(income / cnt) : 0,
+    biggest: last ? { item: last.item_name || '', price: round2(num(last.price)), cost: round2(num(last.cost)), date: (last.created_at || '').slice(0, 10) } : null,
+    first_day: (orR && orR.first_day || '').slice(0, 10), last_day: (orR && orR.last_day || '').slice(0, 10),
+    days_since_last: daysSinceLast,
+    pay: { avg_days: avgDays, fastest: ds.length ? ds[0] : null, slowest: ds.length ? ds[ds.length - 1] : null, settled_cnt: ds.length },
+    unpaid, overdue_cnt: overdueCnt, oldest_days: oldest,
+    dun_times: dunTimes, statements: stN, disputes,
+    price_up_pct: priceUpPct, margin_target: TGT
+  })
 })
 
 app.get('/party-balance', async (c) => {
