@@ -167,35 +167,18 @@ Page({
     this.refresh(); this.loadCloudBackup()
   },
   refresh() {
+    // 核心数据（每屏都要用，量小）
     this.loadDashboard()
-    this.loadAr()
-    this.loadAp()
-    this.loadArSummary()
-    this.loadGroups('ar')
-    this.loadGroups('ap')
-    this.loadExpenses()
-    this.loadHistory()
-    this.loadContacts()
-    this.loadMe()
-    this.loadCashflow()
-    this.loadDebts()
-    this.loadPrepaids()
-    this.loadLimits()
-    this.loadFixed()
-    this.loadMonthLocks()
-    this.loadArchives()
-    this.loadAuditLogs()
-    this.loadTrash()
-    this.loadPhrases()
-    this.loadBudgets()
-    this.loadLoans()
-    this.loadBooks()
     this.loadReminders()
-    this.loadOnboard()
+    this.loadMe()
+    this.loadBooks()
     this.loadAccounts()
-    this.loadTarget()
     this.loadCategories()
-    this.loadAdvances()
+    this.loadOnboard()
+    this.loadCashflow()
+    this.loadTarget()
+    // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
+    this.enterTab(this.data.tab)
   },
   loadCloudBackup() {
     this.req({
@@ -955,17 +938,39 @@ Page({
   onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }); this.loadGroups('ar') },
   onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }); this.loadGroups('ap') },
   onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this.data.exp_all, e.detail.value) }) },
+  // 切到某个页时才加载那一页要用的数据（一次 30 个请求太多，手机上慢）
+  enterTab(t) {
+    if (t === 'ar' || t === 'ap') {
+      this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadGroups(t || 'ar')
+      this.loadLimits(); this.loadAdvances()
+    } else if (t === 'expense') {
+      this.loadExpenses(); this.loadLoans(); this.loadSuggest()
+    } else if (t === 'history') {
+      this.loadHistory()
+    } else if (t === 'import') {
+      this.loadReconLog(); this.loadImportLog(); this.loadReconProgress()
+    } else if (t === 'report') {
+      this.loadFixed(); this.loadMonthLocks(); this.loadArchives(); this.loadAuditLogs()
+      this.loadTrash(); this.loadPhrases(); this.loadBudgets()
+      this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks()
+    } else if (t === 'asset') {
+      this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows()
+      this.loadWriteoffs(); this.loadTransfers(); this.loadDebts(); this.loadPrepaids()
+    } else if (t === 'flows') {
+      this.loadFlows()
+    } else if (t === 'contact') {
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts()
+    } else {
+      this.loadAr(); this.loadAp(); this.loadArSummary()
+    }
+  },
   setGroup(e) {
     const g = e.currentTarget.dataset.g
     const keep = { bill: ['ar', 'ap', 'expense', 'import'], stat: ['report', 'asset', 'history'], me: ['contact'], home: ['home'] }
     const t = (keep[g] || ['home']).indexOf(this.data.tab) >= 0 ? this.data.tab : (keep[g] || ['home'])[0]
     this.setData({ group: g, tab: t })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
-    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'flows') this.loadFlows()
-    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms(); this.loadProfiles() }
-    if (t === 'expense') this.loadLoans()
+    this.enterTab(t)
     if (t === 'ar' || t === 'ap' || t === 'expense') this.loadSuggest()
   },
   // 工作台待办点击跳转（reminders 里的 tab: ar/ap/expense/nw/home）
@@ -981,23 +986,14 @@ Page({
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     if (t === 'ar') this.setData({ ar_filter: 'overdue' })
     if (t === 'ap') this.setData({ ap_filter: 'overdue' })
-    if (t === 'ar') this.loadAr()
-    if (t === 'ap') this.loadAp()
-    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
-    if (t === 'expense') this.loadLoans()
+    this.enterTab(t)
   },
   setTab(e) {
     const t = e.currentTarget.dataset.t
     const g = ({ ar: 'bill', ap: 'bill', expense: 'bill', import: 'bill', report: 'stat', asset: 'stat', history: 'stat', contact: 'me', home: 'home' })[t] || 'home'
     this.setData({ tab: t, group: g })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
-    if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
-    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'flows') this.loadFlows()
-    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms(); this.loadProfiles() }
-    if (t === 'expense') this.loadLoans()
-    if (t === 'import') { this.loadReconLog(); this.loadImportLog(); this.loadReconProgress() }
+    this.enterTab(t)
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
