@@ -106,6 +106,20 @@ Page({
     head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', dy: null, dy_year: '', st_log: null, dp: null,
   },
   req(opts) {
+    // 连点保护：同一个动作（once 名字相同）没回来之前，重复点击直接忽略
+    if (opts.once) {
+      this._once = this._once || {}
+      if (this._once[opts.once]) return
+      this._once[opts.once] = true
+      const tag = opts.once
+      const rel = () => { if (this._once) delete this._once[tag] }
+      setTimeout(rel, 8000)
+      const s0 = opts.success, f0 = opts.fail
+      opts = Object.assign({}, opts, {
+        success: (res) => { rel(); s0 && s0(res) },
+        fail: (res) => { rel(); f0 && f0(res) }
+      })
+    }
     const ak = wx.getStorageSync('ak') || ''
     const bk = String(wx.getStorageSync('book') || 1)
     const doReq = (key) => {
@@ -943,7 +957,7 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         this.req({
-          url: API_BASE + '/pay-batch', method: 'POST',
+          url: API_BASE + '/pay-batch', method: 'POST', once: 'pay-batch',
           data: { supplier: ds.n, amount: Number(ds.amt), account_id: this.data.acc_id },
           success: (res) => {
             const d = res.data || {}
@@ -1274,7 +1288,7 @@ Page({
     const { o_customer, o_item, o_price, o_cost, o_due, o_operator, o_date } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/orders', method: 'POST',
+      url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true,
       data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, operator: o_operator, date: o_date },
       success: (res) => {
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' })
@@ -1294,7 +1308,7 @@ Page({
     const { p_supplier, p_amount, p_remark, p_operator, p_due, p_date } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/payables', method: 'POST',
+      url: API_BASE + '/payables', method: 'POST', once: 'add-payable',
       data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due, date: p_date }, dupRetry: true,
       success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest(); this.showChecks(res) }
     })
@@ -1303,7 +1317,7 @@ Page({
     const { e_amount, e_remark, categories, e_category, e_operator, e_date } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/expenses', method: 'POST', dupRetry: true,
+      url: API_BASE + '/expenses', method: 'POST', dupRetry: true, once: 'add-expense',
       data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date },
       success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
     })
@@ -1340,7 +1354,7 @@ Page({
           return wx.showToast({ title: '比未收的还多（还剩 ' + remain + '）', icon: 'none' })
         }
         this.req({
-          url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
+          url: API_BASE + '/orders/' + id + '/receive', method: 'POST', once: 'receive-' + id,
           data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
           success: (res) => {
             this.refresh()
@@ -1367,7 +1381,7 @@ Page({
       success: (rr) => {
         if (!rr.confirm) return
         this.req({
-          url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'),
+          url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'), once: 'pay-' + id,
           method: 'POST',
           data: { amount: left, account_id: this.data.acc_id },
           success: () => { this.refresh(); wx.showToast({ title: kind === 'ar' ? '已收清' : '已付清', icon: 'success' }); this._offerReceipt(id, kind) }
@@ -1390,7 +1404,7 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         this.req({
-          url: API_BASE + '/receive-batch', method: 'POST',
+          url: API_BASE + '/receive-batch', method: 'POST', once: 'receive-batch',
           data: { customer, amount, date: this.data.rb_date, account_id: this.data.acc_id },
           success: (res) => {
             const d = res.data || {}
@@ -1453,7 +1467,7 @@ Page({
           return wx.showToast({ title: '比未付的还多（还剩 ' + remain + '）', icon: 'none' })
         }
         this.req({
-          url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
+          url: API_BASE + '/payables/' + id + '/pay', method: 'POST', once: 'payp-' + id,
           data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
           success: () => {
             this.refresh()

@@ -3553,10 +3553,17 @@ async function orderChecks(db, o) {
 }
 
 app.post('/orders', async (c) => {
-  const { customer, item_name, price, due_date, operator, date, cost } = await c.req.json()
+  const body = await c.req.json()
+  const { customer, item_name, price, due_date, operator, date, cost } = body
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
   const created = stampOf(date)
+  // 手抖/连点保护：同一客户、同一金额，2 分钟内又记一张，先问一句（不是不让记，是防重复点）
+  if (!body.confirm_dup) {
+    const near = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND created_at >= ? ORDER BY id DESC LIMIT 1")
+      .bind(customer, num(price), new Date(Date.now() - 120000).toISOString()).first()
+    if (near) return c.json({ dup: true, code: 'dup_soon', id: near.id, error: '刚记过一张一样的：' + customer + ' ¥' + num(price) + '。是又记了一笔吗？' }, 409)
+  }
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date) || (await termDue(db, customer, created))
   const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
