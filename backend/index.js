@@ -1429,6 +1429,10 @@ const termDue = async (db, party, baseIso) => {
     const t = await db.prepare('SELECT term_days FROM party_terms WHERE party=?').bind(String(party || '')).first()
     if (t && num(t.term_days) > 0) return addDaysIso(baseIso, num(t.term_days)) + 'T00:00:00.000Z'
   } catch (e) { /* 表还没建也不影响建单 */ }
+  try {
+    const g = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first()
+    if (g && num(g.value) > 0) return addDaysIso(baseIso, num(g.value)) + 'T00:00:00.000Z'
+  } catch (e) { /* 忽略 */ }
   return ''
 }
 const toIsoDate = (s) => {
@@ -2842,6 +2846,32 @@ app.get('/last-deal', async (c) => {
 
 
 // 开账引导：第一次用要先把"底数"填上，否则后面所有报表都不准
+// 默认账期：没单独设账期的单位，新单按这个天数自动算到期日（新用户最容易漏的一步）
+app.get('/term-default', async (c) => {
+  const db = c.env.DB
+  const r = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
+  return c.json({ ok: true, days: num(r && r.value) })
+})
+app.post('/term-default', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const days = Math.max(0, Math.min(180, Math.round(num(b.days))))
+  await db.prepare("INSERT INTO settings (key,value) VALUES ('default_term',?) ON CONFLICT(key) DO UPDATE SET value=?").bind(String(days), String(days)).run()
+  await logAudit(db, '默认账期', 'settings', `${days} 天`)
+  let filled = 0
+  if (days > 0 && b.fill) {
+    // 顺手把没到期日的未结单补上（按单据日期 + 天数）
+    const os = (await db.prepare("SELECT id, created_at FROM orders WHERE paid < price AND (due_date IS NULL OR due_date='')").all()).results || []
+    const ps = (await db.prepare("SELECT id, created_at FROM payables WHERE paid < amount AND (due_date IS NULL OR due_date='')").all()).results || []
+    const st = []
+    for (const x of os) st.push(db.prepare('UPDATE orders SET due_date=? WHERE id=?').bind(addDaysIso(String(x.created_at || '').slice(0, 10), days) + 'T00:00:00.000Z', x.id))
+    for (const x of ps) st.push(db.prepare('UPDATE payables SET due_date=? WHERE id=?').bind(addDaysIso(String(x.created_at || '').slice(0, 10), days) + 'T00:00:00.000Z', x.id))
+    for (let i = 0; i < st.length; i += 40) { try { await db.batch(st.slice(i, i + 40)) } catch (e) { /* 忽略 */ } }
+    filled = st.length
+  }
+  return c.json({ ok: true, days, filled })
+})
+
 app.get('/onboarding', async (c) => {
   const db = c.env.DB
   await ensureAccounts(db)
@@ -2851,16 +2881,20 @@ app.get('/onboarding', async (c) => {
   const pRow = await db.prepare('SELECT COUNT(*) AS n FROM payables').first()
   const lRow = await db.prepare('SELECT COUNT(*) AS n FROM ledger').first()
   const flag = (await db.prepare("SELECT value FROM settings WHERE key='onboard_done'").first()) || {}
+  const dt = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
+  const tr = await db.prepare('SELECT COUNT(*) AS n FROM party_terms').first().catch(() => null)
+  const hasTerm = num(dt && dt.value) > 0 || num(tr && tr.n) > 0
   const steps = [
     { k: 'acc', t: '填一下账户余额', d: '现在手上的现金、银行卡、微信里各有多少钱', done: opening > 0, go: '设置 → 账户' },
+    { k: 'term', t: '设个默认账期', d: '比如「30 天」，新单自动算到期日，到期才会提醒你收钱', done: hasTerm, go: '设置 → 单位 → 默认账期' },
     { k: 'ar', t: '录"别人还欠我"的账', d: '外面还没收回来的加工费（期初应收）', done: num(oRow && oRow.n) > 0, go: '记账 → 导入 → 期初应收' },
     { k: 'ap', t: '录"我还欠别人"的账', d: '还没付给供应商的钱（期初应付）', done: num(pRow && pRow.n) > 0, go: '记账 → 导入 → 期初应付' }
   ]
   const doneCount = steps.filter((x) => x.done).length
   return c.json({
     show: String(flag.value || '') !== '1',
-    steps, done: doneCount, total: steps.length, all_done: doneCount === 3,
-    opening, ledger_rows: num(lRow && lRow.n)
+    steps, done: doneCount, total: steps.length, all_done: doneCount === steps.length,
+    opening, ledger_rows: num(lRow && lRow.n), default_term: num(dt && dt.value)
   })
 })
 app.post('/onboarding/dismiss', async (c) => {
@@ -6530,11 +6564,13 @@ app.get('/reminders', async (c) => {
     db.prepare("SELECT party, type, month, channel, created_at FROM statement_log WHERE COALESCE(ack,'') = '' AND date(created_at) <= date(?, '-7 day') ORDER BY created_at").bind(today).all(),
     db.prepare("SELECT o.customer AS party, COUNT(*) n, COALESCE(SUM(o.price-o.paid-COALESCE(o.written_off,0)),0) t FROM orders o WHERE o.price-o.paid-COALESCE(o.written_off,0) > 0 AND substr(o.created_at,1,10) <= date(?, '-30 day') AND NOT EXISTS (SELECT 1 FROM statement_log s WHERE s.party=o.customer AND substr(s.created_at,1,7)=?) GROUP BY o.customer ORDER BY t DESC").bind(today, curM).all(),
     db.prepare("SELECT o.customer AS party, COUNT(*) n, COALESCE(SUM(o.price-o.paid-COALESCE(o.written_off,0)),0) t FROM orders o WHERE o.price-o.paid-COALESCE(o.written_off,0) > 0 AND substr(o.created_at,1,10) <= date(?, '-" + minD + " day') AND NOT EXISTS (SELECT 1 FROM dunning_log d WHERE d.party=o.customer AND substr(d.created_at,1,10) >= date(?, '-7 day')) GROUP BY o.customer ORDER BY t DESC").bind(today, today).all(),
-    db.prepare('SELECT party, MAX(created_at) last_at FROM recon_log GROUP BY party').all()
+    db.prepare('SELECT party, MAX(created_at) last_at FROM recon_log GROUP BY party').all(),
+    db.prepare("SELECT COUNT(*) n FROM (SELECT 1 FROM orders WHERE paid + COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='') UNION ALL SELECT 1 FROM payables WHERE paid + COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date=''))").first(),
+    db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
   ]
   const R = await Promise.all(jobs.map((j) => j.catch(() => null)))
   const rows0 = (x) => ((x && x.results) || [])
-  const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon] = R
+  const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm] = R
   const items = []
   const push = (level, text, tab, list) => items.push({ level, text, tab, list: list || [] })
   const odR = rows0(od)
@@ -6557,6 +6593,8 @@ app.get('/reminders', async (c) => {
   if (num(un && un.n) > 0) push('yellow', `${num(un.n)} 笔银行流水还没认领`, 'nw')
   if (num(lo && lo.n) > 0 && num(lo && lo.t) > 0) push('yellow', `员工借支还有 ¥${round2(num(lo.t))} 没清`, 'expense')
   if (num(iv && iv.n) > 0) push('gray', `${num(iv.n)} 张已收款的单还没开发票`, 'nw')
+  // 新用户最容易漏：没设账期 → 未结单没有到期日 → 到期提醒、逾期榜都是空的
+  if (num(noDue && noDue.n) > 0 && num(dterm && dterm.value) === 0) push('yellow', `${num(noDue.n)} 张单还没到期日（设个默认账期就会自动算）`, 'me')
   // 对账：有差异没处理优先提醒，其次「这个月还没对过账」
   if (num(ro && ro.n) > 0) {
     const lst = rows0(await db.prepare("SELECT party, type, diff FROM recon_log WHERE done=0 AND state<>'match' ORDER BY id DESC LIMIT 3").all())

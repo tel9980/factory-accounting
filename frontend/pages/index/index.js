@@ -223,6 +223,37 @@ Page({
     })
   },
   closeReconCal() { this.setData({ rc: null }) },
+  onTermDefault(e) { this.setData({ term_default: e.detail.value }) },
+  loadTermDefault() {
+    this.req({
+      url: API_BASE + '/term-default',
+      success: (res) => { const d = res.data || {}; this.setData({ term_default: String(d.days || 0) }) }
+    })
+  },
+  saveTermDefault() {
+    const days = Math.max(0, Math.min(180, Math.round(Number(this.data.term_default) || 0)))
+    const body = { days }
+    const go = () => this.req({
+      url: API_BASE + '/term-default', method: 'POST', data: body,
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) { wx.showToast({ title: d.error, icon: 'none' }); return }
+        wx.showToast({ title: days ? '默认账期 ' + days + ' 天' : '已关闭默认账期', icon: 'none' })
+        this.setData({ term_default: String(days) })
+        this.refresh()
+      }
+    })
+    if (!days) return go()
+    wx.showModal({
+      title: '默认账期 ' + days + ' 天',
+      content: '以后新单没写到期日就按「单据日期 + ' + days + ' 天」算。要不要顺手把现在还没到期日的未结单也补上？',
+      confirmText: '都补上', cancelText: '只存设置',
+      success: (m) => {
+        body.fill = !!m.confirm
+        go()
+      }
+    })
+  },
   saveTerm() {
     const party = (this.data.term_party || '').trim()
     if (!party) return wx.showToast({ title: '填单位名', icon: 'none' })
@@ -961,7 +992,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary()
     }
@@ -3863,7 +3894,7 @@ Page({
   },
   onbGo(e) {
     const k = e.currentTarget.dataset.k
-    if (k === 'acc') return this.setData({ group: 'me', tab: 'contact' })
+    if (k === 'acc' || k === 'term') return this.setData({ group: 'me', tab: 'contact' })
     this.setData({ group: 'bill', tab: 'import', import_type: k === 'ap' ? 6 : 5 })
   },
   onbDismiss() {
