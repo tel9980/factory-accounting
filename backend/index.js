@@ -7084,9 +7084,8 @@ const apAtEnd = async (db, m) => {
 }
 
 // 家底：每月末 现金 + 别人欠我 − 我欠别人
-app.get('/networth', async (c) => {
-  const db = c.env.DB
-  const n = Math.min(Math.max(num(c.req.query('months'), 12) || 12, 3), 36)
+async function netSeries(db, months) {
+  const n = Math.min(Math.max(num(months) || 12, 1), 36)
   // 性能：原来每个月都要 8 次查询、串行 12 个月（19 秒），改成 5 次分组查询后自己累加（约 1 秒）
   const jobs = [
     db.prepare('SELECT COALESCE(SUM(opening),0) t FROM accounts').first(),
@@ -7133,7 +7132,75 @@ app.get('/networth', async (c) => {
     const debt = debtAtEnd(m)
     out.push({ m, cash, ar, ap, debt, net: round2(cash + ar - ap - debt) })
   }
-  return c.json(out)
+  return out
+}
+// 现在这一刻的家底（按当月算）
+async function netNow(db) {
+  const arr = await netSeries(db, 1)
+  const r = arr[arr.length - 1] || { cash: 0, ar: 0, ap: 0, debt: 0, net: 0 }
+  return { month: now().slice(0, 7), cash: r.cash, ar: r.ar, ap: r.ap, debt: r.debt, net: r.net }
+}
+// 存一份家底快照：以后改了老单据，已存的历史数不会被带偏
+async function snapNet(db, m, note) {
+  const mm = String(m || '').slice(0, 7) || now().slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(mm)) return { error: '月份格式：YYYY-MM' }
+  const arr = await netSeries(db, 36)
+  const hit = arr.find((x) => x.m === mm)
+  if (!hit) return { error: '这个月还没有账，存了也是 0' }
+  const has = await db.prepare('SELECT 1 FROM net_snapshots WHERE month=?').bind(mm).first()
+  if (has) {
+    await db.prepare('UPDATE net_snapshots SET cash=?, ar=?, ap=?, debt=?, net=?, note=?, created_at=? WHERE month=?')
+      .bind(hit.cash, hit.ar, hit.ap, hit.debt, hit.net, String(note || '').slice(0, 60), now(), mm).run()
+  } else {
+    await db.prepare('INSERT INTO net_snapshots (month, cash, ar, ap, debt, net, note, created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(mm, hit.cash, hit.ar, hit.ap, hit.debt, hit.net, String(note || '').slice(0, 60), now()).run()
+  }
+  return { ok: true, month: mm, cash: hit.cash, ar: hit.ar, ap: hit.ap, debt: hit.debt, net: hit.net }
+}
+app.get('/networth', async (c) => {
+  return c.json(await netSeries(c.env.DB, c.req.query('months')))
+})
+
+// 家底存档：存了就一直留着，可和「现在算出来的」对照（差得多说明老单据被改过）
+app.get('/networth-snapshots', async (c) => {
+  const db = c.env.DB
+  const [saved, live] = await Promise.all([
+    db.prepare('SELECT * FROM net_snapshots ORDER BY month DESC LIMIT 36').all().catch(() => ({ results: [] })),
+    netSeries(db, 36).catch(() => [])
+  ])
+  const liveMap = {}
+  for (const x of (live || [])) liveMap[x.m] = x
+  const rows = (saved.results || []).map((r) => {
+    const lv = liveMap[r.month]
+    const drift = lv ? round2(num(lv.net) - num(r.net)) : 0
+    return { month: r.month, cash: num(r.cash), ar: num(r.ar), ap: num(r.ap), debt: num(r.debt), net: num(r.net),
+      note: r.note || '', saved_at: r.created_at, live_net: lv ? num(lv.net) : null, drift }
+  })
+  for (let i = 0; i < rows.length; i++) {
+    const prev = rows[i + 1]
+    rows[i].delta = prev ? round2(rows[i].net - prev.net) : null
+  }
+  const curM = liveMap[now().slice(0, 7)] || null
+  const cur = curM ? { month: curM.m, cash: curM.cash, ar: curM.ar, ap: curM.ap, debt: curM.debt, net: curM.net } : null
+  const hasThis = rows.some((r) => r.month === now().slice(0, 7))
+  const diffs = rows.filter((r) => Math.abs(num(r.drift)) >= 1)
+  const advice = []
+  if (!rows.length) advice.push('还没存过。每月最后一天会自动存一份，也可以现在手动存。')
+  if (!hasThis) advice.push('这个月的家底还没存，点一下「记下这个月的家底」就行。')
+  if (diffs.length) advice.push(`有 ${diffs.length} 个月的数和现在算出来的不一样（说明那些老单据后来被改过），已存的存档不会变。`)
+  return c.json({ ok: true, rows, current: cur, has_this_month: hasThis, count: rows.length, advice })
+})
+app.post('/networth-snapshot', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const r = await snapNet(c.env.DB, b.month || c.req.query('month'), b.note)
+  if (r.error) return c.json({ error: r.error }, 400)
+  return c.json(r)
+})
+app.delete('/networth-snapshot/:month', async (c) => {
+  const m = String(c.req.param('month') || '').slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份格式：YYYY-MM' }, 400)
+  await c.env.DB.prepare('DELETE FROM net_snapshots WHERE month=?').bind(m).run()
+  return c.json({ ok: true })
 })
 
 // 报表抬头（厂名 / 备注）
@@ -8073,7 +8140,12 @@ export default {
           // 每月最后一天：推一条「这个月目标收了多少」
           const t0 = new Date()
           const lastDay = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth() + 1, 0)).getUTCDate()
-          if (t0.getUTCDate() === lastDay) { await pushTargetSummary(db); await pushDunningSummary(db) }
+          if (t0.getUTCDate() === lastDay) {
+            await pushTargetSummary(db)
+            await pushDunningSummary(db)
+            // 月底：把家底存一份，以后改了老单据也不会带偏历史那一段曲线
+            try { await snapNet(db, now().slice(0, 7), '月底自动存档') } catch (e) { console.error('net snapshot failed', e) }
+          }
         }
       } catch (e) {
         console.error('scheduled fixed failed book' + bid, e)

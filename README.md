@@ -319,6 +319,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 
 
+171. ✅ **家底存档（曲线不会被后来的改单带偏）**：`GET /networth` 是「按现在库里的数据倒推每个月末的家底」，一改老单据，历史那一段曲线就跟着变——月底盘过的家底明明是多少，过两个月看却变了样。现在每个月末自动把家底存一份（`net_snapshots` 表：现金 / 应收 / 应付 / 借款 / 净资产），也可以在家底页点「📌 记下这个月的家底」手动留底；存档列表显示「净资产、比上月多了多少」，**并且和「现在重新算的」对照**：两者不一致就标一句「⚠ 现在重新算是 X（差 Y，说明这月的单据后来改过）」，一眼看出哪个月的账被动过。接口：`GET /networth-snapshots`（存档 + 现值 + 差异）、`POST /networth-snapshot {month,note}`（存/覆盖，没账的月份不给存）、`DELETE /networth-snapshot/:month`。cron 在每月最后一天自动存（跟「目标达成」「催款小结」同一条）。实测：11 月存 6000 → 改单后现值 8000 并标出差 2000 → 重存归零；10 月存 5000、11 月存 9000 → 「比上月 +4000」正确；删除存档后列表回到空。
+
 
 **P1.10 · 首页改版：工作台式（已完成 2026-11）**
 44. ✅ **一级导航收成 4 个**：工作台 / 记账 / 报表 / 设置，二级用胶囊切「应收·应付·支出·导入」「报表·家底·历史」，不再一行挤 8 个 tab。
@@ -326,12 +328,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 46. ✅ **大数字与常用入口**：客户欠我 / 我欠别人 / 今天收到 / 本月经营毛利，加 8 格快捷入口；全局搜索移到工作台底部，不再在所有页面占屏。
 47. ✅ **应收/应付二级 tab 带未结笔数徽标**，一眼知道还有几单没结。
 
-**P1.6 · 下一步（第二档余项，尚未开始）**
-- 家底快照与净资产曲线（每月末盘点：现金 + 别人欠我 − 我欠别人）
-- ~~账龄与坏账准备~~ ✅ 已完成（账龄已做，坏账核销已做）
-- 月度结转归档（每月结完锁账，生成归档报表）（月度归档已做，结转锁定用「月度结账锁定」）
-- ~~报表抬头自定义~~ ✅ 已完成
-- 财务指标看板（毛利率、回款周期、现金安全垫）
+**P1.6 · 第二档（已全部完成）**
+- ✅ 家底快照与净资产曲线（每月末盘点：现金 + 别人欠我 − 我欠别人；曲线 + 月末存档见第 171 项）
+- ✅ 账龄与坏账准备（账龄分段 + 坏账核销）
+- ✅ 月度结转归档（月度结账锁定 + `month_archive` 快照，打印/报表优先用快照）
+- ✅ 报表抬头自定义（厂名/电话/地址/收款信息）
+- ✅ 财务指标看板（净利率、回款天数、周转天数、现金安全垫、最大客户占比、保本线，接口 `GET /kpi`）
 
 **P2 · 锦上添花**
 9. **微信登录 + 权限分级**：目前是共享口令，绑定微信后能分清是谁记的；老板可看全部、员工只记账。
@@ -361,7 +363,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 245 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 252 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -468,6 +470,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 - `DELETE /month-lock/:month`
 - `POST /month-lock`
+
+**networth-snapshot**（2）
+
+- `DELETE /networth-snapshot/:month`
+- `POST /networth-snapshot`
 
 **orders**（10）
 
@@ -591,7 +598,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /auth/setup`
 - `POST /auth/staff`
 
-**其它（单个接口）**（125）
+**其它（单个接口）**（130）
 
 - `GET /`
 - `GET /accruals`
@@ -604,6 +611,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /backup`
 - `GET /backup-get`
 - `GET /backup-list`
+- `POST /backup-restore`
+- `GET /backup-timeline`
 - `POST /backup-to-notes`
 - `POST /bank-import`
 - `POST /book-name`
@@ -660,8 +669,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /month-pack-run`
 - `GET /month-report`
 - `GET /month-reports`
+- `GET /my-day`
 - `GET /my-work`
 - `GET /networth`
+- `GET /networth-snapshots`
 - `POST /parse-import`
 - `GET /party-balance`
 - `GET /party-groups`
@@ -697,6 +708,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /run-fixed`
 - `GET /search`
 - `GET /selfcheck`
+- `GET /staff-activity`
 - `GET /statement`
 - `GET /statement-link`
 - `GET /statement-month`

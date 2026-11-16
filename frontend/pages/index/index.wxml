@@ -1405,6 +1405,26 @@
       </view>
     </view>
 
+    <view class="form" wx:if="{{nws}}">
+      <view class="tip">📌 家底存档（每月最后一天自动存一份；改了老单据也不会带偏已存的数）</view>
+      <view class="aline" wx:for="{{nws.advice}}" wx:key="*this">{{item}}</view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="saveNetworthSnap">{{nws.has_this_month?'重存这个月':'记下这个月的家底'}}</button>
+      </view>
+      <view class="tip" wx:if="{{nws.current}}">现在算出来：现金 {{nws.current.cash}}、别人欠我 {{nws.current.ar}}、我欠别人 {{nws.current.ap}}、借款 {{nws.current.debt}} → 净资产 {{nws.current.net}} 元</view>
+      <view class="item" wx:for="{{nws.rows}}" wx:key="month">
+        <view class="row1">
+          <text class="nm">{{item.month}} 净资产 ¥{{item.net}}</text>
+          <text class="amt" wx:if="{{item.delta!==null}}">{{item.delta>=0?'比上月 +':'比上月 '}}{{item.delta}}</text>
+        </view>
+        <view class="row2">现金 {{item.cash}} · 应收 {{item.ar}} · 应付 {{item.ap}} · 借款 {{item.debt}}</view>
+        <view class="row2" wx:if="{{item.drift}}">⚠ 现在重新算是 {{item.live_net}}（差 {{item.drift}}，说明这月的单据后来改过）</view>
+        <view class="row2" wx:if="{{item.note}}">{{item.note}}</view>
+        <button class="btn ghost" size="mini" wx:if="{{role!='staff'}}" bindtap="delNetworthSnap" data-m="{{item.month}}">删</button>
+      </view>
+      <view class="tip" wx:if="{{!nws.rows.length}}">还没有存档。到月底会自动存；想现在留个底就点上面的按钮。</view>
+    </view>
+
     <view class="form" wx:if="{{kpi}}">
       <view class="tip">财务指标（{{kpi.month}}）</view>
       <view class="kpi-row"><text>本月净利率</text><text class="kpi-n {{kpi.margin>=0?'ok':'bad'}}">{{kpi.margin}}%（净利 {{kpi.profit}}）</text></view>

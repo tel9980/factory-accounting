@@ -312,3 +312,15 @@ CREATE TABLE IF NOT EXISTS op_dedupe (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_op_client ON op_dedupe(client_id);
+
+-- 家底存档：每个月末的现金/应收/应付/借款/净资产，存下来就不会被后来的改单带偏
+CREATE TABLE IF NOT EXISTS net_snapshots (
+  month TEXT PRIMARY KEY,       -- YYYY-MM
+  cash REAL DEFAULT 0,
+  ar REAL DEFAULT 0,
+  ap REAL DEFAULT 0,
+  debt REAL DEFAULT 0,
+  net REAL DEFAULT 0,
+  note TEXT,
+  created_at TEXT NOT NULL
+);

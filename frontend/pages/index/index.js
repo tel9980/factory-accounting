@@ -101,7 +101,7 @@ Page({
     pending_count: 0,
     btl: null,
     book: 1, book_name: '主账套', books: [], rename_text: '',
-    nw: [], nw_max: 1, nw_latest: null,
+    nw: [], nw_max: 1, nw_latest: null, nws: null,
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
@@ -3283,7 +3283,7 @@ Page({
       })
   },
   // ── 家底 / 账龄 / 财务指标 / 月度归档 / 报表抬头 ──
-  loadAsset() { this.loadWx(); this.loadNetworth(); this.loadKpi(); this.loadAging(); this.loadHead(); this.loadLoans() },
+  loadAsset() { this.loadWx(); this.loadNetworth(); this.loadNetworthSnap(); this.loadKpi(); this.loadAging(); this.loadHead(); this.loadLoans() },
   loadNetworth() {
     this.req({
       url: API_BASE + '/networth?months=12',
@@ -3296,6 +3296,42 @@ Page({
           w: Math.round((Math.abs(r.net) / mx) * 100)
         }))
         this.setData({ nw: out, nw_max: mx, nw_latest: list.length ? list[list.length - 1] : null })
+      }
+    })
+  },
+  // 家底存档：每月末存一份，改了老单据也不影响存档
+  loadNetworthSnap() {
+    this.req({
+      url: API_BASE + '/networth-snapshots',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ nws: d }) }
+    })
+  },
+  saveNetworthSnap() {
+    this.req({
+      url: API_BASE + '/networth-snapshot',
+      method: 'POST',
+      once: true,
+      data: {},
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没存上', icon: 'none' })
+        wx.showToast({ title: `已存下 ${d.month} 的家底 ¥${d.net}`, icon: 'none' })
+        this.loadNetworthSnap(); this.loadNetworth()
+      }
+    })
+  },
+  delNetworthSnap(e) {
+    const m = e.currentTarget.dataset.m
+    wx.showModal({
+      title: '删掉这条存档？',
+      content: `删除 ${m} 的家底存档（不影响账本里的单据）。`,
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/networth-snapshot/' + m,
+          method: 'DELETE',
+          success: () => { this.loadNetworthSnap() }
+        })
       }
     })
   },
