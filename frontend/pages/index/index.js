@@ -75,7 +75,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', st_log: null,
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', st_log: null, dp: null,
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -2129,6 +2129,37 @@ Page({
         else wx.setClipboardData({ data: phone })
       }
     })
+  },
+  loadDisputes() {
+    this.req({
+      url: API_BASE + '/disputes',
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: '读取失败', icon: 'none' })
+        this.setData({ dp: d })
+      }
+    })
+  },
+  resolveDispute(e) {
+    const id = e.currentTarget.dataset.id
+    const k = e.currentTarget.dataset.k
+    const send = (note) => {
+      this.req({
+        url: API_BASE + '/statement-log/' + id + '/resolve', method: 'POST', data: { note: note || '' },
+        success: (res) => {
+          if (res.data && res.data.ok) { wx.showToast({ title: '已处理', icon: 'none' }); this.loadDisputes() }
+          else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+        }
+      })
+    }
+    if (k === 'ignore') {
+      wx.showModal({ title: '标记为不用管？', content: '以后不在争议清单里显示', success: (r) => { if (r.confirm) send('对方没再提，算了') } })
+    } else {
+      wx.showModal({
+        title: '怎么核对的？', editable: true, placeholderText: '例：他那笔 800 是现金付的，补记了收款',
+        success: (r) => { if (r.confirm) send(r.content) }
+      })
+    }
   },
   loadDunMonth() {
     this.req({

@@ -3688,6 +3688,51 @@ app.delete('/dunning-log/:id', async (c) => {
   await db.prepare('DELETE FROM dunning_log WHERE id=?').bind(num(c.req.param('id'))).run()
   return c.json({ ok: true })
 })
+// 对账单争议清单：对方说对不上的，攒一页专门处理（这类最容易拖成死账）
+app.get('/disputes', async (c) => {
+  const db = c.env.DB
+  const all = String(c.req.query('all') || '') === '1'
+  const where = all ? "s.ack='doubt'" : "s.ack='doubt' AND COALESCE(s.resolved_at,'')=''"
+  const rows = ((await db.prepare('SELECT s.* FROM statement_log s WHERE ' + where + ' ORDER BY s.id DESC LIMIT 100').all()).results || []).map((r) => ({
+    id: r.id, party: r.party || '', type: r.type === 'ap' ? 'ap' : 'ar', month: r.month || '',
+    date: String(r.created_at || '').slice(0, 10), days: daysSince(r.created_at),
+    note: r.note || '', resolved_at: String(r.resolved_at || '').slice(0, 10), resolved: !!r.resolved_at
+  }))
+  const arLeft = (await db.prepare('SELECT customer party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t, COUNT(*) n FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer').all()).results || []
+  const apLeft = (await db.prepare('SELECT supplier party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t, COUNT(*) n FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier').all()).results || []
+  const map = {}
+  for (const r of arLeft.concat(apLeft)) {
+    const k = norm(r.party)
+    const o = map[k] || (map[k] = { left: 0, cnt: 0 })
+    o.left = round2(o.left + num(r.t)); o.cnt += num(r.n)
+  }
+  for (const r of rows) {
+    const o = map[norm(r.party)] || { left: 0, cnt: 0 }
+    r.left = round2(o.left); r.open_cnt = o.cnt
+    r.kind_text = r.type === 'ap' ? '应付' : '应收'
+    r.advice = r.days >= 30 ? '拖了 ' + r.days + ' 天，尽快当面核账' : (r.left > 0 ? '先把这几笔对清楚再谈付款' : '已经结清，核对完可以标记忽略')
+  }
+  const open0 = rows.filter((x) => !x.resolved)
+  return c.json({
+    ok: true, count: open0.length, total_left: round2(open0.reduce((a, x) => a + x.left, 0)),
+    oldest_days: open0.length ? Math.max(...open0.map((x) => x.days)) : 0,
+    rows, advice: open0.length
+      ? (open0.length >= 3 ? '争议攒了 ' + open0.length + ' 家，建议抽半天一次性核完——拖越久越说不清。' : '有 ' + open0.length + ' 家对账单对不上，尽快核一笔。')
+      : '没有待处理的争议，账目清楚。'
+  })
+})
+// 标记争议已处理（fixed=核对改正了，ignore=不用管）
+app.post('/statement-log/:id/resolve', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const b = await c.req.json().catch(() => ({}))
+  const row = await db.prepare('SELECT * FROM statement_log WHERE id=?').bind(id).first()
+  if (!row) return c.json({ error: '这条记录不存在' }, 404)
+  await db.prepare("UPDATE statement_log SET resolved_at=?, note=? WHERE id=?")
+    .bind(now(), (b.note ? String(b.note).slice(0, 100) : (row.note || '') + '（已处理）'), id).run()
+  await logAudit(db, 'statement', row.party, '争议已处理：' + row.party + '（' + (b.note ? String(b.note).slice(0, 30) : '核对完') + '）')
+  return c.json({ ok: true })
+})
 // 月度催款小结（可复制发微信 / 存图）
 app.get('/dunning-month', async (c) => {
   const db = c.env.DB
@@ -5758,6 +5803,14 @@ app.get('/reminders', async (c) => {
     if (soonRows.length) {
       const sum2 = round2(soonRows.reduce((a, x) => a + num(lmap[norm(x.party)]), 0))
       push('yellow', `${soonRows.length} 家答应明天付（共 ¥${sum2}），今天提一句`, 'ar', soonRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
+    }
+  } catch (e) {}
+  // 对账单有异议还没处理（最容易变死账）
+  try {
+    const dp = await db.prepare("SELECT s.party, s.month, s.note, s.created_at FROM statement_log s WHERE s.ack='doubt' AND COALESCE(s.resolved_at,'')='' ORDER BY s.id DESC").all()
+    const dl = dp.results || []
+    if (dl.length) {
+      push('red', `${dl.length} 份对账单对方说对不上，还没处理`, 'ar', dl.slice(0, 3).map((x) => ({ party: x.party || '', amount: 0, note: (x.note || '有异议').slice(0, 20) + '（' + daysSince(x.created_at) + ' 天前）' })))
     }
   } catch (e) {}
   // 对账单发出去 7 天还没回音

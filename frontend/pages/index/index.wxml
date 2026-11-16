@@ -849,6 +849,24 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">对账单争议：对方说对不上的，专门一页处理（拖久了容易变死账）</view>
+      <button class="btn" size="mini" bindtap="loadDisputes">⚠ 看争议清单</button>
+      <view wx:if="{{dp}}">
+        <view class="tip">{{dp.count}} 份待处理，涉及欠款 ¥{{dp.total_left}}{{dp.oldest_days ? '，最久的拖了 ' + dp.oldest_days + ' 天' : ''}}</view>
+        <view class="aline {{dp.count ? 'warn':'ok'}}">{{dp.advice}}</view>
+        <view class="item" wx:for="{{dp.rows}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.party}}（{{item.kind_text}}）</text><text class="amt {{item.left>0?'red':'ok'}}">{{item.resolved ? '已处理' : '待处理'}}</text></view>
+          <view class="row2">{{item.date}} 发的{{item.month ? ' ' + item.month + ' 月账单' : '对账单'}} · {{item.days}} 天前</view>
+          <view class="row2">对方说：{{item.note || '对不上'}}</view>
+          <view class="row2">现在欠 {{item.left}}（{{item.open_cnt}} 笔未结）· {{item.advice}}</view>
+          <view class="btns" wx:if="{{!item.resolved}}">
+            <button size="mini" bindtap="resolveDispute" data-id="{{item.id}}" data-k="fixed">✓ 核对完了</button>
+            <button size="mini" bindtap="resolveDispute" data-id="{{item.id}}" data-k="ignore">不用管</button>
+          </view>
+        </view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">年度总账：12 个月拼一张看全年</view>
       <input class="inp" placeholder="年份，如 2026（不填=今年）" value="{{ys_year}}" bindinput="onYsYear"/>
       <button class="btn" size="mini" bindtap="loadYearSummary">📅 出年度总账</button>
