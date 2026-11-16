@@ -819,6 +819,20 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">催款效果：催了几次、催完到底有没有把钱催回来</view>
+      <button class="btn" size="mini" bindtap="loadDunEffect">📣 看催款效果</button>
+      <view wx:if="{{dfx}}">
+        <view class="tip">{{dfx.months}} 个月内催过 {{dfx.count}} 家 / 共 {{dfx.total_dun}} 次；催后收回 ¥{{dfx.recovered}}，平均一次催回 ¥{{dfx.avg_per_dun}}；这些家现在还欠 ¥{{dfx.still_left}}</view>
+        <view class="aline {{item.tone}}" wx:for="{{dfx.advice}}" wx:key="text">{{item.text}}</view>
+        <view class="prev-row" wx:for="{{dfx.rows}}" wx:key="party">
+          <text class="prev-t">{{index+1}}. {{item.party}}（{{item.type_text}}）</text>
+          <text class="prev-n">催 {{item.times}} 次 · 催后收回 {{item.paid_after}} · 还欠 {{item.left}} · 最后一次 {{item.last}}（{{item.last_days}} 天前）</text>
+          <text class="prev-n {{item.verdict==='quiet'?'red':''}}">{{item.text}}</text>
+        </view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="copyDunEffect">📋 复制成文字</button></view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">年度总账：12 个月拼一张看全年</view>
       <input class="inp" placeholder="年份，如 2026（不填=今年）" value="{{ys_year}}" bindinput="onYsYear"/>
       <button class="btn" size="mini" bindtap="loadYearSummary">📅 出年度总账</button>

@@ -117,7 +117,7 @@ app.use('*', async (c, next) => {
   if (role === 'staff') {
     const m = c.req.method
     const denyStaff = m === 'PATCH' || m === 'DELETE' ||
-      (/^\/(profit-compare|aging|weekly-text|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
+      (/^\/(profit-compare|aging|weekly-text|dunning-effect|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
       (/^\/auth\/(change|staff)$/.test(path)) ||
       (/^\/(report-head|book-name|wx-config)$/.test(path)) ||
       (/^\/month-lock/.test(path)) ||
@@ -3687,6 +3687,60 @@ app.delete('/dunning-log/:id', async (c) => {
   const db = c.env.DB
   await db.prepare('DELETE FROM dunning_log WHERE id=?').bind(num(c.req.param('id'))).run()
   return c.json({ ok: true })
+})
+// 催款效果：催了几次、催完到底有没有把钱催回来
+app.get('/dunning-effect', async (c) => {
+  const db = c.env.DB
+  const months = Math.max(1, Math.min(24, num(c.req.query('months')) || 6))
+  const since = (() => { const d = new Date(); d.setUTCMonth(d.getUTCMonth() - months); return d.toISOString().slice(0, 10) })()
+  const duns = (await db.prepare('SELECT party, type, COUNT(*) n, MIN(created_at) f, MAX(created_at) l FROM dunning_log WHERE substr(created_at,1,10) >= ? GROUP BY party, type').bind(since).all()).results || []
+  const arIn = (await db.prepare("SELECT o.customer party, l.created_at d, l.amount a FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,10) >= ?").bind(since).all()).results || []
+  const apOut = (await db.prepare("SELECT p.supplier party, l.created_at d, l.amount a FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND substr(l.created_at,1,10) >= ?").bind(since).all()).results || []
+  const arLeft = (await db.prepare('SELECT customer party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer').all()).results || []
+  const apLeft = (await db.prepare('SELECT supplier party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier').all()).results || []
+  const leftOf = (type, party) => {
+    const src = type === 'ap' ? apLeft : arLeft
+    const hit = src.find((x) => norm(x.party) === norm(party))
+    return round2(num(hit && hit.t))
+  }
+  const rows = duns.map((d) => {
+    const type = d.type === 'ap' ? 'ap' : 'ar'
+    const first = String(d.f || '').slice(0, 10)
+    const flows = type === 'ap' ? apOut : arIn
+    const paid = round2(flows.filter((x) => norm(x.party) === norm(d.party) && String(x.d).slice(0, 10) >= first).reduce((a, x) => a + num(x.a), 0))
+    const left = leftOf(type, d.party)
+    let verdict = 'quiet', vtext = '催了没动静'
+    if (left <= 0.005 && paid > 0) { verdict = 'done'; vtext = '催完就收清了' }
+    else if (paid > 0) { verdict = 'partial'; vtext = '催了有回款，还欠 ' + left }
+    else if (left <= 0.005) { verdict = 'paid_before'; vtext = '催之前就结清了' }
+    return {
+      party: d.party, type, type_text: type === 'ap' ? '应付' : '应收',
+      times: num(d.n), first, last: String(d.l || '').slice(0, 10),
+      last_days: daysSince(d.l), paid_after: paid, left, verdict, text: vtext,
+      avg_once: paid > 0 ? round2(paid / Math.max(1, num(d.n))) : 0
+    }
+  }).sort((a, b) => (b.left - a.left) || (b.times - a.times))
+  const hit = rows.filter((r) => r.verdict === 'done' || r.verdict === 'partial')
+  const quiet = rows.filter((r) => r.verdict === 'quiet')
+  const recovered = round2(hit.reduce((a, r) => a + r.paid_after, 0))
+  const totalDun = rows.reduce((a, r) => a + r.times, 0)
+  const stillLeft = round2(rows.reduce((a, r) => a + r.left, 0))
+  const advice = []
+  if (!rows.length) advice.push({ tone: 'ok', text: '这 ' + months + ' 个月还没记过催款，催完记得点「记一笔催款」，这里才看得出谁催得动。' })
+  else {
+    if (hit.length) advice.push({ tone: 'ok', text: '催过的 ' + rows.length + ' 家里，' + hit.length + ' 家有回款，一共收回 ¥' + recovered + '（' + totalDun + ' 次催款，平均一次催回 ¥' + round2(recovered / Math.max(1, totalDun)) + '）。' })
+    if (quiet.length) advice.push({ tone: 'bad', text: quiet.slice(0, 3).map((r) => r.party).join('、') + ' 催了没动静（共 ' + quiet.length + ' 家、欠 ¥' + round2(quiet.reduce((a, r) => a + r.left, 0)) + '），这些要换方式：上门、停货、或者让他先付一部分。' })
+    const heavy = rows.filter((r) => r.times >= 3 && r.left > 0)
+    if (heavy.length) advice.push({ tone: 'warn', text: heavy.slice(0, 2).map((r) => r.party + '（催了 ' + r.times + ' 次仍欠 ' + r.left + '）').join('、') + ' 属于「催不动」，下次开单前先要预付款。' })
+    if (!quiet.length && !heavy.length) advice.push({ tone: 'ok', text: '目前没有「催了不动」的家，保持记账习惯就行。' })
+  }
+  return c.json({
+    ok: true, months, since, count: rows.length, total_dun: totalDun,
+    recovered, still_left: stillLeft, hit_count: hit.length, quiet_count: quiet.length,
+    hit_rate: rows.length ? Math.round(hit.length * 100 / rows.length) : 0,
+    avg_per_dun: totalDun ? round2(recovered / totalDun) : 0,
+    rows, quiet_parties: quiet, advice
+  })
 })
 // 催款阈值：欠多少天才进催款清单（默认 0 = 全都进）
 app.get('/collect-config', async (c) => {
