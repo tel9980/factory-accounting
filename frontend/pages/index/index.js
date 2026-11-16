@@ -4217,10 +4217,15 @@ Page({
         const pc = res.data || {}
         const items = pc.items || []
         if (!items.length) return this._doClose(m)
-        const lines = items.map((it) => (it.tone === 'ok' ? '✓ ' : it.tone === 'bad' ? '✗ ' : it.tone === 'warn' ? '！' : '· ') + it.tip)
+        const lines = []
+        items.forEach((it) => {
+          const mark = it.tone === 'ok' ? '✓ ' : it.tone === 'bad' ? '✗ ' : it.tone === 'warn' ? '！' : '· '
+          lines.push(mark + it.tip)
+          if (it.after && it.tone !== 'ok') lines.push('     ↳ ' + it.after)
+        })
         const tail = (pc.blockers && pc.blockers.length)
-          ? '\n\n带 ✗ 的先处理更稳；现在结账也行，只是这个月以后就改不了了。'
-          : '\n\n结账会出快照并锁定该月，之后不能再增删改。'
+          ? '\n\n带 ✗ 的处理一下更稳；照样结账也行——锁上后要改，得先去「月结归档」解锁。'
+          : '\n\n结账会出快照并把这个月锁上：之后不能再增删改，要改先去「月结归档」解锁。'
         wx.showModal({
           title: '结账前自检 · ' + m,
           content: lines.join('\n') + tail,
@@ -4276,7 +4281,7 @@ Page({
         if (!s) return wx.showToast({ title: dd.error || '结转失败', icon: 'none' })
         wx.showModal({
           title: m + ' 已结转',
-          content: '接单 ' + s.order_add + '\n材料·外协成本 ' + (s.mat_cost || 0) + '\n现金费用 ' + s.cash_expense + ' · 摊销 ' + s.amort + ' · 折旧 ' + s.dep + ' · 预提息 ' + s.accrue_int + '\n净利 ' + s.profit + '（净利率 ' + s.margin + '%）\n期末现金 ' + s.cash_balance + '\n应收 ' + s.ar_left + ' · 应付 ' + s.ap_left + ' · 借款 ' + s.debt_left + '\n净资产 ' + s.net_worth + '\n\n以后报表就用这份快照，改历史不影响已出报表。',
+          content: '接单 ' + s.order_add + '\n材料·外协成本 ' + (s.mat_cost || 0) + '\n现金费用 ' + s.cash_expense + ' · 摊销 ' + s.amort + ' · 折旧 ' + s.dep + ' · 预提息 ' + s.accrue_int + '\n净利 ' + s.profit + '（净利率 ' + s.margin + '%）\n期末现金 ' + s.cash_balance + '\n应收 ' + s.ar_left + ' · 应付 ' + s.ap_left + ' · 借款 ' + s.debt_left + '\n净资产 ' + s.net_worth + '\n\n以后报表就用这份快照，改历史不影响已出报表。\n\n' + (dd.lock_note || '') + '\n' + (dd.unlock_how || '') + '\n' + (dd.not_affected || ''),
           showCancel: false
         })
         this.setData({ lock_month: '' })

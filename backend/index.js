@@ -838,30 +838,51 @@ async function closePrecheck(db, mm) {
       return { pm, locked: num(r && r.n) > 0 }
     })()
   ])
+  const biz = await db.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,7)=?) + (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,7)=?) + (SELECT COUNT(*) FROM ledger WHERE substr(created_at,1,7)=?) n")
+    .bind(mm, mm, mm).first().catch(() => ({ n: 0 }))
+  if (!num(biz && biz.n)) {
+    return { month: mm, items: [{ k: 'empty', label: '本月还没有单据', count: 0, tone: 'ok',
+      tip: '这个月还没有任何单据和流水，不用结账', after: '', fixable: 'yes', fix_how: '有账了再来结' }],
+      blockers: [], warns: [], can_close: true, empty: true,
+      text: '这个月还没有任何单据和流水，不用结账。' }
+  }
   const items = []
   const nd = num(diff && diff.n)
   items.push({ k: 'recon_diff', label: '对账差异还没处理', count: nd, tone: nd ? 'bad' : 'ok',
-    tip: nd ? `还有 ${nd} 家对账差异没处理，结账后就补不进去了` : '对账差异都处理完了' })
+    tip: nd ? `还有 ${nd} 家对账差异没处理` : '对账差异都处理完了',
+    after: nd ? '结账后这个月就不能再补记差异了，等发现少记了钱只能先解锁' : '',
+    fixable: 'yes',
+    fix_how: '补完差异再结账；已经结过的，在「月结归档」里删掉这个月的归档就是解锁，补完重新结一次' })
   const na = num(anyRecon && anyRecon.n)
   items.push({ k: 'never_recon', label: '这个月对过账', count: na ? 1 : 0, tone: na ? 'ok' : 'warn',
-    tip: na ? `本月和 ${na} 家对过账` : '这个月还没跟任何单位对过账（对一遍再结账更稳）' })
+    tip: na ? `本月和 ${na} 家对过账` : '这个月还没跟任何单位对过账',
+    after: na ? '' : '不影响账目，只是没跟对方核过数，万一对方记的和你不一致，结完账才发现就麻烦',
+    fixable: 'yes', fix_how: '对账随时都能做，结账不拦；下次结账前顺手对一遍就行' })
   const okSumm = !!(summ && String(summ.v || '') === mm)
   items.push({ k: 'summary', label: '出过本月小结', count: okSumm ? 1 : 0, tone: okSumm ? 'ok' : 'warn',
-    tip: okSumm ? '本月小结已出' : '还没出本月小结（报表页「出本月小结」一点就有）' })
+    tip: okSumm ? '本月小结已出' : '还没出本月小结',
+    after: okSumm ? '' : '小结是给自己看的月报，不出也能结账，只是这个月就少一份留档的话',
+    fixable: 'yes', fix_how: '报表页「出本月小结」一点就有；结账后再出也不影响' })
   const bkDays = bk && bk.t ? Math.floor((Date.now() - new Date(bk.t).getTime()) / 86400000) : -1
   const bkOk = bkDays >= 0 && bkDays <= 7
   items.push({ k: 'backup', label: '最近 7 天备份过', count: bkOk ? 1 : 0, tone: bkOk ? 'ok' : 'warn',
-    tip: bkDays < 0 ? '还没备份过，结账前先点一次「备份全部数据」' : (bkOk ? `${bkDays} 天前备份过` : `上次备份是 ${bkDays} 天前，建议先备份`) })
+    tip: bkDays < 0 ? '还没备份过' : (bkOk ? `${bkDays} 天前备份过` : `上次备份是 ${bkDays} 天前`),
+    after: bkOk ? '' : '结账本身不危险，但没有备份的话，以后数据出问题就回不到现在这个样子',
+    fixable: 'yes', fix_how: '设置 → 「备份全部数据」（或打开云端备份，每天自动备一份）' })
   const nu = num(unclosed && unclosed.n)
-  items.push({ k: 'unclosed', label: '本月还有没结清的单', count: nu, tone: 'info',
-    tip: nu ? `本月还有 ${nu} 张单没收清/付清（结账不影响欠款，但该月就改不了了）` : '本月单据都结清了' })
+  items.push({ k: 'unclosed', label: '本月还有没结清的单', count: nu, tone: nu ? 'info' : 'ok',
+    tip: nu ? `本月还有 ${nu} 张单没收清/付清` : '本月单据都结清了',
+    after: nu ? '欠款不受影响、到点照样提醒你收；只是这个月的单据金额以后不能再改' : '',
+    fixable: 'yes', fix_how: '收款/付款随时能补记，和结账无关；要改单据金额才需要解锁' })
   items.push({ k: 'prev', label: `上个月（${prevLock.pm}）已结账`, count: prevLock.locked ? 1 : 0, tone: prevLock.locked ? 'ok' : 'info',
-    tip: prevLock.locked ? '上个月已结账' : `上个月（${prevLock.pm}）还没结账，跳着结账以后对账麻烦` })
+    tip: prevLock.locked ? '上个月已结账' : `上个月（${prevLock.pm}）还没结账`,
+    after: prevLock.locked ? '' : '跳着结账不会出错，但以后按月查报表会缺上个月那一块',
+    fixable: 'yes', fix_how: '回头把上个月也结一次就行，顺序不影响数据' })
   const blockers = items.filter((x) => x.k === 'recon_diff' && x.count > 0).map((x) => x.k)
     .concat(items.filter((x) => x.k === 'summary' && !x.count).map((x) => x.k))
   const warns = items.filter((x) => x.tone === 'warn').map((x) => x.k)
   return { month: mm, items, blockers, warns, can_close: blockers.length === 0,
-    text: items.filter((x) => x.tone !== 'ok').map((x) => '· ' + x.tip).join('\n') || '该做的都做了，可以放心结账' }
+    text: items.filter((x) => x.tone !== 'ok').map((x) => '· ' + x.tip + (x.after ? '（' + x.after + '）' : '')).join('\n') || '该做的都做了，可以放心结账' }
 }
 
 app.get('/close-precheck', async (c) => {
@@ -940,7 +961,10 @@ app.post('/month-close', async (c) => {
   await saveArchive(db, snap)
   await db.prepare('INSERT OR IGNORE INTO month_lock (month, locked_at) VALUES (?,?)').bind(mm, now()).run()
   await logAudit(db, '月结归档', mm, `结转 ${mm}：毛利 ${snap.profit}，成本 ${snap.cost}`)
-  return c.json({ ok: true, snapshot: snap })
+  return c.json({ ok: true, snapshot: snap,
+    lock_note: `${mm} 已经锁住了：这个月不能再新增、修改、删除单据，也不能再收付款、批量导入。`,
+    unlock_how: '要改这个月的账：报表 → 月结归档 → 点这个月旁边的「解锁」，改完再结一次（归档会重新生成）。',
+    not_affected: '欠款、催款提醒、对账单、报表查看都不受影响，以后月份的记账照常。' })
 })
 
 app.get('/month-archives', async (c) => {

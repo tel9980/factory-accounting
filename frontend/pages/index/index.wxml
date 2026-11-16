@@ -1228,6 +1228,7 @@
       </view>
       <view wx:if="{{me}}">
         <view class="prev-h">{{me.month}} · 六件事办了 {{me.done_count}}/{{me.total}}</view>
+        <view class="tip" wx:if="{{me.locked}}">🔒 这个月已经结账锁定了，不能再增删改；要改就在下面归档区点「解锁」，改完重新结一次。</view>
         <view class="aline {{me.ready?'ok':'warn'}}">{{me.advice}}</view>
         <view class="tip">本月：接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销折旧 {{me.numbers.cost_other}} · 净利 {{me.numbers.profit}}（净利率 {{me.numbers.margin}}%）· 手头现金 {{me.numbers.cash}}</view>
         <view class="hk-row" wx:for="{{me.steps}}" wx:key="k" bindtap="meGo" data-tab="{{item.tab}}">
@@ -1251,7 +1252,7 @@
           <view class="btns">
             <button size="mini" bindtap="viewArchive" data-m="{{item.month}}">看快照</button>
             <button size="mini" bindtap="printReport" data-m="{{item.month}}">打印</button>
-            <button size="mini" bindtap="delArchive" data-m="{{item.month}}">删归档（解锁）</button>
+            <button size="mini" bindtap="delArchive" data-m="{{item.month}}">🔓 解锁（删归档）</button>
           </view>
         </view>
       </view>
