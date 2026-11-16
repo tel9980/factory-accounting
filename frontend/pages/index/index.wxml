@@ -1915,6 +1915,28 @@
       <view class="tip">「补到期日」= 给这家现有还没结完的单，按账期天数补上到期日（这样首页 7 天内到期提醒才准）。</view>
     </view>
     <view class="form">
+      <view class="tip">🔀 合并重名 / 改名（同一家被记成两个名字，对账就永远对不上）</view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadPartyDups">🔀 查有没有重名</button>
+        <button class="btn ghost" size="mini" wx:if="{{pdup}}" bindtap="closePartyDups">收起</button>
+      </view>
+      <view wx:if="{{pdup}}">
+        <view class="tip">{{pdup.advice}}</view>
+        <view class="item" wx:for="{{pdup.groups}}" wx:key="key">
+          <view class="row1"><text class="nm">看着是同一家</text><text class="amt">{{item.names.length}} 种写法</text></view>
+          <view class="row2">用这套名字记账，建议统一成「{{item.keep}}」</view>
+          <view class="btns">
+            <block wx:for="{{item.names}}" wx:for-item="nm" wx:key="*this">
+              <button size="mini" wx:if="{{nm!==item.keep}}" bindtap="mergeInto" data-from="{{nm}}" data-to="{{item.keep}}">「{{nm}}」并到「{{item.keep}}」</button>
+            </block>
+          </view>
+        </view>
+        <view class="frow">
+          <input class="inp" placeholder="原来的名字" value="{{pm_from}}" bindinput="onPmFrom"/>
+          <input class="inp" placeholder="改成的名字（已有的名字=合并）" value="{{pm_to}}" bindinput="onPmTo"/>
+        </view>
+        <button class="btn" size="mini" bindtap="doPartyMerge">改名/合并</button>
+      </view>
       <view class="tip">往来单位档案（填了电话就能一键拨号催款，对账单也能带抬头）{{profiles.length ? '　共 '+profiles.length+' 家' : ''}}</view>
       <button class="btn" size="mini" bindtap="loadProfiles">读取档案</button>
       <view wx:if="{{profile_edit}}">

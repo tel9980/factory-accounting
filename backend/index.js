@@ -217,6 +217,7 @@ app.use('*', async (c, next) => {
       (/^\/assets/.test(path) && m !== 'GET') ||
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
+      || /^\/party-merge/.test(path)
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
   c.set('role', role)
@@ -2174,6 +2175,85 @@ app.delete('/categories/:id', async (c) => {
 })
 
 // 预收款（客户先打钱给活还没做）/ 预付款（先付供应商定金）
+// 单位重名/改名：同一家被记成两个名字，对账就永远对不上——扫出来、一键合并
+app.get('/party-dups', async (c) => {
+  const db = c.env.DB
+  const [oR, pR] = await Promise.all([
+    db.prepare('SELECT customer party, COUNT(*) n, COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) rem FROM orders GROUP BY customer').all().catch(() => ({ results: [] })),
+    db.prepare('SELECT supplier party, COUNT(*) n, COALESCE(SUM(amount-COALESCE(paid,0)-COALESCE(written_off,0)),0) rem FROM payables GROUP BY supplier').all().catch(() => ({ results: [] }))
+  ])
+  const all = []
+  for (const r of ((oR && oR.results) || [])) all.push({ party: r.party || '', side: 'ar', n: num(r.n), left: round2(num(r.rem)) })
+  for (const r of ((pR && pR.results) || [])) all.push({ party: r.party || '', side: 'ap', n: num(r.n), left: round2(num(r.rem)) })
+  const g = {}
+  for (const x of all) {
+    if (!x.party) continue
+    const k = norm(x.party)
+    g[k] = g[k] || []
+    g[k].push(x)
+  }
+  const groups = []
+  for (const k of Object.keys(g)) {
+    const names = Array.from(new Set(g[k].map((x) => x.party)))
+    if (names.length < 2) continue
+    // 建议保留「用得最多的那个名字」（单数最多），没有就用最长的
+    const cntOf = (nm) => g[k].filter((x) => x.party === nm).reduce((t, x) => t + x.n, 0)
+    const keep = names.slice().sort((a, b) => (cntOf(b) - cntOf(a)) || (b.length - a.length))[0]
+    groups.push({ key: k, names, keep,
+      rows: g[k].map((x) => ({ party: x.party, side: x.side, cnt: x.n, left: x.left })) })
+  }
+  return c.json({ ok: true, count: groups.length, groups,
+    advice: groups.length ? `有 ${groups.length} 组名字看着是同一家（比如「兴旺五金」和「兴旺五金加工厂」），合并后对账才不会再分成两家。` : '没发现重名：每个客户/供应商只有一种写法。' })
+})
+
+// 合并/改名：把 from 改成 to（to 已存在就是合并），所有用到这个名字的表一起改
+app.post('/party-merge', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const from = String(b.from || '').trim()
+  const to = String(b.to || '').trim()
+  if (!from || !to) return c.json({ error: '要填「原来的名字」和「改成的名字」' }, 400)
+  if (from === to) return c.json({ error: '两个名字一样，不用改' }, 400)
+  const db = c.env.DB
+  const month = String(b.month || now().slice(0, 7)).slice(0, 7)
+  if (b.force !== true && (await isMonthLocked(db, month))) {
+    // 只拦「动到锁定月份单据」的情况
+    const hit = await db.prepare("SELECT COUNT(*) n FROM orders WHERE customer=? AND substr(created_at,1,7)=?").bind(from, month).first()
+    const hit2 = await db.prepare("SELECT COUNT(*) n FROM payables WHERE supplier=? AND substr(created_at,1,7)=?").bind(from, month).first()
+    if (num(hit && hit.n) + num(hit2 && hit2.n) > 0) return c.json({ error: `${month} 已结账锁定，这个月的单据名字先别改（可以换个月或先解锁）` }, 403)
+  }
+  const counts = {}
+  const step = async (label, sql, ...args) => {
+    try {
+      const r = await db.prepare(sql).bind(...args).run()
+      counts[label] = (r.meta && r.meta.changes != null) ? r.meta.changes : 0
+    } catch (e) { counts[label] = -1 }
+  }
+  await step('应收单', 'UPDATE orders SET customer=? WHERE customer=?', to, from)
+  await step('应付单', 'UPDATE payables SET supplier=? WHERE supplier=?', to, from)
+  await step('预收预付', 'UPDATE advances SET party=? WHERE party=?', to, from)
+  await step('对账记录', 'UPDATE recon_log SET party=? WHERE party=?', to, from)
+  await step('催款记录', 'UPDATE dunning_log SET party=? WHERE party=?', to, from)
+  await step('对账单记录', 'UPDATE statement_log SET party=? WHERE party=?', to, from)
+  // 这两张是 UNIQUE(party)，目标已存在就删掉源记录（保留目标那份）
+  for (const [label, table] of [['账期设置', 'party_terms'], ['单位档案', 'party_profiles'], ['信用额度', 'credit_limits']]) {
+    const hasSrc = await db.prepare(`SELECT 1 FROM ${table} WHERE party=?`).bind(from).first().catch(() => null)
+    if (!hasSrc) { counts[label] = 0; continue }
+    const hasDst = await db.prepare(`SELECT 1 FROM ${table} WHERE party=?`).bind(to).first().catch(() => null)
+    if (hasDst) {
+      const r = await db.prepare(`DELETE FROM ${table} WHERE party=?`).bind(from).run().catch(() => null)
+      counts[label] = (r && r.meta && r.meta.changes) || 0
+      counts[label + '(删源留目标)'] = counts[label]
+    } else {
+      const r = await db.prepare(`UPDATE ${table} SET party=? WHERE party=?`).bind(to, from).run().catch(() => null)
+      counts[label] = (r && r.meta && r.meta.changes) || 0
+    }
+  }
+  const moved = Object.keys(counts).reduce((s, k) => s + Math.max(0, counts[k] || 0), 0)
+  await logAudit(db, '合并/改名', to, `${from} → ${to}（动了 ${moved} 处）`, '', act(c))
+  return c.json({ ok: true, from, to, counts, moved,
+    note: `已把「${from}」全部改成「${to}」，动了 ${moved} 处。以后记账都用新名字，对账就不会再分成两家。` })
+})
+
 // 钱的三条线：客户先给的（预收）/ 员工借支未清 / 外面借的钱——首页一屏看清
 app.get('/funding', async (c) => {
   const db = c.env.DB

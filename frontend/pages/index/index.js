@@ -60,6 +60,7 @@ const FEATS = [
   { n: "全局搜索（找单据）", go: "home:home", desc: "首页底部搜客户名、金额、备注", kw: "搜索 查找 找单" },
   { n: "多账套（几本账）", go: "me:contact", desc: "一个口令下可以有多本账，互不串", kw: "账套 两个厂 分开记 另一本" },
   { n: "出事了怎么办（一页纸）", go: "home:home", desc: "首页「怎么用」，每天 30 秒、每周 5 分钟", kw: "怎么用 教程 新手 说明" },
+  { n: "合并重名 / 单位改名", go: "me:contact", desc: "同一家被记成两个名字时，在「单位」页点 🔀 查重名", kw: "重名 合并 改名 名字 两个名字 对不上 重复 同一个客户" },
 ]
 
 Page({
@@ -164,7 +165,7 @@ Page({
     pending_count: 0,
     btl: null,
     book: 1, book_name: '主账套', books: [], rename_text: '',
-    nw: [], nw_max: 1, nw_latest: null, nws: null,
+    nw: [], nw_max: 1, nw_latest: null, nws: null, pdup: null, pm_from: '', pm_to: '',
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
@@ -1173,7 +1174,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadMyDay()
     }
@@ -3412,6 +3413,55 @@ Page({
           w: Math.round((Math.abs(r.net) / mx) * 100)
         }))
         this.setData({ nw: out, nw_max: mx, nw_latest: list.length ? list[list.length - 1] : null })
+      }
+    })
+  },
+  // 单位重名：同一家被记成两个名字，对账永远对不上
+  loadPartyDups() {
+    this.req({
+      url: API_BASE + '/party-dups',
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '查重失败', icon: 'none' })
+        this.setData({ pdup: d })
+      }
+    })
+  },
+  closePartyDups() { this.setData({ pdup: null }) },
+  onPmFrom(e) { this.setData({ pm_from: e.detail.value }) },
+  onPmTo(e) { this.setData({ pm_to: e.detail.value }) },
+  mergeInto(e) {
+    const from = e.currentTarget.dataset.from
+    const to = e.currentTarget.dataset.to
+    this._doMerge(from, to)
+  },
+  doPartyMerge() {
+    const from = (this.data.pm_from || '').trim()
+    const to = (this.data.pm_to || '').trim()
+    if (!from || !to) return wx.showToast({ title: '两个名字都填一下', icon: 'none' })
+    if (from === to) return wx.showToast({ title: '两个名字一样', icon: 'none' })
+    this._doMerge(from, to)
+  },
+  _doMerge(from, to) {
+    wx.showModal({
+      title: '合并 / 改名',
+      content: `把「${from}」全部改成「${to}」？应收、应付、预收预付、对账和催款记录都会一起改，改完不能自动撤回。`,
+      confirmText: '改',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/party-merge',
+          method: 'POST',
+          once: true,
+          data: { from, to },
+          success: (res) => {
+            const d = res.data || {}
+            if (!d.ok) return wx.showModal({ title: '没改成', content: d.error || '出错了', showCancel: false })
+            wx.showModal({ title: '改好了', content: d.note || '', showCancel: false })
+            this.setData({ pm_from: '', pm_to: '' })
+            this.loadPartyDups(); this.loadContacts(); this.loadAr(); this.loadAp()
+          }
+        })
       }
     })
   },
