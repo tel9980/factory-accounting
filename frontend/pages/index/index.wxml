@@ -1691,6 +1691,37 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
       </block>
+      <view class="tip">📋 逐笔对账（这个月的单 vs 这个月的收付款，一行一行对）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空这个月）" value="{{ro_month}}" bindinput="onRoMonth" bindconfirm="loadReconOrders" data-t="ar"/>
+        <button class="btn half" size="mini" bindtap="loadReconOrders" data-t="ar">对一对</button>
+      </view>
+      <view class="frow">
+        <button class="btn ghost half" size="mini" bindtap="loadReconOrders" data-t="ar">看应收</button>
+        <button class="btn ghost half" size="mini" bindtap="loadReconOrders" data-t="ap">看应付</button>
+      </view>
+      <block wx:if="{{ro}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{ro.month}} {{ro.type=='ar'?'收款':'付款'}}</text><text class="amt {{ro.warn_count?'red':'ok'}}">{{ro.warn_count?ro.warn_count+' 处对不上':'全都对得上 ✓'}}</text></view>
+          <view class="row2">单据 {{ro.doc_cnt}} 张合计 ¥{{ro.doc_total}}；单上记已{{ro.type=='ar'?'收':'付'}} ¥{{ro.paid_total}}</view>
+          <view class="row2">流水合计 ¥{{ro.flow_total}}{{ro.diff?'　差 '+ro.diff:''}}</view>
+          <view class="row2" wx:if="{{ro.orphan.length}}">另有 {{ro.orphan.length}} 笔（¥{{ro.orphan_total}}）没挂到单据上</view>
+        </view>
+        <view class="box" wx:for="{{ro.rows}}" wx:key="id" wx:for-item="d">
+          <view class="row1"><text class="nm">#{{d.id}} {{d.party}}{{d.item?' · '+d.item:''}}</text><text class="amt {{d.ok?'ok':'red'}}">¥{{d.amount}}</text></view>
+          <view class="row2">{{d.date}} · 已{{ro.type=='ar'?'收':'付'}} ¥{{d.paid}}{{d.written_off?' · 核销 '+d.written_off:''}} · 还欠 ¥{{d.left}}{{d.due?' · 到期 '+d.due:''}}</view>
+          <view class="row2" wx:if="{{d.pays.length}}">流水：<text wx:for="{{d.pays}}" wx:key="date" wx:for-item="p">{{p.date}} ¥{{p.amount}}（{{p.account}}）　</text></view>
+          <view class="aline red" wx:for="{{d.warns}}" wx:key="k" wx:for-item="w">⚠ {{w.text}}</view>
+        </view>
+        <view class="box" wx:if="{{ro.orphan.length}}">
+          <view class="tip">没挂到单据上的{{ro.type=='ar'?'收款':'付款'}}（手动记的钱、预收款，或者记错了）</view>
+          <view class="row2" wx:for="{{ro.orphan}}" wx:key="date">{{item.date}} ¥{{item.amount}} · {{item.type}} · {{item.account}}</view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyReconOrders">📋 复制这份对账</button>
+          <button class="btn half" size="mini" bindtap="closeReconOrders">收起</button>
+        </view>
+      </block>
       <view class="tip">💸 支出结构（这个月比上个月、比平时多花在哪）</view>
       <view class="frow">
         <input class="inp half" placeholder="月份 YYYY-MM（留空这个月）" value="{{ec_month}}" bindinput="onEcMonth" bindconfirm="loadExpenseCompare"/>

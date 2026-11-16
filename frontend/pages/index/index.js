@@ -106,7 +106,7 @@ Page({
     gl: null, gl_kw: '', gl_open: '', gl_cat: '',
     rec: null,
     rec_show: false, rec_code: '', rec_pw: '', rec_busy: false,
-    ag: null, ag_tab: 'newphone', cc: null, ar2: null,
+    ag: null, ag_tab: 'newphone', cc: null, ro: null, ro_month: '', ar2: null,
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -3254,6 +3254,22 @@ Page({
     })
   },
   onEcMonth(e) { this.setData({ ec_month: e.detail.value }) },
+  // ── 逐笔对账 ──
+  onRoMonth(e) { this.setData({ ro_month: e.detail.value }) },
+  loadReconOrders(e) {
+    const t = (e && e.currentTarget && e.currentTarget.dataset.t) || (this.data.ro && this.data.ro.type) || 'ar'
+    const m = String(this.data.ro_month || '').trim()
+    this.req({
+      url: '/recon-orders?type=' + t + (m ? '&month=' + encodeURIComponent(m) : ''),
+      success: (res) => { if (res.data && res.data.ok) this.setData({ ro: res.data }) },
+    })
+  },
+  closeReconOrders() { this.setData({ ro: null }) },
+  copyReconOrders() {
+    const ro = this.data.ro
+    if (!ro) return
+    wx.setClipboardData({ data: ro.text, success: () => wx.showToast({ title: '已复制' }) })
+  },
   loadExpenseCompare() {
     const mv = (this.data.ec_month || '').trim()
     const q = /^\d{4}-\d{2}$/.test(mv) ? '?month=' + encodeURIComponent(mv) : ''

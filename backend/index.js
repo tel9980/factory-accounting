@@ -7904,6 +7904,84 @@ app.get('/history', async (c) => {
 
 // 单位列表（客户/供应商汇总）
 // 收付流水：逐笔看钱进钱出（老板最常问「这个月钱花哪了」）
+// ── 逐笔对账：这个月的单和这个月的收款，一笔一笔对起来 ──
+app.get('/recon-orders', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const m = /^\d{4}-\d{2}$/.test(String(c.req.query('month') || '')) ? String(c.req.query('month')) : now().slice(0, 7)
+  const isAr = type === 'ar'
+  const dir = isAr ? 'in' : 'out'
+  const docR = isAr
+    ? db.prepare(`SELECT id, customer AS party, item_name AS item, price AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at
+        FROM orders WHERE substr(created_at,1,7)=? ORDER BY id`).bind(m).all().catch(() => ({ results: [] }))
+    : db.prepare(`SELECT id, supplier AS party, remark AS item, amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at
+        FROM payables WHERE substr(created_at,1,7)=? ORDER BY id`).bind(m).all().catch(() => ({ results: [] }))
+  const flowR = db.prepare(`SELECT l.id, l.ref_id, l.amount, l.direction, l.ref_type, l.created_at, COALESCE(a.name,'') AS account,
+        (l.account_id IS NULL OR l.account_id=0) AS no_acc
+      FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id
+      WHERE substr(l.created_at,1,7)=? AND l.direction=? AND l.cash=1 ORDER BY l.id`).bind(m, dir).all().catch(() => ({ results: [] }))
+  const [docQ, flowQ] = await Promise.all([docR, flowR])
+  const docs = docQ.results || []
+  const flows = flowQ.results || []
+  const byRef = {}
+  for (const f of flows) {
+    if (f.ref_type !== (isAr ? 'order' : 'payable') || !f.ref_id) continue
+    const k = num(f.ref_id)
+    ;(byRef[k] || (byRef[k] = [])).push(f)
+  }
+  const rows = []
+  let docTotal = 0, paidTotal = 0, flowTotal = 0
+  const warns = []
+  for (const d of docs) {
+    const paid = round2(num(d.paid)), wo = round2(num(d.wo)), amt = round2(num(d.amount))
+    const left = round2(amt - paid - wo)
+    docTotal = round2(docTotal + amt)
+    paidTotal = round2(paidTotal + paid)
+    const fs = byRef[d.id] || []
+    const fsum = round2(fs.reduce((x, f) => x + num(f.amount), 0))
+    flowTotal = round2(flowTotal + fsum)
+    const w = []
+    if (paid > 0.005 && !fs.length) w.push({ k: 'no_flow', text: `这单记了已${isAr ? '收' : '付'} ¥${paid}，却找不到对应的流水（可能是直接改的金额，或者流水被删了）` })
+    if (fsum > paid + 0.005) w.push({ k: 'flow_over', text: `流水比单上记的已${isAr ? '收' : '付'}多 ¥${round2(fsum - paid)}，两边对不上` })
+    if (fs.some((f) => num(f.no_acc) === 1)) w.push({ k: 'no_acc', text: '有一笔流水没记账户（会默认算进第一个账户）' })
+    if (left > 0.005 && d.due_date && String(d.due_date).slice(0, 10) < todayIso()) w.push({ k: 'overdue', text: `还欠 ¥${left}，到期日 ${String(d.due_date).slice(0, 10)} 已经过了 ${daysSince(d.due_date)} 天` })
+    rows.push({
+      id: d.id, party: d.party, item: d.item || '', date: (d.created_at || '').slice(0, 10),
+      amount: amt, paid, written_off: wo, left, due: (d.due_date || '').slice(0, 10),
+      flow_sum: fsum, pays: fs.map((f) => ({ date: (f.created_at || '').slice(0, 10), amount: round2(num(f.amount)), account: f.account || '（没记账户）' })),
+      warns: w, ok: w.length === 0
+    })
+    for (const x of w) warns.push({ doc: d.id, party: d.party, ...x })
+  }
+  // 落在流水里、但没挂到任何单据上的收/付款（比如手动记的「收了一笔钱」）
+  const orphan = flows.filter((f) => !(f.ref_type === (isAr ? 'order' : 'payable') && f.ref_id)).map((f) => ({
+    date: (f.created_at || '').slice(0, 10), amount: round2(num(f.amount)), type: f.ref_type || '（没分类）', account: f.account || '（没记账户）'
+  }))
+  const orphanTotal = round2(orphan.reduce((x, f) => x + num(f.amount), 0))
+  const diff = round2(paidTotal - flowTotal)
+  const L = []
+  L.push(`【${m} 逐笔对账 · ${isAr ? '应收（收款）' : '应付（付款）'}】`)
+  if (!docs.length && !flows.length) L.push('这个月没有单据也没有流水，不用对。')
+  else {
+    L.push(`单据 ${docs.length} 张，合计 ¥${docTotal}；其中已${isAr ? '收' : '付'} ¥${paidTotal}`)
+    L.push(`这个月的${isAr ? '收款' : '付款'}流水合计 ¥${flowTotal}（挂在这月的单上）`)
+    if (Math.abs(diff) < 0.005) L.push('两边一致 ✓')
+    else L.push(`两边差 ¥${Math.abs(diff)}：单据上记的已${isAr ? '收' : '付'}比流水${diff > 0 ? '多' : '少'} ¥${Math.abs(diff)}`)
+    if (orphan.length) L.push(`另有 ${orphan.length} 笔${isAr ? '收款' : '付款'}（合计 ¥${orphanTotal}）没挂到任何单据上——可能是手动记的钱、预收款，或者记错了`)
+    if (warns.length) {
+      L.push(`有 ${warns.length} 处对不上：`)
+      warns.slice(0, 8).forEach((x) => L.push(`· ${x.party} 第 ${x.doc} 号单：${x.text}`))
+      if (warns.length > 8) L.push(`（还有 ${warns.length - 8} 处，看明细）`)
+    } else L.push('每张单的钱都能在流水里对上 ✓')
+  }
+  return c.json({
+    ok: true, type, month: m, rows, warns, warn_count: warns.length,
+    orphan, orphan_total: orphanTotal,
+    doc_cnt: docs.length, doc_total: docTotal, paid_total: paidTotal, flow_total: flowTotal, diff,
+    text: L.join('\n')
+  })
+})
+
 app.get('/flows', async (c) => {
   const db = c.env.DB
   const m = String(c.req.query('month') || '').trim()

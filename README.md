@@ -562,11 +562,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 付款速度只统计「已经结清」的单（从开单到他付清花几天），没结清的单不掺进来；
    - 底部可「复制这张卡」发微信，或直接「发对账单」。
    - 员工口令看不到这张卡（含毛利）。
+202. ✅ **逐笔对账（这个月的单 vs 这个月的收付款，一行一行对）**：报表页新增「📋 逐笔对账」，填月份（留空=这个月），可切「看应收 / 看应付」——
+   - 顶部一张汇总：单据几张、合计多少、单上记已收(付)多少、流水合计多少、两边差多少，以及「有几笔钱没挂到单据上」；
+   - 下面每张单一行：谁、什么活、金额、已收(付)、还欠、到期日，以及它对应的每笔流水（日期、金额、进了哪个账户）；
+   - 自动标出四种对不上的地方：**这单记了已收(付)却找不到流水**（直接改的金额或流水被删）、**流水比单上记的已收(付)多**、**流水没记账户**、**还欠且已过期**；
+   - 底部单独列「没挂到单据上的收付款」（手动记的钱、预收款，或者记错了），整段可复制发微信。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 282 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 283 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -818,7 +823,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（149）
+**其它（单个接口）**（150）
 
 - `GET /`
 - `GET /access-guide`
@@ -928,6 +933,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /recon-dunning`
 - `POST /recon-fix`
 - `GET /recon-month`
+- `GET /recon-orders`
 - `GET /recon-progress`
 - `POST /recon-save`
 - `POST /reconcile`
