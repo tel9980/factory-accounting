@@ -251,3 +251,10 @@ CREATE TABLE IF NOT EXISTS party_terms (
   note TEXT,
   created_at TEXT
 );
+
+-- 往来单位档案（电话/联系人/地址/备注）：催款拨号、对账单抬头
+CREATE TABLE IF NOT EXISTS party_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT NOT NULL UNIQUE,
+  kind TEXT, contact TEXT, phone TEXT, addr TEXT, note TEXT, created_at TEXT
+);

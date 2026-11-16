@@ -41,6 +41,7 @@ Page({
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
     pc_month: '', pc: null, rv_month: '', rv: null, ano: null, ys_year: '', ys: null,
     tgt: null, tgt_edit: false, tgt_receive: '', tgt_order: '', trend: null, ps: null, be: null,
+    flows: null, flows_month: '', flows_kw: '', flows_dir: '', profile_edit: false, pf_party: '', pf_contact: '', pf_phone: '', pf_addr: '', pf_note: '', profiles: [],
     th: null, thTips: [], tw: null, tf: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
@@ -950,7 +951,8 @@ Page({
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms() }
+    if (t === 'flows') this.loadFlows()
+    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms(); this.loadProfiles() }
     if (t === 'expense') this.loadLoans()
     if (t === 'ar' || t === 'ap' || t === 'expense') this.loadSuggest()
   },
@@ -980,7 +982,8 @@ Page({
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms() }
+    if (t === 'flows') this.loadFlows()
+    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms(); this.loadProfiles() }
     if (t === 'expense') this.loadLoans()
     if (t === 'import') { this.loadReconLog(); this.loadImportLog(); this.loadReconProgress() }
   },
@@ -1981,6 +1984,75 @@ Page({
       url: API_BASE + '/pay-speed',
       success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ ps: d }) },
       fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadFlows() {
+    const m = (this.data.flows_month || '').trim()
+    const kw = (this.data.flows_kw || '').trim()
+    const dir = this.data.flows_dir || ''
+    const qs = []
+    if (m) qs.push('month=' + m)
+    if (kw) qs.push('kw=' + encodeURIComponent(kw))
+    if (dir) qs.push('dir=' + dir)
+    this.req({
+      url: API_BASE + '/flows' + (qs.length ? '?' + qs.join('&') : ''),
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ flows: d }) },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  onFlowsMonth(e) {
+    let v = String(e.detail.value || '').trim()
+    const mm = v.match(/^(\d{4})-(\d{1,2})$/)
+    if (mm) v = mm[1] + '-' + mm[2].padStart(2, '0')
+    this.setData({ flows_month: v })
+  },
+  onFlowsKw(e) { this.setData({ flows_kw: e.detail.value }) },
+  setFlowsDir(e) { this.setData({ flows_dir: e.currentTarget.dataset.d || '' }, () => this.loadFlows()) },
+  delFlow(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删掉这笔？', content: '这笔记错了就删掉，单据上已收/已付的金额会一起调回来。',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => { wx.showToast({ title: '删掉了', icon: 'none' }); this.loadFlows(); this.refresh() } })
+      }
+    })
+  },
+  loadProfiles() {
+    this.req({
+      url: API_BASE + '/profiles',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ profiles: d.list }) },
+      fail: () => {}
+    })
+  },
+  openProfile(e) {
+    const party = e.currentTarget.dataset.p || ''
+    const pf = (this.data.profiles || []).filter((x) => x.party === party)[0] || {}
+    this.setData({ profile_edit: true, pf_party: party, pf_contact: pf.contact || '', pf_phone: pf.phone || '', pf_addr: pf.addr || '', pf_note: pf.note || '' })
+  },
+  closeProfile() { this.setData({ profile_edit: false }) },
+  onPfContact(e) { this.setData({ pf_contact: e.detail.value }) },
+  onPfPhone(e) { this.setData({ pf_phone: e.detail.value }) },
+  onPfAddr(e) { this.setData({ pf_addr: e.detail.value }) },
+  onPfNote(e) { this.setData({ pf_note: e.detail.value }) },
+  saveProfile() {
+    const b = { party: this.data.pf_party, contact: this.data.pf_contact, phone: this.data.pf_phone, addr: this.data.pf_addr, note: this.data.pf_note }
+    if (!String(b.party || '').trim()) return wx.showToast({ title: '单位名称空着', icon: 'none' })
+    this.req({
+      url: API_BASE + '/profiles', method: 'POST', data: b,
+      success: () => { this.setData({ profile_edit: false }); wx.showToast({ title: '存好了', icon: 'none' }); this.loadProfiles() },
+      fail: () => wx.showToast({ title: '没存上，再试一次', icon: 'none' })
+    })
+  },
+  callParty(e) {
+    const phone = e.currentTarget.dataset.ph || ''
+    if (!phone) return wx.showToast({ title: '这家还没填电话，点「档案」填一下', icon: 'none' })
+    wx.showActionSheet({
+      itemList: ['打电话 ' + phone, '复制电话'],
+      success: (r) => {
+        if (r.tapIndex === 0) wx.makePhoneCall({ phoneNumber: phone, fail: () => {} })
+        else wx.setClipboardData({ data: phone })
+      }
     })
   },
   loadBreakEven() {

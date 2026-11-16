@@ -18,6 +18,7 @@
     <view class="sub {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
     <view class="sub {{tab=='asset'?'on':''}}" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="asset">家底</view>
     <view class="sub {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
+    <view class="sub {{tab=='flows'?'on':''}}" bindtap="setTab" data-t="flows">流水</view>
   </view>
   <view class="subtabs" wx:if="{{group=='me'}}">
     <view class="sub on" bindtap="setTab" data-t="contact">单位 · 账户 · 设置</view>
@@ -1273,6 +1274,38 @@
     </view>
   </block>
 
+  <block wx:if="{{tab=='flows'}}">
+    <view class="form">
+      <input class="inp" placeholder="月份，如 2026-11（不填=全部）" value="{{flows_month}}" bindinput="onFlowsMonth"/>
+      <input class="inp" placeholder="搜分类/备注/账户，如 房租" value="{{flows_kw}}" bindinput="onFlowsKw" bindconfirm="loadFlows"/>
+      <view class="chips">
+        <view class="seg {{flows_dir==''?'on':''}}" bindtap="setFlowsDir" data-d="">全部</view>
+        <view class="seg {{flows_dir=='in'?'on':''}}" bindtap="setFlowsDir" data-d="in">只看收</view>
+        <view class="seg {{flows_dir=='out'?'on':''}}" bindtap="setFlowsDir" data-d="out">只看付</view>
+        <button class="btn" size="mini" bindtap="loadFlows">查一下</button>
+      </view>
+      <view class="tip" wx:if="{{flows}}">共 {{flows.count}} 笔　收 {{flows.total_in}}　付 {{flows.total_out}}　结余 {{flows.net}}{{flows.tip ? '　' + flows.tip : ''}}</view>
+      <view wx:if="{{flows && flows.by_cat.length}}">
+        <view class="plrow" wx:for="{{flows.by_cat}}" wx:key="name">
+          <text class="pll">{{item.name}}</text><text class="plv">{{item.amount}}</text>
+        </view>
+      </view>
+    </view>
+    <view class="list" wx:if="{{flows}}">
+      <view class="item" wx:for="{{flows.rows}}" wx:key="id">
+        <view class="row1">
+          <text class="nm">{{item.date}} · {{item.dir_text}} {{item.amount}}</text>
+          <text class="amt {{item.dir=='in'?'ok':'red'}}">{{item.dir=='in'?'+':'-'}}{{item.amount}}</text>
+        </view>
+        <view class="row2">{{item.cat_text}}{{item.remark ? ' · ' + item.remark : ''}} · {{item.account}}{{item.ref_text ? ' · ' + item.ref_text : ''}}</view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="delFlow" data-id="{{item.id}}">删</button>
+        </view>
+      </view>
+      <view class="empty" wx:if="{{!flows.rows.length}}">{{flows.tip || '这个范围没有流水'}}</view>
+    </view>
+  </block>
+
   <block wx:if="{{tab=='history'}}">
     <view class="form">
       <view class="seg {{history_type=='ar'?'on':''}}" bindtap="setHistoryType" data-t="ar">已收完的应收</view>
@@ -1316,6 +1349,30 @@
       </view>
       <view class="tip" wx:if="{{terms_unset.length}}">还没设账期但有欠款：<text wx:for="{{terms_unset}}" wx:key="party" class="red" data-i="{{index}}" bindtap="pickUnsetParty">{{item.party}} </text>——点名字自动填到上面</view>
       <view class="tip">「补到期日」= 给这家现有还没结完的单，按账期天数补上到期日（这样首页 7 天内到期提醒才准）。</view>
+    </view>
+    <view class="form">
+      <view class="tip">往来单位档案（填了电话就能一键拨号催款，对账单也能带抬头）{{profiles.length ? '　共 '+profiles.length+' 家' : ''}}</view>
+      <button class="btn" size="mini" bindtap="loadProfiles">读取档案</button>
+      <view wx:if="{{profile_edit}}">
+        <view class="tip">正在改：{{pf_party}}</view>
+        <input class="inp" placeholder="联系人" value="{{pf_contact}}" bindinput="onPfContact"/>
+        <input class="inp" placeholder="电话" type="text" value="{{pf_phone}}" bindinput="onPfPhone"/>
+        <input class="inp" placeholder="地址" value="{{pf_addr}}" bindinput="onPfAddr"/>
+        <input class="inp" placeholder="备注（开票信息、习惯付款日等）" value="{{pf_note}}" bindinput="onPfNote"/>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="saveProfile">保存</button>
+          <button class="btn ghost" size="mini" bindtap="closeProfile">取消</button>
+        </view>
+      </view>
+      <view class="item" wx:for="{{profiles}}" wx:key="party">
+        <view class="row1"><text class="nm">{{item.party}}{{item.kind=='ap'?'（供应商）':''}}</text><text class="amt {{item.left>0?'red':'ok'}}">欠 {{item.left}}</text></view>
+        <view class="row2">{{item.phone ? item.phone : '还没填电话'}}{{item.contact ? ' · ' + item.contact : ''}}{{item.addr ? ' · ' + item.addr : ''}}</view>
+        <view class="row2" wx:if="{{item.note}}">{{item.note}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="callParty" data-ph="{{item.phone}}">📞 打电话</button>
+          <button size="mini" bindtap="openProfile" data-p="{{item.party}}">改档案</button>
+        </view>
+      </view>
     </view>
     <view class="form">
       <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>

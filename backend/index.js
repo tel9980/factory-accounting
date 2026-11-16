@@ -4604,6 +4604,92 @@ app.get('/history', async (c) => {
 })
 
 // 单位列表（客户/供应商汇总）
+// 收付流水：逐笔看钱进钱出（老板最常问「这个月钱花哪了」）
+app.get('/flows', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || '').trim()
+  const kw = String(c.req.query('kw') || '').trim()
+  const dir = ['in', 'out'].indexOf(c.req.query('dir')) >= 0 ? c.req.query('dir') : ''
+  let sql = "SELECT l.id, l.direction, l.amount, l.category, l.remark, l.ref_type, l.ref_id, l.created_at, COALESCE(a.name,'') AS account, (l.account_id IS NULL OR l.account_id=0) AS no_acc FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id WHERE 1=1"
+  const b = []
+  if (m) { sql += ' AND substr(l.created_at,1,7)=?'; b.push(m) }
+  if (dir) { sql += ' AND l.direction=?'; b.push(dir) }
+  if (kw) { sql += ' AND (COALESCE(l.category,\'\') LIKE ? OR COALESCE(l.remark,\'\') LIKE ? OR COALESCE(a.name,\'\') LIKE ?)'; b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%') }
+  sql += ' ORDER BY l.created_at DESC, l.id DESC LIMIT 300'
+  const st = b.length ? db.prepare(sql).bind(...b) : db.prepare(sql)
+  const raw = (await st.all()).results || []
+  const rows = raw.map((r) => ({
+    id: r.id,
+    date: String(r.created_at || '').slice(0, 10),
+    dir: r.direction,
+    dir_text: r.direction === 'in' ? '收' : '付',
+    amount: round2(num(r.amount)),
+    signed: round2(r.direction === 'in' ? num(r.amount) : -num(r.amount)),
+    category: r.category || '',
+    cat_text: r.category || (r.ref_type === 'order' ? '货款' : (r.ref_type === 'payable' ? '货款' : (r.ref_type === 'advance' ? '预收预付' : (r.ref_type === 'loan' ? '借支' : (r.ref_type === 'debt' ? '借款' : '未分类'))))),
+    remark: r.remark || '',
+    account: r.account || '现金',
+    ref_type: r.ref_type || '',
+    ref_id: r.ref_id || 0,
+    ref_text: r.ref_type === 'order' ? '应收 #' + r.ref_id : (r.ref_type === 'payable' ? '应付 #' + r.ref_id : (r.ref_type === 'advance' ? '预收预付' : (r.ref_type === 'loan' ? '借支' : (r.ref_type === 'transfer' ? '内部转账' : (r.ref_type === 'dep' ? '折旧' : (r.ref_type === 'accrual' || r.ref_type === 'debt_int' ? '预提利息' : (r.ref_type === 'debt' ? '借款' : '')))))))
+  }))
+  const ti = round2(rows.filter((x) => x.dir === 'in').reduce((a, x) => a + x.amount, 0))
+  const to = round2(rows.filter((x) => x.dir === 'out').reduce((a, x) => a + x.amount, 0))
+  const cats = {}
+  rows.forEach((x) => { const k = (x.dir === 'in' ? '收·' : '付·') + (x.cat_text || '未分类'); cats[k] = round2(num(cats[k]) + x.amount) })
+  return c.json({
+    ok: true, month: m, kw, dir, count: rows.length, rows,
+    total_in: ti, total_out: to, net: round2(ti - to),
+    by_cat: Object.keys(cats).map((k) => ({ name: k, amount: cats[k] })).sort((a, b2) => b2.amount - a.amount),
+    tip: rows.length ? '' : '这个范围没有流水，换个月份或清空关键词'
+  })
+})
+
+// 往来单位档案：电话、联系人、地址、开票信息 —— 催款能直接拨号，对账单有抬头
+app.get('/profiles', async (c) => {
+  const db = c.env.DB
+  const kind = c.req.query('kind') === 'ap' ? 'ap' : (c.req.query('kind') === 'ar' ? 'ar' : '')
+  const prof = (await db.prepare('SELECT * FROM party_profiles').all()).results || []
+  const pmap = {}
+  prof.forEach((r) => { pmap[r.party] = r })
+  const arRows = (await db.prepare('SELECT customer AS party, COUNT(*) cnt, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) left_amt, SUM(price) total FROM orders GROUP BY customer').all()).results || []
+  const apRows = (await db.prepare('SELECT supplier AS party, COUNT(*) cnt, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) left_amt, SUM(amount) total FROM payables GROUP BY supplier').all()).results || []
+  const mk = (arr, k) => arr.map((r) => {
+    const p = pmap[r.party] || {}
+    return { kind: k, party: r.party || '', cnt: num(r.cnt), left: round2(num(r.left_amt)), total: round2(num(r.total)), contact: p.contact || '', phone: p.phone || '', addr: p.addr || '', note: p.note || '', has_profile: !!p.id, id: p.id || 0 }
+  })
+  let list = mk(arRows, 'ar').concat(mk(apRows, 'ap'))
+  if (kind) list = list.filter((x) => x.kind === kind)
+  list.sort((a, b2) => (b2.left - a.left) || (b2.total - a.total))
+  return c.json({ ok: true, kind, count: list.length, with_phone: list.filter((x) => x.phone).length, list })
+})
+
+app.post('/profiles', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const party = String(b.party || '').trim()
+  if (!party) return c.json({ error: '单位名称不能空着' }, 400)
+  const kind = b.kind === 'ap' ? 'ap' : 'ar'
+  const contact = String(b.contact || '').trim().slice(0, 30)
+  const phone = String(b.phone || '').trim().slice(0, 30)
+  const addr = String(b.addr || '').trim().slice(0, 100)
+  const note = String(b.note || '').trim().slice(0, 200)
+  const old = await db.prepare('SELECT id FROM party_profiles WHERE party=?').bind(party).first()
+  if (old) {
+    await db.prepare('UPDATE party_profiles SET kind=?,contact=?,phone=?,addr=?,note=? WHERE id=?').bind(kind, contact, phone, addr, note, old.id).run()
+  } else {
+    await db.prepare('INSERT INTO party_profiles (party,kind,contact,phone,addr,note,created_at) VALUES (?,?,?,?,?,?,?)').bind(party, kind, contact, phone, addr, note, now()).run()
+  }
+  await logAudit(db, 'profile', party, '改档案 ' + (phone || contact || ''))
+  return c.json({ ok: true, party, contact, phone, addr, note })
+})
+
+app.delete('/profiles/:id', async (c) => {
+  const db = c.env.DB
+  await db.prepare('DELETE FROM party_profiles WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
+
 app.get('/contacts', async (c) => {
   const db = c.env.DB
   const ar = await db.prepare(
