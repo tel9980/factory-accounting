@@ -4288,6 +4288,71 @@ app.get('/disputes', async (c) => {
       : '没有待处理的争议，账目清楚。'
   })
 })
+// 争议台账：每笔争议从「对方说对不上」到「最后怎么收场」的一条线，顺手生成重发时说的话
+app.get('/dispute-book', async (c) => {
+  const db = c.env.DB
+  const all = String(c.req.query('all') || '') === '1'
+  const onlyParty = String(c.req.query('party') || '').trim()
+  const title = await getTitle(db)
+  const sRows = ((await db.prepare("SELECT * FROM statement_log WHERE ack='doubt' ORDER BY id DESC LIMIT 100").all()).results || [])
+  const recRows = ((await db.prepare('SELECT * FROM recon_log ORDER BY id DESC LIMIT 400').all()).results || [])
+  const dunRows = ((await db.prepare('SELECT party, created_at, promise_date FROM dunning_log ORDER BY id DESC LIMIT 400').all()).results || [])
+  const leftMap = {}
+  for (const r of ((await db.prepare('SELECT customer party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders GROUP BY customer').all()).results || [])) {
+    const k = norm(r.party); leftMap[k] = round2((leftMap[k] || 0) + num(r.t))
+  }
+  for (const r of ((await db.prepare('SELECT supplier party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables GROUP BY supplier').all()).results || [])) {
+    const k = norm(r.party); leftMap[k] = round2((leftMap[k] || 0) + num(r.t))
+  }
+  const rows = []
+  for (const r of sRows) {
+    const party = r.party || ''
+    const k = norm(party)
+    if (onlyParty && k !== norm(onlyParty)) continue
+    const resolved = !!r.resolved_at
+    if (!all && resolved) continue
+    const doubtDate = String(r.created_at || '').slice(0, 10)
+    const rec = recRows.find((x) => norm(x.party) === k && (!r.month || x.month === r.month))
+    let fixedAmount = 0
+    if (rec && rec.note) {
+      const mm = /补记\s*([0-9.]+)\s*元/.exec(String(rec.note))
+      if (mm) fixedAmount = round2(num(mm[1]))
+    }
+    const timeline = [{ d: doubtDate, t: `对方说对不上${r.note ? '：' + r.note : ''}` }]
+    if (rec) {
+      timeline.push({ d: String(rec.created_at || '').slice(0, 10), t: rec.note ? String(rec.note) : (num(rec.diff) === 0 ? '核对下来两家金额一致' : '核对过，差 ' + round2(num(rec.diff)) + ' 元') })
+    }
+    const duns = dunRows.filter((x) => norm(x.party) === k)
+    if (duns.length) timeline.push({ d: String(duns[0].created_at || '').slice(0, 10), t: `催过 ${duns.length} 次` + (duns[0].promise_date ? `，对方答应 ${String(duns[0].promise_date).slice(0, 10)} 付` : '') })
+    if (resolved) timeline.push({ d: String(r.resolved_at).slice(0, 10), t: '标记处理完' + (r.note ? '：' + String(r.note).slice(0, 40) : '') })
+    timeline.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0))
+    const left = round2(leftMap[k] || 0)
+    const diffs = fixedAmount > 0 ? `您上月提的 ¥${fixedAmount} 差异我们已核实并补记入账` : '您上月提的差异我们已核对'
+    const resend = resolved
+      ? `${party} 您好，${r.month || ''} 那期对账单${diffs}。这是新一期的对账单，麻烦再核对一下${left > 0 ? `，现在账上还剩 ¥${left} 未结` : '，账目已经两清'}。`
+      : (fixedAmount > 0
+        ? `${party} 您好，您提的 ¥${fixedAmount} 差异我们已核实并补记入账，麻烦再看一眼这期对账单${left > 0 ? `，现在账上还剩 ¥${left} 未结` : ''}。`
+        : `${party} 您好，您提的对账单差异我们正在逐笔核对，这两天给您答复。${left > 0 ? `目前账上还剩 ¥${left} 未结` : ''}`)
+    rows.push({
+      id: r.id, party, type: r.type === 'ap' ? 'ap' : 'ar', month: r.month || '',
+      doubt_date: doubtDate, days_open: resolved ? 0 : daysSince(r.created_at),
+      note: r.note || '', fixed_amount: fixedAmount, recon_state: rec ? String(rec.state || '') : '',
+      left, resolved, resolved_at: String(r.resolved_at || '').slice(0, 10),
+      timeline, resend_text: resend
+    })
+  }
+  const open0 = rows.filter((x) => !x.resolved)
+  const fixedTotal = round2(rows.reduce((a, x) => a + x.fixed_amount, 0))
+  return c.json({
+    ok: true, title: title.title, count: open0.length, total: rows.length,
+    fixed_total: fixedTotal, oldest_days: open0.length ? Math.max(...open0.map((x) => x.days_open)) : 0,
+    rows,
+    advice: open0.length
+      ? `还有 ${open0.length} 家没核完${open0.length >= 3 ? '，争议攒多了先集中核一天' : ''}；核完一条就点「标记处理完」，下次发对账单可以照着上面那句说。`
+      : (rows.length ? `争议都处理完了，累计核实补记 ¥${fixedTotal}。` : '还没出现过争议。')
+  })
+})
+
 // 标记争议已处理（fixed=核对改正了，ignore=不用管）
 app.post('/statement-log/:id/resolve', async (c) => {
   const db = c.env.DB

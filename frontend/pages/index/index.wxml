@@ -954,7 +954,26 @@
             <button size="mini" bindtap="resolveDispute" data-id="{{item.id}}" data-k="fixed">✓ 核对完了</button>
             <button size="mini" bindtap="resolveDispute" data-id="{{item.id}}" data-k="ignore">不用管</button>
           </view>
+          <view class="btns"><button size="mini" class="ghost" bindtap="openDisputeBook" data-party="{{item.party}}">🕘 处理过程 / 跟对方怎么说</button></view>
         </view>
+      </view>
+    </view>
+    <view class="form" wx:if="{{dbk}}">
+      <view class="tip">争议台账{{dbk.party_filter ? ' · ' + dbk.party_filter : ''}}（每笔从「对方说对不上」到「怎么收场」的一条线）</view>
+      <view class="aline {{dbk.count ? 'warn':'ok'}}">{{dbk.advice}}</view>
+      <view class="tip">共 {{dbk.total}} 笔 · 未结 {{dbk.count}} 笔{{dbk.fixed_total ? ' · 累计核实补记 ¥' + dbk.fixed_total : ''}}</view>
+      <view class="item" wx:for="{{dbk.rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.party}}（{{item.kind_text || (item.type=='ap'?'应付':'应收')}}）</text><text class="amt {{item.resolved?'ok':'red'}}">{{item.resolved?'已了结':'拖了 '+item.days_open+' 天'}}</text></view>
+        <view class="row2">{{item.month}} 期对账单 · 现在欠 ¥{{item.left}}{{item.fixed_amount ? ' · 核实补记 ¥' + item.fixed_amount : ''}}</view>
+        <view class="tl" wx:for="{{item.timeline}}" wx:for-item="t" wx:key="d">
+          <text class="tl-d">{{t.d}}</text><text class="tl-t">{{t.t}}</text>
+        </view>
+        <view class="tip">发对账单时可以说：{{item.resend_text}}</view>
+        <view class="btns"><button size="mini" bindtap="copyResend" data-text="{{item.resend_text}}">📋 复制这句话</button></view>
+      </view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadDisputeBookAll">看全部（含已了结）</button>
+        <button class="btn ghost" size="mini" bindtap="closeDisputeBook">收起</button>
       </view>
     </view>
     <view class="form">
