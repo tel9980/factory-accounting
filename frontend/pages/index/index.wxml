@@ -1412,8 +1412,10 @@
         <view class="row1"><text class="nm">{{item.party}}{{item.kind=='ap'?'（供应商）':''}}</text><text class="amt {{item.left>0?'red':'ok'}}">欠 {{item.left}}</text></view>
         <view class="row2">{{item.phone ? item.phone : '还没填电话'}}{{item.contact ? ' · ' + item.contact : ''}}{{item.addr ? ' · ' + item.addr : ''}}</view>
         <view class="row2" wx:if="{{item.note}}">{{item.note}}</view>
+        <view class="row2" wx:if="{{item.sent_times}}">📄 已发对账单 {{item.sent_times}} 次（上次 {{item.sent_last}}{{item.sent_days!==null ? '，' + item.sent_days + ' 天前' : ''}}）</view>
         <view class="btns">
           <button size="mini" bindtap="callParty" data-ph="{{item.phone}}">📞 打电话</button>
+          <button size="mini" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 记发对账单</button>
           <button size="mini" bindtap="openProfile" data-p="{{item.party}}">改档案</button>
         </view>
       </view>

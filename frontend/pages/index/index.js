@@ -1480,6 +1480,31 @@ Page({
     })
   },
   // 对账单：选“存图片/直接发对方/复制文字”
+  // 记一笔「对账单已发出」（silent=true 不弹提示）
+  logStatement(d, ctx, channel, silent) {
+    const party = (ctx && ctx.name) || (d && d.party) || ''
+    if (!party) return
+    const type = (ctx && ctx.type) || (d && d.type) || 'ar'
+    const month = (d && d.month) || ''
+    this.req({
+      url: API_BASE + '/statement-log', method: 'POST',
+      data: { party, type, month, channel: channel || '微信', note: '' },
+      success: () => { if (!silent) wx.showToast({ title: '已记下这次发送', icon: 'none' }) },
+      fail: () => {}
+    })
+  },
+  // 单位页手动补记（当面给纸质单、别人代发等）
+  logStatementManual(e) {
+    const party = e.currentTarget.dataset.p
+    const type = e.currentTarget.dataset.k === 'ap' ? 'ap' : 'ar'
+    wx.showActionSheet({
+      itemList: ['微信发过去', '打印纸质当面给', '别人代发', '其他'],
+      success: (r) => {
+        const ch = ['微信发过去', '打印纸质当面给', '别人代发', '其他'][r.tapIndex] || '其他'
+        this.logStatement({}, { name: party, type }, ch)
+      }
+    })
+  },
   statementActions(d, ctx) {
     wx.showActionSheet({
       itemList: ['存成图片（可保存/转发）', '直接发给对方', '复制文字', '打印页链接（电脑浏览器存 PDF）'],
@@ -1491,6 +1516,7 @@ Page({
         if (r.tapIndex === 3) {
           const party = (ctx && ctx.name) || d.party || ''
           const stype = (ctx && ctx.type) || d.type || 'ar'
+          this.logStatement(d, ctx, '打印版链接')
           if (!party) return wx.showToast({ title: '这份对账单没有单位名，改用图片', icon: 'none' })
           wx.showLoading({ title: '生成链接…' })
           this.req({
@@ -1505,6 +1531,7 @@ Page({
           })
           return
         }
+        this.logStatement(d, ctx, r.tapIndex === 1 ? '微信发对方' : '存图')
         this.drawStatementImage(d, r.tapIndex === 1)
       }
     })

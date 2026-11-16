@@ -3688,6 +3688,47 @@ app.delete('/dunning-log/:id', async (c) => {
   await db.prepare('DELETE FROM dunning_log WHERE id=?').bind(num(c.req.param('id'))).run()
   return c.json({ ok: true })
 })
+// 对账单送达记录：哪天把对账单发给谁了（对方赖「没收到」时有据可查）
+app.get('/statement-log', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const limit = Math.max(1, Math.min(200, num(c.req.query('limit')) || 60))
+  let sql = 'SELECT * FROM statement_log WHERE 1=1'
+  const b = []
+  if (party) { sql += ' AND party=?'; b.push(party) }
+  if (month) { sql += ' AND substr(created_at,1,7)=?'; b.push(month) }
+  sql += ' ORDER BY id DESC LIMIT ' + limit
+  const rows = ((b.length ? await db.prepare(sql).bind(...b).all() : await db.prepare(sql).all()).results || []).map((r) => ({
+    ...r, date: String(r.created_at || '').slice(0, 10), days: daysSince(r.created_at)
+  }))
+  const stat = {}
+  for (const r of rows) {
+    const s2 = stat[r.party] || (stat[r.party] = { party: r.party, times: 0, last: '' })
+    s2.times++
+    if (!s2.last || String(r.created_at) > s2.last) s2.last = String(r.created_at)
+  }
+  return c.json({
+    ok: true, count: rows.length, rows,
+    parties: Object.keys(stat).map((k) => ({ party: k, times: stat[k].times, last: stat[k].last.slice(0, 10), days: daysSince(stat[k].last) })).sort((a, b2) => b2.times - a.times)
+  })
+})
+app.post('/statement-log', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const party = String(b.party || '').trim()
+  if (!party) return c.json({ error: '要写清楚发给哪一家' }, 400)
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  await db.prepare('INSERT INTO statement_log (party,type,month,channel,note,created_at) VALUES (?,?,?,?,?,?)')
+    .bind(party, type, String(b.month || '').slice(0, 7), String(b.channel || '微信').slice(0, 10), String(b.note || '').slice(0, 100), now()).run()
+  await logAudit(db, 'statement', party, '发对账单：' + (String(b.month || '') || '全部') + '（' + String(b.channel || '微信') + '）')
+  return c.json({ ok: true })
+})
+app.delete('/statement-log/:id', async (c) => {
+  const db = c.env.DB
+  await db.prepare('DELETE FROM statement_log WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
 // 催款效果：催了几次、催完到底有没有把钱催回来
 app.get('/dunning-effect', async (c) => {
   const db = c.env.DB
@@ -4828,11 +4869,18 @@ app.get('/profiles', async (c) => {
   const prof = (await db.prepare('SELECT * FROM party_profiles').all()).results || []
   const pmap = {}
   prof.forEach((r) => { pmap[r.party] = r })
+  // 对账单发过几次（单位页显示，避免重复发、也证明发过）
+  const slog = {}
+  try {
+    const sl = (await db.prepare('SELECT party, COUNT(*) n, MAX(created_at) last FROM statement_log GROUP BY party').all()).results || []
+    for (const r of sl) slog[norm(r.party)] = { times: num(r.n), last: String(r.last || '').slice(0, 10), days: daysSince(r.last) }
+  } catch (e) {}
   const arRows = (await db.prepare('SELECT customer AS party, COUNT(*) cnt, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) left_amt, SUM(price) total FROM orders GROUP BY customer').all()).results || []
   const apRows = (await db.prepare('SELECT supplier AS party, COUNT(*) cnt, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) left_amt, SUM(amount) total FROM payables GROUP BY supplier').all()).results || []
   const mk = (arr, k) => arr.map((r) => {
     const p = pmap[r.party] || {}
-    return { kind: k, party: r.party || '', cnt: num(r.cnt), left: round2(num(r.left_amt)), total: round2(num(r.total)), contact: p.contact || '', phone: p.phone || '', addr: p.addr || '', note: p.note || '', has_profile: !!p.id, id: p.id || 0 }
+    const sg = slog[norm(r.party)] || {}
+    return { kind: k, party: r.party || '', cnt: num(r.cnt), left: round2(num(r.left_amt)), total: round2(num(r.total)), contact: p.contact || '', phone: p.phone || '', addr: p.addr || '', note: p.note || '', has_profile: !!p.id, id: p.id || 0, sent_times: num(sg.times), sent_last: sg.last || '', sent_days: sg.days === undefined ? null : sg.days }
   })
   let list = mk(arRows, 'ar').concat(mk(apRows, 'ap'))
   if (kind) list = list.filter((x) => x.kind === kind)
@@ -5665,7 +5713,7 @@ app.get('/reminders', async (c) => {
   }
   // 答应付款的日子过了还没付
   try {
-    const br = await db.prepare("SELECT d.party, d.promise_date, d.note FROM dunning_log d WHERE d.promise_date IS NOT NULL AND d.promise_date < ? AND d.id = (SELECT MAX(x.id) FROM dunning_log x WHERE x.party=d.party AND x.promise_date IS NOT NULL)").bind(today).all()
+    const br = await db.prepare("SELECT d.party, d.promise_date, d.note FROM dunning_log d WHERE d.promise_date IS NOT NULL AND substr(d.promise_date,1,10) < ? AND d.id = (SELECT MAX(x.id) FROM dunning_log x WHERE x.party=d.party AND x.promise_date IS NOT NULL)").bind(today).all()
     const arLeft = (await db.prepare('SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer').all()).results || []
     const apLeft = (await db.prepare('SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier').all()).results || []
     const lmap = {}
@@ -5674,6 +5722,14 @@ app.get('/reminders', async (c) => {
     if (brokenRows.length) {
       const sum = round2(brokenRows.reduce((a, x) => a + num(lmap[norm(x.party)]), 0))
       push('red', `${brokenRows.length} 家答应付的日子过了还没付（共 ¥${sum}）`, 'ar', brokenRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
+    }
+    // 答应「明天」付的，今天先提醒一句，别等过了日子才发现
+    const tomorrow = addDaysIso(today, 1)
+    const so = await db.prepare("SELECT d.party, d.promise_date FROM dunning_log d WHERE substr(d.promise_date,1,10) = ? AND d.id = (SELECT MAX(x.id) FROM dunning_log x WHERE x.party=d.party AND x.promise_date IS NOT NULL)").bind(tomorrow).all()
+    const soonRows = (so.results || []).filter((x) => num(lmap[norm(x.party)]) > 0.005)
+    if (soonRows.length) {
+      const sum2 = round2(soonRows.reduce((a, x) => a + num(lmap[norm(x.party)]), 0))
+      push('yellow', `${soonRows.length} 家答应明天付（共 ¥${sum2}），今天提一句`, 'ar', soonRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
     }
   } catch (e) {}
   // 欠了很久又一直没催过的家

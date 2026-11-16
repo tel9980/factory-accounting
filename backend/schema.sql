@@ -265,3 +265,15 @@ CREATE INDEX IF NOT EXISTS idx_dunning_party ON dunning_log(party);
 
 -- 催款时对方答应的付款日（答应 X 日付，过了没付就提醒）
 ALTER TABLE dunning_log ADD COLUMN promise_date TEXT;
+
+-- 对账单送达记录（哪天把对账单发给谁了）
+CREATE TABLE IF NOT EXISTS statement_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT,
+  type TEXT,
+  month TEXT,
+  channel TEXT,
+  note TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_statement_log_party ON statement_log(party);
