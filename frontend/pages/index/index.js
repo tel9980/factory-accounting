@@ -99,7 +99,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
-    gl: null, gl_kw: '', gl_open: '',
+    gl: null, gl_kw: '', gl_open: '', gl_cat: '',
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -1332,10 +1332,15 @@ Page({
   loadHelpKw() {
     const kw = this.data.gl_kw || ''
     this.req({
-      url: API_BASE + '/help?kw=' + encodeURIComponent(kw),
+      url: API_BASE + '/help?kw=' + encodeURIComponent(kw) + (this.data.gl_cat ? '&cat=' + this.data.gl_cat : ''),
       once: 'help', silent: true,
       success: (r) => { if (r.data && r.data.ok) this.setData({ gl: r.data, gl_open: '' }) }
     })
+  },
+  setGlCat(e) {
+    const c = e.currentTarget.dataset.c || ''
+    this.setData({ gl_cat: this.data.gl_cat === c ? '' : c, gl_open: '' })
+    this.loadHelpKw()
   },
   toggleGl(e) {
     const k = e.currentTarget.dataset.k

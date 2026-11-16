@@ -1278,8 +1278,12 @@
       </view>
     </view>
     <view class="form">
-      <view class="tip">❓ 不懂就问：这些词啥意思（封存、核销、权责、账期、预提…… 搜一个词，或者往下翻）</view>
-      <input class="inp" placeholder="搜一下，比如：核销 / 账期 / 预提" value="{{gl_kw}}" bindinput="onGlKw" />
+      <view class="tip">❓ 不懂就问：这些词啥意思、这句报错该咋办（搜一个词，或者往下翻）</view>
+      <input class="inp" placeholder="搜一下，比如：核销 / 账期 / 口令不对" value="{{gl_kw}}" bindinput="onGlKw" />
+      <view class="caps" wx:if="{{gl && gl.cats}}">
+        <view class="cap {{gl_cat == '' ? 'on' : ''}}" bindtap="setGlCat" data-c="">全部 {{gl.total}}</view>
+        <view class="cap {{gl_cat == item.k ? 'on' : ''}}" wx:for="{{gl.cats}}" wx:key="k" bindtap="setGlCat" data-c="{{item.k}}">{{item.label}} {{item.n}}</view>
+      </view>
       <view class="tip">{{gl ? gl.text : '在读词典…'}}</view>
       <view class="glrow" wx:for="{{gl.items}}" wx:key="k" bindtap="toggleGl" data-k="{{item.k}}">
         <view class="row1">

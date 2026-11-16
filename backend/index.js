@@ -3306,17 +3306,35 @@ const GLOSSARY = [
   { k: 'import', t: '批量导入 / 模板', s: '把 Excel 里的数一次录进来', d: '先下载模板（Excel），按列填好再选文件导入；也可以把对账单粘进「对账核对」里比数。', tip: '导入前会先给预览，确认了才入账，导错了能整批撤回。', go: 'bill:import' },
   { k: 'health', t: '账本健康分', s: '这本账记得规不规范', d: '十项检查：没填成本、没设到期日、没电话、流水没挂账户、疑似重复、上月没结账……', tip: '点开能看到每一项怎么改。', go: 'home' },
   { k: 'cost', t: '材料·外协成本', s: '这一单你自己的料钱和外协费', d: '开单时填「成本」，系统就能算毛利、比较不同客户赚不赚。', tip: '不填成本，毛利率会虚高，报表里会提醒你。', go: 'bill:ar' },
+  // ── 出错了怎么办（把界面上会跳出来的报错都能搜到）──
+  { cat: 'err', k: 'e_bad_key', t: '「口令不对」', s: '进不去', d: '每台手机第一次用要先设一个访问口令，之后每次打开都用这个口令。口令对不上就会提示这句。', tip: '忘了口令：在旧手机上「设置 → 改口令」会告诉你怎么重置，或者直接在服务器数据库里清掉口令重新设。换手机不用备份，只要填同一个口令就能看到原来的账。', go: 'stat:me' },
+  { cat: 'err', k: 'e_conflict', t: '「这张单刚被别人改过」', s: '同事也在改同一张单', d: '为了避免两个人同时改把数字弄乱，系统会拦住第二次修改。', tip: '下拉刷新一下，看到最新的数再改一次就行，不用重新录单。', go: '' },
+  { cat: 'err', k: 'e_sealed', t: '「这本账已经封存（只读）」', s: '老账本被锁成只读了', d: '封存是为了防止误改对完的旧账，封存后整本不能增删改。', tip: '要改就去「设置 → 🔒 账本封存 → 解封」，解封要点一次确认。', go: 'stat:me' },
+  { cat: 'err', k: 'e_locked', t: '「这个月已经结账锁定」', s: '结过账的月份不让改', d: '结账会把当月的单据锁住，报表也按那时的快照出。', tip: '确实要改：先「报表 → 解锁（删归档）」，改完记得重新结一次账。', go: 'stat:report' },
+  { cat: 'err', k: 'e_dup', t: '「刚记过一张一样的」', s: '可能是手滑点了两次', d: '同一家、同一金额、两分钟内又记一笔，系统会先拦一下问你。', tip: '如果确实是又一次活，点「确实要再记一笔」就记上；如果点错了，直接关掉。', go: '' },
+  { cat: 'err', k: 'e_offline', t: '「现在没网，看到的是之前的数据」', s: '手机信号不好', d: '没网时还能翻之前的账（带黄条提示这是几小时前的），但不能存新数据。', tip: '记的单会在手机上排队，联网后自动补发；顶部「📤 有 N 笔没发出去」点一下可以手动重发。', go: 'home' },
+  { cat: 'err', k: 'e_server', t: '「服务器出了点问题」', s: '后台出错了', d: '错误已经自动记到「设置 → 🐞 运行日志」里，不用你抄下来。', tip: '先等 30 秒再点一次，多半就好了；连续出现就把运行日志最后几条发给我。', go: 'stat:report' },
+  { cat: 'err', k: 'e_staff', t: '「这是老板才能用的功能」', s: '员工口令被拦了', d: '员工能记单、收款、看自己的活，但不能删改单据、看毛利、结账、封存。', tip: '确实要这些就换老板口令，或者让老板来做。', go: 'stat:me' },
 ]
 app.get('/help', (c) => {
   const kw = String(c.req.query('kw') || '').trim()
+  const cat = String(c.req.query('cat') || '')
   const low = kw.toLowerCase()
-  const all = GLOSSARY.map((g) => ({ k: g.k, t: g.t, s: g.s, d: g.d, tip: g.tip || '', go: g.go || '' }))
-  const hit = low ? all.filter((g) => (g.t + g.s + g.d + g.tip + g.k).toLowerCase().includes(low)) : all
+  const all = GLOSSARY.map((g) => ({
+    k: g.k, t: g.t, s: g.s, d: g.d, tip: g.tip || '', go: g.go || '',
+    cat: g.cat || 'word', cat_text: g.cat === 'err' ? '出错了怎么办' : '财务名词',
+  }))
+  const pool = cat ? all.filter((g) => g.cat === cat) : all
+  const hit = low ? pool.filter((g) => (g.t + g.s + g.d + g.tip + g.k).toLowerCase().includes(low)) : pool
   const items = hit.slice(0, 40)
+  const cats = [
+    { k: 'word', label: '财务名词', n: all.filter((g) => g.cat === 'word').length },
+    { k: 'err', label: '出错了怎么办', n: all.filter((g) => g.cat === 'err').length },
+  ]
   const text = low
-    ? (items.length ? `「${kw}」找到 ${items.length} 条解释` : `没有「${kw}」这个词。换个说法（比如「核销」「账期」），或者直接问我`)
-    : `一共收录 ${all.length} 个词，点任意一条看解释`
-  return c.json({ ok: true, kw, count: items.length, total: all.length, items, text })
+    ? (items.length ? `「${kw}」找到 ${items.length} 条解释` : `没有「${kw}」这个词。换个说法（比如「核销」「账期」「口令不对」），或者直接问我`)
+    : (cat ? `这一类一共 ${items.length} 条` : `一共收录 ${all.length} 条，点任意一条看解释`)
+  return c.json({ ok: true, kw, cat, count: items.length, total: all.length, cats, items, text })
 })
 
 app.get('/books-check', async (c) => {
