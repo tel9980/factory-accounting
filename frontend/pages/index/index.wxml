@@ -1267,7 +1267,7 @@
         <button class="btn" size="mini" bindtap="closeMonth">结转归档（出报表 + 锁定）</button>
       </view>
       <view wx:if="{{me}}">
-        <view class="prev-h">{{me.month}} · 六件事办了 {{me.done_count}}/{{me.total}}</view>
+        <view class="prev-h">{{me.month}} · {{me.total}} 件事办了 {{me.done_count}}/{{me.total}}</view>
         <view class="tip" wx:if="{{me.locked}}">🔒 这个月已经结账锁定了，不能再增删改；要改就在下面归档区点「解锁」，改完重新结一次。</view>
         <view class="aline {{me.ready?'ok':'warn'}}">{{me.advice}}</view>
         <view class="tip">本月：接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销折旧 {{me.numbers.cost_other}} · 净利 {{me.numbers.profit}}（净利率 {{me.numbers.margin}}%）· 手头现金 {{me.numbers.cash}}</view>
@@ -2147,7 +2147,7 @@
       <view class="help-p">2. 「记账 → 应收」里看谁欠得最久，点「催款清单」生成话术，抄微信发过去。</view>
       <view class="help-h">每月（20 分钟）</view>
       <view class="help-p">1. 对方发来对账明细：到「记账 → 批量导入」，选「对账核对（应收）」，或直接粘贴，先「看预览」再「确认入账」，差异一键补记。</view>
-      <view class="help-p">2. 「报表 → 月底收尾」：六步走完就结账，结完这个月不能改。</view>
+      <view class="help-p">2. 「报表 → 月底收尾」：七步走完就结账（单据、对账、差异、发对账单、小结、备份、结账），结完这个月不能改。</view>
       <view class="help-p">3. 「报表 → 备份」备份一次（也可开云端/笔记站自动备份）。</view>
       <view class="help-h">要给别人用</view>
       <view class="help-p">· 员工：设置里设「员工口令」，给他这个口令——他能记账、收款，但删改单子、看利润要老板口令。</view>

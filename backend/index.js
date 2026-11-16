@@ -966,7 +966,7 @@ app.get('/month-end', async (c) => {
   const m = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份格式：YYYY-MM' }, 400)
   const J = (sql, ...b) => db.prepare(sql).bind(...b).first()
-  const [pre, pl, accs, cnt, reconRow, lockRow, sumRow, bkRow] = await Promise.all([
+  const [pre, pl, accs, cnt, reconRow, lockRow, sumRow, bkRow, stR, stA] = await Promise.all([
     closePrecheck(db, m),
     monthPL(db, m),
     accountBalances(db),
@@ -974,8 +974,11 @@ app.get('/month-end', async (c) => {
     J('SELECT COUNT(*) c, COUNT(DISTINCT party) p FROM recon_log WHERE month=?', m),
     J('SELECT COUNT(*) c FROM month_lock WHERE month=?', m),
     J("SELECT value FROM settings WHERE key='pipeline_summary'"),
-    J('SELECT created_at FROM backups ORDER BY id DESC LIMIT 1')
+    J('SELECT created_at FROM backups ORDER BY id DESC LIMIT 1'),
+    J("SELECT COUNT(*) c FROM (SELECT DISTINCT customer p FROM orders WHERE price - paid - COALESCE(written_off,0) > 0) x WHERE x.p NOT IN (SELECT party FROM statement_log WHERE month=? AND type='ar')", m),
+    J("SELECT COUNT(*) c FROM (SELECT DISTINCT supplier p FROM payables WHERE amount - paid - COALESCE(written_off,0) > 0) x WHERE x.p NOT IN (SELECT party FROM statement_log WHERE month=? AND type='ap')", m)
   ])
+  const stUnsent = num(stR && stR.c) + num(stA && stA.c)
   const locked = num(lockRow && lockRow.c) > 0
   const summed = String((sumRow && sumRow.value) || '') === m
   const bkDays = (bkRow && bkRow.created_at) ? Math.floor((Date.now() - Date.parse(bkRow.created_at)) / 86400000) : 999
@@ -987,11 +990,14 @@ app.get('/month-end', async (c) => {
       detail: num(reconRow && reconRow.c) > 0 ? `对过 ${num(reconRow.p)} 家` : '本月还没对账', tip: '导入页粘对账单 → 对账核对' },
     { k: 'diff', no: 3, title: '差异处理完', tab: 'import', done: !openDiff,
       detail: openDiff ? '还有差异没处理' : '没有遗留差异 ✓', tip: '差异可一键补记，或标记「不用补」' },
-    { k: 'summary', no: 4, title: '出一页月度小结', tab: 'report', done: summed,
+    { k: 'stmt', no: 4, title: '对账单发给客商', tab: 'report', done: stUnsent === 0,
+      detail: stUnsent === 0 ? '该发的都发了 ✓' : `还有 ${stUnsent} 家没发（应收 ${num(stR && stR.c)} · 应付 ${num(stA && stA.c)}）`,
+      tip: '报表 → 📤 批量发对账单，点「话术」「打印页」自动记已发' },
+    { k: 'summary', no: 5, title: '出一页月度小结', tab: 'report', done: summed,
       detail: summed ? '小结已出' : '还没出（结账会被提醒）', tip: '留档，也能直接发微信' },
-    { k: 'backup', no: 5, title: '备份一次', tab: 'report', done: bkDays <= 7,
+    { k: 'backup', no: 6, title: '备份一次', tab: 'report', done: bkDays <= 7,
       detail: bkDays === 999 ? '从没备份过' : `上次备份 ${bkDays} 天前`, tip: '云端备份或整库备份，防误删' },
-    { k: 'close', no: 6, title: '结账归档', tab: 'report', done: locked,
+    { k: 'close', no: 7, title: '结账归档', tab: 'report', done: locked,
       detail: locked ? '已结账，单据锁定' : '还没结账', tip: '结完当月不能再改，出错可解锁' }
   ]
   const doneCount = steps.filter((x) => x.done).length
@@ -1008,7 +1014,8 @@ app.get('/month-end', async (c) => {
     numbers, ready: pre.can_close && !locked,
     blockers: pre.blockers || [], warns: pre.warns || [],
     todo: todo.map((x) => ({ k: x.k, no: x.no, title: x.title, tab: x.tab, detail: x.detail })),
-    advice: locked ? `${m} 已经结账归档了。` : (doneCount === steps.length ? '六件事都办好了，可以结账了。' : `还有 ${steps.length - doneCount} 件事没办：${todo.map((x) => x.no + '. ' + x.title).join('、')}`)
+    stmt_unsent: stUnsent,
+    advice: locked ? `${m} 已经结账归档了。` : (doneCount === steps.length ? '七件事都办好了，可以结账了。' : `还有 ${steps.length - doneCount} 件事没办：${todo.map((x) => x.no + '. ' + x.title).join('、')}`)
   })
 })
 
