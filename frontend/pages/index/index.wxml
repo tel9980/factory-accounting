@@ -504,6 +504,34 @@
         <view class="tip">点一下 = 标记已处理／未处理；长按 = 删掉这条记录（不动单据）。每月对完一次，月底看「还差几家没处理」就知道有没有漏。</view>
       </view>
 
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadReconProgress">📈 对账进度</button>
+        <button class="btn ghost" size="mini" bindtap="loadReconDunning">💬 差异话术</button>
+      </view>
+
+      <view class="prev" wx:if="{{rec_prog}}">
+        <view class="prev-h">{{rec_prog.type_text}}对账进度　还没对过 {{rec_prog.never_count}} 家　差异没处理 {{rec_prog.open_diff}} 条</view>
+        <view class="prev-row" wx:for="{{rec_prog.list}}" wx:key="party">
+          <text class="prev-t">{{item.party}}</text>
+          <text class="prev-n">{{item.last_month}} 账期 · 对过 {{item.times}} 次</text>
+          <text class="{{item.bad?'red':'ok'}}">{{item.state_text}}</text>
+        </view>
+        <view class="tip" wx:if="{{rec_prog.never_count}}">有欠款但还没对过账：{{rec_prog.never[0].party}} {{rec_prog.never[0].left}} 元{{rec_prog.never_count>1 ? ' 等 ' + rec_prog.never_count + ' 家' : ''}}——这些最该先对。</view>
+      </view>
+
+      <view class="prev" wx:if="{{rec_dun}}">
+        <view class="prev-h">差异话术　{{rec_dun.count}} 家要说</view>
+        <view class="prev-row" wx:for="{{rec_dun.rows}}" wx:key="id" data-i="{{index}}" bindtap="copyDunOne">
+          <text class="prev-t">{{item.party}}</text>
+          <text class="prev-n">单上 {{item.imported}} / 我这 {{item.system}}</text>
+          <text class="red">点我复制</text>
+        </view>
+        <view class="frow" wx:if="{{rec_dun.count}}">
+          <button class="btn" size="mini" bindtap="copyDunAll">📋 全部复制</button>
+        </view>
+        <view class="tip">点某一家 = 复制专门给那家说的话（带上差额和原因），直接粘到微信发出去。</view>
+      </view>
+
       <view class="prev" wx:if="{{import_log}}">
         <view class="prev-h">导入记录（最近 50 批，导错了能整批撤回）</view>
         <view class="prev-row" wx:for="{{import_log.rows}}" wx:key="id" data-i="{{index}}">

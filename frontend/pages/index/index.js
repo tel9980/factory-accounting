@@ -33,7 +33,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
-    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, import_log: null,
+    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -472,9 +472,27 @@ Page({
         wx.getFileSystemManager().readFile({
           filePath: f.path, encoding: 'base64',
           success: (fr) => {
-            wx.showLoading({ title: '导入中…' })
+            wx.showLoading({ title: '看这是什么表…' })
             this.setData({ import_file_name: f.name || 'Excel 文件' })
-            this.postXlsx(t, fr.data, false)
+            const names = { ar: '应收（客户欠我）', ap: '应付（我欠别人）', expense: '支出', loan: '员工借支', reimb: '报销', recon: '对账核对（只比不入账）', ar_init: '期初应收', ap_init: '期初应付' }
+            this.req({
+              url: API_BASE + '/detect-import', method: 'POST', data: { b64: fr.data },
+              success: (res) => {
+                wx.hideLoading()
+                const d = res.data || {}
+                if (d.type && d.type !== t) {
+                  return wx.showModal({
+                    title: '这个表看着是「' + (names[d.type] || d.type) + '」',
+                    content: (d.why || '') + '，共 ' + (d.rows_count || 0) + ' 行。\n按它说的导，还是按你选的「' + (names[t] || t) + '」导？',
+                    confirmText: '按它说的', cancelText: '按我选的',
+                    success: (m) => { wx.showLoading({ title: '导入中…' }); this.postXlsx(m.confirm ? d.type : t, fr.data, false) }
+                  })
+                }
+                wx.showLoading({ title: '导入中…' })
+                this.postXlsx(t, fr.data, false)
+              },
+              fail: () => { wx.hideLoading(); wx.showLoading({ title: '导入中…' }); this.postXlsx(t, fr.data, false) }
+            })
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) }
         })
@@ -742,7 +760,7 @@ Page({
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
-    if (t === 'import') { this.loadReconLog(); this.loadImportLog() }
+    if (t === 'import') { this.loadReconLog(); this.loadImportLog(); this.loadReconProgress() }
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
@@ -1536,6 +1554,37 @@ Page({
       url: API_BASE + '/recon-log/' + r.id, method: 'PATCH', data: { done: !r.done },
       success: () => this.loadReconLog()
     })
+  },
+  loadReconProgress() {
+    const type = (this.data.import_type === 1 || this.data.import_type === 3 || this.data.import_type === 6) ? 'ap' : 'ar'
+    this.req({
+      url: API_BASE + '/recon-progress?type=' + type,
+      success: (res) => {
+        const d = res.data || {}
+        const list = (d.list || []).map((x) => Object.assign({}, x, { bad: x.open_diff > 0 }))
+        this.setData({ rec_prog: { list, never: d.never || [], never_count: d.never_count || 0, open_diff: d.open_diff || 0, type_text: type === 'ap' ? '应付' : '应收' } })
+      }
+    })
+  },
+  loadReconDunning() {
+    const type = (this.data.import_type === 1 || this.data.import_type === 3 || this.data.import_type === 6) ? 'ap' : 'ar'
+    this.req({
+      url: API_BASE + '/recon-dunning?type=' + type,
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ rec_dun: { rows: d.rows || [], count: d.count || 0, all_text: d.all_text || '' } })
+      }
+    })
+  },
+  copyDunOne(e) {
+    const r = ((this.data.rec_dun || {}).rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    wx.setClipboardData({ data: r.text, success: () => wx.showToast({ title: '已复制，粘给' + r.party, icon: 'none' }) })
+  },
+  copyDunAll() {
+    const t = (this.data.rec_dun || {}).all_text || ''
+    if (!t) return wx.showToast({ title: '没有要说的差异', icon: 'none' })
+    wx.setClipboardData({ data: t, success: () => wx.showToast({ title: '全部差异话术已复制', icon: 'none' }) })
   },
   delReconLog(e) {
     const r = (this.data.recon_log.rows || [])[e.currentTarget.dataset.i]

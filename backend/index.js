@@ -1062,6 +1062,92 @@ app.delete('/recon-log', async (c) => {
   return c.json({ ok: true })
 })
 
+// ===== 对账进度：每家上次什么时候对过、对不对得上、谁还没对过 =====
+app.get('/recon-progress', async (c) => {
+  const db = c.env.DB
+  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  const rows = (await db.prepare("SELECT party, COUNT(*) cnt, MAX(created_at) last_at, MAX(month) last_month, SUM(CASE WHEN done=0 AND state<>'match' THEN 1 ELSE 0 END) open_diff FROM recon_log WHERE type=? GROUP BY party ORDER BY last_at DESC").bind(type).all()).results || []
+  const list = []
+  for (const r of rows) {
+    const l = (await db.prepare('SELECT state, diff, imported, system, month FROM recon_log WHERE type=? AND party=? ORDER BY id DESC LIMIT 1').bind(type, r.party).first()) || {}
+    let st = '一致'
+    if (l.state === 'more') st = '我少记 ' + round2(Math.abs(num(l.diff)))
+    else if (l.state === 'less') st = '我多记 ' + round2(Math.abs(num(l.diff)))
+    else if (l.state === 'new') st = '当时没这家'
+    list.push({ party: r.party, times: num(r.cnt), last_at: r.last_at, last_month: l.month || r.last_month, open_diff: num(r.open_diff), state: l.state || '', state_text: st, imported: round2(num(l.imported)), system: round2(num(l.system)) })
+  }
+  // 还有欠款、但从没对过账的单位：最该提醒
+  const openRows = type === 'ap'
+    ? (await db.prepare("SELECT supplier AS party, SUM(CASE WHEN amount-paid-COALESCE(written_off,0)>0 THEN amount-paid-COALESCE(written_off,0) ELSE 0 END) AS left FROM payables GROUP BY supplier").all()).results
+    : (await db.prepare("SELECT customer AS party, SUM(CASE WHEN price-paid-COALESCE(written_off,0)>0 THEN price-paid-COALESCE(written_off,0) ELSE 0 END) AS left FROM orders GROUP BY customer").all()).results
+  const done = new Set(rows.map((r) => r.party))
+  const never = (openRows || []).filter((o) => num(o.left) > 0 && !done.has(o.party)).map((o) => ({ party: o.party, left: round2(num(o.left)) }))
+  const openDiff = list.reduce((a, x) => a + x.open_diff, 0)
+  return c.json({ ok: true, type, list, never, never_count: never.length, open_diff: openDiff })
+})
+
+// ===== 差异话术：按差异方向自动生成该说的话（催款 / 核对 / 建账） =====
+app.get('/recon-dunning', async (c) => {
+  const db = c.env.DB
+  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const title = await getSetting(db, 'report_title')
+  const me = (title || '我这') + '（' + (type === 'ap' ? '应付' : '应收') + '）'
+  const rows = month
+    ? (await db.prepare("SELECT * FROM recon_log WHERE type=? AND month=? AND done=0 ORDER BY party").bind(type, month).all()).results
+    : (await db.prepare("SELECT * FROM recon_log WHERE type=? AND done=0 ORDER BY id DESC LIMIT 30").bind(type).all()).results
+  const out = []
+  for (const r of rows || []) {
+    if (r.state === 'match') continue
+    const party = r.party || ''
+    const on = round2(num(r.imported))
+    const mine = round2(num(r.system))
+    let text = ''
+    if (r.state === 'more') {
+      const d = round2(Math.abs(num(r.diff)))
+      text = `${party} 你好，对了一下账：你那边记的是 ${on} 元，${me}是 ${mine} 元，差 ${d} 元。方便的话把这 ${d} 元对应的单子或收款记录发我一下，我这边好对上。`
+    } else if (r.state === 'less') {
+      const d = round2(Math.abs(num(r.diff)))
+      text = `${party} 你好，对账发现我这边记的 ${mine} 元比你那边 ${on} 元多了 ${d} 元，可能是我重复记了或者你已经付过一笔我没记上。我这边核一下，回头给你准数。`
+    } else if (r.state === 'new') {
+      text = `${party} 你好，我这边账上还没有你的往来，麻烦把这边的对账单（或者记的金额）发我一下，我建个账好对上。`
+    } else continue
+    out.push({ id: r.id, party, state: r.state, month: r.month, imported: on, system: mine, diff: round2(num(r.diff)), text })
+  }
+  return c.json({ ok: true, type, month, rows: out, count: out.length, all_text: out.map((x) => x.text).join('\n\n') })
+})
+
+// ===== 自动认表：选了个 Excel 但不知道是应收还是应付，先猜一下 =====
+const DETECT_RULES = [
+  { type: 'ap', kw: /供应商|采购|欠供/, why: '表里有「供应商」这类字' },
+  { type: 'ar', kw: /客户|产品|加工费/, why: '表里有「客户 / 产品」这类字' },
+  { type: 'expense', kw: /分类|支出|水电|房租|工资/, why: '表里有「分类 / 支出」这类字' },
+  { type: 'loan', kw: /员工|借支|姓名/, why: '表里有「员工 / 借支」这类字' },
+  { type: 'reimb', kw: /报销/, why: '表里有「报销」' }
+]
+app.post('/detect-import', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  let rows = Array.isArray(b.rows) ? b.rows : []
+  if (!rows.length && b.b64) {
+    try { rows = await xlsxToRows(fromB64(b.b64).buffer) } catch (e) { return c.json({ error: '读不了这个文件' }, 400) }
+  }
+  if (!rows.length) return c.json({ error: '没有数据' }, 400)
+  const head = (rows[0] || []).map((x) => String(x == null ? '' : x)).join(' ')
+  const body = rows.slice(0, 40).map((r) => (r || []).map((x) => String(x == null ? '' : x)).join(' ')).join('\n')
+  const cols = (rows[0] || []).length
+  let type = ''
+  let why = ''
+  for (const r of DETECT_RULES) {
+    if (r.kw.test(head) || r.kw.test(body)) { type = r.type; why = r.why; break }
+  }
+  if (!type && cols <= 2) { type = 'recon'; why = '只有两列，像是「单位 + 金额」的对账单' }
+  if (!type) { type = 'ar'; why = '没看出关键字，按最常见的应收处理' }
+  // 给出的候选（前端可以让你换）
+  const cands = ['ar', 'ap', 'expense', 'loan', 'reimb', 'recon']
+  if (!cands.includes(type)) cands.unshift(type)
+  return c.json({ ok: true, type, why, cols, rows_count: rows.length, candidates: cands })
+})
+
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
 app.get('/', (c) => c.html(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
