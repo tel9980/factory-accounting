@@ -69,8 +69,9 @@
     <view class="tab {{tab=='ar'?'on':''}}" bindtap="setTab" data-t="ar">应收</view>
     <view class="tab {{tab=='ap'?'on':''}}" bindtap="setTab" data-t="ap">应付</view>
     <view class="tab {{tab=='expense'?'on':''}}" bindtap="setTab" data-t="expense">支出</view>
-    <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">批量导入</view>
+    <view class="tab {{tab=='import'?'on':''}}" bindtap="setTab" data-t="import">导入</view>
     <view class="tab {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
+    <view class="tab {{tab=='asset'?'on':''}}" bindtap="setTab" data-t="asset">家底</view>
     <view class="tab {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
     <view class="tab {{tab=='contact'?'on':''}}" bindtap="setTab" data-t="contact">单位</view>
   </view>
@@ -362,6 +363,91 @@
           <button size="mini" bindtap="genReportImage">生成图片</button>
         </view>
       </view>
+    </view>
+  </block>
+
+  <block wx:if="{{tab=='asset'}}">
+    <view class="cards" wx:if="{{nw_latest}}">
+      <view class="card">
+        <view class="num">{{nw_latest.net}}</view>
+        <view class="label">家底（现金+别人欠我−我欠别人）</view>
+      </view>
+      <view class="card">
+        <view class="num">{{nw_latest.cash}}</view>
+        <view class="label">手里现金</view>
+      </view>
+    </view>
+    <view class="biz" wx:if="{{nw_latest}}">
+      <text>别人欠我</text><text class="amt">{{nw_latest.ar}}</text>
+    </view>
+    <view class="biz" wx:if="{{nw_latest}}">
+      <text>我欠别人</text><text class="amt out">{{nw_latest.ap}}</text>
+    </view>
+
+    <view class="chart" wx:if="{{nw.length}}">
+      <view class="chart-title">近 12 个月家底变化（数字=净资产）</view>
+      <view class="bar-line" wx:for="{{nw}}" wx:key="m">
+        <view class="bar-m">{{item.m}}</view>
+        <view class="bar-zone">
+          <view class="bar bar-in" style="width:{{item.w}}%"></view>
+          <text class="bar-num">{{item.net}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="form" wx:if="{{kpi}}">
+      <view class="tip">财务指标（{{kpi.month}}）</view>
+      <view class="kpi-row"><text>本月毛利率</text><text class="kpi-n {{kpi.margin>=0?'ok':'bad'}}">{{kpi.margin}}%（毛利 {{kpi.profit}}）</text></view>
+      <view class="kpi-row"><text>平均回款天数</text><text class="kpi-n">{{kpi.avg_days}} 天</text></view>
+      <view class="kpi-row"><text>应收周转天数</text><text class="kpi-n">{{kpi.turn_days}} 天</text></view>
+      <view class="kpi-row"><text>现金能撑几个月</text><text class="kpi-n {{kpi.cushion_months>=1?'ok':'bad'}}">{{kpi.cushion_months}} 个月</text></view>
+      <view class="kpi-row" wx:if="{{kpi.top_customer}}"><text>最大客户占比</text><text class="kpi-n {{kpi.conc_pct>=60?'bad':''}}">{{kpi.top_customer}} {{kpi.conc_pct}}%</text></view>
+      <view class="tip">毛利率 = （本月接单 − 赊购 − 现金成本）/ 接单；现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
+    </view>
+
+    <view class="form">
+      <view class="tip">账龄（欠了多久没结）</view>
+      <view class="btns">
+        <view class="seg {{aging_type=='ar'?'on':''}}" bindtap="setAgingType" data-t="ar">别人欠我</view>
+        <view class="seg {{aging_type=='ap'?'on':''}}" bindtap="setAgingType" data-t="ap">我欠别人</view>
+      </view>
+      <view wx:if="{{aging}}">
+        <view class="kpi-row" wx:for="{{aging.buckets}}" wx:key="key">
+          <text>{{item.label}}</text><text class="kpi-n {{item.key=='d999'&&item.amount>0?'bad':''}}">{{item.amount}} 元 / {{item.cnt}} 笔</text>
+        </view>
+        <view class="kpi-row"><text>合计未结</text><text class="kpi-n">{{aging.total}} 元</text></view>
+        <view class="kpi-row" wx:if="{{aging.type=='ar'}}"><text>建议坏账准备</text><text class="kpi-n {{aging.provision>0?'bad':''}}">{{aging.provision}} 元</text></view>
+        <view class="duesoon" wx:if="{{aging.over60>0}}">超过 60 天的款有 {{aging.over60}} 元，建议单独去催一次</view>
+        <view class="list" wx:if="{{aging.worst.length}}">
+          <view class="item" wx:for="{{aging.worst}}" wx:key="id">
+            <view class="row1"><text class="nm">{{item.party}}</text><text class="amt">{{item.amount}}</text></view>
+            <view class="row2">已经 {{item.days}} 天了</view>
+          </view>
+        </view>
+        <view class="tip">坏账准备按经验估：61-90 天算 10%、90 天以上算 30%，只是心里有个数，不等于真要损失。</view>
+      </view>
+    </view>
+
+    <view class="form">
+      <view class="tip">月度归档（这个月的账单，可复制或存图发给老板/会计）</view>
+      <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{mr_month}}" bindinput="onMrMonth"/>
+      <button class="btn" size="mini" bindtap="genMonthReport">生成月度归档</button>
+    </view>
+    <view class="list" wx:if="{{mr_text}}">
+      <view class="item">
+        <view class="row2 pre">{{mr_text}}</view>
+        <view class="btns">
+          <button size="mini" bindtap="copyMonthReport">复制</button>
+          <button size="mini" bindtap="mrImage">生成图片</button>
+        </view>
+      </view>
+    </view>
+
+    <view class="form">
+      <view class="tip">报表抬头（写厂名，图片更像正式对账单）</view>
+      <input class="inp" placeholder="厂名，如 兴旺五金加工厂" value="{{head_title}}" bindinput="onHeadTitle"/>
+      <input class="inp" placeholder="备注，如 账期：当月 1 日至月底" value="{{head_note}}" bindinput="onHeadNote"/>
+      <button class="btn" size="mini" bindtap="saveHead">保存抬头</button>
     </view>
   </block>
 

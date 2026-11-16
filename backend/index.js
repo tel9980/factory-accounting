@@ -1681,6 +1681,176 @@ app.post('/restore', async (c) => {
   return c.json({ ok: true, restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, skipped })
 })
 
+
+// ── 第二档：家底 / 账龄 / 月度归档 / 报表抬头 / 财务指标 ──
+const monthList = (n) => {
+  const out = []
+  const d = new Date()
+  for (let i = n - 1; i >= 0; i--) {
+    const dt = new Date(d.getFullYear(), d.getMonth() - i, 1)
+    out.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`)
+  }
+  return out
+}
+const cashAtEnd = async (db, m) => {
+  const accs = await accountBalances(db)
+  const opening = accs.reduce((s, a) => s + num(a.opening), 0)
+  const i = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='in' AND substr(created_at,1,7)<=?").bind(m).first()
+  const o = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='out' AND substr(created_at,1,7)<=?").bind(m).first()
+  return round2(opening + num(i.t) - num(o.t))
+}
+const arAtEnd = async (db, m) => {
+  const a = await db.prepare("SELECT COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)<=?").bind(m).first()
+  const b = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND substr(created_at,1,7)<=?").bind(m).first()
+  return round2(Math.max(num(a.t) - num(b.t), 0))
+}
+const apAtEnd = async (db, m) => {
+  const a = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)<=?").bind(m).first()
+  const b = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND substr(created_at,1,7)<=?").bind(m).first()
+  return round2(Math.max(num(a.t) - num(b.t), 0))
+}
+
+// 家底：每月末 现金 + 别人欠我 − 我欠别人
+app.get('/networth', async (c) => {
+  const db = c.env.DB
+  const n = Math.min(Math.max(num(c.req.query('months'), 12) || 12, 3), 36)
+  const out = []
+  for (const m of monthList(n)) {
+    const cash = await cashAtEnd(db, m)
+    const ar = await arAtEnd(db, m)
+    const ap = await apAtEnd(db, m)
+    out.push({ m, cash, ar, ap, net: round2(cash + ar - ap) })
+  }
+  return c.json(out)
+})
+
+// 账龄分析 + 坏账准备建议
+app.get('/aging', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const rows = type === 'ar'
+    ? (await db.prepare("SELECT id, customer AS party, (price - paid) AS unpaid, created_at FROM orders WHERE paid < price ORDER BY created_at").all()).results
+    : (await db.prepare("SELECT id, supplier AS party, (amount - paid) AS unpaid, created_at FROM payables WHERE paid < amount ORDER BY created_at").all()).results
+  const buckets = [
+    { key: 'd30', label: '30 天内', amount: 0, cnt: 0 },
+    { key: 'd60', label: '31-60 天', amount: 0, cnt: 0 },
+    { key: 'd90', label: '61-90 天', amount: 0, cnt: 0 },
+    { key: 'd999', label: '90 天以上', amount: 0, cnt: 0 }
+  ]
+  const today = Date.now()
+  const detail = []
+  for (const r of rows) {
+    const t = Date.parse(r.created_at || '') || today
+    const days = Math.max(Math.floor((today - t) / 86400000), 0)
+    const amt = round2(num(r.unpaid))
+    const idx = days <= 30 ? 0 : days <= 60 ? 1 : days <= 90 ? 2 : 3
+    buckets[idx].amount = round2(buckets[idx].amount + amt)
+    buckets[idx].cnt++
+    detail.push({ id: r.id, party: r.party, amount: amt, days })
+  }
+  const total = round2(buckets.reduce((s, b) => s + b.amount, 0))
+  // 坏账准备建议：61-90 天按 10%，90 天以上按 30%（只对"别人欠我"）
+  const provision = type === 'ar' ? round2(buckets[2].amount * 0.1 + buckets[3].amount * 0.3) : 0
+  detail.sort((a, b) => b.days - a.days)
+  return c.json({ type, total, buckets, provision, worst: detail.slice(0, 8), over60: round2(buckets[2].amount + buckets[3].amount) })
+})
+
+// 报表抬头（厂名 / 备注）
+app.get('/report-head', async (c) => {
+  const db = c.env.DB
+  const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note')").all()).results
+  const g = (k) => (rows.find((r) => r.key === k) || {}).value || ''
+  return c.json({ title: g('report_title'), note: g('report_note') })
+})
+app.post('/report-head', async (c) => {
+  const { title, note } = await c.req.json()
+  const db = c.env.DB
+  const put = async (k, v) => {
+    const has = await db.prepare('SELECT 1 FROM settings WHERE key=?').bind(k).first()
+    if (has) await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(v, k).run()
+    else await db.prepare('INSERT INTO settings (key, value) VALUES (?,?)').bind(k, v).run()
+  }
+  await put('report_title', String(title || '').slice(0, 30))
+  await put('report_note', String(note || '').slice(0, 60))
+  return c.json({ ok: true })
+})
+
+// 月度归档：一个月收了多少、花了多少、钱花在哪、月底还剩多少
+app.get('/month-report', async (c) => {
+  const db = c.env.DB
+  let m = String(c.req.query('month') || '').slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(m)) m = now().slice(0, 7)
+  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='in' AND substr(created_at,1,7)=?").bind(m).first()
+  const out = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='out' AND substr(created_at,1,7)=?").bind(m).first()
+  const oAdd = await db.prepare("SELECT COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?").bind(m).first()
+  const pAdd = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?").bind(m).first()
+  const cats = (await db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') c, SUM(amount) t FROM ledger WHERE cash=1 AND direction='out' AND substr(created_at,1,7)=? GROUP BY c ORDER BY t DESC").bind(m).all()).results
+  const cash = await cashAtEnd(db, m)
+  const ar = await arAtEnd(db, m)
+  const ap = await apAtEnd(db, m)
+  const head = await db.prepare("SELECT key, value FROM settings WHERE key='report_title'").first()
+  const lines = []
+  lines.push(`【${(head && head.value) || '加工费记账'}】${m} 月度归档`)
+  lines.push(`—— 收支 ——`)
+  lines.push(`本月收款：¥${round2(num(inc.t))}`)
+  lines.push(`本月付款：¥${round2(num(out.t))}`)
+  lines.push(`本月结余：¥${round2(num(inc.t) - num(out.t))}`)
+  lines.push(`—— 业务 ——`)
+  lines.push(`新接单：¥${round2(num(oAdd.t))}`)
+  lines.push(`新赊购：¥${round2(num(pAdd.t))}`)
+  lines.push(`—— 钱花在哪 ——`)
+  if (cats.length) cats.forEach((r) => lines.push(`${r.c}：¥${round2(num(r.t))}`))
+  else lines.push('本月无支出')
+  lines.push(`—— 月底家底 ——`)
+  lines.push(`现金余额：¥${cash}`)
+  lines.push(`别人欠我：¥${ar}`)
+  lines.push(`我欠别人：¥${ap}`)
+  lines.push(`净资产：¥${round2(cash + ar - ap)}`)
+  return c.json({
+    month: m, cash_in: round2(num(inc.t)), cash_out: round2(num(out.t)), net: round2(num(inc.t) - num(out.t)),
+    order_add: round2(num(oAdd.t)), payable_add: round2(num(pAdd.t)), cats: cats.map((r) => ({ c: r.c, t: round2(num(r.t)) })),
+    cash, ar, ap, net_worth: round2(cash + ar - ap), title: (head && head.value) || '', text: lines.join('\n')
+  })
+})
+
+// 财务指标
+app.get('/kpi', async (c) => {
+  const db = c.env.DB
+  let m = String(c.req.query('month') || '').slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(m)) m = now().slice(0, 7)
+  const oAdd = num((await db.prepare("SELECT COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?").bind(m).first()).t)
+  const pAdd = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?").bind(m).first()).t)
+  const cashCost = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='out' AND substr(created_at,1,7)=?").bind(m).first()).t)
+  const cashIn = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='in' AND substr(created_at,1,7)=?").bind(m).first()).t)
+  const profit = round2(oAdd - pAdd - cashCost)
+  const margin = oAdd > 0 ? round2((profit / oAdd) * 100) : 0
+  // 平均回款天数：已收完的单 从开单到收清的平均天数
+  const paidOrders = (await db.prepare("SELECT o.id, o.created_at, MAX(l.created_at) last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid >= o.price GROUP BY o.id").all()).results
+  let sumD = 0, cntD = 0
+  for (const o of paidOrders) {
+    const a = Date.parse(o.created_at || ''); const b = Date.parse(o.last_pay || '')
+    if (a && b && b >= a) { sumD += (b - a) / 86400000; cntD++ }
+  }
+  const avg_days = cntD ? round2(sumD / cntD) : 0
+  // 应收周转天数：期末应收 / 近 3 个月平均月收款 × 30
+  const in3 = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='in' AND substr(created_at,1,7)<=? AND substr(created_at,1,7)>=?").bind(m, monthList(3)[0]).first()).t)
+  const ar = await arAtEnd(db, m)
+  const turnDays = in3 > 0 ? round2((ar / (in3 / 3)) * 30) : 0
+  // 现金安全垫：现金余额 / 近 3 个月平均月支出
+  const out3 = num((await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND direction='out' AND substr(created_at,1,7)<=? AND substr(created_at,1,7)>=?").bind(m, monthList(3)[0]).first()).t)
+  const cashNow = round2((await accountBalances(db)).reduce((s, a) => s + a.balance, 0))
+  const cushion = out3 > 0 ? round2(cashNow / (out3 / 3)) : 0
+  // 客户集中度：本月收款里最大客户占比
+  const byCust = (await db.prepare("SELECT o.customer c, SUM(l.amount) t FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,7)=? GROUP BY o.customer ORDER BY t DESC").bind(m).all()).results
+  const topCust = byCust.length ? byCust[0] : null
+  const conc = cashIn > 0 && topCust ? round2((num(topCust.t) / cashIn) * 100) : 0
+  return c.json({
+    month: m, order_add: round2(oAdd), payable_add: round2(pAdd), cash_cost: round2(cashCost), profit, margin,
+    avg_days, ar_end: ar, turn_days: turnDays, cash_now: cashNow, cushion_months: cushion,
+    top_customer: topCust ? topCust.c : '', conc_pct: conc
+  })
+})
+
 export default {
   fetch: (req, env, ctx) => {
     // 多账套：根据请求头 X-Book（1/2/3）选择对应的 D1 库

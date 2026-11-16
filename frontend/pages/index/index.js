@@ -41,7 +41,12 @@ Page({
     phrases: [], phrase_kind: 0,
     budget_over: [], budget_alert_count: 0,
     budgets: [], b_category: 0, b_amount: '',
-    book: 1, book_name: '主账套', books: [], rename_text: ''
+    book: 1, book_name: '主账套', books: [], rename_text: '',
+    nw: [], nw_max: 1, nw_latest: null,
+    aging_type: 'ar', aging: null,
+    kpi: null,
+    mr_month: '', mr_text: '',
+    head_title: '', head_note: ''
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -389,6 +394,7 @@ Page({
     const t = e.currentTarget.dataset.t
     this.setData({ tab: t })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
+    if (t === 'asset') this.loadAsset()
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
@@ -993,6 +999,73 @@ Page({
           fail: () => { wx.hideLoading(); wx.showToast({ title: '生成失败', icon: 'none' }) }
         })
       })
+  },
+  // ── 家底 / 账龄 / 财务指标 / 月度归档 / 报表抬头 ──
+  loadAsset() { this.loadNetworth(); this.loadKpi(); this.loadAging(); this.loadHead() },
+  loadNetworth() {
+    this.req({
+      url: API_BASE + '/networth?months=12',
+      success: (res) => {
+        const list = res.data || []
+        let mx = 1
+        list.forEach((r) => { mx = Math.max(mx, Math.abs(r.net), Math.abs(r.cash)) })
+        const out = list.map((r) => ({
+          m: r.m.slice(5) + '月', cash: r.cash, ar: r.ar, ap: r.ap, net: r.net,
+          w: Math.round((Math.abs(r.net) / mx) * 100)
+        }))
+        this.setData({ nw: out, nw_max: mx, nw_latest: list.length ? list[list.length - 1] : null })
+      }
+    })
+  },
+  loadKpi() {
+    this.req({ url: API_BASE + '/kpi', success: (res) => this.setData({ kpi: res.data || null }) })
+  },
+  loadAging() {
+    this.req({
+      url: API_BASE + '/aging?type=' + this.data.aging_type,
+      success: (res) => this.setData({ aging: res.data || null })
+    })
+  },
+  setAgingType(e) { this.setData({ aging_type: e.currentTarget.dataset.t }, () => this.loadAging()) },
+  onMrMonth(e) { this.setData({ mr_month: e.detail.value }) },
+  genMonthReport() {
+    const m = (this.data.mr_month || '').trim()
+    this.req({
+      url: API_BASE + '/month-report' + (m ? '?month=' + encodeURIComponent(m) : ''),
+      success: (res) => {
+        if (res.data && res.data.text) this.setData({ mr_text: res.data.text, mr_month: res.data.month })
+        else wx.showToast({ title: '生成失败', icon: 'none' })
+      }
+    })
+  },
+  copyMonthReport() {
+    if (!this.data.mr_text) return wx.showToast({ title: '先生成归档', icon: 'none' })
+    wx.setClipboardData({ data: this.data.mr_text })
+  },
+  mrImage() {
+    if (!this.data.mr_text) return wx.showToast({ title: '先生成归档', icon: 'none' })
+    this.drawTextImage(this.data.mr_text)
+  },
+  loadHead() {
+    this.req({
+      url: API_BASE + '/report-head',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ head_title: d.title || '', head_note: d.note || '' })
+      }
+    })
+  },
+  onHeadTitle(e) { this.setData({ head_title: e.detail.value }) },
+  onHeadNote(e) { this.setData({ head_note: e.detail.value }) },
+  saveHead() {
+    this.req({
+      url: API_BASE + '/report-head', method: 'POST',
+      data: { title: this.data.head_title, note: this.data.head_note },
+      success: (res) => {
+        if (res.data && res.data.ok) wx.showToast({ title: '已保存', icon: 'success' })
+        else wx.showToast({ title: (res.data && res.data.error) || '保存失败', icon: 'none' })
+      }
+    })
   },
   changeKey() {
     wx.showModal({
