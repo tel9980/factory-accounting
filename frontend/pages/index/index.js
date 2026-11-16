@@ -2441,6 +2441,32 @@ Page({
       fail: () => wx.hideLoading()
     })
   },
+  // 批量对账单：所有单位一个 Excel（汇总页 + 每家一页）
+  packAr() { this.exportStatementPack('ar') },
+  packAp() { this.exportStatementPack('ap') },
+  exportStatementPack(type) {
+    const d = new Date()
+    const cm = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    wx.showActionSheet({
+      itemList: ['本月', '今年（1 月至今）'],
+      success: (r) => {
+        const m = (this.data.ex_month || '').trim() || cm
+        const q = r.tapIndex === 0 ? '&month=' + m : '&from=' + cm.slice(0, 4) + '-01-01'
+        wx.showLoading({ title: '生成中…' })
+        this.req({
+          url: API_BASE + '/statement-pack?type=' + type + q,
+          success: (res) => {
+            wx.hideLoading()
+            const dd = res.data || {}
+            if (!dd.b64) return wx.showToast({ title: dd.error || '没生成出来', icon: 'none' })
+            wx.showToast({ title: '共 ' + dd.parties + ' 家', icon: 'none' })
+            this.saveXlsxFile(dd)
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
+  },
   // A4 打印版对账单：复制链接，电脑浏览器打开即可打印/存 PDF
   printStatement(e) {
     const ds = e.currentTarget.dataset

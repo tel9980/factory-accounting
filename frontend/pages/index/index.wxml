@@ -961,6 +961,11 @@
         <picker mode="date" value="{{ex_to}}" bindchange="onExTo"><view class="picker">到 {{ex_to || '选日期'}} ▾</view></picker>
       </view>
       <button class="btn" size="mini" bindtap="exportRangeXlsx">⬇ 导出这段时间 Excel（含明细）</button>
+      <view class="tip" style="margin-top:16rpx">📑 批量对账单：把所有往来单位一次导成一个 Excel（第一页是汇总，后面每家一页，带期初/本期/期末和签字栏），打印或逐个发微信都行</view>
+      <view class="row2">
+        <button class="btn ghost" size="mini" bindtap="packAr">📑 应收对账单</button>
+        <button class="btn ghost" size="mini" bindtap="packAp">📑 应付对账单</button>
+      </view>
       <view class="tip" style="margin-top:16rpx">📦 月度报表包（每月 1 号自动生成上月，一个 Excel 装全套：总览/利润表/资产负债表/应收/应付/流水/账龄/到期表）</view>
       <button class="btn" size="mini" bindtap="genMonthPack">⚙️ 现在生成上月报表包</button>
       <view class="item" wx:for="{{packs}}" wx:key="id" data-i="{{index}}" bindtap="downloadPack">

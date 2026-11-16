@@ -3331,6 +3331,89 @@ app.get('/receipt-text', async (c) => {
 })
 
 // 月度对账（按单位+月份）
+// 批量对账单：一次导出所有往来单位的对账表（汇总页 + 每家一页），发给客户/供应商一次搞定
+app.get('/statement-pack', async (c) => {
+  const db = c.env.DB
+  const isAp = c.req.query('type') === 'ap'
+  const mo = c.req.query('month') || ''
+  const today = now().slice(0, 10)
+  let from = c.req.query('from') || ''
+  let to = c.req.query('to') || ''
+  if (mo) { const yy = Number(mo.slice(0, 4)); const mnum = Number(mo.slice(5, 7)); const dim = new Date(Date.UTC(yy, mnum, 0)).getUTCDate(); from = `${mo}-01`; to = `${mo}-${String(dim).padStart(2, '0')}` } else { if (!from) from = `${today.slice(0, 4)}-01-01`; if (!to) to = today }
+  const T = isAp ? 'payables' : 'orders'
+  const P = isAp ? 'supplier' : 'customer'
+  const AMT = isAp ? 'amount' : 'price'
+  const rng = 'substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?'
+  const bills = (await db.prepare(`SELECT * FROM ${T} WHERE ${rng} ORDER BY ${P} ASC, id ASC`).bind(from, to).all()).results
+  const preRows = (await db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${AMT} - COALESCE(paid,0) - COALESCE(written_off,0)),0) AS open FROM ${T} WHERE substr(created_at,1,10)<? GROUP BY ${P}`).bind(from).all()).results
+  const payRows = (await db.prepare(`SELECT x.${P} AS party, COALESCE(SUM(l.amount),0) AS paid FROM ledger l JOIN ${T} x ON x.id = l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=? GROUP BY x.${P}`).bind(isAp ? 'payable' : 'order', from, to).all()).results
+  const head = await getTitle(db)
+  const map = new Map()
+  const add = (p2) => { if (!map.has(p2)) map.set(p2, { party: p2, bills: [], amt: 0, paidIn: 0, wo: 0, opening: 0, oldest: 0 }); return map.get(p2) }
+  for (const r of preRows) if (num(r.open) > 0.009) add(r.party).opening = round2(num(r.open))
+  for (const b of bills) {
+    const e = add(b[P])
+    e.bills.push(b)
+    e.amt = round2(e.amt + num(b[AMT]))
+    e.wo = round2(e.wo + num(b.written_off))
+    const left = num(b[AMT]) - num(b.paid) - num(b.written_off)
+    if (left > 0.009) {
+      const base = (b.due_date || b.created_at || '').slice(0, 10)
+      const days = Math.floor((Date.parse(today) - Date.parse(base)) / 86400000)
+      if (days > e.oldest) e.oldest = Math.max(0, days)
+    }
+  }
+  for (const r of payRows) { const e = map.get(r.party); if (e) e.paidIn = round2(num(r.paid)) }
+  const list = Array.from(map.values()).map((e) => ({ ...e, end: round2(e.opening + e.amt - e.paidIn - e.wo) }))
+  list.sort((a, b) => b.end - a.end || b.amt - a.amt)
+  const NAME = isAp ? '应付' : '应收'
+  const CN = isAp ? '已付' : '已收'
+  const CN2 = isAp ? '未付' : '未收'
+  const sheets = []
+  const sumRows = [[`【${head.title || '加工费记账'}】${NAME}对账单汇总`, `账期 ${from} ~ ${to}`, `导出 ${today}`]]
+  sumRows.push(['单位', '单据数', '本期金额', `本期${CN}`, '核销', '期初欠', `期末${CN2}`, '最久逾期(天)'])
+  const phones = new Map()
+  try {
+    const ps = (await db.prepare("SELECT party, phone, contact FROM party_profiles").all()).results
+    for (const x of ps) phones.set(x.party, x.phone || x.contact || '')
+  } catch (e) { /* 没建表就跳过 */ }
+  let tAmt = 0; let tPaid = 0; let tWo = 0; let tEnd = 0
+  for (const e of list) {
+    tAmt = round2(tAmt + e.amt); tPaid = round2(tPaid + e.paidIn); tWo = round2(tWo + e.wo); tEnd = round2(tEnd + e.end)
+    sumRows.push([e.party, String(e.bills.length), round2(e.amt).toFixed(2), round2(e.paidIn).toFixed(2), round2(e.wo).toFixed(2), round2(e.opening).toFixed(2), e.end.toFixed(2), String(e.oldest)])
+  }
+  sumRows.push(['合计', String(list.length), tAmt.toFixed(2), tPaid.toFixed(2), tWo.toFixed(2), '', tEnd.toFixed(2), ''])
+  sheets.push({ name: `${NAME}对账汇总`, rows: sumRows })
+  const cap = list.slice(0, 80)
+  for (const e of cap) {
+    const rows = [[`【${head.title || '加工费记账'}】${NAME}对账单`]]
+    const meta = [`单位：${e.party}`, `账期：${from} ~ ${to}`]
+    if (head.phone) meta.push(`电话：${head.phone}`)
+    rows.push(meta)
+    if (head.addr) rows.push([`地址：${head.addr}`])
+    const p2 = phones.get(e.party)
+    if (p2) rows.push([`对方联系：${p2}`])
+    rows.push([])
+    rows.push(['日期', '单号', isAp ? '类别/备注' : '产品', '金额', CN, '核销', CN2, '约定日'])
+    let bAmt = 0; let bPaid = 0; let bWo = 0; let bLeft = 0
+    for (const b of e.bills) {
+      const amt = num(b[AMT]); const pd = num(b.paid); const wo = num(b.written_off)
+      const left = round2(amt - pd - wo)
+      bAmt = round2(bAmt + amt); bPaid = round2(bPaid + pd); bWo = round2(bWo + wo); bLeft = round2(bLeft + left)
+      rows.push([(b.created_at || '').slice(0, 10), '#' + b.id, isAp ? (b.remark || b.category || '') : (b.item_name || ''), amt.toFixed(2), pd.toFixed(2), wo ? wo.toFixed(2) : '', left.toFixed(2), (b.due_date || '').slice(0, 10)])
+    }
+    rows.push(['本期合计', '', '', bAmt.toFixed(2), bPaid.toFixed(2), bWo.toFixed(2), bLeft.toFixed(2), ''])
+    rows.push(['期初结转', '', '', '', '', '', round2(e.opening).toFixed(2), ''])
+    rows.push([`期末${CN2}`, '', '', '', '', '', e.end.toFixed(2), ''])
+    rows.push([])
+    rows.push(['核对无误请签字：', '', '', '', '', '日期：', '', ''])
+    sheets.push({ name: e.party, rows })
+  }
+  const b64 = await toB64(await makeXlsxSheets(sheets))
+  const nm = `对账单_${NAME}_${from}_${to}.xlsx`
+  return c.json({ ok: true, name: nm, b64, parties: list.length, exported: cap.length, from, to, total_end: tEnd, truncated: list.length > cap.length })
+})
+
 app.get('/statement-month', async (c) => {
   const type = c.req.query('type')
   const name = c.req.query('name')
