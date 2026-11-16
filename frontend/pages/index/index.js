@@ -40,7 +40,7 @@ Page({
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
     pc_month: '', pc: null, rv_month: '', rv: null, ano: null, ys_year: '', ys: null,
-    tgt: null, tgt_edit: false, tgt_receive: '', tgt_order: '', trend: null, ps: null,
+    tgt: null, tgt_edit: false, tgt_receive: '', tgt_order: '', trend: null, ps: null, be: null,
     th: null, thTips: [], tw: null, tf: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
@@ -1980,6 +1980,13 @@ Page({
     this.req({
       url: API_BASE + '/pay-speed',
       success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ ps: d }) },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadBreakEven() {
+    this.req({
+      url: API_BASE + '/break-even',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ be: d }) },
       fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
     })
   },

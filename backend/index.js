@@ -3541,12 +3541,34 @@ app.get('/collect-list', async (c) => {
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
   const rows = (await db.prepare(`SELECT ${col} AS party, COUNT(*) cnt, COALESCE(SUM(${amt}-paid-COALESCE(written_off,0)),0) left_amt, MIN(created_at) oldest, MAX(CASE WHEN due_date IS NOT NULL THEN due_date END) due FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0 GROUP BY ${col}`).all()).results || []
+  // 每家的历史付款速度（结清的单平均几天付清）——用来判断「催得动」还是「一直拖」
+  const histSql = type === 'ap'
+    ? "SELECT o.supplier AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM payables o JOIN ledger l ON l.ref_type='payable' AND l.ref_id=o.id AND l.direction='out' WHERE o.paid + COALESCE(o.written_off,0) >= o.amount GROUP BY o.id"
+    : "SELECT o.customer AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id"
+  const histRows = (await db.prepare(histSql).all()).results || []
+  const hstat = {}
+  for (const h of histRows) {
+    const a = Date.parse(h.c_at || ''); const b = Date.parse(h.last_pay || '')
+    if (!a || !b || b < a) continue
+    const k = norm(h.party)
+    const st = hstat[k] || (hstat[k] = { sum: 0, n: 0 })
+    st.sum += (b - a) / 86400000
+    st.n++
+  }
   const list = rows.map((r) => {
     const days = daysSince(r.oldest)
-    const over = num(r.left_amt) * Math.min(days, 180) / 30
+    const dueOver = r.due ? Math.max(0, daysSince(r.due)) : 0
+    const h = hstat[norm(r.party)]
+    const avgPay = h && h.n ? round2(h.sum / h.n) : null
+    const wDays = 0.5 + Math.min(days, 180) / 60
+    const wRel = avgPay ? Math.min(1.6, Math.max(0.6, 60 / Math.max(avgPay, 1))) : 1
+    const wDue = 1 + Math.min(dueOver, 90) / 30
+    const why = ['欠 ' + days + ' 天']
+    if (dueOver > 0) why.push('已逾期 ' + dueOver + ' 天')
+    if (avgPay) why.push('平时 ' + avgPay + ' 天就付')
     return {
       party: r.party || '', left: round2(num(r.left_amt)), cnt: num(r.cnt), oldest_days: days,
-      due: r.due || '', over_due: r.due ? daysSince(r.due) : 0, score: Math.round(over)
+      due: r.due || '', over_due: dueOver, avg_pay_days: avgPay, score: Math.round(num(r.left_amt) * wDays * wRel * wDue), why: why.join(' · ')
     }
   }).filter((x) => x.left > 0.005 && x.oldest_days >= minDays)
   list.sort((a, b) => b.score - a.score)
@@ -3872,8 +3894,24 @@ app.get('/target', async (c) => {
   const daysLeft = isCur ? Math.max(0, dim - today.getUTCDate() + 1) : 0
   const pct = (v, tv) => tv > 0 ? Math.round(v / tv * 1000) / 10 : null
   const gap = tr > 0 ? round2(tr - receive) : null
+  // 本周进度：把月目标按天数拆到 4 周（最后一周含余下天数）
+  let wk = null
+  if (isCur) {
+    const segs = [[1, 7], [8, 14], [15, 21], [22, dim]]
+    const dom = today.getUTCDate()
+    let idx = segs.findIndex(([a, b]) => dom >= a && dom <= b)
+    if (idx < 0) idx = 3
+    const wa = segs[idx][0], wb = segs[idx][1]
+    const wt = tr > 0 ? Math.round(tr * (wb - wa + 1) / dim) : 0
+    const from = m + '-' + String(wa).padStart(2, '0')
+    const to = m + '-' + String(wb).padStart(2, '0')
+    const wr = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(from, to).first()
+    const got = round2(num(wr && wr.a))
+    const leftDays = Math.max(0, wb - dom + 1)
+    wk = { no: idx + 1, from, to, target: wt, received: got, gap: wt > 0 ? round2(wt - got) : null, left_days: leftDays, need_per_day: (wt > 0 && wt - got > 0) ? round2((wt - got) / Math.max(1, leftDays)) : null }
+  }
   return c.json({
-    ok: true, month: m, receive_target: tr, order_target: ta, has_target: tr > 0 || ta > 0,
+    ok: true, month: m, receive_target: tr, order_target: ta, has_target: tr > 0 || ta > 0, week: wk,
     receive, order_add: orderAdd, receive_pct: pct(receive, tr), order_pct: pct(orderAdd, ta),
     gap, days_left: daysLeft, per_day: gap && daysLeft > 0 ? round2(gap / daysLeft) : null,
     advice: tr > 0
@@ -5018,6 +5056,41 @@ app.get('/kpi', async (c) => {
     top_customer: topCust ? topCust.c : '', conc_pct: conc,
     cost_total: costTotal, expense_ratio: expenseRatio, break_even: breakEven,
     amort: adj.amort, dep: adj.dep, accrue_int: adj.accrue_int, net_worth: nw, trend
+  })
+})
+
+// 保本线：固定开销（房租工资水电这些每月必花的）+ 变动成本率 → 这个月最少要收多少才不亏
+app.get('/break-even', async (c) => {
+  const db = c.env.DB
+  const m = c.req.query('month') || now().slice(0, 7)
+  const ms = monthList(3)
+  const from = ms[0], to = ms[ms.length - 1]
+  const rows = (await db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') AS cat, COALESCE(SUM(amount),0) AS amt FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)>=? AND substr(created_at,1,7)<=? GROUP BY cat").bind(from, to).all()).results || []
+  const VAR = ['采购', '辅料', '运费']
+  let fixedSum = 0, varSum = 0
+  const items = []
+  for (const r of rows) {
+    const a = round2(num(r.amt))
+    if (VAR.indexOf(r.cat) >= 0) { varSum = round2(varSum + a); items.push({ name: r.cat, amount: a, kind: '变动' }) }
+    else { fixedSum = round2(fixedSum + a); items.push({ name: r.cat, amount: a, kind: '固定' }) }
+  }
+  const fx = await db.prepare('SELECT COALESCE(SUM(amount),0) AS a FROM fixed_expenses').first()
+  const fixedPlan = round2(num(fx && fx.a))
+  const add3 = round2(num((await db.prepare('SELECT COALESCE(SUM(price),0) AS a FROM orders WHERE substr(created_at,1,7)>=? AND substr(created_at,1,7)<=?').bind(from, to).first()).a))
+  const fixedAvg = round2(fixedSum / 3)
+  const varRatio = add3 > 0 ? Math.min(0.95, varSum / add3) : 0
+  const gm = Math.max(0.05, 1 - varRatio)
+  const breakEven = fixedAvg > 0 ? Math.round(fixedAvg / gm) : 0
+  const curAdd = round2(num((await db.prepare('SELECT COALESCE(SUM(price),0) AS a FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()).a))
+  const curOut = round2(num((await db.prepare("SELECT COALESCE(SUM(amount),0) AS a FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?").bind(m).first()).a))
+  return c.json({
+    ok: true, month: m, fixed_avg: fixedAvg, fixed_plan: fixedPlan, var_sum: varSum, order_add_3m: add3,
+    var_ratio: Math.round(varRatio * 1000) / 10, gross_margin: Math.round(gm * 1000) / 10,
+    break_even: breakEven, month_order_add: curAdd, month_out: curOut, gap: round2(breakEven - curAdd),
+    items: items.sort((a, b) => b.amount - a.amount),
+    note: breakEven > 0
+      ? (curAdd >= breakEven ? '这个月接单 ' + curAdd + ' 元，已经过了保本线（' + breakEven + ' 元），超 ' + round2(curAdd - breakEven) + ' 元。' : '这个月接单 ' + curAdd + ' 元，离保本线还差 ' + round2(breakEven - curAdd) + ' 元才不亏。')
+      : '还没有支出数据，先记几笔房租、工资，系统就能算出这个月最少要收多少才不亏。'
   })
 })
 

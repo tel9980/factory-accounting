@@ -109,6 +109,7 @@
         <view class="goalbar"><view class="goalbar-in {{tgt.receive_pct>=100?'done':''}}" style="width:{{tgt.receive_pct>100?100:(tgt.receive_pct<0?0:tgt.receive_pct)}}%"></view></view>
         <view class="goalrow"><text>已收 {{tgt.receive}} / 目标 {{tgt.receive_target}}（{{tgt.receive_pct}}%）</text><text class="{{tgt.gap>0?'red':'green'}}">{{tgt.gap>0 ? '还差 '+tgt.gap : '已达成'}}</text></view>
         <view class="goalsub">本月接单 {{tgt.order_add}}{{tgt.order_target>0 ? ' / 目标 '+tgt.order_target : ''}}　{{tgt.advice}}</view>
+        <view class="goalsub" wx:if="{{tgt.week && tgt.week.target>0}}">本周（{{tgt.week.from}} ~ {{tgt.week.to}}）该收 {{tgt.week.target}}，已收 {{tgt.week.received}}{{tgt.week.gap>0 ? '，还差 '+tgt.week.gap+'（剩 '+tgt.week.left_days+' 天，每天 '+tgt.week.need_per_day+'）' : '，这周已经够了 ✓'}}</view>
       </block>
       <view class="goalsub" wx:else>{{tgt.receive}} 元已收，{{tgt.order_add}} 元接单。设个目标，首页就有进度条。</view>
     </view>
@@ -235,7 +236,7 @@
         <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
         <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
           <text class="prev-t">{{item.no}}. {{item.party}}</text>
-          <text class="prev-n">欠 {{item.left}} · 最久 {{item.oldest_days}} 天</text>
+          <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
           <text class="red">点我复制</text>
         </view>
         <view class="frow">
@@ -401,7 +402,7 @@
         <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
         <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
           <text class="prev-t">{{item.no}}. {{item.party}}</text>
-          <text class="prev-n">欠 {{item.left}} · 最久 {{item.oldest_days}} 天</text>
+          <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
           <text class="red">点我复制</text>
         </view>
         <view class="frow">
@@ -774,6 +775,22 @@
           <text class="prev-n">一笔没结清 · 欠 {{item.unpaid_amt}} · 等了 {{item.wait_days}} 天</text>
         </view>
         <view class="aline {{item.tone}}" wx:for="{{ps.advice}}" wx:key="text">{{item.text}}</view>
+      </view>
+    </view>
+    <view class="form">
+      <view class="tip">保本线：这个月最少要收多少才不亏（固定开销 ＋ 变动成本率）</view>
+      <button class="btn" size="mini" bindtap="loadBreakEven">⚖ 算保本线</button>
+      <view wx:if="{{be}}">
+        <view class="tip">{{be.note}}</view>
+        <view class="plrow"><text class="pll">每月固定开销（近3个月平均）</text><text class="plv">{{be.fixed_avg}}</text></view>
+        <view class="plrow"><text class="pll">变动成本占比（采购辅料运费 / 接单）</text><text class="plv">{{be.var_ratio}}%</text></view>
+        <view class="plrow"><text class="pll strong">保本月收入</text><text class="plv {{be.gap>0?'bad':'ok'}}">{{be.break_even}}</text></view>
+        <view class="plrow"><text class="pll">本月接单 / 本月现金支出</text><text class="plv">{{be.month_order_add}} / {{be.month_out}}</text></view>
+        <view class="plrow" wx:for="{{be.items}}" wx:key="name">
+          <text class="pll">{{item.name}}（{{item.kind}}）</text>
+          <text class="plv">{{item.amount}}</text>
+        </view>
+        <view class="tip">固定 = 房租工资水电这类不管接单多少都要花的；变动 = 采购辅料运费，接单越多花越多。固定 ÷（1 − 变动占比）= 保本线。</view>
       </view>
     </view>
     <view class="form">
