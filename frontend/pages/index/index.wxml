@@ -222,9 +222,45 @@
         </view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
+          <button class="btn ghost" size="mini" bindtap="makeCollectImage">🖼 存成图片发微信</button>
           <button class="btn ghost" size="mini" bindtap="closeCollect">收起</button>
         </view>
-        <view class="tip">点某一家 = 只复制那家的话（带金额、笔数、天数、约定到期日）；「全部复制」= 一次性把每一家的话都排好，粘到群里挨个发。</view>
+        <view class="tip">点某一家 = 只复制那家的话；「存成图片」= 生成一张提醒卡，微信里可以直接转发给对方。</view>
+      </view>
+
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="openDue" data-type="ar">📅 到期表</button>
+        <button class="btn ghost" size="mini" bindtap="openRisk" data-type="ar">⚠️ 超期分级</button>
+      </view>
+
+      <view class="prev" wx:if="{{due && due.type=='ar'}}">
+        <view class="prev-h">到期表　未结 {{due.count}} 张 · 合计 {{due.total}} 元</view>
+        <view class="prev-row red"><text class="prev-t">已逾期 {{due.overdue_total}} 元</text><text class="prev-n">7 天内到期 {{due.soon_total}} 元</text><text>没到期日 {{due.no_due_total}} 元</text></view>
+        <view class="prev-row" wx:for="{{due.rows}}" wx:key="id">
+          <text class="prev-t">{{item.party}}  {{item.left}}</text>
+          <text class="prev-n">{{item.due || '没到期日'}}{{item.guess ? '(按账期)' : ''}}</text>
+          <text class="{{item.days>0?'red':'ok'}}">{{item.state}}</text>
+        </view>
+        <view class="tip" wx:if="{{due.more}}">后面还有 {{due.more}} 张，导出 Excel 能看全。</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="downloadDueXlsx">⬇ 导出 Excel（发客户对账）</button>
+          <button class="btn ghost" size="mini" bindtap="closeDue">收起</button>
+        </view>
+      </view>
+
+      <view class="prev" wx:if="{{risk && risk.type=='ar'}}">
+        <view class="prev-h">超期分级　{{risk.level}}</view>
+        <view class="prev-row" wx:for="{{risk.b}}" wx:key="label">
+          <text class="prev-t">{{item.label}}</text>
+          <text class="prev-n">{{item.cnt}} 笔</text>
+          <text class="{{item.label.indexOf('90')>=0?'red':'ok'}}">{{item.amount}} 元</text>
+        </view>
+        <view class="prev-row red" wx:if="{{risk.bad_count}}">拖最久的 {{risk.bad_count}} 家：{{risk.bad[0].party}} {{risk.bad[0].left}} 元（{{risk.bad[0].worst}} 天）</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyRiskText">📋 复制这份分级</button>
+          <button class="btn ghost" size="mini" bindtap="closeRisk">收起</button>
+        </view>
+        <view class="tip">超过 90 天的那一档单独列出来——这就是该考虑催到底、还是核销坏账的小名单。</view>
       </view>
     </view>
     <view class="list" wx:if="{{ar_view=='party'}}">
@@ -352,9 +388,45 @@
         </view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
+          <button class="btn ghost" size="mini" bindtap="makeCollectImage">🖼 存成图片发微信</button>
           <button class="btn ghost" size="mini" bindtap="closeCollect">收起</button>
         </view>
-        <view class="tip">点某一家 = 只复制那家的话（带金额、笔数、天数、约定到期日）；「全部复制」= 一次性把每一家的话都排好，粘到群里挨个发。</view>
+        <view class="tip">点某一家 = 只复制那家的话；「存成图片」= 生成一张提醒卡，微信里可以直接转发给对方。</view>
+      </view>
+
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="openDue" data-type="ap">📅 到期表</button>
+        <button class="btn ghost" size="mini" bindtap="openRisk" data-type="ap">⚠️ 超期分级</button>
+      </view>
+
+      <view class="prev" wx:if="{{due && due.type=='ap'}}">
+        <view class="prev-h">到期表　未结 {{due.count}} 张 · 合计 {{due.total}} 元</view>
+        <view class="prev-row red"><text class="prev-t">已逾期 {{due.overdue_total}} 元</text><text class="prev-n">7 天内到期 {{due.soon_total}} 元</text><text>没到期日 {{due.no_due_total}} 元</text></view>
+        <view class="prev-row" wx:for="{{due.rows}}" wx:key="id">
+          <text class="prev-t">{{item.party}}  {{item.left}}</text>
+          <text class="prev-n">{{item.due || '没到期日'}}{{item.guess ? '(按账期)' : ''}}</text>
+          <text class="{{item.days>0?'red':'ok'}}">{{item.state}}</text>
+        </view>
+        <view class="tip" wx:if="{{due.more}}">后面还有 {{due.more}} 张，导出 Excel 能看全。</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="downloadDueXlsx">⬇ 导出 Excel（发客户对账）</button>
+          <button class="btn ghost" size="mini" bindtap="closeDue">收起</button>
+        </view>
+      </view>
+
+      <view class="prev" wx:if="{{risk && risk.type=='ap'}}">
+        <view class="prev-h">超期分级　{{risk.level}}</view>
+        <view class="prev-row" wx:for="{{risk.b}}" wx:key="label">
+          <text class="prev-t">{{item.label}}</text>
+          <text class="prev-n">{{item.cnt}} 笔</text>
+          <text class="{{item.label.indexOf('90')>=0?'red':'ok'}}">{{item.amount}} 元</text>
+        </view>
+        <view class="prev-row red" wx:if="{{risk.bad_count}}">拖最久的 {{risk.bad_count}} 家：{{risk.bad[0].party}} {{risk.bad[0].left}} 元（{{risk.bad[0].worst}} 天）</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyRiskText">📋 复制这份分级</button>
+          <button class="btn ghost" size="mini" bindtap="closeRisk">收起</button>
+        </view>
+        <view class="tip">超过 90 天的那一档单独列出来——这就是该考虑催到底、还是核销坏账的小名单。</view>
       </view>
     </view>
     <view class="list" wx:if="{{ap_view=='party'}}">

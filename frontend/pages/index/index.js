@@ -34,7 +34,7 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null,
-    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', collect: null,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', collect: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -281,6 +281,87 @@ Page({
     if (!c) return
     const head = (c.type === 'ap' ? '【要付清单】共 ' : '【催款清单】共 ') + c.total + ' 元，' + c.count + ' 家\n\n'
     wx.setClipboardData({ data: head + (c.list || []).map((x) => x.no + '. ' + x.text).join('\n\n') })
+  },
+  // 催款清单存成图片：可直接用微信「发给对方」
+  makeCollectImage(e) {
+    const c = this.data.collect
+    if (!c || !c.list || !c.list.length) return wx.showToast({ title: '先点催款清单', icon: 'none' })
+    const ds = (e && e.currentTarget && e.currentTarget.dataset) || {}
+    const i = ds.i !== undefined ? Number(ds.i) : -1
+    if (i >= 0) {
+      const x = c.list[i]
+      if (!x) return
+      return this.drawStatementImage({ text: (c.type === 'ap' ? '【付款提醒】\n' : '【收款提醒】\n') + x.text }, true)
+    }
+    const head = c.type === 'ap' ? '【我这边要付的】' : '【还欠我钱的】'
+    const lines = [head + ' 共 ' + c.count + ' 家 · ' + c.total + ' 元', '']
+    c.list.forEach((x) => lines.push(x.no + '. ' + x.party + '  ' + x.left + ' 元（' + x.cnt + ' 笔，最久 ' + x.oldest_days + ' 天）'))
+    lines.push('', '点哪家可以单独复制话术发过去。')
+    this.drawStatementImage({ text: lines.join('\n') }, true)
+  },
+  // 到期表：哪张单哪天到期
+  openDue(e) {
+    const t = (e && e.currentTarget && e.currentTarget.dataset.type) || 'ar'
+    wx.showLoading({ title: '算到期…' })
+    this.req({
+      url: API_BASE + '/due-schedule?type=' + t + '&months=6',
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        const rows = (d.rows || []).slice(0, 15)
+        this.setData({ due: { type: t, total: d.total, overdue_total: d.overdue_total, soon_total: d.soon_total, no_due_total: d.no_due_total, count: d.count, rows, more: Math.max(0, (d.rows || []).length - rows.length) } })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeDue() { this.setData({ due: null }) },
+  downloadDueXlsx() {
+    const d = this.data.due
+    if (!d) return
+    wx.showLoading({ title: '生成 Excel…' })
+    this.req({
+      url: API_BASE + '/due-schedule-xlsx?type=' + d.type + '&months=6',
+      success: (res) => {
+        const r = res.data || {}
+        if (!r.b64) { wx.hideLoading(); return wx.showToast({ title: '生成失败', icon: 'none' }) }
+        const p = wx.env.USER_DATA_PATH + '/' + (r.name || '到期表.xlsx')
+        wx.getFileSystemManager().writeFile({
+          filePath: p, data: r.b64, encoding: 'base64',
+          success: () => {
+            wx.hideLoading()
+            if (wx.shareFileMessage) wx.shareFileMessage({ filePath: p, fileName: r.name || '到期表.xlsx', fail: () => wx.showToast({ title: '已生成', icon: 'none' }) })
+            else wx.showToast({ title: '已生成', icon: 'success' })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '保存失败', icon: 'none' }) }
+        })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  // 超期分级：30/60/90
+  openRisk(e) {
+    const t = (e && e.currentTarget && e.currentTarget.dataset.type) || 'ar'
+    wx.showLoading({ title: '分级…' })
+    this.req({
+      url: API_BASE + '/risk-list?type=' + t,
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        const bk = d.buckets || {}
+        this.setData({ risk: { type: t, level: d.level || '', bad_total: d.bad_total || 0, bad_count: d.bad_count || 0, bad: (d.bad || []).slice(0, 8), b: [bk.dx, bk.d90, bk.d60, bk.d30, bk.d0].filter(Boolean) } })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeRisk() { this.setData({ risk: null }) },
+  copyRiskText() {
+    const r = this.data.risk
+    if (!r) return
+    const lines = [r.type === 'ap' ? '【我欠别人·超期分级】' : '【欠款超期分级】', '']
+    r.b.forEach((x) => { if (x.cnt) lines.push(x.label + '：' + x.amount + ' 元（' + x.cnt + ' 笔）') })
+    if (r.bad.length) { lines.push('', '拖最久的：'); r.bad.forEach((p) => lines.push('· ' + p.party + ' ' + p.left + ' 元，最久 ' + p.worst + ' 天')) }
+    lines.push('', r.level)
+    wx.setClipboardData({ data: lines.join('\n') })
   },
   closeCollect() { this.setData({ collect: null }) },
   loadAccounts() {

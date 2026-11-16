@@ -14,6 +14,8 @@ const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
+// 单位名归一：去掉括号备注、有限公司/公司/厂/店与空白，用来跨表匹配同一家
+const norm = (t) => String(t || '').replace(/[（(].*?[)）]|有限公司|公司|厂|店|\s/g, '')
 const isMonthLocked = async (db, m) => {
   if (!m) return false
   const r = await db.prepare('SELECT 1 FROM month_lock WHERE month=?').bind(m).first()
@@ -2450,6 +2452,13 @@ const daysSince = (iso) => {
   if (isNaN(t.getTime())) return 0
   return Math.max(0, Math.floor((Date.now() - t.getTime()) / 86400000))
 }
+// 带符号天数差：正数=已经过去 N 天，负数=还有 N 天到期（daysSince 会把未来压成 0，到期表不能用它）
+const dayDiff = (iso) => {
+  const t = Date.parse(String(iso || '').slice(0, 10) + 'T00:00:00.000Z')
+  if (isNaN(t)) return 0
+  const today = Date.parse(now().slice(0, 10) + 'T00:00:00.000Z')
+  return Math.round((today - t) / 86400000)
+}
 const fmtOrder = (r) => ({
   ...r,
   cost: round2(num(r.cost)),
@@ -3534,6 +3543,102 @@ app.get('/collect-list', async (c) => {
   }))
   const total = round2(list.reduce((a, x) => a + x.left, 0))
   return c.json({ ok: true, type, total, count: list.length, list: out })
+})
+
+// ===== 到期表：按账期排出「哪张单哪天到期」，能导 Excel 发客户 =====
+async function dueRows(db, type, months, party) {
+  const tbl = type === 'ap' ? 'payables' : 'orders'
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  const amt = type === 'ap' ? 'amount' : 'price'
+  const itemCol = type === 'ap' ? 'remark' : 'item_name'
+  const terms = (await db.prepare('SELECT party, term_days FROM party_terms').all()).results || []
+  const tmap = {}
+  terms.forEach((t) => { tmap[norm(t.party)] = num(t.term_days) })
+  let sql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0`
+  const binds = []
+  if (party) { sql += ` AND ${col} = ?`; binds.push(String(party)) }
+  sql += ' ORDER BY created_at ASC LIMIT 800'
+  const st = binds.length ? db.prepare(sql).bind(...binds) : db.prepare(sql)
+  const raw = (await st.all()).results || []
+  const horizon = dayAfter(num(months) > 0 ? num(months) * 31 : 186)
+  const out = []
+  raw.forEach((r) => {
+    const left = round2(num(r.amount) - num(r.paid) - num(r.wo))
+    if (left <= 0.005) return
+    let due = r.due_date ? String(r.due_date).slice(0, 10) : ''
+    let guess = false
+    if (!due) {
+      const td = tmap[norm(r.party)]
+      if (td > 0) { const d = new Date(String(r.created_at).slice(0, 10) + 'T00:00:00.000Z'); d.setUTCDate(d.getUTCDate() + td); due = d.toISOString().slice(0, 10); guess = true }
+    }
+    const days = due ? dayDiff(due) : null
+    let state = '没有到期日'
+    if (due && days > 0) state = '已逾期 ' + days + ' 天'
+    else if (due && days === 0) state = '今天到期'
+    else if (due) state = '还有 ' + Math.abs(days) + ' 天'
+    out.push({ id: r.id, party: r.party || '', item: r.item || '', amount: round2(num(r.amount)), left, due, guess, days, state, created_at: String(r.created_at).slice(0, 10) })
+  })
+  out.sort((a, b) => (a.due || '9999') < (b.due || '9999') ? -1 : 1)
+  const soon = out.filter((x) => x.days !== null && x.days <= 7)
+  const overdue = out.filter((x) => x.days !== null && x.days > 0)
+  const future = out.filter((x) => x.days !== null && x.days < 0 && x.due <= horizon)
+  return {
+    rows: out, total: round2(out.reduce((a, x) => a + x.left, 0)),
+    overdue_total: round2(overdue.reduce((a, x) => a + x.left, 0)),
+    soon_total: round2(soon.reduce((a, x) => a + x.left, 0)),
+    future_total: round2(future.reduce((a, x) => a + x.left, 0)),
+    no_due_total: round2(out.filter((x) => !x.due).reduce((a, x) => a + x.left, 0)),
+    count: out.length, overdue_count: overdue.length
+  }
+}
+
+app.get('/due-schedule', async (c) => {
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const r = await dueRows(c.env.DB, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim())
+  return c.json(Object.assign({ ok: true, type }, r))
+})
+
+app.get('/due-schedule-xlsx', async (c) => {
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const r = await dueRows(c.env.DB, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim())
+  const head = ['单号', '单位', '产品/说明', '金额', '未结', '开单日', '到期日', '状态']
+  const rows = [head].concat(r.rows.map((x) => [x.id, x.party, x.item, x.amount, x.left, x.created_at, x.due || '', x.state + (x.guess ? '（按账期推算）' : '')]))
+  rows.push([])
+  rows.push(['合计未结', r.total, '已逾期', r.overdue_total, '7天内', r.soon_total, '没到期日', r.no_due_total])
+  const b64 = toB64(await makeXlsxSheets([{ name: type === 'ap' ? '应付到期表' : '应收到期表', rows }]))
+  return c.json({ ok: true, name: (type === 'ap' ? '应付到期表_' : '应收到期表_') + now().slice(0, 10) + '.xlsx', b64 })
+})
+
+// ===== 超期分级：30/60/90 天三档，拖太久的单独圈出来 =====
+app.get('/risk-list', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const tbl = type === 'ap' ? 'payables' : 'orders'
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  const amt = type === 'ap' ? 'amount' : 'price'
+  const raw = (await db.prepare(`SELECT id, ${col} AS party, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0`).all()).results || []
+  const b = { d0: { label: '没到期 / 7天内', amount: 0, cnt: 0 }, d30: { label: '超 1-30 天', amount: 0, cnt: 0 }, d60: { label: '超 31-60 天', amount: 0, cnt: 0 }, d90: { label: '超 61-90 天', amount: 0, cnt: 0 }, dx: { label: '超 90 天（疑似坏账）', amount: 0, cnt: 0 } }
+  const pmap = {}
+  raw.forEach((r) => {
+    const left = round2(num(r.amount) - num(r.paid) - num(r.wo))
+    if (left <= 0.005) return
+    const base = r.due_date ? String(r.due_date).slice(0, 10) : String(r.created_at).slice(0, 10)
+    const days = dayDiff(base)
+    let k = 'd0'
+    if (days > 90) k = 'dx'
+    else if (days > 60) k = 'd90'
+    else if (days > 30) k = 'd60'
+    else if (days > 7) k = 'd30'
+    b[k].amount = round2(b[k].amount + left); b[k].cnt += 1
+    const p = pmap[r.party || ''] || (pmap[r.party || ''] = { party: r.party || '', left: 0, cnt: 0, oldest: 99999, worst: 0 })
+    p.left = round2(p.left + left); p.cnt += 1
+    p.oldest = Math.min(p.oldest, days); p.worst = Math.max(p.worst, days)
+  })
+  const parties = Object.keys(pmap).map((k) => pmap[k]).sort((a, b2) => b2.worst - a.worst)
+  const bad = parties.filter((p) => p.worst > 90)
+  const badTotal = round2(bad.reduce((a, x) => a + x.left, 0))
+  const level = type === 'ap' ? (badTotal > 0 ? '我欠别人超 90 天的有 ' + round2(badTotal) + ' 元，先安排这笔' : '没有拖过 90 天的应付') : (badTotal > 0 ? '超过 90 天没收回的有 ' + round2(badTotal) + ' 元（' + bad.length + ' 家），建议走坏账核销或专人跟' : '没有超过 90 天的欠款，账很干净')
+  return c.json({ ok: true, type, buckets: b, parties, bad, bad_total: badTotal, bad_count: bad.length, level })
 })
 
 // ===== 导入批次留痕：记下这一次导了哪些单据，导错了能整批撤回 =====
