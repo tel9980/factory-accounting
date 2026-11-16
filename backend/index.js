@@ -5889,10 +5889,29 @@ app.get('/year-summary', async (c) => {
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
   const ms = []
   for (let i = 1; i <= 12; i++) ms.push(y + '-' + String(i).padStart(2, '0'))
+  // 性能：原来 12 个月 × monthSum（每月 4 条查询，共 48 条串行，7 秒），改成 2 条按年分组的查询自己拆到月
+  const [oR, lR] = await Promise.all([
+    db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) add_, COALESCE(SUM(COALESCE(cost,0)),0) cst FROM orders WHERE substr(created_at,1,4)=? GROUP BY mk').bind(y).all().catch((e) => { noteFail(e, '年度汇总'); return { results: [] } }),
+    db.prepare(`SELECT substr(created_at,1,7) mk,
+      COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) inc,
+      COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) outt,
+      COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
+      COALESCE(SUM(CASE WHEN direction='out' AND cash=0 AND ref_type='dep' THEN amount ELSE 0 END),0) dep,
+      COALESCE(SUM(CASE WHEN direction='out' AND cash=0 AND ref_type='amort' THEN amount ELSE 0 END),0) amort,
+      COALESCE(SUM(CASE WHEN direction='out' AND cash=0 AND ref_type='debt_int' THEN amount ELSE 0 END),0) accr
+      FROM ledger WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all().catch((e) => { noteFail(e, '年度汇总'); return { results: [] } })
+  ])
+  const oMap = {}, lMap = {}
+  for (const r of ((oR && oR.results) || [])) oMap[r.mk] = r
+  for (const r of ((lR && lR.results) || [])) lMap[r.mk] = r
   const rows = []
   for (const m of ms) {
-    const s = await monthSum(db, m)
-    rows.push({ m, month_label: Number(m.slice(5, 7)) + '月', order_add: s.orderAdd, cost: s.orderCost, gross: s.gross, expense: round2(s.expCash + s.dep + s.amort + s.accrual), profit: s.net, cash_in: s.inc, cash_out: s.out, cash_net: round2(s.inc - s.out) })
+    const o = oMap[m] || {}, l = lMap[m] || {}
+    const orderAdd = round2(num(o.add_)), orderCost = round2(num(o.cst))
+    const inc = round2(num(l.inc)), outt = round2(num(l.outt))
+    const expCash = round2(num(l.exp)), dep = round2(num(l.dep)), amort = round2(num(l.amort)), accrual = round2(num(l.accr))
+    const gross = round2(orderAdd - orderCost)
+    rows.push({ m, month_label: Number(m.slice(5, 7)) + '月', order_add: orderAdd, cost: orderCost, gross, expense: round2(expCash + dep + amort + accrual), profit: round2(gross - expCash - dep - amort - accrual), cash_in: inc, cash_out: outt, cash_net: round2(inc - outt) })
   }
   const t = (k) => round2(rows.reduce((a, x) => a + num(x[k]), 0))
   const active = rows.filter((x) => x.order_add > 0 || x.expense > 0 || x.cash_in > 0)
