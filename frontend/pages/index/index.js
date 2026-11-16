@@ -1,5 +1,9 @@
 const API_BASE = 'https://jz.qy663.de5.net'
 
+// 手机本地日期串（YYYY-MM-DD）。不能用 toISOString()——那是 UTC，北京时间 0~8 点会差一天
+const pad2 = (n) => String(n).padStart(2, '0')
+const dayOf = (d) => { const x = d || new Date(); return x.getFullYear() + '-' + pad2(x.getMonth() + 1) + '-' + pad2(x.getDate()) }
+
 // 功能索引：170 多项功能太多，用「找功能」搜索直接跳过去（纯前端，不发请求）
 const FEATS = [
   { n: "预收款（客户先给的钱）", go: "me:contact", desc: "客户没干活先给的钱，记成预收款；以后发货/加工完成抵扣，不重复算收入", kw: "预收 预付款 定金 先给 打款 客户先给 抵扣" },
@@ -102,7 +106,7 @@ Page({
     gl: null, gl_kw: '', gl_open: '', gl_cat: '',
     rec: null,
     rec_show: false, rec_code: '', rec_pw: '', rec_busy: false,
-    ag: null, ag_tab: 'newphone',
+    ag: null, ag_tab: 'newphone', ar2: null,
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -1396,6 +1400,27 @@ Page({
       },
       fail: () => { this.setData({ rec_busy: false }); wx.showToast({ title: '网络不好', icon: 'none' }) }
     })
+  },
+  // ── 钱进了哪个口袋（按账户对收付） ──
+  openAccRecon() {
+    const mode = (this.data.ar2 && this.data.ar2.mode) || 'day'
+    this.loadAccRecon(mode)
+  },
+  accReconDay() { this.loadAccRecon('day') },
+  accReconMonth() { this.loadAccRecon('month') },
+  loadAccRecon(mode) {
+    this.req({
+      url: '/account-recon?mode=' + (mode || 'day'),
+      success: (res) => {
+        if (res.data && res.data.ok) this.setData({ ar2: res.data })
+      },
+    })
+  },
+  closeAccRecon() { this.setData({ ar2: null }) },
+  copyAccRecon() {
+    const d = this.data.ar2
+    if (!d) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制' }) })
   },
   // ── 换手机 / 停用员工向导 ──
   loadAccessGuide() {
@@ -3049,7 +3074,7 @@ Page({
     })
   },
   loadReconMonth() {
-    const m = this.data.rsum_month || (new Date()).toISOString().slice(0, 7)
+    const m = this.data.rsum_month || dayOf(new Date()).slice(0, 7)
     this.req({
       url: API_BASE + '/recon-month?month=' + m + '&type=' + (this.data.rsum_type || 'ar'),
       success: (res) => {
@@ -4103,10 +4128,10 @@ Page({
           success: (r2) => {
             const d = new Date()
             let pd = ''
-            if (r2.tapIndex === 1) pd = d.toISOString().slice(0, 10)
-            else if (r2.tapIndex === 2) pd = new Date(d.getTime() + 3 * 86400000).toISOString().slice(0, 10)
-            else if (r2.tapIndex === 3) pd = new Date(d.getTime() + 7 * 86400000).toISOString().slice(0, 10)
-            else if (r2.tapIndex === 4) pd = new Date(Date.UTC(d.getFullYear(), d.getMonth() + 1, 0)).toISOString().slice(0, 10)
+            if (r2.tapIndex === 1) pd = dayOf(d)
+            else if (r2.tapIndex === 2) pd = dayOf(new Date(d.getTime() + 3 * 86400000))
+            else if (r2.tapIndex === 3) pd = dayOf(new Date(d.getTime() + 7 * 86400000))
+            else if (r2.tapIndex === 4) pd = dayOf(new Date(d.getFullYear(), d.getMonth() + 1, 0))
             this.req({
               url: API_BASE + '/dunning-log', method: 'POST', data: { party, type, note, promise_date: pd },
               success: () => {
@@ -4572,7 +4597,7 @@ Page({
               wx.setClipboardData({ data: json, success: () => wx.showToast({ title: '已复制，粘到微信/笔记里存好', icon: 'none' }) })
               return
             }
-            const fp = wx.env.USER_DATA_PATH + '/整库备份_' + new Date().toISOString().slice(0, 10) + '.json'
+            const fp = wx.env.USER_DATA_PATH + '/整库备份_' + dayOf(new Date()) + '.json'
             wx.getFileSystemManager().writeFile({
               filePath: fp, data: json, encoding: 'utf8',
               success: () => wx.shareFileMessage({

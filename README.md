@@ -529,11 +529,31 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
    实测：向导三页 6/5/6 步、tips 随状态变化（无恢复码→提示、开员工口令→提示）；`/auth/staff-off` 错口令 403、员工口令调 403、老板口令 200 后员工立刻 401、重复停用返回「本来就没开」。
 
+198. ✅ **钱进了哪个口袋（按资金账户对一下账）**：家底页账户区多了「🧾 钱进了哪个口袋（对一下）」，可切「今天 / 这个月」。
+
+   - 每个账户一行：这段时间**收了多少、付了多少（几笔）、现在余额多少**；底部合计，外加「按单据算该收 ¥X／按流水算收到 ¥Y」两栏对照——两边不一样，说明有单据没挂流水、或流水没挂单据。
+   - **没记账户的老流水**单独一栏提示（钱进来了却没说是现金还是微信），并说明「余额里暂时算进第一个账户」。
+   - `issues` 自动挑毛病：账户余额为负、有流水没挂账户、单据与流水对不上，每条都给「怎么办」。
+   - 一句话版可复制发给自己。接口 `GET /account-recon?mode=day|month&date=&month=`。
+
+   实测：现金期初 1000 / 微信 500，收 1200 到现金、800 到微信、付 300 微信 → 日视图「现金 收 1200 余额 2200」「微信 收 800 付 300 余额 1000」，合计收 2000／付 300，`paid_doc = paid_flow = 500`，无毛病；月视图按当月聚合正常。
+
+199. ✅ **全站改成北京时间（修掉「半夜记的账算到昨天」）**：以前后端一律用 UTC 时间戳，两个真问题——
+
+   - 北京时间 **00:00–08:00** 记的账，日期会显示成**前一天**（实测 00:25 记的单显示 11-16）。
+   - 同一时段里「今天收到多少」「逾期多少天」「7 天内到期」都会**差一天**。
+
+   现在统一成 `const TZ_MS = 8 * 3600 * 1000` + `now()` 返回北京时间串，并配套改了 31 处：`todayIso()`、`daysSince/dayDiff`（改成**只按日期串相减**，不掺时刻）、`dayStr/dayAgo/dayAfter`、员工操作时间的 `local()`（不再重复 +8）、备份天数、2 分钟防重复、近 7/30/183 天窗口、`monthList`/`targetHistory`/回测月桶、恢复码锁定（改用真实时刻，避免出现「490 分钟后再试」）。前端也改成手机本地日期（`dayOf()`），不再用 `toISOString()`。
+
+   **顺带修了月底推送**：原来靠「UTC 日期是最后一天」判断，改北京时间后那一刻正好是「1 号 0 点」，判断永远不成立——现在改成「北京日期为 1 号时，给刚过完的那个月发小结」，`pushTargetSummary(db, pm)`、`pushDunningSummary(db, pm)`、`snapNet(db, pm)` 都按上个月算。
+
+   实测：`/account-recon` 的 label 从 `2026-11-16` 变成 `2026-11-17`；00:30 记的单 `created_at = 2026-11-17T00:30:55`；补记 11-16 的单 `days = 1`、今天记的 `days = 0`；`today_income = 500` 与 `/account-recon` 一致；`/my-day` 说「今天（11-17）」；2 分钟内同客同额第二张 409 拦住；`/networth`、`/kpi`、`/cashflow` 数字不变；清库后体检回到 100 分（empty）。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 252 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 280 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -548,11 +568,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /advances`
 - `POST /advances`
 
-**assets**（4）
+**assets**（5）
 
 - `DELETE /assets/:id`
 - `GET /assets`
 - `POST /assets`
+- `POST /assets/:id/dispose`
 - `POST /assets/run-depreciation`
 
 **bank-flows**（3）
@@ -727,10 +748,27 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `DELETE /writeoffs/:id`
 - `GET /writeoffs`
 
+**auth**（7）
+
+- `GET /auth/recover-info`
+- `POST /auth/change`
+- `POST /auth/recover`
+- `POST /auth/recover-code`
+- `POST /auth/setup`
+- `POST /auth/staff`
+- `POST /auth/staff-off`
+
 **collect-config**（2）
 
 - `GET /collect-config`
 - `POST /collect-config`
+
+**edit-requests**（4）
+
+- `GET /edit-requests`
+- `POST /edit-requests/:id/approve`
+- `POST /edit-requests/:id/cancel`
+- `POST /edit-requests/:id/reject`
 
 **expenses**（2）
 
@@ -747,6 +785,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /report-head`
 - `POST /report-head`
 
+**seal**（2）
+
+- `GET /seal`
+- `POST /seal`
+
 **target**（2）
 
 - `GET /target`
@@ -762,15 +805,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**auth**（3）
-
-- `POST /auth/change`
-- `POST /auth/setup`
-- `POST /auth/staff`
-
-**其它（单个接口）**（130）
+**其它（单个接口）**（147）
 
 - `GET /`
+- `GET /access-guide`
+- `GET /account-recon`
 - `GET /accruals`
 - `GET /aging`
 - `GET /anomaly`
@@ -785,8 +824,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /backup-timeline`
 - `POST /backup-to-notes`
 - `POST /bank-import`
+- `POST /batch`
 - `POST /book-name`
 - `GET /books`
+- `GET /books-check`
 - `GET /break-even`
 - `GET /cash-bridge`
 - `GET /cashbook`
@@ -810,12 +851,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /dunning-effect`
 - `GET /dunning-month`
 - `GET /dunning-year`
+- `POST /edit-request`
 - `GET /export`
 - `GET /export-all`
 - `GET /export-xlsx`
 - `GET /flows`
 - `GET /forecast`
+- `GET /funding`
+- `GET /handover`
+- `POST /handover-note`
+- `GET /handover-print`
 - `GET /health-check`
+- `GET /help`
 - `GET /history`
 - `POST /import`
 - `POST /import-all`
@@ -843,9 +890,13 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /my-work`
 - `GET /networth`
 - `GET /networth-snapshots`
+- `GET /next-step`
 - `POST /parse-import`
 - `GET /party-balance`
+- `GET /party-dups`
 - `GET /party-groups`
+- `GET /party-items`
+- `POST /party-merge`
 - `POST /pay-batch`
 - `GET /pay-speed`
 - `GET /pipeline`
@@ -876,10 +927,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /run-accrual`
 - `POST /run-amort`
 - `POST /run-fixed`
+- `GET /schema-check`
 - `GET /search`
 - `GET /selfcheck`
 - `GET /staff-activity`
 - `GET /statement`
+- `GET /statement-batch`
 - `GET /statement-link`
 - `GET /statement-month`
 - `GET /statement-pack`
@@ -893,6 +946,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /track-log`
 - `POST /transfer`
 - `GET /trend`
+- `POST /unseal`
 - `GET /weekly-text`
 - `POST /wx-login`
 - `GET /wx-status`

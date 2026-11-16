@@ -2183,6 +2183,31 @@
       <input class="inp" placeholder="这个账户期初有多少钱(可不填)" type="digit" value="{{new_acc_opening}}" bindinput="onNewAccOpening"/>
       <button class="btn" size="mini" bindtap="addAccount">加一个账户</button>
       <view class="tip">期初余额 = 你开始用这个软件时，这个账户里本来有多少钱</view>
+      <view class="hobtns">
+        <button class="btn gray" size="mini" bindtap="openAccRecon">🧾 钱进了哪个口袋（对一下）</button>
+      </view>
+    </view>
+    <view class="form" wx:if="{{ar2}}">
+      <view class="rec-t">🧾 {{ar2.label}} 收付对照</view>
+      <view class="ag-tabs">
+        <text class="ag-tab {{ar2.mode=='day'?'on':''}}" bindtap="accReconDay">今天</text>
+        <text class="ag-tab {{ar2.mode=='month'?'on':''}}" bindtap="accReconMonth">这个月</text>
+      </view>
+      <view class="item" wx:for="{{ar2.rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.balance<0?'red':''}}">余额 ¥{{item.balance}}</text></view>
+        <view class="row2">收 ¥{{item.income}}（{{item.in_n}} 笔） · 付 ¥{{item.outcome}}（{{item.out_n}} 笔） · 净 {{item.net}}</view>
+      </view>
+      <view class="item" wx:if="{{ar2.no_acc.n>0}}">
+        <view class="row1"><text class="nm">没记是哪个账户</text><text class="amt warnc">{{ar2.no_acc.n}} 笔</text></view>
+        <view class="row2">收 ¥{{ar2.no_acc.in}} · 付 ¥{{ar2.no_acc.out}}（先算进第一个账户了）</view>
+      </view>
+      <view class="row1"><text class="nm">合计</text><text class="amt">收 ¥{{ar2.total_in}} · 付 ¥{{ar2.total_out}}</text></view>
+      <view class="ag-tip" wx:for="{{ar2.issues}}" wx:key="*this">{{item.tone=='bad'?'⚠ ':'· '}}{{item.text}}</view>
+      <view class="tip" wx:if="{{ar2.issues.length==0}}">各账户都对得上 ✓</view>
+      <view class="hobtns">
+        <button class="btn" size="mini" bindtap="copyAccRecon">复制这段</button>
+        <button class="btn gray" size="mini" bindtap="closeAccRecon">收起</button>
+      </view>
     </view>
     <view class="form">
       <view class="tip">账户内部转账（现金存银行、微信提现，不算收入也不算支出）</view>

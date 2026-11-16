@@ -42,8 +42,12 @@ app.onError(async (err, c) => {
   return c.json({ ok: false, code: 'server_error', error: '服务器出了点问题，已经记下来了（设置 → 数据体检 → 🐞 运行日志）' }, 500)
 })
 
-const now = () => new Date().toISOString()
-const month = () => new Date().toISOString().slice(0, 7)
+// 全站统一北京时间（UTC+8）：created_at / due_date 存的一律是「北京日期时间串」。
+// 以前用 UTC，北京时间 00:00–08:00 记的账会显示成前一天，「今天收到」「逾期天数」也都会差一天。
+const TZ_MS = 8 * 3600 * 1000
+const now = () => new Date(Date.now() + TZ_MS).toISOString()
+const todayIso = () => now().slice(0, 10)
+const month = () => now().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
 
@@ -236,7 +240,7 @@ app.post('/auth/recover', async (c) => {
     const n = num(fRow && fRow.value) + 1
     await setSettingRaw(db, 'recover_fail', n)
     if (n >= 8) {
-      await setSettingRaw(db, 'recover_lock', now())
+      await setSettingRaw(db, 'recover_lock', new Date(Date.now() + 10 * 60 * 1000).toISOString())
       await delSettingRaw(db, 'recover_fail')
       return c.json({ error: '恢复码错了 8 次，先锁 10 分钟（防止别人乱试）', code: 'too_many' }, 429)
     }
@@ -285,6 +289,70 @@ app.post('/auth/staff-off', async (c) => {
   await mainDb.prepare("DELETE FROM settings WHERE key='staff_key'").run()
   await logAudit(mainDb, '停用员工口令', '员工口令', (b.note || '离职/换人'), '', '老板')
   return c.json({ ok: true, enabled: false, note: '已停用：他手机上那个口令现在进不去了' })
+})
+
+// 按账户对账：今天/这个月，钱到底进了哪个口袋，有没有对不上
+app.get('/account-recon', async (c) => {
+  const db = c.env.DB
+  const today = now().slice(0, 10)
+  const curM = today.slice(0, 7)
+  const mode = String(c.req.query('mode') || 'day') === 'month' ? 'month' : 'day'
+  let date = String(c.req.query('date') || today).slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) date = today
+  let month = String(c.req.query('month') || curM).slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(month)) month = curM
+  const from = mode === 'day' ? date : month + '-01'
+  const to = mode === 'day' ? date : month + '-31'
+  const label = mode === 'day' ? date : month
+  const range = "substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? AND cash=1"
+  const [accR, byAcc, noAcc, paidR, flowR, allIn] = await Promise.all([
+    db.prepare('SELECT id, name, kind, COALESCE(opening,0) AS opening FROM accounts ORDER BY id').all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT COALESCE(account_id,0) AS aid, direction, COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM ledger WHERE ${range} GROUP BY COALESCE(account_id,0), direction`).bind(from, to).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT direction, COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM ledger WHERE ${range} AND (account_id IS NULL OR account_id=0) GROUP BY direction`).bind(from, to).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM ledger WHERE ${range} AND direction='in' AND ref_type IN ('order','batch')`).bind(from, to).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) AS s, COUNT(*) AS n FROM ledger WHERE ${range} AND direction='in'`).bind(from, to).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(account_id,0) AS aid, direction, COALESCE(SUM(amount),0) AS s FROM ledger WHERE cash=1 GROUP BY COALESCE(account_id,0), direction`).all().catch(() => ({ results: [] })),
+  ])
+  const accs = accR.results || []
+  const firstId = accs.length ? num(accs[0].id) : 0
+  const m = {}
+  const put = (aid, dir, s, n) => {
+    m[aid] = m[aid] || { in: 0, out: 0, in_n: 0, out_n: 0 }
+    if (dir === 'in') { m[aid].in = round2(m[aid].in + num(s)); m[aid].in_n += num(n) } else { m[aid].out = round2(m[aid].out + num(s)); m[aid].out_n += num(n) }
+  }
+  (byAcc.results || []).forEach((r) => put(num(r.aid), r.direction, r.s, r.n))
+  const allMap = {}
+  ;(allIn.results || []).forEach((r) => {
+    const aid = num(r.aid) || firstId
+    allMap[aid] = allMap[aid] || 0
+    allMap[aid] += (r.direction === 'in' ? num(r.s) : -num(r.s))
+  })
+  const rows = accs.map((a) => {
+    const k = num(a.id)
+    const mm = m[k] || { in: 0, out: 0, in_n: 0, out_n: 0 }
+    return {
+      id: k, name: a.name, kind: a.kind || '',
+      income: round2(mm.in), outcome: round2(mm.out), net: round2(mm.in - mm.out),
+      in_n: mm.in_n, out_n: mm.out_n,
+      balance: round2(num(a.opening) + (allMap[k] || 0)),
+    }
+  })
+  const noIn = round2(((noAcc.results || []).find((r) => r.direction === 'in') || {}).s || 0)
+  const noOut = round2(((noAcc.results || []).find((r) => r.direction === 'out') || {}).s || 0)
+  const noN = (noAcc.results || []).reduce((a, r) => a + num(r.n), 0)
+  const totalIn = round2(rows.reduce((a, r) => a + r.income, 0) + noIn)
+  const totalOut = round2(rows.reduce((a, r) => a + r.outcome, 0) + noOut)
+  const issues = []
+  if (noN > 0) issues.push({ tone: 'warn', text: `有 ${noN} 笔流水没记是哪个账户（收 ¥${noIn}／付 ¥${noOut}）。账户余额里先算进了「${(accs[0] && accs[0].name) || '第一个账户'}」，最好补一下（流水 → 改）` })
+  rows.forEach((r) => { if (r.balance < 0) issues.push({ tone: 'bad', text: `${r.name} 现在是 −¥${Math.abs(r.balance)}：这个账户记的钱比实际多，去流水里核对几笔` }) })
+  const paidS = round2(num(paidR && paidR.s))
+  const flowS = round2(num(flowR && flowR.s))
+  const gap = round2(flowS - paidS)
+  if (Math.abs(gap) >= 0.01) issues.push({ tone: 'warn', text: `收款流水共 ¥${flowS}，其中挂单据的 ¥${paidS}，另外 ¥${gap} 是预收款/借款这类没有对应单据的（正常），如果多出来的记不清是啥，去流水里看一眼` })
+  const text = (mode === 'day' ? `${date} 收付` : `${month} 收付`) + '：收 ¥' + totalIn + '（' + rows.reduce((a, r) => a + r.in_n, 0) + ' 笔）、付 ¥' + totalOut + '\n' +
+    (rows.length ? rows.map((r) => `${r.name}：收 ${r.income}／付 ${r.outcome}，余额 ${r.balance}`).join('\n') : '还没有资金账户') +
+    (issues.length ? '\n要注意：\n' + issues.map((i) => '· ' + i.text).join('\n') : '\n各账户都对得上 ✓')
+  return c.json({ ok: true, mode, label, from, to, rows, no_acc: { in: noIn, out: noOut, n: noN }, total_in: totalIn, total_out: totalOut, total_net: round2(totalIn - totalOut), paid_doc: paidS, paid_flow: flowS, issues, text })
 })
 
 // 「换手机 / 停用员工」向导 + 离职交接自查
@@ -1272,7 +1340,7 @@ async function closePrecheck(db, mm) {
     tip: okSumm ? '本月小结已出' : '还没出本月小结',
     after: okSumm ? '' : '小结是给自己看的月报，不出也能结账，只是这个月就少一份留档的话',
     fixable: 'yes', fix_how: '报表页「出本月小结」一点就有；结账后再出也不影响' })
-  const bkDays = bk && bk.t ? Math.floor((Date.now() - new Date(bk.t).getTime()) / 86400000) : -1
+  const bkDays = bk && bk.t ? daysSince(new Date(new Date(bk.t).getTime() - TZ_MS).toISOString()) : -1
   const bkOk = bkDays >= 0 && bkDays <= 7
   items.push({ k: 'backup', label: '最近 7 天备份过', count: bkOk ? 1 : 0, tone: bkOk ? 'ok' : 'warn',
     tip: bkDays < 0 ? '还没备份过' : (bkOk ? `${bkDays} 天前备份过` : `上次备份是 ${bkDays} 天前`),
@@ -1321,7 +1389,7 @@ app.get('/month-end', async (c) => {
   const stUnsent = num(stR && stR.c) + num(stA && stA.c)
   const locked = num(lockRow && lockRow.c) > 0
   const summed = String((sumRow && sumRow.value) || '') === m
-  const bkDays = (bkRow && bkRow.created_at) ? Math.floor((Date.now() - Date.parse(bkRow.created_at)) / 86400000) : 999
+  const bkDays = (bkRow && bkRow.created_at) ? daysSince(new Date(Date.parse(bkRow.created_at) - TZ_MS).toISOString()) : 999
   const openDiff = ((pre && pre.items) || []).filter((x) => x.k === 'recon_diff').reduce((acc, x) => acc + num(x.count), 0)
   const steps = [
     { k: 'bill', no: 1, title: '本月单据录完', tab: 'ar', done: num(cnt && cnt.ord) + num(cnt && cnt.pay) > 0,
@@ -1782,7 +1850,7 @@ app.get('/price-anomaly', async (c) => {
   const db = c.env.DB
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 90)))
   const pctLimit = Math.min(100, Math.max(5, num(c.req.query('pct'), 15)))
-  const since = new Date(Date.now() - days * 86400000).toISOString()
+  const since = new Date(Date.now() + TZ_MS - days * 86400000).toISOString()
   const avgRows = ((await db.prepare(`SELECT customer, COALESCE(NULLIF(item_name,''),'（没写产品）') AS item, AVG(price) AS avg_price, COUNT(*) AS cnt
     FROM orders GROUP BY customer, item HAVING cnt>=2`).all()).results || [])
   const am = {}
@@ -2328,7 +2396,7 @@ const toIsoDate = (s) => {
   if (!s) return ''
   const m = String(s).trim().match(/^(\d{4})?[-/年]?(\d{1,2})[-/月](\d{1,2})日?$/)
   if (!m) return ''
-  const y = m[1] || new Date().getFullYear()
+  const y = m[1] || todayIso().slice(0, 4)
   const mm = String(m[2]).padStart(2, '0')
   const dd = String(m[3]).padStart(2, '0')
   if (num(mm) < 1 || num(mm) > 12 || num(dd) < 1 || num(dd) > 31) return ''
@@ -2346,7 +2414,7 @@ const normDate = (s) => {
   if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t + 'T00:00:00.000Z'
   if (/^\d{1,2}-\d{1,2}$/.test(t)) {
     const [mm, dd] = t.split('-')
-    return `${new Date().getFullYear()}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}T00:00:00.000Z`
+    return `${todayIso().slice(0, 4)}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}T00:00:00.000Z`
   }
   return now()
 }
@@ -2421,7 +2489,7 @@ async function wxPush(db, items) {
 // 到期提醒内容：7 天内该收/该付
 async function dueReminderItems(db) {
   const today = now().slice(0, 10)
-  const soon = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  const soon = new Date(Date.now() + TZ_MS + 7 * 86400000).toISOString().slice(0, 10)
   const ar = (await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?").bind(today, soon).first())
   const ap = (await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?").bind(today, soon).first())
   const na = num(ar && ar.n)
@@ -3610,9 +3678,9 @@ const accrualAdjust = async (db, m) => {
 app.get('/dashboard', async (c) => {
   const db = c.env.DB
   const m = month()
-  const todayS = new Date().toISOString().slice(0, 10)
-  const soonS = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
-  const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+  const todayS = todayIso()
+  const soonS = new Date(Date.now() + TZ_MS + 7 * 86400000).toISOString().slice(0, 10)
+  const cutoff = new Date(Date.now() + TZ_MS - 30 * 86400000).toISOString()
   // 性能：原来 20 多条查询一条条排队（一次要 6 秒），现在 1 条聚合 + 并发取明细
   const aggSql = `SELECT
     (SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) FROM orders WHERE paid + COALESCE(written_off,0) < price) AS ar,
@@ -3817,7 +3885,7 @@ app.get('/cashflow', async (c) => {
 // 近 7 天经营速览（周报）：可复制，也可自动推微信
 const weeklyStat = async (db) => {
   const end = now()
-  const start = new Date(Date.now() - 6 * 86400000).toISOString()
+  const start = new Date(Date.now() + TZ_MS - 6 * 86400000).toISOString()
   const q = async (sql) => num((await db.prepare(sql).bind(start, end).first()).t)
   const inc = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND created_at>=? AND created_at<=?")
   const out = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND created_at>=? AND created_at<=?")
@@ -3861,10 +3929,8 @@ async function pushReconRemind(db) {
   try {
     const cfg = await wxCfg(db)
     if (!cfg.appid || !cfg.secret || !cfg.tpl) return
-    const d = new Date()
-    d.setDate(1)
-    d.setMonth(d.getMonth() - 1)
-    const lm = d.toISOString().slice(0, 7)
+    const d = new Date(Date.now() + TZ_MS)
+    const lm = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
     const all = await db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(lm).first()
     const open = await db.prepare("SELECT COUNT(*) n FROM recon_log WHERE done=0 AND state<>'match'").first()
     await wxPush(db, {
@@ -3949,20 +4015,21 @@ const pageArgs = (c) => {
 }
 
 // ── 应收 / 应付 列表公共件 ──
-const dayStr = (d) => d.toISOString().slice(0, 10)
+const dayStr = (d) => new Date(d.getTime() + TZ_MS).toISOString().slice(0, 10)
 const dayAgo = (n) => dayStr(new Date(Date.now() - n * 86400000))
 const dayAfter = (n) => dayStr(new Date(Date.now() + n * 86400000))
+// 只按「日期串」相减，不掺时刻，避免 8 小时时差把天数算偏
+const dateNum = (iso) => Date.parse(String(iso || '').slice(0, 10) + 'T00:00:00.000Z')
 const daysSince = (iso) => {
-  const t = new Date(String(iso || '').slice(0, 10))
-  if (isNaN(t.getTime())) return 0
-  return Math.max(0, Math.floor((Date.now() - t.getTime()) / 86400000))
+  const t = dateNum(iso)
+  if (isNaN(t)) return 0
+  return Math.max(0, Math.round((dateNum(todayIso()) - t) / 86400000))
 }
 // 带符号天数差：正数=已经过去 N 天，负数=还有 N 天到期（daysSince 会把未来压成 0，到期表不能用它）
 const dayDiff = (iso) => {
-  const t = Date.parse(String(iso || '').slice(0, 10) + 'T00:00:00.000Z')
+  const t = dateNum(iso)
   if (isNaN(t)) return 0
-  const today = Date.parse(now().slice(0, 10) + 'T00:00:00.000Z')
-  return Math.round((today - t) / 86400000)
+  return Math.round((dateNum(todayIso()) - t) / 86400000)
 }
 const fmtOrder = (r) => ({
   ...r,
@@ -4415,7 +4482,7 @@ app.post('/orders', async (c) => {
   // 手抖/连点保护：同一客户、同一金额，2 分钟内又记一张，先问一句（不是不让记，是防重复点）
   if (!body.confirm_dup) {
     const near = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND created_at >= ? ORDER BY id DESC LIMIT 1")
-      .bind(customer, num(price), new Date(Date.now() - 120000).toISOString()).first()
+      .bind(customer, num(price), new Date(Date.now() + TZ_MS - 120000).toISOString()).first()
     if (near) return c.json({ dup: true, code: 'dup_soon', id: near.id, error: '刚记过一张一样的：' + customer + ' ¥' + num(price) + '。是又记了一笔吗？' }, 409)
   }
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
@@ -4540,7 +4607,6 @@ app.get('/dunning', async (c) => {
   const type = c.req.query('type') || 'ar'
   const days = num(c.req.query('days'), 30)
   const name = c.req.query('name')
-  const today = Date.now()
   const lines = []
   if (type === 'ar') {
     let sql = 'SELECT customer AS nm, COUNT(*) AS cnt, SUM(price-paid-COALESCE(written_off,0)) AS unpaid, MIN(created_at) AS oldest, MAX(created_at) AS newest FROM orders WHERE paid + COALESCE(written_off,0) < price'
@@ -4552,12 +4618,12 @@ app.get('/dunning', async (c) => {
     if (!rows.length) return c.text('没有未结清的应收，暂时不用催款。')
     let all = 0
     for (const r of rows) {
-      const od = Math.floor((today - new Date(r.oldest).getTime()) / 86400000)
+      const od = daysSince(r.oldest)
       all += num(r.unpaid)
       lines.push(`${r.nm}：欠 ¥${round2(num(r.unpaid))}（${r.cnt} 单，最早一笔 ${od} 天前）`)
     }
     return c.text(
-      `【应收催款清单 ${new Date().toISOString().slice(0, 10)}】\n` +
+      `【应收催款清单 ${todayIso()}】\n` +
         `合计待收：¥${round2(all)}\n\n${lines.join('\n')}\n\n` +
         `—— 催款话术模板（复制后改名字发微信）——\n` +
         `${rows[0].nm}您好，麻烦对一下账：这边还有 ¥${round2(num(rows[0].unpaid))} 加工费没结（${rows[0].cnt} 单），方便的话这两天安排一下，谢谢！`
@@ -4573,7 +4639,7 @@ app.get('/dunning', async (c) => {
     all += num(r.unpaid)
     lines.push(`${r.nm}：欠 ¥${round2(num(r.unpaid))}（${r.cnt} 笔）`)
   }
-  return c.text(`【应付清单 ${new Date().toISOString().slice(0, 10)}】\n合计待付：¥${round2(all)}\n\n${lines.join('\n')}`)
+  return c.text(`【应付清单 ${todayIso()}】\n合计待付：¥${round2(all)}\n\n${lines.join('\n')}`)
 })
 
 // 订单状态
@@ -4601,7 +4667,7 @@ app.post('/payables', async (c) => {
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   // 防重复：同供应商 + 同金额，7 天内提醒一次
   if (!confirm_dup) {
-    const since = new Date(Date.now() - 7 * 86400000).toISOString()
+    const since = new Date(Date.now() + TZ_MS - 7 * 86400000).toISOString()
     const d = await db.prepare('SELECT 1 FROM payables WHERE supplier=? AND amount=? AND created_at >= ?')
       .bind(supplier, num(amount), since).first()
     if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
@@ -5519,7 +5585,7 @@ async function importRows(db, type, rows, opts) {
       d = toIsoDate(p.pop())
     } else if (type === 'ar_init' || type === 'ap_init') {
       // 期初余额：不带日期就记到今年 1 月 1 日（表示“以前欠下的”）
-      d = `${new Date().getFullYear()}-01-01T00:00:00.000Z`
+      d = `${todayIso().slice(0, 4)}-01-01T00:00:00.000Z`
     }
     if (await isMonthLocked(db, (d || '').slice(0, 7))) { skippedLocked++; continue }
     if (type === 'ar') {
@@ -6086,7 +6152,7 @@ app.delete('/statement-log/:id', async (c) => {
 app.get('/dunning-effect', async (c) => {
   const db = c.env.DB
   const months = Math.max(1, Math.min(24, num(c.req.query('months')) || 6))
-  const since = (() => { const d = new Date(); d.setUTCMonth(d.getUTCMonth() - months); return d.toISOString().slice(0, 10) })()
+  const since = (() => { const d = new Date(Date.now() + TZ_MS); d.setUTCMonth(d.getUTCMonth() - months); return d.toISOString().slice(0, 10) })()
   const duns = (await db.prepare('SELECT party, type, COUNT(*) n, MIN(created_at) f, MAX(created_at) l FROM dunning_log WHERE substr(created_at,1,10) >= ? GROUP BY party, type').bind(since).all()).results || []
   const arIn = (await db.prepare("SELECT o.customer party, l.created_at d, l.amount a FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,10) >= ?").bind(since).all()).results || []
   const apOut = (await db.prepare("SELECT p.supplier party, l.created_at d, l.amount a FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND substr(l.created_at,1,10) >= ?").bind(since).all()).results || []
@@ -6254,7 +6320,7 @@ app.get('/risk-list', async (c) => {
 
 // ===== 回款预测：按账期把未结单排到未来几个月，再按历史回款率打折 =====
 async function histRate(db) {
-  const six = new Date(Date.now() - 183 * 86400000).toISOString().slice(0, 7)
+  const six = new Date(Date.now() + TZ_MS - 183 * 86400000).toISOString().slice(0, 7)
   const add = num((await db.prepare('SELECT COALESCE(SUM(price),0) AS t FROM orders WHERE substr(created_at,1,7)>=?').bind(six).first() || {}).t)
   const got = num((await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND ref_type='order' AND substr(created_at,1,7)>=?").bind(six).first() || {}).t)
   const rate = add > 0 ? Math.min(1, Math.max(0.3, got / add)) : 0.8
@@ -6267,7 +6333,7 @@ app.get('/forecast', async (c) => {
   const hr = await histRate(db)
   const ar = await dueRows(db, 'ar', 12, '')
   const ap = await dueRows(db, 'ap', 12, '')
-  const base = new Date()
+  const base = new Date(Date.now() + TZ_MS)
   const buckets = []
   for (let i = 0; i < n; i++) {
     const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + i, 1))
@@ -6481,7 +6547,7 @@ app.get('/target', async (c) => {
   const orderAdd = round2(num(add && add.a))
   const tr = round2(num(t && t.receive))
   const ta = round2(num(t && t.order_add))
-  const today = new Date()
+  const today = new Date(Date.now() + TZ_MS)
   const isCur = m === now().slice(0, 7)
   const dim = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).getUTCDate()
   const daysLeft = isCur ? Math.max(0, dim - today.getUTCDate() + 1) : 0
@@ -6835,7 +6901,7 @@ app.post('/db-clean', async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const days = Math.max(30, Math.min(3650, Math.round(num(b.days) || 180)))
   const db = c.env.DB
-  const cut = new Date(Date.now() - days * 86400000).toISOString()
+  const cut = new Date(Date.now() + TZ_MS - days * 86400000).toISOString()
   const targets = ['audit_log', 'error_log', 'import_log']
   const deleted = {}
   for (const t of targets) {
@@ -6846,7 +6912,7 @@ app.post('/db-clean', async (c) => {
   }
   // 回收站只留 30 天（和每日 cron 同一口径，这里手动补一次）
   try {
-    const cut30 = new Date(Date.now() - 30 * 86400000).toISOString()
+    const cut30 = new Date(Date.now() + TZ_MS - 30 * 86400000).toISOString()
     const r = await db.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cut30).run()
     deleted.trash = (r.meta && r.meta.changes) || 0
   } catch (e) { deleted.trash = -1 }
@@ -6943,7 +7009,7 @@ app.post('/import-all', async (c) => {
 
 // 年度流水报表
 app.get('/report', async (c) => {
-  const y = String(c.req.query('year') || new Date().getFullYear())
+  const y = String(c.req.query('year') || todayIso().slice(0, 4))
   const db = c.env.DB
   const prefix = y + '-%'
   const lines = []
@@ -7010,12 +7076,12 @@ app.get('/export', async (c) => {
     for (const l of results) rows.push([l.created_at.slice(0, 10), l.direction === 'in' ? '收' : '付', l.amount, l.category, l.remark, accName(l.account_id), l.operator || ''])
   }
   const text = '\ufeff' + rows.map((r) => r.map(csvCell).join(',')).join('\n')
-  return c.json({ text, filename: `factory-${type}-${new Date().toISOString().slice(0, 10)}.csv` })
+  return c.json({ text, filename: `factory-${type}-${todayIso()}.csv` })
 })
 
 // 报表图表数据（按月收入/支出）
 app.get('/report-data', async (c) => {
-  const y = String(c.req.query('year') || new Date().getFullYear())
+  const y = String(c.req.query('year') || todayIso().slice(0, 4))
   const db = c.env.DB
   const { results } = await db.prepare(
     "SELECT substr(created_at,1,7) AS m, SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) AS inc, SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) AS out FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND created_at LIKE ? GROUP BY m ORDER BY m"
@@ -7033,7 +7099,7 @@ app.get('/report-data', async (c) => {
 // 客户/供应商信用看板：欠款榜 + 平均回款天数
 app.get('/credits', async (c) => {
   const db = c.env.DB
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayIso()
   const { results: orders } = await db.prepare('SELECT * FROM orders').all()
   const { results: pays } = await db.prepare("SELECT * FROM ledger WHERE direction='in' AND ref_type='order'").all()
   const lastPay = {}
@@ -7192,7 +7258,7 @@ app.get('/health-check', async (c) => {
   const qAll = (sql) => db.prepare(sql).all().then((r) => r.results || []).catch((e) => { noteFail(e, '数据体检'); return [] })
   const items = []
   const add = (k, label, count, tip, go, list) => { items.push({ k, label, count: num(count), tip, go: go || '', list: list || [] }) }
-  const since7 = new Date(Date.now() - 7 * 86400000).toISOString()
+  const since7 = new Date(Date.now() + TZ_MS - 7 * 86400000).toISOString()
 
   const [costMiss, payNoDue, arNoTerm, apNoTerm, noPhone, ledgerNoAcc, dupCnt, lastLock, errCnt, bkLast, wxCnt] = await Promise.all([
     qAll("SELECT id, customer, item_name, price FROM orders WHERE COALESCE(cost,0)=0 AND price>0 ORDER BY id DESC LIMIT 5"),
@@ -7222,12 +7288,12 @@ app.get('/health-check', async (c) => {
   add('acc', '流水没挂资金账户', ledgerNoAcc.c, '没挂账户的流水会默认算进第一个账户，账户余额会不准', '记账 → 流水 → 删除重记并选账户')
   const dups = (dupCnt || []).filter((x) => num(x.c) > 1)
   add('dup', '同一天同金额的疑似重复单', dups.length, '同客户、同金额、同一天出现多张，可能重复录了', '记账 → 应收 → 核对一下', dups.map((x) => ({ party: x.customer, amount: num(x.price), date: x.d })))
-  const lastM = new Date(Date.now() - 86400000 * 35).toISOString().slice(0, 7)
-  const prevM = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
+  const lastM = new Date(Date.now() + TZ_MS - 86400000 * 35).toISOString().slice(0, 7)
+  const prevM = (() => { const d = new Date(Date.now() + TZ_MS); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1)).toISOString().slice(0, 7) })()
   const lockedM = (lastLock[0] || {}).month || ''
   add('lock', '上个月还没结账', lockedM >= prevM && lockedM ? 0 : 1, '月底结一次账，把报表定格存档，以后改单也不影响已出的报表', '报表 → 月结归档', [])
   add('err', '近 7 天有接口报错', errCnt.c, '偶尔一次是网络抖动；连着多次说明某个功能坏了，把路径发我', '报表 → 数据体检 → 看运行日志')
-  const bkDays = (bkLast[0] && bkLast[0].created_at) ? Math.floor((Date.now() - Date.parse(bkLast[0].created_at)) / 86400000) : 999
+  const bkDays = (bkLast[0] && bkLast[0].created_at) ? daysSince(new Date(Date.parse(bkLast[0].created_at) - TZ_MS).toISOString()) : 999
   add('backup', '最近没自动备份', bkDays > 7 ? 1 : 0, bkDays === 999 ? '还没有备份记录，先手动备份一次' : `上次备份在 ${bkDays} 天前`, '报表 → 云端备份')
   add('wx', '微信提醒没开', num(wxCnt.c) > 0 ? 0 : 1, '开了之后每天 9 点自动推「今天该收/该付」，不用自己记', '设置 → 微信提醒')
   void lastM
@@ -7272,7 +7338,7 @@ app.get('/health-check', async (c) => {
 app.get('/error-log', async (c) => {
   const db = c.env.DB
   const days = Math.min(60, Math.max(1, num(c.req.query('days'), 7)))
-  const since = new Date(Date.now() - days * 86400000).toISOString()
+  const since = new Date(Date.now() + TZ_MS - days * 86400000).toISOString()
   const rows = (await db.prepare('SELECT * FROM error_log WHERE created_at >= ? ORDER BY id DESC LIMIT 100').bind(since).all()).results
   const byPath = {}
   for (const r of rows) { const k = (r.method || 'GET') + ' ' + (r.path || ''); byPath[k] = (byPath[k] || 0) + 1 }
@@ -8068,9 +8134,9 @@ app.post('/backup-restore', async (c) => {
 // ── 第二档：家底 / 账龄 / 月度归档 / 报表抬头 / 财务指标 ──
 const monthList = (n) => {
   const out = []
-  const d = new Date()
+  const d = new Date(Date.now() + TZ_MS)
   for (let i = n - 1; i >= 0; i--) {
-    const dt = new Date(d.getFullYear(), d.getMonth() - i, 1)
+    const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - i, 1))
     out.push(`${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`)
   }
   return out
@@ -8864,11 +8930,11 @@ app.get('/staff-activity', async (c) => {
     db.prepare("SELECT action, COUNT(*) n FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? GROUP BY action ORDER BY n DESC LIMIT 8").bind(since).all().catch(() => ({ results: [] })),
     db.prepare("SELECT value AS v FROM settings WHERE key='staff_key'").first().catch(() => null)
   ])
-  // created_at 存的是 UTC，界面上要显示北京时间（+8 小时）
+  // created_at 已经存的就是北京时间，这里只做格式整理
   const local = (t) => {
     const d = new Date(String(t || '').replace(' ', 'T'))
     if (isNaN(d.getTime())) return String(t || '')
-    const x = new Date(d.getTime() + 8 * 3600 * 1000).toISOString()
+    const x = d.toISOString()
     return x.slice(0, 10) + ' ' + x.slice(11, 16)
   }
   const list = (rows.results || []).map((r) => {
@@ -9233,7 +9299,8 @@ export default {
           await pushReconRemind(db)
           // 每月 1 号：把上个月的全套报表打包存好，并推一条「报表已生成」
           try {
-            const pm = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
+            const bj = new Date(Date.now() + TZ_MS)
+            const pm = new Date(Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
             const rp = await runMonthPack(db, pm)
             if (rp && rp.ok) await pushMonthPack(db, pm)
           } catch (e) {
@@ -9241,14 +9308,14 @@ export default {
           }
         } else {
           await runWxReminder(db)
-          // 每月最后一天：推一条「这个月目标收了多少」
-          const t0 = new Date()
-          const lastDay = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth() + 1, 0)).getUTCDate()
-          if (t0.getUTCDate() === lastDay) {
-            await pushTargetSummary(db)
-            await pushDunningSummary(db)
+          // 这个 cron 每天在北京时间 0 点跑一次，所以「刚过完的那个月」= 北京日期为 1 号时往前推一个月
+          const t0 = new Date(Date.now() + TZ_MS)
+          if (t0.getUTCDate() === 1) {
+            const pm = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth() - 1, 1)).toISOString().slice(0, 7)
+            await pushTargetSummary(db, pm)
+            await pushDunningSummary(db, pm)
             // 月底：把家底存一份，以后改了老单据也不会带偏历史那一段曲线
-            try { await snapNet(db, now().slice(0, 7), '月底自动存档') } catch (e) { console.error('net snapshot failed', e) }
+            try { await snapNet(db, pm, '月底自动存档') } catch (e) { console.error('net snapshot failed', e) }
           }
         }
       } catch (e) {
@@ -9269,7 +9336,7 @@ export default {
       }
       try {
         // 回收站超过 30 天自动彻底清除
-        const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+        const cutoff = new Date(Date.now() + TZ_MS - 30 * 86400000).toISOString()
         await db.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cutoff).run()
       } catch (e) {
         console.error('scheduled trash-clean failed book' + bid, e)
@@ -9332,7 +9399,7 @@ app.get('/target-forecast', async (c) => {
   const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
   const got = round2(num(inc && inc.a))
   // 回款率：近 6 个月「实收 / 开单」，下限 30%、上限 100%
-  const since = (() => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 5, 1)).toISOString().slice(0, 10) })()
+  const since = (() => { const d = new Date(Date.now() + TZ_MS); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 5, 1)).toISOString().slice(0, 10) })()
   const sixIn = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,10)>=?").bind(since).first()
   const sixOrd = await db.prepare('SELECT COALESCE(SUM(price),0) a FROM orders WHERE substr(created_at,1,10)>=?').bind(since).first()
   const rate = Math.min(1, Math.max(0.3, num(sixOrd && sixOrd.a) > 0 ? num(sixIn && sixIn.a) / num(sixOrd && sixOrd.a) : 0.3))
@@ -9363,7 +9430,7 @@ app.get('/target-forecast', async (c) => {
 async function targetHistory(db, months) {
   const n = Math.min(24, Math.max(1, num(months) || 6))
   const out = []
-  const base = new Date()
+  const base = new Date(Date.now() + TZ_MS)
   for (let i = n - 1; i >= 0; i--) {
     const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() - i, 1))
     const m = d.toISOString().slice(0, 7)
@@ -9393,7 +9460,7 @@ async function targetHistory(db, months) {
   const lastO = lastDone ? lastDone.order_add : 0
   const rnd = (v, step) => Math.max(step, Math.round(v / step) * step)
   const suggest = {
-    month: (() => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 7) })(),
+    month: (() => { const d = new Date(Date.now() + TZ_MS); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 7) })(),
     receive: lastR > 0 ? rnd(lastR * 1.1, 500) : 0,
     order_add: lastO > 0 ? rnd(lastO * 1.1, 1000) : 0,
     basis: lastDone ? (lastDone.label + '实际收 ' + lastR + ' 元、接单 ' + lastO + ' 元，按 +10% 给的') : ''
@@ -9475,17 +9542,17 @@ async function dunningMonthText(db, m) {
   return { text: L.join('\n'), stat: d }
 }
 // 月底自动推一条催款小结
-async function pushDunningSummary(db) {
+async function pushDunningSummary(db, mm) {
   try {
-    const m = now().slice(0, 7)
+    const m = mm || now().slice(0, 7)
     const r = await dunningMonthText(db, m)
     if (!r.stat.count && !r.stat.statements) return
     await wxPush(db, { title: '这个月催款小结：收回 ¥' + r.stat.recovered, time: m, note: '催 ' + r.stat.times + ' 次、' + r.stat.count + ' 家；还欠 ¥' + r.stat.left_total + (r.stat.broken ? '；失约 ' + r.stat.broken + ' 次' : '') })
   } catch (e) { /* 没配微信就跳过 */ }
 }
-async function pushTargetSummary(db) {
+async function pushTargetSummary(db, mm) {
   try {
-    const m = now().slice(0, 7)
+    const m = mm || now().slice(0, 7)
     const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
     const tR = num(t && t.receive)
     if (tR <= 0) return

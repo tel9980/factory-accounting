@@ -379,3 +379,5 @@
 .ag-tab { font-size: 12px; color: #1f4e9c; background: #eef3fb; border-radius: 14px; padding: 5px 10px; margin: 0 8px 8px 0; }
 .ag-tab.on { background: #1f4e9c; color: #fff; }
 .ag-step { font-size: 13px; color: #333; line-height: 1.75; margin-bottom: 4px; }
+
+.warnc { color: #b8860b; }
