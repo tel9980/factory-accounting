@@ -1,5 +1,63 @@
 const API_BASE = 'https://jz.qy663.de5.net'
 
+// 功能索引：170 多项功能太多，用「找功能」搜索直接跳过去（纯前端，不发请求）
+const FEATS = [
+  { n: "改单（填错了要改）", go: "bill:ar", desc: "客户、产品、金额、成本、到期日都能改；收过钱的不能改到比已收还少", kw: "改 修改 改错 填错 错了 改金额 改客户 重开" },
+  { n: "历史流水（每笔进出）", go: "stat:history", desc: "一天一天看收了多少、付了多少、花在哪", kw: "流水 明细 历史 每笔 台账 进出 收了哪些" },
+  { n: "记一笔应收（接单）", go: "bill:ar", desc: "客户、产品、金额、成本、约定收款日", kw: "开单 接单 记账 应收 加工费 报价单" },
+  { n: "收客户的钱", go: "bill:ar", desc: "点应收那一行「收款」，可以只收一部分", kw: "收款 收钱 到账 回款 结清" },
+  { n: "记一笔应付（欠供应商）", go: "bill:ap", desc: "供应商、金额、备注、到期日", kw: "应付 欠款 供应商 赊购 进货" },
+  { n: "付供应商的钱", go: "bill:ap", desc: "点应付那一行「付款」", kw: "付款 付钱 还钱 结清" },
+  { n: "记一笔支出（工资/水电/房租）", go: "bill:expense", desc: "六类：工资水电网费房租采购辅料运费维修税金其他", kw: "支出 费用 花销 工资 水电 房租 加油 运费" },
+  { n: "一句话记账", go: "home:home", desc: "首页顶上那个框，写「收张老板3000」「工资5000」", kw: "语音 一句话 快速 懒 不想点" },
+  { n: "批量导入（Excel/模板）", go: "bill:import", desc: "下载模板填好，选文件直接导入", kw: "导入 excel 表格 模板 批量 一堆单子" },
+  { n: "期初余额导入（开账）", go: "bill:import", desc: "接手前的旧账：客户欠我多少、我欠别人多少", kw: "期初 开账 旧账 一开始 建账" },
+  { n: "和客户对账（对账单）", go: "stat:report", desc: "按客户出对账单，可存图片发微信、可打印 A4", kw: "对账 对账单 结账 核对 发对方" },
+  { n: "批量对账单（每家一页）", go: "stat:report", desc: "一次导出所有客户/供应商的对账单", kw: "批量对账 所有客户 一起发" },
+  { n: "对账差异补记", go: "bill:import", desc: "对方账面和我这边不一样，一键按差额补一张", kw: "差异 少记 漏记 补记 对不上" },
+  { n: "催款清单（该催谁）", go: "stat:report", desc: "按「欠多久、平时多久付」排出先催谁，带话术", kw: "催款 要钱 催收 欠钱不还 讨债" },
+  { n: "催款台账（催过几次）", go: "stat:report", desc: "记下每次催款、对方答应哪天付", kw: "催了几次 承诺 答应 跟进" },
+  { n: "客户进度链接（发给他看）", go: "me:contact", desc: "生成一个链接，客户点开能看到做到哪一步", kw: "进度 工序 发客户 链接" },
+  { n: "看谁欠最多 / 信用额度", go: "stat:report", desc: "欠款排行、最久未结、平均回款天数", kw: "欠款排行 谁欠 信用 额度 老赖" },
+  { n: "毛利分析（按客户/产品）", go: "stat:report", desc: "哪个客户赚钱、哪个活白干", kw: "毛利 利润 赚多少 亏 白干 毛利率" },
+  { n: "价格表 / 上次报价", go: "stat:report", desc: "同一客户同一产品以前报多少，录单时自动带出", kw: "报价 价格 上次多少 便宜了 涨价" },
+  { n: "损失台账（亏的和少赚的）", go: "stat:report", desc: "坏账、毛利过低、被压价的单", kw: "亏了 少赚 坏账 被压价" },
+  { n: "月度总账一页纸", go: "stat:report", desc: "三句人话说清这个月赚了多少、钱去哪了", kw: "月报 小结 一页纸 总结" },
+  { n: "报表打印 / 导出 Excel", go: "stat:report", desc: "利润表、资产负债表、任意区间导出", kw: "打印 A4 导出 excel 报表 给会计" },
+  { n: "月度结账（锁账）", go: "stat:report", desc: "结完这个月就不能再改，防止事后乱动", kw: "结账 锁账 月结 封账" },
+  { n: "月底收尾清单", go: "stat:report", desc: "六步：录完单、对过账、差异清完、出小结、备份、结账", kw: "月底 收尾 清单 该做什么" },
+  { n: "现金流预测（会不会缺钱）", go: "home:home", desc: "按到期日算未来 45 天手头钱够不够", kw: "缺钱 现金 预测 撑得住" },
+  { n: "净资产 / 家底曲线", go: "stat:asset", desc: "现金 + 别人欠我 − 我欠别人，每月存档", kw: "家底 净资产 存款 有多少钱 身家 总资产" },
+  { n: "家底存档（留个底）", go: "stat:asset", desc: "每月末自动存一份，改老单据不影响历史", kw: "存档 快照 历史 曲线" },
+  { n: "账龄 / 坏账准备", go: "stat:asset", desc: "欠了多久、分几档、该提多少坏账", kw: "账龄 欠多久 老账 坏账" },
+  { n: "寿命/折旧（设备）", go: "stat:asset", desc: "设备按月计提折旧", kw: "折旧 设备 机器 固定资产" },
+  { n: "待摊费用（房租一次交一年）", go: "stat:asset", desc: "钱一次出，成本按月摊", kw: "摊销 待摊 房租 一次交" },
+  { n: "借款台账 / 利息", go: "stat:asset", desc: "借了多少钱、月息多少、该还多少", kw: "借款 贷款 利息 还本 贷款利息" },
+  { n: "员工借支 / 报销", go: "bill:expense", desc: "员工先借后报，冲抵", kw: "借支 报销 垫付 员工借钱" },
+  { n: "坏账核销（要不回来了）", go: "stat:report", desc: "这笔钱确定收不回来，抹掉往来不动现金", kw: "核销 坏账 要不回来 放弃" },
+  { n: "预收 / 预付（定金）", go: "me:contact", desc: "客户先给的钱、先付给供应商的钱", kw: "预收 预付 定金 预付款" },
+  { n: "账户与余额（现金/银行卡/微信）", go: "me:contact", desc: "期初余额、每个账户进出、余额", kw: "账户 现金 银行卡 微信 支付宝 余额" },
+  { n: "账户之间转账", go: "me:contact", desc: "银行卡取现、微信转银行卡", kw: "转账 内部 取现 挪钱" },
+  { n: "支出预算（别超）", go: "stat:report", desc: "给某类费用设月预算，快超了首页提醒", kw: "预算 控制 花超了" },
+  { n: "账期设置（多少天付款）", go: "me:contact", desc: "按客户/供应商设账期，开单自动算到期日", kw: "账期 30天 月结 到期日" },
+  { n: "单位档案（电话/地址）", go: "me:contact", desc: "联系人和电话，一键拨号", kw: "客户 供应商 电话 地址 联系" },
+  { n: "发对账单留痕 / 对方回音", go: "me:contact", desc: "记下什么时候发的、对方有没有异议", kw: "回音 确认 有异议 争议" },
+  { n: "发票台账 / 钱和票对一下", go: "stat:asset", desc: "开了多少票、收了多少钱、差在哪", kw: "发票 开票 税额 票钱对照" },
+  { n: "银行流水导入与认领", go: "stat:asset", desc: "把银行流水粘进来，勾掉已记的", kw: "银行流水 对账 认领 未认领" },
+  { n: "固定资产/家庭收支以外的资产", go: "stat:asset", desc: "设备清单", kw: "设备 资产 机器" },
+  { n: "数据体检（哪里填得不对）", go: "stat:report", desc: "10 项检查打分：没填成本、没设账期、疑似重复…", kw: "体检 检查 打分 有问题" },
+  { n: "运行日志（出错了）", go: "stat:report", desc: "服务器错误的原文，报问题时给我看", kw: "日志 错误 报错 500" },
+  { n: "备份 / 回到某一天", go: "me:contact", desc: "每天自动备份，可以回到某一天", kw: "备份 恢复 还原 找回来" },
+  { n: "回收站（删错了）", go: "me:contact", desc: "删掉的单据 30 天内能找回", kw: "删错 删除 删掉 找回 恢复 回收站 误删" },
+  { n: "换手机 / 多人用", go: "me:contact", desc: "同一个口令登录就是同一本账", kw: "换手机 新手机 多台 一起用" },
+  { n: "员工口令（只记账不能删）", go: "me:contact", desc: "员工看不到毛利、不能删改单据", kw: "员工 店员 家人 权限 口令" },
+  { n: "账本健康分", go: "home:home", desc: "首页那个分数，点开看哪几项能改好", kw: "健康分 分数 体检" },
+  { n: "我的活（今天该干什么）", go: "home:home", desc: "3 天内到期和逾期的收付款", kw: "今天做什么 待办 提醒" },
+  { n: "全局搜索（找单据）", go: "home:home", desc: "首页底部搜客户名、金额、备注", kw: "搜索 查找 找单" },
+  { n: "多账套（几本账）", go: "me:contact", desc: "一个口令下可以有多本账，互不串", kw: "账套 两个厂 分开记 另一本" },
+  { n: "出事了怎么办（一页纸）", go: "home:home", desc: "首页「怎么用」，每天 30 秒、每周 5 分钟", kw: "怎么用 教程 新手 说明" },
+]
+
 Page({
   data: {
     tab: 'home', group: 'home',
@@ -28,6 +86,7 @@ Page({
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
     role: 'owner', staff_enabled: false, cf: null, mw: null, md: null, sad: null, help_open: false,
+    feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
     prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
     month_amort: 0, month_accrue_int: 0, month_dep: 0, month_expense_cash: 0,
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
@@ -1112,6 +1171,45 @@ Page({
       this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadMyDay()
+    }
+  },
+  // ── 找功能：输一个词，直接跳到那个功能 ──
+  openFeatSearch() {
+    let recent = []
+    try { recent = wx.getStorageSync('feat_recent') || [] } catch (e) { recent = [] }
+    this.setData({ feat_open: true, feat_kw: '', feat_hits: [], feat_recent: recent })
+  },
+  closeFeatSearch() { this.setData({ feat_open: false }) },
+  onFeatKw(e) {
+    const kw = String(e.detail.value || '').trim()
+    this.setData({ feat_kw: kw })
+    this.searchFeat(kw)
+  },
+  searchFeat(kwArg) {
+    const kw = String(typeof kwArg === 'string' ? kwArg : this.data.feat_kw || '').trim().toLowerCase()
+    if (!kw) { this.setData({ feat_hits: [] }); return }
+    const words = kw.split(/\s+/).filter(Boolean)
+    const hit = (f) => {
+      const hay = (f.n + ' ' + f.desc + ' ' + f.kw).toLowerCase()
+      return words.every((w) => hay.indexOf(w) >= 0)
+    }
+    let hits = this.data.feat_all.filter(hit)
+    // 名字里直接含这个词的排前面
+    hits.sort((a, b) => (b.n.toLowerCase().indexOf(kw) >= 0 ? 1 : 0) - (a.n.toLowerCase().indexOf(kw) >= 0 ? 1 : 0))
+    this.setData({ feat_hits: hits.slice(0, 20) })
+  },
+  openFeat(e) {
+    const d = e.currentTarget.dataset
+    const go = String(d.go || '')
+    const name = String(d.n || '')
+    if (go) {
+      try {
+        let recent = wx.getStorageSync('feat_recent') || []
+        recent = [{ n: name, go }].concat(recent.filter((x) => x.n !== name)).slice(0, 5)
+        wx.setStorageSync('feat_recent', recent)
+      } catch (err) { /* 存不下就存不下 */ }
+      this.setData({ feat_open: false, feat_recent: [] })
+      this.jumpMap({ currentTarget: { dataset: { go } } })
     }
   },
   jumpMap(e) {

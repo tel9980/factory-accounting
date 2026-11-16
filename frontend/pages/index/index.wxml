@@ -162,6 +162,23 @@
       <view class="aline warn" wx:for="{{md.tips}}" wx:key="*this">{{item}}</view>
     </view>
     <view class="card" bindtap="openHelp"><view class="card-h">❓ 怎么用（一页纸）<text class="tip">新接手的人看这个 ›</text></view></view>
+    <view class="card" bindtap="openFeatSearch"><view class="card-h">🔎 找功能<text class="tip">170 多项，不知道在哪点？输个词 ›</text></view></view>
+    <view class="card" wx:if="{{feat_open}}">
+      <view class="card-h">🔎 找功能<text class="card-n" bindtap="closeFeatSearch">收起</text></view>
+      <input class="inp" placeholder="输个词：催款 / 对账 / 折旧 / 预算 / 备份" value="{{feat_kw}}" bindinput="onFeatKw" confirm-type="search" focus="{{feat_open}}"/>
+      <view class="item" wx:for="{{feat_hits}}" wx:key="n" bindtap="openFeat" data-go="{{item.go}}" data-n="{{item.n}}">
+        <view class="row1"><text class="nm">{{item.n}}</text><text class="amt">去这里 ›</text></view>
+        <view class="row2">{{item.desc}}</view>
+      </view>
+      <view class="tip" wx:if="{{feat_kw && !feat_hits.length}}">没找到这个功能。换个说法试试，比如「要钱」改成「催款」、「记账」改成「记一笔」。</view>
+      <block wx:if="{{!feat_kw}}">
+        <view class="tip" wx:if="{{feat_recent.length}}">最近用过的</view>
+        <view class="item" wx:for="{{feat_recent}}" wx:key="n" bindtap="openFeat" data-go="{{item.go}}" data-n="{{item.n}}">
+          <view class="row1"><text class="nm">{{item.n}}</text><text class="amt">去这里 ›</text></view>
+        </view>
+        <view class="tip">常用的几个：催款清单、对账单、批量导入、账期设置、支出预算、数据体检、备份、员工口令。</view>
+      </block>
+    </view>
     <view class="issuebar" wx:if="{{issue_count>0}}" bindtap="showIssue">⚠ 数据自检发现 {{issue_count}} 处对不上（点开看）</view>
     <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
     <view class="cfcard" wx:if="{{role!='staff' && cf && cf.days}}" bindtap="showCashflow">
