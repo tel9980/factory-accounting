@@ -978,6 +978,15 @@ Page({
     if (this.data.overdue_count > 0 || this.data.due_soon_count > 0) this.setData({ tab: 'ar' })
     else if (this.data.pay_soon_count > 0) this.setData({ tab: 'ap' })
   },
+  explainProfit() {
+    const d = this.data
+    wx.showModal({
+      title: '这个「本月净利」怎么算的',
+      content: `本月接单 ¥${d.month_order_add || 0}\n− 材料·外协成本 ¥${d.month_mat_cost || 0}\n− 现金支出（工资水电房租等）¥${d.month_expense_cash || 0}\n− 摊销 ¥${d.month_amort || 0} − 折旧 ¥${d.month_dep || 0} − 预提利息 ¥${d.month_accrue_int || 0}\n= 净利 ¥${d.profit_biz || 0}\n\n赊购（欠供应商的货款）只算到「我欠别人」里，不重复扣一次成本。想按付钱算，看报表页「两口径」。`,
+      showCancel: false,
+      confirmText: '知道了'
+    })
+  },
   goRem(e) {
     const t0 = e.currentTarget.dataset.tab
     const t = ({ nw: 'asset', home: 'report' })[t0] || t0 || 'home'

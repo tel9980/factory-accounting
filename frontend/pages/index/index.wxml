@@ -87,8 +87,8 @@
         <view class="g4l">今天收到</view>
       </view>
       <view class="g4" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="report">
-        <view class="g4n {{profit_biz < 0 ? 'red' : 'green'}}">{{profit_biz}}</view>
-        <view class="g4l">本月经营毛利</view>
+        <view class="g4n {{profit_biz < 0 ? 'red' : 'green'}}" bindtap="explainProfit">{{profit_biz}}</view>
+        <view class="g4l" bindtap="explainProfit">本月净利 ⓘ</view>
       </view>
     </view>
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
@@ -1035,8 +1035,8 @@
       <button class="btn" size="mini" bindtap="printReport">🖨 打印报表（A4，资产负债表 / 利润表）</button>
       <view class="list" wx:if="{{archives.length}}">
         <view class="item" wx:for="{{archives}}" wx:key="month">
-          <view class="row1"><text class="nm">{{item.month}} 已归档</text><text class="amt">毛利 {{item.profit}}</text></view>
-          <view class="row2">接单 {{item.order_add}} · 成本 {{item.cost}} · 毛利率 {{item.margin}}% · 净资产 {{item.net_worth}}</view>
+          <view class="row1"><text class="nm">{{item.month}} 已归档</text><text class="amt">净利 {{item.profit}}</text></view>
+          <view class="row2">接单 {{item.order_add}} · 材料成本 {{item.mat_cost}} · 现金费用+摊销折旧 {{item.cost}} · 净利率 {{item.margin}}% · 净资产 {{item.net_worth}}</view>
           <view class="row2">归档于 {{item.created_at}}</view>
           <view class="btns">
             <button size="mini" bindtap="viewArchive" data-m="{{item.month}}">看快照</button>
@@ -1181,16 +1181,16 @@
 
     <view class="form" wx:if="{{kpi}}">
       <view class="tip">财务指标（{{kpi.month}}）</view>
-      <view class="kpi-row"><text>本月毛利率</text><text class="kpi-n {{kpi.margin>=0?'ok':'bad'}}">{{kpi.margin}}%（毛利 {{kpi.profit}}）</text></view>
+      <view class="kpi-row"><text>本月净利率</text><text class="kpi-n {{kpi.margin>=0?'ok':'bad'}}">{{kpi.margin}}%（净利 {{kpi.profit}}）</text></view>
       <view class="kpi-row"><text>平均回款天数</text><text class="kpi-n">{{kpi.avg_days}} 天</text></view>
       <view class="kpi-row"><text>应收周转天数</text><text class="kpi-n">{{kpi.turn_days}} 天</text></view>
       <view class="kpi-row"><text>现金能撑几个月</text><text class="kpi-n {{kpi.cushion_months>=1?'ok':'bad'}}">{{kpi.cushion_months}} 个月</text></view>
       <view class="kpi-row" wx:if="{{kpi.top_customer}}"><text>最大客户占比</text><text class="kpi-n {{kpi.conc_pct>=60?'bad':''}}">{{kpi.top_customer}} {{kpi.conc_pct}}%</text></view>
-      <view class="kpi-row"><text>本月成本合计</text><text class="kpi-n">{{kpi.cost_total}}（现金 {{kpi.cash_cost}} + 摊销 {{kpi.amort}} + 折旧 {{kpi.dep}} + 预提息 {{kpi.accrue_int}}）</text></view>
+      <view class="kpi-row"><text>本月成本合计</text><text class="kpi-n">{{kpi.cost_total}}（材料 {{kpi.mat_cost}} + 现金费用 {{kpi.cash_cost}} + 摊销 {{kpi.amort}} + 折旧 {{kpi.dep}} + 预提息 {{kpi.accrue_int}}）</text></view>
       <view class="kpi-row"><text>费用率（成本/接单）</text><text class="kpi-n {{kpi.expense_ratio>=100?'bad':''}}">{{kpi.expense_ratio}}%</text></view>
       <view class="kpi-row" wx:if="{{kpi.break_even>0}}"><text>保本月收入</text><text class="kpi-n">约 {{kpi.break_even}} 元（低于这个数就亏）</text></view>
       <view class="kpi-row"><text>净资产</text><text class="kpi-n {{kpi.net_worth<0?'bad':'ok'}}">{{kpi.net_worth}} 元</text></view>
-      <view class="kpi-sub">近 6 个月毛利趋势</view>
+      <view class="kpi-sub">近 6 个月净利趋势</view>
       <view class="bar-line" wx:for="{{kpi.trend}}" wx:key="m">
         <view class="bar-m">{{item.m}}</view>
         <view class="bar-zone">
@@ -1198,7 +1198,7 @@
           <text class="bar-num">{{item.profit}}（{{item.margin}}%）</text>
         </view>
       </view>
-      <view class="tip">毛利率 = （本月接单 − 赊购 − 现金成本）/ 接单；现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
+      <view class="tip">净利率 =（本月接单 − 材料·外协成本 − 现金费用 − 摊销 − 折旧 − 预提息）/ 接单。赊购只算欠款、不重复算成本。现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
     </view>
 
     <view class="form">

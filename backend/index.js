@@ -14,6 +14,32 @@ const now = () => new Date().toISOString()
 const month = () => new Date().toISOString().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
+
+// ===== 统一口径（全站同一个"赚了多少"，避免不同页面数字打架）=====
+// 净利（权责）= 本月接单额 − 本月单子上的材料·外协成本 − 本月现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息
+// 赊购（应付）只影响欠款和现金流，不重复算成本；付给供应商的钱若已算在单子成本里也不再算一次。
+const CASH_EXP_WHERE = "direction='out' AND cash=1 AND ref_type IN ('expense','fixed')"
+async function monthPL(db, mm) {
+  const sql = `SELECT
+    (SELECT COALESCE(SUM(price),0) FROM orders WHERE substr(created_at,1,7)=?) AS income,
+    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE substr(created_at,1,7)=?) AS mat,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${CASH_EXP_WHERE} AND substr(created_at,1,7)=?) AS cash_exp,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='amort' AND substr(created_at,1,7)=?) AS amort,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?) AS dep,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?) AS accrue,
+    (SELECT COALESCE(SUM(amount),0) FROM payables WHERE substr(created_at,1,7)=?) AS payable_add,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type='payable' AND substr(created_at,1,7)=?) AS paid_payable`
+  const r = ((await db.prepare(sql).bind(mm, mm, mm, mm, mm, mm, mm, mm).first()) || {})
+  const income = round2(num(r.income)), mat = round2(num(r.mat)), cashExp = round2(num(r.cash_exp))
+  const amort = round2(num(r.amort)), dep = round2(num(r.dep)), accrue = round2(num(r.accrue))
+  const adj = round2(amort + dep + accrue)
+  const cost = round2(mat + cashExp + adj)
+  return {
+    month: mm, income, mat, cash_exp: cashExp, amort, dep, accrue, adj, cost,
+    profit: round2(income - cost), margin: income > 0 ? round2(((income - cost) / income) * 100) : 0,
+    payable_add: round2(num(r.payable_add)), paid_payable: round2(num(r.paid_payable))
+  }
+}
 // 单位名归一：去掉括号备注、有限公司/公司/厂/店与空白，用来跨表匹配同一家
 const norm = (t) => String(t || '').replace(/[（(].*?[)）]|有限公司|公司|厂|店|\s/g, '')
 const isMonthLocked = async (db, m) => {
@@ -615,8 +641,9 @@ const monthSnapshot = async (db, mm) => {
   const dep = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?", mm)
   const accrue = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?", mm)
   const cashExp = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND substr(created_at,1,7)=?", mm)
-  const cost = round2(cashExp + amort + dep + accrue)
-  const profit = round2(orderAdd - payableAdd - cost)
+  const matCost = await one('SELECT COALESCE(SUM(COALESCE(cost,0)),0) t FROM orders WHERE substr(created_at,1,7)=?', mm)
+  const cost = round2(matCost + cashExp + amort + dep + accrue)
+  const profit = round2(orderAdd - cost)
   // 期末余额（截至该月最后一天）
   const opening = await one('SELECT COALESCE(SUM(opening),0) t FROM accounts')
   const cashFlow = await one("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10)<=?", end)
@@ -630,7 +657,7 @@ const monthSnapshot = async (db, mm) => {
     month: mm, period_end: end,
     income: cashIn, outcome: cashOut, net_cash: round2(cashIn - cashOut),
     order_add: orderAdd, order_count: orderCnt, payable_add: payableAdd, payable_count: payableCnt, ledger_count: ledgerCnt,
-    cash_expense: cashExp, amort, dep, accrue_int: accrue, cost,
+    cash_expense: cashExp, mat_cost: matCost, amort, dep, accrue_int: accrue, cost,
     profit, margin: orderAdd > 0 ? round2((profit / orderAdd) * 100) : 0,
     cash_balance: cash, ar_left: arLeft, ap_left: apLeft, debt_left: debtB,
     net_worth: round2(cash + arLeft - apLeft - debtB)
@@ -726,14 +753,22 @@ app.get('/report-print', async (c) => {
   const head = await getTitle(db)
   const snap = await snapOf(db, mm)
   const yr = mm.slice(0, 4)
-  // 本年累计
-  let yOrder = 0; let yPayable = 0; let yCashExp = 0; let yAmort = 0; let yDep = 0; let yAccrue = 0
-  for (let i = 1; i <= Number(mm.slice(5, 7)); i += 1) {
-    const s = await snapOf(db, `${yr}-${String(i).padStart(2, '0')}`)
-    yOrder += s.order_add; yPayable += s.payable_add; yCashExp += s.cash_expense; yAmort += s.amort; yDep += s.dep; yAccrue += s.accrue_int
-  }
-  const yCost = round2(yCashExp + yAmort + yDep + yAccrue)
-  const yProfit = round2(yOrder - yPayable - yCost)
+  // 本年累计（性能：原来是逐月 snapOf，一个月 15 条查询、11 个月就 40 秒；改成 1 条聚合）
+  const yFrom = `${yr}-01`
+  const R = "substr(created_at,1,7)>=? AND substr(created_at,1,7)<=?"
+  const yAgg = ((await db.prepare(`SELECT
+    (SELECT COALESCE(SUM(price),0) FROM orders WHERE ${R}) yo,
+    (SELECT COALESCE(SUM(amount),0) FROM payables WHERE ${R}) yp,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${CASH_EXP_WHERE} AND ${R}) yce,
+    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE ${R}) ym,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='amort' AND ${R}) ya,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='dep' AND ${R}) yd,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='debt_int' AND ${R}) yac`)
+    .bind(yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm).first()) || {})
+  const yOrder = num(yAgg.yo); const yPayable = num(yAgg.yp); const yCashExp = num(yAgg.yce)
+  const yMat = num(yAgg.ym); const yAmort = num(yAgg.ya); const yDep = num(yAgg.yd); const yAccrue = num(yAgg.yac)
+  const yCost = round2(yMat + yCashExp + yAmort + yDep + yAccrue)
+  const yProfit = round2(yOrder - yCost)
   const cats = (await db.prepare("SELECT category, COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND substr(created_at,1,7)=? GROUP BY category ORDER BY t DESC").bind(mm).all()).results
   const accounts = (await db.prepare('SELECT * FROM accounts ORDER BY id').all()).results
   const bal = await accountBalances(db)
@@ -768,15 +803,16 @@ th{background:#f5f5f5;text-align:left;font-weight:600}
 <table>
 <tr><th>项目</th><th class="n">本月</th><th class="n">本年累计</th></tr>
 <tr><td>营业收入（接单金额）</td><td class="n">${money(snap.order_add)}</td><td class="n">${money(yOrder)}</td></tr>
-<tr><td>采购/委外（赊购）</td><td class="n">${money(snap.payable_add)}</td><td class="n">${money(yPayable)}</td></tr>
+<tr><td>材料·外协成本</td><td class="n">${money(num(snap.mat_cost))}</td><td class="n">${money(yMat)}</td></tr>
+<tr><td>　本月赊购（备查，等付款时进现金流）</td><td class="n">${money(snap.payable_add)}</td><td class="n">${money(yPayable)}</td></tr>
 <tr><td>现金支出</td><td class="n">${money(snap.cash_expense)}</td><td class="n">${money(yCashExp)}</td></tr>
 ${catRows}
 <tr><td>　摊销（待摊费用）</td><td class="n">${money(snap.amort)}</td><td class="n">${money(yAmort)}</td></tr>
 <tr><td>　折旧</td><td class="n">${money(snap.dep)}</td><td class="n">${money(yDep)}</td></tr>
 <tr><td>　预提利息</td><td class="n">${money(snap.accrue_int)}</td><td class="n">${money(yAccrue)}</td></tr>
 <tr class="total"><td>成本合计</td><td class="n">${money(snap.cost)}</td><td class="n">${money(yCost)}</td></tr>
-<tr class="total"><td>经营毛利</td><td class="n ${snap.profit >= 0 ? 'green' : 'red'}">${money(snap.profit)}</td><td class="n ${yProfit >= 0 ? 'green' : 'red'}">${money(yProfit)}</td></tr>
-<tr><td>毛利率</td><td class="n">${snap.margin}%</td><td class="n">${yOrder > 0 ? round2((yProfit / yOrder) * 100) : 0}%</td></tr>
+<tr class="total"><td>净利（权责口径）</td><td class="n ${snap.profit >= 0 ? 'green' : 'red'}">${money(snap.profit)}</td><td class="n ${yProfit >= 0 ? 'green' : 'red'}">${money(yProfit)}</td></tr>
+<tr><td>净利率</td><td class="n">${snap.margin}%</td><td class="n">${yOrder > 0 ? round2((yProfit / yOrder) * 100) : 0}%</td></tr>
 </table>
 
 <h2>二、资产负债表（${snap.period_end} 期末）</h2>
@@ -2197,7 +2233,7 @@ app.get('/dashboard', async (c) => {
     (SELECT COUNT(*) FROM orders WHERE status < 2) AS pending,
     (SELECT COALESCE(SUM(price),0) FROM orders WHERE substr(created_at,1,7)=?) AS order_add,
     (SELECT COALESCE(SUM(amount),0) FROM payables WHERE substr(created_at,1,7)=?) AS payable_add,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)=?) AS exp_cash,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${CASH_EXP_WHERE} AND substr(created_at,1,7)=?) AS exp_cash,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,10)=?) AS today_in,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='amort' AND substr(created_at,1,7)=?) AS amort,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='debt_int' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?) AS acr,
@@ -2207,9 +2243,10 @@ app.get('/dashboard', async (c) => {
     (SELECT value FROM settings WHERE key='selfcheck_count') AS sc_cnt,
     (SELECT value FROM settings WHERE key='selfcheck_at') AS sc_at,
     (SELECT receive FROM targets WHERE month=?) AS tgt_receive,
-    (SELECT order_add FROM targets WHERE month=?) AS tgt_order`
+    (SELECT order_add FROM targets WHERE month=?) AS tgt_order,
+    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE substr(created_at,1,7)=?) AS order_cost`
   const [aggR, recentR, overdueR, dueSoonR, paySoonR, topCustR, budsR, spendR, debtRowsR, debtRepsR, accList] = await Promise.all([
-    db.prepare(aggSql).bind(m, m, m, m, m, todayS, m, m, m, m, m).first(),
+    db.prepare(aggSql).bind(m, m, m, m, m, todayS, m, m, m, m, m, m).first(),
     db.prepare('SELECT * FROM ledger ORDER BY id DESC LIMIT 10').all(),
     db.prepare('SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all(),
     db.prepare("SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all(),
@@ -2224,6 +2261,7 @@ app.get('/dashboard', async (c) => {
   const agg = aggR || {}
   const ar = { total: agg.ar }, ap = { total: agg.ap }, inc = { total: agg.inc }, out = { total: agg.outt }
   const pending = { n: agg.pending }, orderAdd = { t: agg.order_add }, payableAdd = { t: agg.payable_add }
+  const matCost = { t: agg.order_cost }
   const expCash = { t: agg.exp_cash }, todayIn = { t: agg.today_in }
   const accAdj = { amort: round2(num(agg.amort)), accrue_int: round2(num(agg.acr)), dep: round2(num(agg.dep)) }
   accAdj.net = round2(accAdj.amort + accAdj.accrue_int + accAdj.dep)
@@ -2268,7 +2306,8 @@ app.get('/dashboard', async (c) => {
     month_amort: accAdj.amort,
     month_accrue_int: accAdj.accrue_int,
     month_dep: accAdj.dep,
-    profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(payableAdd.t) - expTotal),
+    month_mat_cost: round2(num(matCost.t)),
+    profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(matCost.t) - expTotal),
     pending_count: pending.n,
     today_income: round2(num(todayIn.t)),
     top_customer: topCust ? topCust.nm : '',
@@ -2394,16 +2433,17 @@ const weeklyStat = async (db) => {
   const outCnt = await q("SELECT COUNT(*) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND created_at>=? AND created_at<=?")
   const orderAdd = await q('SELECT COALESCE(SUM(price),0) t FROM orders WHERE created_at>=? AND created_at<=?')
   const payableAdd = await q('SELECT COALESCE(SUM(amount),0) t FROM payables WHERE created_at>=? AND created_at<=?')
-  const expCash = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND created_at>=? AND created_at<=?")
+  const expCash = await q(`SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE ${CASH_EXP_WHERE} AND created_at>=? AND created_at<=?`)
+  const matCost = await q('SELECT COALESCE(SUM(COALESCE(cost,0)),0) t FROM orders WHERE created_at>=? AND created_at<=?')
   const arTotal = num((await db.prepare('SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()).t)
   const apTotal = num((await db.prepare('SELECT COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount').first()).t)
   const topAr = (await db.prepare('SELECT customer nm, SUM(price-paid-COALESCE(written_off,0)) t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 3').all()).results
   const cash = round2((await accountBalances(db)).reduce((a, x) => a + x.balance, 0))
-  const profit = round2(orderAdd - payableAdd - expCash)
+  const profit = round2(orderAdd - matCost - expCash)
   return {
     from: start.slice(0, 10), to: end.slice(0, 10),
     inc: round2(inc), inc_cnt: incCnt, out: round2(out), out_cnt: outCnt,
-    order_add: round2(orderAdd), payable_add: round2(payableAdd), exp_cash: round2(expCash),
+    order_add: round2(orderAdd), payable_add: round2(payableAdd), mat_cost: round2(matCost), exp_cash: round2(expCash),
     profit, ar_total: round2(arTotal), ap_total: round2(apTotal), cash,
     top_ar: topAr.map((r) => ({ party: r.nm, amount: round2(num(r.t)) }))
   }
@@ -2416,7 +2456,7 @@ const weeklyText = async (db) => {
   lines.push(`付出：¥${w.out}（${w.out_cnt} 笔）`)
   lines.push(`净流入：¥${round2(w.inc - w.out)}`)
   lines.push(`新接单：¥${w.order_add}　新赊购：¥${w.payable_add}　现金成本：¥${w.exp_cash}`)
-  lines.push(`经营毛利（估算）：¥${w.profit}`)
+  lines.push(`净利（权责口径）：¥${w.profit}`)
   lines.push(`现在被欠：¥${w.ar_total}　我欠别人：¥${w.ap_total}　手头现金：¥${w.cash}`)
   if (w.top_ar.length) lines.push('欠款最多：' + w.top_ar.map((x) => `${x.party} ¥${x.amount}`).join('、'))
   return { text: lines.join('\n'), stat: w }
@@ -2478,18 +2518,20 @@ app.get('/profit-compare', async (c) => {
   const payableAdd = await q('SELECT COALESCE(SUM(amount),0) AS t FROM payables WHERE substr(created_at,1,7)=?')
   const expCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND ref_type='expense' AND substr(created_at,1,7)=?")
   const fixedCash = await q("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND ref_type='fixed' AND substr(created_at,1,7)=?")
+  const matCost = await q('SELECT COALESCE(SUM(COALESCE(cost,0)),0) AS t FROM orders WHERE substr(created_at,1,7)=?')
   const accAdj = await accrualAdjust(db, m)
   // 现金口径：本月实际收到的钱 − 本月实际付出的钱
   const cash = num(inc) - num(out)
   // 权责口径：本月接的活 − 本月赊的料 − 本月花的现金成本（工资水电等）
   const otherCash = round2(num(out) - expCash - fixedCash) // 还供应商/其它付出
-  const accrual = round2(num(orderAdd) - num(payableAdd) - expCash - fixedCash - accAdj.net)
+  const accrual = round2(num(orderAdd) - num(matCost) - expCash - fixedCash - accAdj.net)
   return c.json({
     month: m,
     cash_income: round2(num(inc)),
     cash_outcome: round2(num(out)),
     cash_profit: round2(cash),
     order_add: round2(num(orderAdd)),
+    mat_cost: round2(num(matCost)),
     payable_add: round2(num(payableAdd)),
     expense_cash: round2(num(expCash) + accAdj.net),
     amort: accAdj.amort,
@@ -4152,9 +4194,9 @@ async function monthSum(db, m) {
     (SELECT COALESCE(SUM(price),0) FROM orders WHERE substr(created_at,1,7)=?) AS order_add,
     (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE substr(created_at,1,7)=?) AS order_cost,
     (SELECT COALESCE(SUM(amount),0) FROM payables WHERE substr(created_at,1,7)=?) AS payable_add,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND substr(created_at,1,7)=?) AS exp_cash,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${CASH_EXP_WHERE} AND substr(created_at,1,7)=?) AS exp_cash,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=0 AND ref_type='dep' AND substr(created_at,1,7)=?) AS dep,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=0 AND ref_type IN ('prepaid','amort') AND substr(created_at,1,7)=?) AS amort,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=0 AND ref_type='amort' AND substr(created_at,1,7)=?) AS amort,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=0 AND ref_type='debt_int' AND substr(created_at,1,7)=?) AS accrual,
     (SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) FROM orders WHERE paid + COALESCE(written_off,0) < price) AS ar_left,
     (SELECT COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) FROM payables WHERE paid + COALESCE(written_off,0) < amount) AS ap_left`
@@ -4240,7 +4282,7 @@ app.get('/trend', async (c) => {
   // 性能：原来每个月 3 次查询（6 个月 18 次串行，4.6 秒），改成 3 次分组查询（约 1 秒）
   const jobs = [
     db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) a, COALESCE(SUM(COALESCE(cost,0)),0) c FROM orders WHERE substr(created_at,1,7)>=? GROUP BY mk').bind(mons[0]).all(),
-    db.prepare("SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN direction='out' THEN amount ELSE 0 END),0) o, COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE 0 END),0) i FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)>=? GROUP BY mk").bind(mons[0]).all()
+    db.prepare(`SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) o, COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) i FROM ledger WHERE cash=1 AND substr(created_at,1,7)>=? GROUP BY mk`).bind(mons[0]).all()
   ].map((x) => x.catch(() => null))
   const [oR, lR] = await Promise.all(jobs)
   const rowsOf = (r) => (r && r.results) || []
@@ -4910,7 +4952,7 @@ app.patch('/ledger/:id', async (c) => {
   const id = c.req.param('id')
   const { amount, category, remark } = await c.req.json()
   const db = c.env.DB
-  const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(id).first()
+  const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type IN ('expense','fixed')").bind(id).first()
   if (!l) return c.json({ error: '支出记录不存在' }, 404)
   if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) return c.json({ error: '该支出所在月份已结账锁定' }, 403)
   const a = num(amount, l.amount)
@@ -4966,12 +5008,12 @@ app.delete('/payables/:id', async (c) => {
 app.delete('/ledger/:id', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
-  const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(id).first()
+  const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type IN ('expense','fixed')").bind(id).first()
   if (!l) return c.json({ error: '支出记录不存在' }, 404)
   if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) return c.json({ error: '该支出所在月份已结账锁定' }, 403)
   const b = uid()
   await intoTrash(db, 'ledger', l.id, l, b)
-  await db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='expense'").bind(id).run()
+  await db.prepare("DELETE FROM ledger WHERE id=? AND ref_type IN ('expense','fixed')").bind(id).run()
   await logAudit(db, '删除支出', l.category || '其他', `${l.category || '其他'} ¥${l.amount}`)
   return c.json({ ok: true })
 })
@@ -5516,6 +5558,9 @@ app.get('/month-report', async (c) => {
   lines.push(`—— 业务 ——`)
   lines.push(`新接单：¥${round2(num(oAdd.t))}`)
   lines.push(`新赊购：¥${round2(num(pAdd.t))}`)
+  const pl = await monthPL(db, m)
+  lines.push(`材料·外协成本：¥${pl.mat}`)
+  lines.push(`净利（权责）：¥${pl.profit}`)
   lines.push(`—— 钱花在哪 ——`)
   if (cats.length) cats.forEach((r) => lines.push(`${r.c}：¥${round2(num(r.t))}`))
   else lines.push('本月无支出')
@@ -5526,7 +5571,7 @@ app.get('/month-report', async (c) => {
   lines.push(`净资产：¥${round2(cash + ar - ap)}`)
   return c.json({
     month: m, cash_in: round2(num(inc.t)), cash_out: round2(num(out.t)), net: round2(num(inc.t) - num(out.t)),
-    order_add: round2(num(oAdd.t)), payable_add: round2(num(pAdd.t)), cats: cats.map((r) => ({ c: r.c, t: round2(num(r.t)) })),
+    order_add: round2(num(oAdd.t)), payable_add: round2(num(pAdd.t)), mat_cost: pl.mat, profit: pl.profit, cats: cats.map((r) => ({ c: r.c, t: round2(num(r.t)) })),
     cash, ar, ap, net_worth: round2(cash + ar - ap), title: (head && head.value) || '', text: lines.join('\n')
   })
 })
@@ -5582,7 +5627,7 @@ app.get('/kpi', async (c) => {
   const aggSql = `SELECT
     (SELECT COALESCE(SUM(price),0) FROM orders WHERE substr(created_at,1,7)=?) AS o_add,
     (SELECT COALESCE(SUM(amount),0) FROM payables WHERE substr(created_at,1,7)=?) AS p_add,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='out' AND substr(created_at,1,7)=?) AS cash_cost,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${CASH_EXP_WHERE} AND substr(created_at,1,7)=?) AS cash_cost,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='in' AND substr(created_at,1,7)=?) AS cash_in,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='in' AND substr(created_at,1,7)<=? AND substr(created_at,1,7)>=?) AS in3,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE cash=1 AND ref_type<>'transfer' AND direction='out' AND substr(created_at,1,7)<=? AND substr(created_at,1,7)>=?) AS out3,
@@ -5595,12 +5640,13 @@ app.get('/kpi', async (c) => {
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND ref_type='order' AND substr(created_at,1,7)<=?) AS ar_end_b,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='amort' AND substr(created_at,1,7)=?) AS am,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='debt_int' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?) AS ac,
-    (SELECT COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?) AS dp`
+    (SELECT COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?) AS dp,
+    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE substr(created_at,1,7)=?) AS order_cost`
   const jobs = [
-    db.prepare(aggSql).bind(m, m, m, m, m, from3, m, from3, m, m, m, m, m).first(),
-    db.prepare("SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)>=? GROUP BY mk").bind(from6).all(),
+    db.prepare(aggSql).bind(m, m, m, m, m, from3, m, from3, m, m, m, m, m, m).first(),
+    db.prepare("SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) t, COALESCE(SUM(COALESCE(cost,0)),0) c2 FROM orders WHERE substr(created_at,1,7)>=? GROUP BY mk").bind(from6).all(),
     db.prepare("SELECT substr(created_at,1,7) mk, COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)>=? GROUP BY mk").bind(from6).all(),
-    db.prepare("SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) c, COALESCE(SUM(CASE WHEN ref_type IN ('amort','debt_int','dep') THEN amount ELSE 0 END),0) ad FROM ledger WHERE substr(created_at,1,7)>=? GROUP BY mk").bind(from6).all(),
+    db.prepare(`SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) c, COALESCE(SUM(CASE WHEN ref_type IN ('amort','debt_int','dep') THEN amount ELSE 0 END),0) ad FROM ledger WHERE substr(created_at,1,7)>=? GROUP BY mk`).bind(from6).all(),
     db.prepare("SELECT o.id, o.created_at, MAX(l.created_at) last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid >= o.price GROUP BY o.id").all(),
     db.prepare("SELECT o.customer c, SUM(l.amount) t FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,7)=? GROUP BY o.customer ORDER BY t DESC").bind(m).all(),
     accountBalances(db)
@@ -5609,7 +5655,8 @@ app.get('/kpi', async (c) => {
   const agg = aggR || {}
   const rowsOf = (r) => (r && r.results) || []
   const oMap = {}, pMap = {}, lMap = {}
-  for (const x of rowsOf(oTR)) oMap[x.mk] = num(x.t)
+  const cMap = {}
+  for (const x of rowsOf(oTR)) { oMap[x.mk] = num(x.t); cMap[x.mk] = num(x.c2) }
   for (const x of rowsOf(pTR)) pMap[x.mk] = num(x.t)
   for (const x of rowsOf(lTR)) lMap[x.mk] = { c: num(x.c), ad: num(x.ad) }
   const oAdd = num(agg.o_add)
@@ -5619,7 +5666,8 @@ app.get('/kpi', async (c) => {
   const adj = { amort: round2(num(agg.am)), accrue_int: round2(num(agg.ac)), dep: round2(num(agg.dp)) }
   adj.net = round2(adj.amort + adj.accrue_int + adj.dep)
   const costTotal = round2(cashCost + adj.net)
-  const profit = round2(oAdd - pAdd - costTotal)
+  const matCost = num(agg.order_cost)
+  const profit = round2(oAdd - matCost - costTotal)
   const margin = oAdd > 0 ? round2((profit / oAdd) * 100) : 0
   const expenseRatio = oAdd > 0 ? round2((costTotal / oAdd) * 100) : 0
   const fixedTotal = round2(num(adj.amort) + num(adj.dep) + num(adj.accrue_int))
@@ -5629,7 +5677,7 @@ app.get('/kpi', async (c) => {
   for (const mm of mons) {
     const oo = num(oMap[mm]), pp = num(pMap[mm])
     const lx = lMap[mm] || { c: 0, ad: 0 }
-    const pf = round2(oo - pp - lx.c - lx.ad)
+    const pf = round2(oo - num(cMap[mm]) - lx.c - lx.ad)
     trend.push({ m: mm, order_add: round2(oo), cost: round2(lx.c + lx.ad), profit: pf, margin: oo > 0 ? round2((pf / oo) * 100) : 0 })
   }
   const accList = (accs && accs.length !== undefined) ? accs : []
@@ -5655,7 +5703,7 @@ app.get('/kpi', async (c) => {
   const topCust = byCust.length ? byCust[0] : null
   const conc = cashIn > 0 && topCust ? round2((num(topCust.t) / cashIn) * 100) : 0
   return c.json({
-    month: m, order_add: round2(oAdd), payable_add: round2(pAdd), cash_cost: round2(cashCost), profit, margin,
+    month: m, order_add: round2(oAdd), payable_add: round2(pAdd), mat_cost: round2(matCost), cash_cost: round2(cashCost), profit, margin,
     avg_days, ar_end: ar, turn_days: turnDays, cash_now: cashNow, cushion_months: cushion,
     top_customer: topCust ? topCust.c : '', conc_pct: conc,
     cost_total: costTotal, expense_ratio: expenseRatio, break_even: breakEven,
