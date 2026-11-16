@@ -1270,13 +1270,14 @@ Page({
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     this.enterTab(t)
   },
-  loadHealth() {
+  // 设置页「🩺 体检一下」：把明细摊开给人看（首页那条健康分条用上面的 loadHealth）
+  loadHealthDetail() {
     this.req({
       url: API_BASE + '/health-check',
       success: (res) => {
         const r = res.data || {}
         if (!r.items) return
-        this.setData({ health: r, health_done: true })
+        this.setData({ health: r, health_done: true, hc: { score: r.score, grade: r.grade, clean: r.clean, count: r.count, delta: r.delta || 0, items: r.items } })
         wx.showToast({ title: r.clean ? '体检全部通过' : '有 ' + r.count + ' 项要补', icon: 'none' })
       }
     })
@@ -3726,7 +3727,6 @@ Page({
   },
   // ===== 毛利分析（按客户 / 按产品） =====
   setMbType(e) { this.setData({ mb_type: e.currentTarget.dataset.t }, () => this.loadMarginBy()) },
-  onMbMonth(e) { this.setData({ mb_month: e.detail.value }) },
   loadMarginBy() {
     const d = this.data
     const m = String(d.mb_month || '').trim()
