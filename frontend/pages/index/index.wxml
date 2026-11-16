@@ -1439,6 +1439,29 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
       </block>
+      <view class="tip">💸 损失台账（这个月/这一年，亏掉的和少赚的都在哪）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空看整年）" value="{{lb_month}}" bindinput="onLbMonth" bindconfirm="loadLossBook"/>
+        <button class="btn half" size="mini" bindtap="loadLossBook">看损失</button>
+      </view>
+      <block wx:if="{{lb}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{lb.period}}</text><text class="amt red">合计影响 ¥{{lb.total}}</text></view>
+          <view class="row2">实亏 ¥{{lb.real_loss}}（收不回来的）· 少赚 ¥{{lb.missed_profit}}（本来能多挣的）</view>
+          <view class="row2" wx:for="{{lb.by_kind}}" wx:key="k">{{item.label}}：{{item.count}} 笔 ¥{{item.amount}}</view>
+        </view>
+        <view class="box" wx:if="{{lb.items.length}}">
+          <view class="tip">逐笔（按影响金额从大到小）</view>
+          <view class="item" wx:for="{{lb.items}}" wx:key="date">
+            <view class="row1"><text class="nm">{{item.date}} {{item.party}}</text><text class="amt red">¥{{item.amount}}</text></view>
+            <view class="row2">{{item.kind_label}}：{{item.what}}</view>
+          </view>
+        </view>
+        <view class="box" wx:if="{{lb.advice.length}}">
+          <view class="aline {{item.tone}}" wx:for="{{lb.advice}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="frow"><button class="btn" size="mini" bindtap="copyLossBook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeLossBook">收起</button></view>
+      </block>
       <view class="tip">📅 全年 × 客户（这一年从谁那儿赚的、谁在拖钱）</view>
       <view class="frow">
         <input class="inp half" placeholder="年份 YYYY（留空今年）" value="{{yc_year}}" bindinput="onYcYear" bindconfirm="loadYearCust"/>

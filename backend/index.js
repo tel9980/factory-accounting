@@ -3932,6 +3932,89 @@ app.get('/month-brief', async (c) => {
   return c.json(out)
 })
 
+// 损失台账：这一年/这一个月亏掉的和少赚的
+app.get('/loss-book', async (c) => {
+  const db = c.env.DB
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const mon = String(c.req.query('month') || '').slice(0, 7)
+  const w = mon ? "substr(created_at,1,7)=?" : "substr(created_at,1,4)=?"
+  const bindv = mon || y
+  const { results: wos } = await db.prepare(
+    "SELECT * FROM writeoffs WHERE ref_type='order' AND " + w + ' ORDER BY created_at'
+  ).bind(bindv).all()
+  const { results: cheap } = await db.prepare(
+    'SELECT id, customer, item_name, price, COALESCE(cost,0) AS cost, created_at FROM orders WHERE ' + w + ' AND price >= 1000 AND COALESCE(cost,0) > 0 AND (price - COALESCE(cost,0)) * 100 < price * 15 ORDER BY (price - COALESCE(cost,0)) * 100.0 / price'
+  ).bind(bindv).all()
+  const { results: allord } = await db.prepare(
+    'SELECT customer, item_name, price, created_at FROM orders WHERE price > 0'
+  ).all()
+  const avgMap = {}
+  for (const o of allord) {
+    const k = String(o.customer) + '|' + String(o.item_name || '')
+    const a = avgMap[k] = avgMap[k] || { s: 0, n: 0 }
+    a.s += num(o.price); a.n += 1
+  }
+  const items = []
+  for (const x of wos) {
+    items.push({ kind: 'bad_debt', kind_label: '实亏·坏账核销', date: String(x.created_at).slice(0, 10), party: x.party || '', what: x.reason || '收不回来，核销', amount: round2(num(x.amount)), note: '', ref: 'order:' + x.ref_id })
+  }
+  for (const x of cheap) {
+    const pr = num(x.price), c = num(x.cost)
+    const gap = round2(pr * 0.15 - (pr - c))
+    items.push({ kind: 'low_margin', kind_label: '少赚·毛利过低', date: String(x.created_at).slice(0, 10), party: x.customer, what: `${x.item_name || '加工'} ¥${pr}（成本 ¥${c}，毛利率 ${round2((pr - c) / pr * 100)}%）`, amount: gap, note: '按 15% 毛利率算少赚的部分', ref: 'order:' + x.id })
+  }
+  // 被压价：低于同客户同产品历史均价 15% 以上
+  const cut = []
+  for (const o of allord) {
+    const k = String(o.customer) + '|' + String(o.item_name || '')
+    const a = avgMap[k]
+    if (!a || a.n < 3) continue
+    if (!(mon ? String(o.created_at).slice(0, 7) === mon : String(o.created_at).slice(0, 4) === y)) continue
+    const avg = (a.s - num(o.price)) / (a.n - 1)
+    if (num(o.price) < avg * 0.85 && avg > 0) {
+      cut.push({ date: String(o.created_at).slice(0, 10), party: o.customer, item: o.item_name || '加工', price: round2(num(o.price)), avg: round2(avg), amount: round2(avg * 0.85 - num(o.price)) })
+    }
+  }
+  for (const x of cut) {
+    items.push({ kind: 'price_cut', kind_label: '少赚·被压价', date: x.date, party: x.party, what: `${x.item} 做 ¥${x.price}（这家这个产品平时 ¥${x.avg}）`, amount: x.amount, note: '按平时价 85 折算少收的部分', ref: '' })
+  }
+  items.sort((a, b) => num(b.amount) - num(a.amount))
+  const byKind = {}
+  for (const x of items) {
+    const k = byKind[x.kind] = byKind[x.kind] || { k: x.kind, label: x.kind_label, amount: 0, count: 0 }
+    k.amount = round2(k.amount + num(x.amount)); k.count += 1
+  }
+  const total = round2(items.reduce((a, x) => a + num(x.amount), 0))
+  const real = round2(items.filter((x) => x.kind === 'bad_debt').reduce((a, x) => a + num(x.amount), 0))
+  const missed = round2(total - real)
+  const advice = []
+  if (!items.length) advice.push({ tone: 'ok', text: `${mon || y + ' 年'}没有发现亏钱或明显少赚的单子 👍` })
+  else {
+    advice.push({ tone: real > 0 ? 'bad' : 'warn', text: `${mon || y + ' 年'}：实亏 ¥${real}（收不回来的），少赚 ¥${missed}（本来能多挣的），合计影响 ¥${total}。` })
+    const top = Object.values(byKind).sort((a, b) => b.amount - a.amount)[0]
+    if (top) advice.push({ tone: 'warn', text: `最多的是「${top.label}」：${top.count} 笔，¥${top.amount}。` })
+    const p = items.filter((x) => x.kind === 'price_cut')[0]
+    if (p) advice.push({ tone: 'warn', text: `被压价最狠的是 ${p.party} 的${p.what}——同一个活别人给多少，可以拿来谈。` })
+    const bd = items.filter((x) => x.kind === 'bad_debt')[0]
+    if (bd) advice.push({ tone: 'bad', text: `${bd.party} 有 ¥${bd.amount} 已经核销成坏账。以后这家先收定金再开工。` })
+    const lm = items.filter((x) => x.kind === 'low_margin')
+    if (lm.length >= 3) advice.push({ tone: 'warn', text: `毛利低于 15% 的单子有 ${lm.length} 张，接单前先算一下料和工，别为了忙而白干。` })
+  }
+  const text = [
+    `【${(await getTitle(db)).title}】${mon || y + ' 年'} 损失台账`,
+    `实亏 ¥${real}　少赚 ¥${missed}　合计影响 ¥${total}`,
+    ...Object.values(byKind).map((k) => `· ${k.label}：${k.count} 笔 ¥${k.amount}`),
+    ...items.slice(0, 8).map((x) => `${x.date} ${x.party}　${x.what}　影响 ¥${x.amount}`),
+    ...advice.slice(1).map((x) => '· ' + x.text)
+  ].join('\n')
+  return c.json({
+    ok: true, year: y, month: mon || '', period: mon || y + ' 年',
+    total, real_loss: real, missed_profit: missed,
+    by_kind: Object.values(byKind).sort((a, b) => b.amount - a.amount),
+    items: items.slice(0, 40), count: items.length, advice, text
+  })
+})
+
 // 全年 × 客户 对照：这一年从谁那儿赚的、谁在拖钱
 app.get('/year-customers', async (c) => {
   const db = c.env.DB
