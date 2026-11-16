@@ -156,6 +156,11 @@
         <text class="mwside">›</text>
       </view>
     </view>
+    <view class="card" wx:if="{{md}}">
+      <view class="card-h">我今天干了啥<text class="card-n" bindtap="copyMyDay">复制</text></view>
+      <view class="tip">{{md.text}}</view>
+      <view class="aline warn" wx:for="{{md.tips}}" wx:key="*this">{{item}}</view>
+    </view>
     <view class="card" bindtap="openHelp"><view class="card-h">❓ 怎么用（一页纸）<text class="tip">新接手的人看这个 ›</text></view></view>
     <view class="issuebar" wx:if="{{issue_count>0}}" bindtap="showIssue">⚠ 数据自检发现 {{issue_count}} 处对不上（点开看）</view>
     <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
@@ -1144,6 +1149,16 @@
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
+      <button class="btn ghost" size="mini" wx:if="{{role!='staff'}}" bindtap="loadStaffAct">👀 员工最近记了什么</button>
+      <view wx:if="{{sad}}">
+        <view class="tip">{{sad.advice}}</view>
+        <view class="item" wx:for="{{sad.rows}}" wx:key="index">
+          <view class="row1"><text class="nm">{{item.date}} {{item.time}} · {{item.action}}</text><text class="amt">{{item.target}}</text></view>
+          <view class="row2">{{item.detail}}</view>
+        </view>
+        <view class="tip" wx:if="{{!sad.rows.length}}">最近 7 天没有员工操作。</view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStaffAct">收起</button></view>
+      </view>
       <view class="tip" wx:if="{{role=='staff'}}">你现在用的是员工口令：能记账、收款付款、查欠款；毛利、删单、改设置需要老板口令。</view>
     </view>
     <view class="form">

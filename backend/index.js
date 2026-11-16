@@ -104,15 +104,17 @@ const intoTrash = async (db, type, refId, obj, batch) => {
   await db.prepare('INSERT INTO trash (type, ref_id, data, batch, deleted_at) VALUES (?,?,?,?,?)')
     .bind(type, refId, JSON.stringify(obj), batch, now()).run()
 }
-const logAudit = async (db, action, target, detail, ref) => {
+const logAudit = async (db, action, target, detail, ref, by) => {
   try {
     const [rt, rid] = String(ref || '').split(':')
-    await db.prepare('INSERT INTO audit_log (action, target, detail, ref_type, ref_id, created_at) VALUES (?,?,?,?,?,?)')
-      .bind(action, target, detail || '', rt || null, rid || null, now()).run()
+    await db.prepare('INSERT INTO audit_log (action, target, detail, ref_type, ref_id, by, created_at) VALUES (?,?,?,?,?,?,?)')
+      .bind(action, target, detail || '', rt || null, rid || null, by || null, now()).run()
   } catch (e) {
     console.error('audit log failed', e)
   }
 }
+// 谁动的手：员工口令操作记为「员工」，老板口令或未登录记为「老板」
+const act = (c) => ((c && c.get && c.get('role') === 'staff') ? '员工' : '老板')
 // 把「改了什么」拼成人话：金额 3000→3200；客户 张三→李四
 const diffText = (pairs) => pairs
   .filter(([, a, b]) => String(a == null ? '' : a) !== String(b == null ? '' : b))
@@ -214,6 +216,7 @@ app.use('*', async (c, next) => {
       (/^\/writeoffs/.test(path) && m !== 'GET') ||
       (/^\/assets/.test(path) && m !== 'GET') ||
       (/^\/trash/.test(path) && m !== 'GET')
+      || /^\/staff-activity/.test(path)
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
   c.set('role', role)
@@ -1240,7 +1243,7 @@ app.post('/import-rows', async (c) => {
     if (type === 'reimb') return [r.party, num(r.amount), r.category || '', r.item || '', date]
     return [r.party, num(r.amount), date]
   })
-  const r = await importRows(db, type, arr, { confirmDup: !!b.confirm_dup })
+  const r = await importRows(db, type, arr, { confirmDup: !!b.confirm_dup, by: act(c) })
   const n = (r && typeof r === 'object') ? num(r.imported) : num(r)
   const locked = (r && typeof r === 'object') ? num(r.skipped_locked) : 0
   const dup = (r && typeof r === 'object' && Array.isArray(r.dup)) ? r.dup : []
@@ -2672,7 +2675,7 @@ app.post('/import-xlsx', async (c) => {
     if (!list.length) return c.json({ error: '这个表格里没认出「单位 + 金额」两列' }, 400)
     return c.json({ ok: true, recon: await reconcileCore(c.env.DB, type === 'recon_ap' ? 'ap' : 'ar', list) })
   }
-  const r = await importRows(c.env.DB, type, rows, { confirmDup: !!body.confirm_dup })
+  const r = await importRows(c.env.DB, type, rows, { confirmDup: !!body.confirm_dup, by: act(c) })
   const dup = (r && Array.isArray(r.dup)) ? r.dup : []
   await logImport(c.env.DB, type, r, 'excel')
   return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked), dup, dup_count: dup.length, total: num(r && r.total) })
@@ -3605,7 +3608,7 @@ app.post('/orders', async (c) => {
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
   await opMark(db, cid, 'order', 0)
-  await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
+  await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`, '', act(c))
   // 超信用额度提醒（不拦，只提醒）
   let warn = null
   const lim = await db.prepare('SELECT * FROM credit_limits WHERE party=?').bind(customer).first()
@@ -3640,7 +3643,7 @@ app.post('/orders/:id/receive', async (c) => {
       .bind(id, a, `收 ${o.customer} ${o.item_name}`, acc, normDate(date))
   ])
   await opMark(db, cid, 'receive', id)
-  await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`)
+  await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`, '', act(c))
   const checks = []
   const d0 = String(normDate(date)).slice(0, 10)
   if (d0 && (o.created_at || '').slice(0, 10) && d0 < (o.created_at || '').slice(0, 10)) checks.push({ k: 'pay_early', text: `收款日期（${d0}）比开单日（${(o.created_at || '').slice(0, 10)}）还早，这单是先收钱后开单吗？不是的话改一下日期。` })
@@ -3677,7 +3680,7 @@ app.post('/receive-batch', async (c) => {
         .bind(o.id, use, `收 ${name} ${o.item_name}${remark ? ' ' + remark : ''}`, acc, d)
     ])
   }
-  await logAudit(db, '批量收款', name, `${name} 共收 ¥${total}，核销 ${detail.length} 张单`)
+  await logAudit(db, '批量收款', name, `${name} 共收 ¥${total}，核销 ${detail.length} 张单`, '', act(c))
   return c.json({ ok: true, total: round2(total), used: detail, rest: round2(left) })
 })
 
@@ -3711,7 +3714,7 @@ app.post('/pay-batch', async (c) => {
         .bind(p.id, use, `付 ${name} ${p.remark || ''}${remark ? ' ' + remark : ''}`, acc, d)
     ])
   }
-  await logAudit(db, '整户付款', name, `${name} 共付 ¥${total}，核销 ${detail.length} 笔`)
+  await logAudit(db, '整户付款', name, `${name} 共付 ¥${total}，核销 ${detail.length} 笔`, '', act(c))
   return c.json({ ok: true, total: round2(total), used: detail, rest: round2(left) })
 })
 
@@ -3791,7 +3794,7 @@ app.post('/payables', async (c) => {
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
     .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created)) || null, created).run()
   await opMark(db, cid, 'payable', 0)
-  await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
+  await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`, '', act(c))
   return c.json(Object.assign({ ok: true }, checks.length ? { checks } : {}))
 })
 
@@ -3817,7 +3820,7 @@ app.post('/payables/:id/pay', async (c) => {
       .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, acc, normDate(date))
   ])
   await opMark(db, cid, 'pay', id)
-  await logAudit(db, '付款', p.supplier, `${p.supplier} 付 ¥${a}`)
+  await logAudit(db, '付款', p.supplier, `${p.supplier} 付 ¥${a}`, '', act(c))
   return c.json({ ok: true })
 })
 
@@ -3841,7 +3844,7 @@ app.post('/expenses', async (c) => {
   await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,?,1,?)")
     .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, acc, created).run()
   await opMark(db, cid, 'expense', 0)
-  await logAudit(db, '新增支出', category || '其他', `${category || '其他'} ¥${num(amount)}`)
+  await logAudit(db, '新增支出', category || '其他', `${category || '其他'} ¥${num(amount)}`, '', act(c))
   return c.json({ ok: true })
 })
 
@@ -4634,7 +4637,7 @@ app.post('/quick', async (c) => {
   } else {
     return c.json({ error: '没识别出收/付/分类，请写如：收张老板5000、付货款3000、工资5000' }, 400)
   }
-  await logAudit(db, '一句话记账', '', summary)
+  await logAudit(db, '一句话记账', '', summary, '', act(c))
   return c.json({ ok: true, summary })
 })
 
@@ -4755,7 +4758,7 @@ async function importRows(db, type, rows, opts) {
       }
     }
   }
-  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`)
+  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`, '', o.by)
   return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length, ids, total: round2(total), batch }
 }
 
@@ -5937,7 +5940,7 @@ app.post('/import', async (c) => {
   const lines = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean)
   if (!lines.length) return c.json({ error: '没有可导入的内容' }, 400)
   const rows = lines.map((row) => row.split(/[,，\t]/).map((s) => s.trim()))
-  const rr = await importRows(c.env.DB, type, rows, { confirmDup: !!cd })
+  const rr = await importRows(c.env.DB, type, rows, { confirmDup: !!cd, by: act(c) })
   await logImport(c.env.DB, type, rr, 'paste')
   return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count), total: num(rr && rr.total), batch: (rr && rr.batch) || '' })
 })
@@ -7688,6 +7691,72 @@ app.delete('/bank-flows/:id', async (c) => {
 })
 
 // 提醒汇总：把该管的事一次列出来
+// 我今天干了啥（员工也看得到）：今天记了几笔、收了多少钱、本月还有多少没收
+app.get('/my-day', async (c) => {
+  const db = c.env.DB
+  const role = c.get('role') || 'owner'
+  const day = String(c.req.query('date') || '').slice(0, 10) || now().slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return c.json({ error: '日期格式：YYYY-MM-DD' }, 400)
+  const one = (sql, ...b) => db.prepare(sql).bind(...b).first().catch(() => ({ n: 0, s: 0 }))
+  const [ar, ap, ex, inc, mUnpaid, nodue] = await Promise.all([
+    one('SELECT COUNT(*) n, COALESCE(SUM(price),0) s FROM orders WHERE substr(created_at,1,10)=?', day),
+    one('SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM payables WHERE substr(created_at,1,10)=?', day),
+    one("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM ledger WHERE substr(created_at,1,10)=? AND direction='out' AND cash=1 AND ref_type IN ('expense','fixed')", day),
+    one("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM ledger WHERE substr(created_at,1,10)=? AND direction='in' AND cash=1", day),
+    one('SELECT COUNT(*) n, COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) s FROM orders WHERE substr(created_at,1,7)=? AND price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005', day.slice(0, 7)),
+    one("SELECT COUNT(*) n FROM orders WHERE substr(created_at,1,10)=? AND (due_date IS NULL OR due_date='')", day)
+  ])
+  const R = (x) => ({ n: num(x && x.n), s: round2(num(x && x.s)) })
+  const a = R(ar), b = R(ap), e = R(ex), i = R(inc), mu = R(mUnpaid)
+  const parts = []
+  if (a.n) parts.push(`记应收 ${a.n} 张 ¥${a.s}`)
+  if (b.n) parts.push(`记应付 ${b.n} 笔 ¥${b.s}`)
+  if (e.n) parts.push(`记支出 ${e.n} 笔 ¥${e.s}`)
+  if (i.n) parts.push(`收钱 ${i.n} 笔 ¥${i.s}`)
+  const text = parts.length
+    ? `今天（${day.slice(5)}）你${parts.join('、')}。`
+    : `今天（${day.slice(5)}）还没记东西。有活就记一笔，一句话也行：「收张老板3000」。`
+  const tips = []
+  if (mu.n && mu.s > 0) tips.push(`本月的单还有 ${mu.n} 张没结清，共 ¥${mu.s}——到日子记得去收。`)
+  if (nodue.n) tips.push(`今天有 ${nodue.n} 张单没写约定收款日，到点不会提醒你去收；能定个日子就填上。`)
+  if (!e.n && i.n) tips.push('收了钱记得顺手记一下花出去的（工资、水电、运费），月底利润才准。')
+  return c.json({ ok: true, day, role, ar: a, ap: b, exp: e, income: i, month_unpaid: mu, nodue: { n: nodue.n ? num(nodue.n) : 0 }, text, tips })
+})
+
+// 老板看：员工这几天记了什么（按操作日志里的「员工」标记）
+app.get('/staff-activity', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(Math.max(num(c.req.query('days')) || 7, 1), 90)
+  const since = addDaysIso(now().slice(0, 10), -days)
+  const [rows, byDay, byAct, staffCfg] = await Promise.all([
+    db.prepare("SELECT action, target, detail, created_at FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? ORDER BY id DESC LIMIT 120").bind(since).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT substr(created_at,1,10) d, COUNT(*) n FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? GROUP BY d ORDER BY d DESC").bind(since).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT action, COUNT(*) n FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? GROUP BY action ORDER BY n DESC LIMIT 8").bind(since).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT value AS v FROM settings WHERE key='staff_key'").first().catch(() => null)
+  ])
+  // created_at 存的是 UTC，界面上要显示北京时间（+8 小时）
+  const local = (t) => {
+    const d = new Date(String(t || '').replace(' ', 'T'))
+    if (isNaN(d.getTime())) return String(t || '')
+    const x = new Date(d.getTime() + 8 * 3600 * 1000).toISOString()
+    return x.slice(0, 10) + ' ' + x.slice(11, 16)
+  }
+  const list = (rows.results || []).map((r) => {
+    const lt = local(r.created_at)
+    return { date: lt.slice(0, 10), time: lt.slice(11, 16), action: r.action, target: r.target || '', detail: r.detail || '' }
+  })
+  const cnt = list.length
+  const last = list[0] ? list[0].date + ' ' + list[0].time : ''
+  const enabled = !!(staffCfg && String(staffCfg.v || ''))
+  const advice = !enabled
+    ? '还没设员工口令，所以这些操作都是老板自己记的。要给家人/伙计用，去「设置 → 员工口令」设一个。'
+    : (cnt ? `最近 ${days} 天员工记了 ${cnt} 笔${last ? '，最后一次 ' + last : ''}。` : `最近 ${days} 天没有员工操作记录。`)
+  return c.json({ ok: true, days, since, count: cnt, last, rows: list,
+    by_day: (byDay.results || []).map((x) => ({ date: x.d, cnt: num(x.n) })),
+    by_action: (byAct.results || []).map((x) => ({ action: x.action, cnt: num(x.n) })),
+    staff_enabled: enabled, advice })
+})
+
 app.get('/reminders', async (c) => {
   const db = c.env.DB
   const today = now().slice(0, 10)

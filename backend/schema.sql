@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail TEXT,
   ref_type TEXT,           -- 挂在哪种单据上：order / payable（老库用 ALTER TABLE 补）
   ref_id TEXT,
+  by TEXT,                 -- 谁动的手：老板 / 员工（老库用 ALTER TABLE 补）
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
