@@ -103,7 +103,25 @@
       <view class="cfwarn" wx:if="{{cf.risk}}">⚠ 按现在的收付，{{cf.min_date}} 会缺钱，最低见底 ¥{{cf.min_balance}}。提前催收或把付款往后挪。</view>
       <view class="cfwarn ok" wx:elif="{{cf.inflow+cf.outflow>0}}">✔ 未来 {{cf.days}} 天不会缺钱</view>
     </view>
+    <view class="goalcard" wx:if="{{role!='staff' && tgt}}" bindtap="openTargetEdit">
+      <view class="goalh">本月目标　<text class="cfl">{{tgt.has_target ? '点此改目标' : '还没设目标，点这里设一个'}}</text></view>
+      <block wx:if="{{tgt.has_target}}">
+        <view class="goalbar"><view class="goalbar-in {{tgt.receive_pct>=100?'done':''}}" style="width:{{tgt.receive_pct>100?100:(tgt.receive_pct<0?0:tgt.receive_pct)}}%"></view></view>
+        <view class="goalrow"><text>已收 {{tgt.receive}} / 目标 {{tgt.receive_target}}（{{tgt.receive_pct}}%）</text><text class="{{tgt.gap>0?'red':'green'}}">{{tgt.gap>0 ? '还差 '+tgt.gap : '已达成'}}</text></view>
+        <view class="goalsub">本月接单 {{tgt.order_add}}{{tgt.order_target>0 ? ' / 目标 '+tgt.order_target : ''}}　{{tgt.advice}}</view>
+      </block>
+      <view class="goalsub" wx:else>{{tgt.receive}} 元已收，{{tgt.order_add}} 元接单。设个目标，首页就有进度条。</view>
+    </view>
     <view class="topcust" wx:if="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}</view>
+    <view class="goalform" wx:if="{{tgt_edit}}">
+      <view class="tip">月度目标（留空或填 0 = 取消）</view>
+      <input class="inp" placeholder="这个月想收多少钱" type="digit" value="{{tgt_receive}}" bindinput="onTgtReceive"/>
+      <input class="inp" placeholder="这个月想接多少单（可不填）" type="digit" value="{{tgt_order}}" bindinput="onTgtOrder"/>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="saveTarget">保存</button>
+        <button class="btn ghost" size="mini" bindtap="closeTargetEdit">取消</button>
+      </view>
+    </view>
 
     <view class="card">
       <view class="card-h">常用</view>
@@ -688,6 +706,38 @@
         <view class="prev-h">异常提醒　{{ano.count}} 条（{{ano.month}}）</view>
         <view class="tip" wx:if="{{!ano.count}}">没发现异常：费用没冒尖、欠款没突变、成本都填了。</view>
         <view class="aline {{item.tone}}" wx:for="{{ano.list}}" wx:key="text">{{item.text}}</view>
+      </view>
+    </view>
+    <view class="form">
+      <view class="tip">经营趋势：最近几个月净利一眼看</view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="loadTrend">📈 看最近 6 个月</button>
+        <button class="btn ghost" size="mini" bindtap="loadPaySpeed">🐢 谁付钱最慢</button>
+      </view>
+      <view wx:if="{{trend}}">
+        <view class="prev-h">每月净利（红=亏）　合计 {{trend.total}}　月均 {{trend.avg}}</view>
+        <view class="trow" wx:for="{{trend.months}}" wx:key="m">
+          <text class="tlabel">{{item.label}}</text>
+          <view class="tbar"><view class="{{item.neg?'tbar-in bad':'tbar-in'}}" style="width:{{item.bar_w}}%"></view></view>
+          <text class="tval {{item.neg?'red':'green'}}">{{item.profit}}</text>
+        </view>
+        <view class="aline {{item.tone}}" wx:for="{{trend.advice}}" wx:key="text">{{item.text}}</view>
+      </view>
+      <view wx:if="{{ps}}">
+        <view class="prev-h">回款速度　平均 {{ps.avg_days}} 天（只算已结清的）</view>
+        <view class="prev-row" wx:for="{{ps.fast}}" wx:key="party">
+          <text class="prev-t">✔ {{item.party}}</text>
+          <text class="prev-n">平均 {{item.avg_days}} 天 · 已结 {{item.done_amt}} 元</text>
+        </view>
+        <view class="prev-row" wx:for="{{ps.slow}}" wx:key="party">
+          <text class="prev-t">🐢 {{item.party}}</text>
+          <text class="prev-n">平均 {{item.avg_days}} 天 · 还欠 {{item.unpaid_amt}}</text>
+        </view>
+        <view class="prev-row" wx:for="{{ps.never}}" wx:key="party">
+          <text class="prev-t">✖ {{item.party}}</text>
+          <text class="prev-n">一笔没结清 · 欠 {{item.unpaid_amt}} · 等了 {{item.wait_days}} 天</text>
+        </view>
+        <view class="aline {{item.tone}}" wx:for="{{ps.advice}}" wx:key="text">{{item.text}}</view>
       </view>
     </view>
     <view class="form">

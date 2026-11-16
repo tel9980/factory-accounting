@@ -40,6 +40,7 @@ Page({
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
     pc_month: '', pc: null, rv_month: '', rv: null, ano: null, ys_year: '', ys: null,
+    tgt: null, tgt_edit: false, tgt_receive: '', tgt_order: '', trend: null, ps: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
@@ -190,6 +191,7 @@ Page({
     this.loadReminders()
     this.loadOnboard()
     this.loadAccounts()
+    this.loadTarget()
     this.loadCategories()
     this.loadAdvances()
   },
@@ -1892,6 +1894,48 @@ Page({
   },
   onReportYear(e) { this.setData({ report_year: e.detail.value }) },
   onPcMonth(e) { this.setData({ pc_month: e.detail.value }) },
+  loadTarget() {
+    this.req({
+      url: API_BASE + '/target',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ tgt: d }) },
+      fail: () => {}
+    })
+  },
+  openTargetEdit() {
+    const t = this.data.tgt || {}
+    this.setData({ tgt_edit: true, tgt_receive: t.receive_target ? String(t.receive_target) : '', tgt_order: t.order_target ? String(t.order_target) : '' })
+  },
+  closeTargetEdit() { this.setData({ tgt_edit: false }) },
+  onTgtReceive(e) { this.setData({ tgt_receive: e.detail.value }) },
+  onTgtOrder(e) { this.setData({ tgt_order: e.detail.value }) },
+  saveTarget() {
+    const r = Number(this.data.tgt_receive || 0)
+    const o = Number(this.data.tgt_order || 0)
+    if (!(r >= 0) || !(o >= 0)) return wx.showToast({ title: '填数字', icon: 'none' })
+    this.req({
+      url: API_BASE + '/target', method: 'POST', data: { receive: r, order_add: o },
+      success: () => {
+        this.setData({ tgt_edit: false })
+        wx.showToast({ title: r === 0 && o === 0 ? '目标已取消' : '目标设好了', icon: 'none' })
+        this.loadTarget(); this.loadDashboard()
+      },
+      fail: () => wx.showToast({ title: '存不了，再试一次', icon: 'none' })
+    })
+  },
+  loadTrend() {
+    this.req({
+      url: API_BASE + '/trend?months=6',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ trend: d }) },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadPaySpeed() {
+    this.req({
+      url: API_BASE + '/pay-speed',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ ps: d }) },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
   onRvMonth(e) { this.setData({ rv_month: e.detail.value }) },
   onYsYear(e) { this.setData({ ys_year: e.detail.value }) },
   loadReportView() {

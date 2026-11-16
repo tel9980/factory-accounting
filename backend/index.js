@@ -2150,6 +2150,7 @@ const accrualAdjust = async (db, m) => {
 }
 
 app.get('/dashboard', async (c) => {
+  const tgtRow = await (c.env.DB.prepare('SELECT receive, order_add FROM targets WHERE month=?').bind(now().slice(0, 7)).first().catch(() => null))
   const db = c.env.DB
   const m = month()
   const ar = await db.prepare('SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS total FROM orders WHERE paid + COALESCE(written_off,0) < price').first()
@@ -2232,7 +2233,11 @@ app.get('/dashboard', async (c) => {
     budget_over: budgetOver,
     budget_alert_count: budgetOver.length,
     cash_balance: cashBal,
-    loan_open: round2(num((await db.prepare('SELECT COALESCE(SUM(amount-used-returned),0) t FROM loans').first()).t))
+    loan_open: round2(num((await db.prepare('SELECT COALESCE(SUM(amount-used-returned),0) t FROM loans').first()).t)),
+    target_receive: round2(num((tgtRow && tgtRow.receive))),
+    target_order: round2(num((tgtRow && tgtRow.order_add))),
+    target_pct: (tgtRow && num(tgtRow.receive) > 0) ? Math.round(num(inc.total) / num(tgtRow.receive) * 1000) / 10 : null,
+    target_gap: (tgtRow && num(tgtRow.receive) > 0) ? round2(num(tgtRow.receive) - num(inc.total)) : null
   })
 })
 
@@ -3764,6 +3769,125 @@ async function packSheets(db, m) {
   sheets.push({ name: '应收到期表', rows: [['单号', '客户', '产品', '未结', '到期日', '状态']].concat(ds.rows.map((x) => [x.id, x.party, x.item, x.left, x.due || '', x.state])) })
   return sheets
 }
+
+// ===== 半年趋势：每月接单/毛利/支出/净利，给前端画柱状图 =====
+app.get('/trend', async (c) => {
+  const db = c.env.DB
+  const n = Math.min(24, Math.max(1, num(c.req.query('months')) || 6))
+  const base = now().slice(0, 7)
+  const rows = []
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(base + '-01T00:00:00.000Z')
+    d.setUTCMonth(d.getUTCMonth() - i)
+    const m = d.toISOString().slice(0, 7)
+    const o = await db.prepare('SELECT COALESCE(SUM(price),0) a, COALESCE(SUM(COALESCE(cost,0)),0) c FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
+    const e = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='out' AND cash=1 AND ref_type!='transfer' AND substr(created_at,1,7)=?").bind(m).first()
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+    const add = round2(num(o && o.a))
+    const cost = round2(num(o && o.c))
+    const expense = round2(num(e && e.a))
+    rows.push({ m, label: num(m.slice(5, 7)) + '月', order_add: add, cost, gross: round2(add - cost), expense, profit: round2(add - cost - expense), cash_in: round2(num(inc && inc.a)) })
+  }
+  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.profit)))
+  rows.forEach((r) => { r.bar_w = Math.max(2, Math.round(Math.abs(r.profit) / maxAbs * 100)); r.neg = r.profit < 0 })
+  const best = rows.slice().sort((a, b) => b.profit - a.profit)[0]
+  const worst = rows.slice().sort((a, b) => a.profit - b.profit)[0]
+  const total = round2(rows.reduce((a, r) => a + r.profit, 0))
+  const active = rows.filter((r) => r.order_add > 0 || r.expense > 0)
+  const avg = active.length ? round2(total / active.length) : 0
+  const last = rows[rows.length - 1]
+  const prev = rows.length > 1 ? rows[rows.length - 2] : null
+  let trend = '平'
+  if (prev && Math.abs(last.profit - prev.profit) > Math.max(200, Math.abs(prev.profit) * 0.15)) trend = last.profit > prev.profit ? '升' : '降'
+  const advice = []
+  if (last.neg) advice.push({ tone: 'bad', text: '这个月是亏的（' + last.profit + ' 元），先看支出是不是哪项冒尖了。' })
+  else if (last.profit > 0) advice.push({ tone: 'ok', text: '这个月净利 ' + last.profit + ' 元，' + (trend === '升' ? '比上月好' : trend === '降' ? '比上月差' : '和上月差不多') + '。' })
+  if (active.length >= 3) {
+    const down = rows.filter((r, i) => i > 0 && r.profit < rows[i - 1].profit - 200)
+    if (down.length >= 2) advice.push({ tone: 'warn', text: '最近 ' + active.length + ' 个月里有 ' + down.length + ' 次下滑，留意是不是接单少了还是支出涨了。' })
+  }
+  return c.json({ ok: true, months: rows, total, avg, best, worst, trend, active_count: active.length, advice })
+})
+
+// ===== 收款速度：谁付钱最快、谁最慢 =====
+app.get('/pay-speed', async (c) => {
+  const db = c.env.DB
+  const paid = (await db.prepare(`SELECT o.customer AS party, COUNT(*) cnt,
+      COALESCE(AVG(julianday(p.last_pay) - julianday(substr(o.created_at,1,10))),0) avg_days,
+      COALESCE(SUM(o.price),0) amt
+    FROM orders o JOIN (SELECT ref_id, MAX(substr(created_at,1,10)) last_pay FROM ledger WHERE ref_type='order' AND direction='in' GROUP BY ref_id) p ON p.ref_id=o.id
+    WHERE o.price - o.paid - COALESCE(o.written_off,0) <= 0.005 GROUP BY o.customer`).all()).results || []
+  const unpaid = (await db.prepare(`SELECT customer AS party, COUNT(*) cnt, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) left_amt,
+      MIN(julianday('now') - julianday(substr(created_at,1,10))) min_wait, MAX(julianday('now') - julianday(substr(created_at,1,10))) max_wait
+    FROM orders WHERE price-paid-COALESCE(written_off,0) > 0.005 GROUP BY customer`).all()).results || []
+  const umap = {}
+  unpaid.forEach((u) => { umap[u.party] = u })
+  const list = paid.map((r) => {
+    const u = umap[r.party]
+    return {
+      party: r.party || '', done_cnt: num(r.cnt), avg_days: Math.round(num(r.avg_days)),
+      done_amt: round2(num(r.amt)), unpaid_cnt: u ? num(u.cnt) : 0, unpaid_amt: u ? round2(num(u.left_amt)) : 0,
+      wait_days: u ? Math.round(num(u.max_wait)) : 0
+    }
+  })
+  const onlyUnpaid = unpaid.filter((u) => !list.some((x) => x.party === u.party)).map((u) => ({
+    party: u.party || '', done_cnt: 0, avg_days: null, done_amt: 0, unpaid_cnt: num(u.cnt), unpaid_amt: round2(num(u.left_amt)), wait_days: Math.round(num(u.max_wait))
+  }))
+  const all = list.concat(onlyUnpaid)
+  const fast = all.filter((x) => x.avg_days !== null).sort((a, b) => a.avg_days - b.avg_days).slice(0, 5)
+  const slow = all.filter((x) => x.avg_days !== null).sort((a, b) => b.avg_days - a.avg_days).slice(0, 5)
+  const never = all.filter((x) => x.avg_days === null).sort((a, b) => b.unpaid_amt - a.unpaid_amt)
+  const avgAll = fast.length || slow.length ? Math.round(all.filter((x) => x.avg_days !== null).reduce((a, x) => a + x.avg_days, 0) / all.filter((x) => x.avg_days !== null).length) : 0
+  const advice = []
+  if (never.length) advice.push({ tone: 'bad', text: '有 ' + never.length + ' 家一笔都没结清过（合计欠 ' + round2(never.reduce((a, x) => a + x.unpaid_amt, 0)) + ' 元），先盯这些。' })
+  if (slow.length && slow[0].avg_days >= 30) advice.push({ tone: 'warn', text: slow[0].party + ' 平均要 ' + slow[0].avg_days + ' 天才付钱，最好改成先款后货或设账期上限。' })
+  if (avgAll && avgAll <= 15) advice.push({ tone: 'ok', text: '平均 ' + avgAll + ' 天回款，现金周转算健康。' })
+  return c.json({ ok: true, fast, slow, never, avg_days: avgAll, count: all.length, advice })
+})
+
+// ===== 月度目标：这个月想收多少 / 想接多少单 =====
+app.get('/target', async (c) => {
+  const db = c.env.DB
+  const m = (c.req.query('month') || now().slice(0, 7))
+  const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
+  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+  const add = await db.prepare('SELECT COALESCE(SUM(price),0) a FROM orders WHERE substr(created_at,1,7)=?').bind(m).first()
+  const receive = round2(num(inc && inc.a))
+  const orderAdd = round2(num(add && add.a))
+  const tr = round2(num(t && t.receive))
+  const ta = round2(num(t && t.order_add))
+  const today = new Date()
+  const isCur = m === now().slice(0, 7)
+  const dim = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).getUTCDate()
+  const daysLeft = isCur ? Math.max(0, dim - today.getUTCDate() + 1) : 0
+  const pct = (v, tv) => tv > 0 ? Math.round(v / tv * 1000) / 10 : null
+  const gap = tr > 0 ? round2(tr - receive) : null
+  return c.json({
+    ok: true, month: m, receive_target: tr, order_target: ta, has_target: tr > 0 || ta > 0,
+    receive, order_add: orderAdd, receive_pct: pct(receive, tr), order_pct: pct(orderAdd, ta),
+    gap, days_left: daysLeft, per_day: gap && daysLeft > 0 ? round2(gap / daysLeft) : null,
+    advice: tr > 0
+      ? (gap <= 0 ? '目标已经达成了（超 ' + round2(-gap) + ' 元）' : '还差 ' + gap + ' 元，' + daysLeft + ' 天里每天要收 ' + round2(gap / Math.max(1, daysLeft)) + ' 元')
+      : '还没设这个月的目标（想设就点一下）'
+  })
+})
+
+app.post('/target', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const m = (b.month || now().slice(0, 7))
+  if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份写成 2026-11 这样' }, 400)
+  const r = round2(num(b.receive))
+  const o = round2(num(b.order_add))
+  if (r < 0 || o < 0) return c.json({ error: '目标不能是负数' }, 400)
+  if (r === 0 && o === 0) {
+    await db.prepare('DELETE FROM targets WHERE month=?').bind(m).run()
+    return c.json({ ok: true, month: m, cleared: true })
+  }
+  await db.prepare('INSERT INTO targets (month, receive, order_add, created_at) VALUES (?,?,?,?) ON CONFLICT(month) DO UPDATE SET receive=excluded.receive, order_add=excluded.order_add').bind(m, r, o, now()).run()
+  await logAudit(db, 'target', m, '月目标 收 ' + r + ' / 接单 ' + o)
+  return c.json({ ok: true, month: m, receive: r, order_add: o })
+})
 
 app.get('/month-pack', async (c) => {
   const m = String(c.req.query('month') || now().slice(0, 7))
