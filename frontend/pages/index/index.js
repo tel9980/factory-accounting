@@ -31,7 +31,7 @@ Page({
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
-    cmp_month: '', analysis_text: '', ex_month: '',
+    cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
     pc_month: '', pc: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
@@ -1489,28 +1489,68 @@ Page({
   },
   onCmpMonth(e) { this.setData({ cmp_month: e.detail.value }) },
   onExMonth(e) { this.setData({ ex_month: e.detail.value }) },
+  onExFrom(e) { this.setData({ ex_from: e.detail.value }) },
+  onExTo(e) { this.setData({ ex_to: e.detail.value }) },
+  // 把后端给的 xlsx 存成文件并转发
+  saveXlsxFile(d) {
+    if (!d.b64) return wx.showToast({ title: '没生成出来', icon: 'none' })
+    const f = wx.env.USER_DATA_PATH + '/' + (d.name || '导出.xlsx')
+    wx.getFileSystemManager().writeFile({
+      filePath: f, data: d.b64, encoding: 'base64',
+      success: () => {
+        if (wx.shareFileMessage) {
+          wx.shareFileMessage({ filePath: f, fileName: d.name || '导出.xlsx', fail: () => wx.openDocument({ filePath: f, showMenu: true }) })
+        } else wx.openDocument({ filePath: f, showMenu: true })
+      },
+      fail: () => wx.showToast({ title: '存文件失败', icon: 'none' })
+    })
+  },
   // 整月导出：一个 Excel 多个工作表
   exportMonthXlsx() {
     const m = (this.data.ex_month || '').trim()
     wx.showLoading({ title: '生成中…' })
     this.req({
       url: API_BASE + '/export-xlsx' + (m ? '?month=' + encodeURIComponent(m) : ''),
+      success: (res) => { wx.hideLoading(); this.saveXlsxFile(res.data || {}) },
+      fail: () => wx.hideLoading()
+    })
+  },
+  // 任意区间导出（比如 7-15 到 8-20）
+  exportRangeXlsx() {
+    const from = this.data.ex_from || ''
+    const to = this.data.ex_to || ''
+    if (!from || !to) return wx.showToast({ title: '先选起止日期', icon: 'none' })
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url: API_BASE + '/export-xlsx?from=' + from + '&to=' + to,
+      success: (res) => { wx.hideLoading(); this.saveXlsxFile(res.data || {}) },
+      fail: () => wx.hideLoading()
+    })
+  },
+  // A4 打印版对账单：复制链接，电脑浏览器打开即可打印/存 PDF
+  printStatement(e) {
+    const ds = e.currentTarget.dataset
+    const url = API_BASE + '/statement-link?type=' + (ds.type || 'ar') + '&party=' + encodeURIComponent(ds.name || '')
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url,
       success: (res) => {
         wx.hideLoading()
-        const d = res.data || {}
-        if (!d.b64) return wx.showToast({ title: '没生成出来', icon: 'none' })
-        const f = wx.env.USER_DATA_PATH + '/' + (d.name || '导出.xlsx')
-        wx.getFileSystemManager().writeFile({
-          filePath: f, data: d.b64, encoding: 'base64',
-          success: () => {
-            if (wx.shareFileMessage) {
-              wx.shareFileMessage({ filePath: f, fileName: d.name || '导出.xlsx', fail: () => wx.openDocument({ filePath: f, showMenu: true }) })
-            } else wx.openDocument({ filePath: f, showMenu: true })
-          },
-          fail: () => wx.showToast({ title: '存文件失败', icon: 'none' })
-        })
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: (res.data && res.data.error) || '没生成出来', icon: 'none' })
+        this.copyPrintLink(u)
       },
       fail: () => wx.hideLoading()
+    })
+  },
+  copyPrintLink(u) {
+    wx.setClipboardData({
+      data: u,
+      success: () => wx.showModal({
+        title: '打印链接已复制',
+        content: '粘到电脑浏览器打开，按 Ctrl+P 就能打印或存成 PDF（手机浏览器打开底部也有「打印」按钮）。',
+        showCancel: false
+      })
     })
   },
   genCredits() {

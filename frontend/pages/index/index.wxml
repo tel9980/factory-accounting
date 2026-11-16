@@ -518,6 +518,11 @@
       <view class="tip">整月全部数据导成一个 Excel（6 个表：总览/应收/应付/收付流水/借支/核销），直接发会计或存档</view>
       <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{ex_month}}" bindinput="onExMonth"/>
       <button class="btn" size="mini" bindtap="exportMonthXlsx">⬇ 导出整月 Excel（多表）</button>
+      <view class="row2" style="margin-top:12rpx">
+        <picker mode="date" value="{{ex_from}}" bindchange="onExFrom"><view class="picker">从 {{ex_from || '选日期'}} ▾</view></picker>
+        <picker mode="date" value="{{ex_to}}" bindchange="onExTo"><view class="picker">到 {{ex_to || '选日期'}} ▾</view></picker>
+      </view>
+      <button class="btn" size="mini" bindtap="exportRangeXlsx">⬇ 导出这段时间 Excel（含明细）</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="orders">导出应收(文件)</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="payables">导出应付(文件)</button>
       <button class="btn" size="mini" bindtap="exportCsv" data-type="ledger">导出流水(文件)</button>
@@ -885,6 +890,7 @@
           <view class="row2">累计{{item.total}} · 已收{{item.paid}} · {{item.cnt}}笔</view>
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
+            <button size="mini" bindtap="printStatement" data-type="ar" data-name="{{item.name}}">打印版</button>
           </view>
         </view>
         <view class="empty" wx:if="{{!contacts_ar.length}}">暂无客户记录</view>
@@ -897,6 +903,7 @@
           <view class="row2">累计{{item.total}} · 已付{{item.paid}} · {{item.cnt}}笔</view>
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ap" data-name="{{item.name}}">往来明细</button>
+            <button size="mini" bindtap="printStatement" data-type="ap" data-name="{{item.name}}">打印版</button>
           </view>
         </view>
         <view class="empty" wx:if="{{!contacts_ap.length}}">暂无供应商记录</view>

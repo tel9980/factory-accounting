@@ -87,6 +87,132 @@ app.post('/auth/staff', async (c) => {
   return c.json({ ok: true, enabled: !!pw })
 })
 
+// 打印链接签名（不暴露访问口令）
+const sigOf = async (key, party, type) => {
+  const data = new TextEncoder().encode(String(key) + '|' + String(party) + '|' + String(type))
+  const buf = await crypto.subtle.digest('SHA-256', data)
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20)
+}
+
+// 生成 A4 打印版对账单链接（小程序里点「打印版」调用）
+app.get('/statement-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  if (!party) return c.json({ error: '缺少对账单位' }, 400)
+  const t = await sigOf(saved, party, type)
+  const base = new URL(c.req.url).origin
+  const url = base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(party) + '&t=' + t
+  return c.json({ ok: true, url })
+})
+
+// A4 打印版对账单（电脑/手机浏览器打开 → Ctrl+P / 分享打印）
+app.get('/statement-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  // 链接里带签名，不含口令本身（口令泄露风险）
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, party, type) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印版」生成新链接。</h3>')
+  if (!party) return c.html('<h3>缺少对账单位。</h3>')
+  const today = now().slice(0, 10)
+  let from = String(c.req.query('from') || '').slice(0, 10) || (today.slice(0, 7) + '-01')
+  let to = String(c.req.query('to') || '').slice(0, 10) || today
+  if (from > to) { const t = from; from = to; to = t }
+
+  const t = await getTitle(db)
+  const q = (sql, ...a) => db.prepare(sql).bind(...a).all().then((r) => r.results)
+  const docs = type === 'ar'
+    ? await q('SELECT * FROM orders WHERE customer=? ORDER BY id', party)
+    : await q('SELECT * FROM payables WHERE supplier=? ORDER BY id', party)
+  const ids = docs.map((d) => d.id)
+  let pays = []
+  if (ids.length) {
+    const ph = ids.map(() => '?').join(',')
+    pays = await q("SELECT * FROM ledger WHERE ref_type=? AND ref_id IN (" + ph + ') ORDER BY id',
+      type === 'ar' ? 'order' : 'payable', ...ids)
+  }
+  const totalOf = (d) => num(type === 'ar' ? d.price : d.amount)
+  const woOf = (d) => num(d.written_off)
+  const paidIn = (d, a, b) => pays.filter((p) => p.ref_id === d.id && (p.created_at || '').slice(0, 10) >= a && (p.created_at || '').slice(0, 10) <= b).reduce((x, p) => x + num(p.amount), 0)
+
+  let opening = 0
+  let added = 0
+  let got = 0
+  let woff = 0
+  const rows = []
+  for (const d of docs) {
+    const d0 = (d.created_at || '').slice(0, 10)
+    if (d0 < from) {
+      opening += Math.max(0, totalOf(d) - woOf(d) - paidIn(d, '0000-00-00', addDaysIso(from, -1)))
+      continue
+    }
+    if (d0 > to) continue
+    const rec = paidIn(d, from, to)
+    added += totalOf(d)
+    got += rec
+    woff += woOf(d)
+    rows.push({ id: d.id, date: d0, item: (type === 'ar' ? d.item_name : d.remark) || '', total: totalOf(d), rec, wo: woOf(d), left: Math.max(0, totalOf(d) - woOf(d) - rec - paidIn(d, '0000-00-00', addDaysIso(from, -1))) })
+  }
+  const closing = opening + added - got - woff
+  const money = (v) => Number(v || 0).toFixed(2)
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]))
+  const body = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.date)}</td><td>${esc(r.item || '—')}</td><td class="n">${money(r.total)}</td><td class="n">${money(r.rec)}</td><td class="n">${money(r.wo)}</td><td class="n b">${money(r.left)}</td></tr>`).join('')
+  const label = type === 'ar' ? '应收账款对账单' : '应付账款对账单'
+  const who = type === 'ar' ? '客户' : '供应商'
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(party)} ${label} ${esc(from)}~${esc(to)}</title>
+<style>
+@page { size: A4; margin: 14mm 12mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif; color:#111; margin:0; padding:18px; background:#f4f5f7; }
+.sheet { background:#fff; max-width:210mm; margin:0 auto; padding:14mm 12mm; box-shadow:0 2px 14px rgba(0,0,0,.12); }
+h1 { font-size: 22px; text-align:center; margin:0 0 4px; letter-spacing:2px; }
+.sub { text-align:center; font-size:12px; color:#666; margin-bottom:14px; }
+.meta { display:flex; justify-content:space-between; font-size:13px; margin:10px 0; border-bottom:1px solid #ddd; padding-bottom:8px; }
+table { width:100%; border-collapse:collapse; font-size:12.5px; }
+th,td { border:1px solid #bbb; padding:6px 8px; }
+th { background:#f0f2f5; font-weight:600; }
+td.n { text-align:right; font-variant-numeric: tabular-nums; }
+td.b { font-weight:700; }
+.sum { margin-top:12px; font-size:13px; }
+.sum table { width:auto; min-width:60%; margin-left:auto; }
+.sum td { border:none; padding:4px 10px; }
+.sum .big { font-size:15px; font-weight:700; color:#b3261e; }
+.foot { margin-top:26px; display:flex; justify-content:space-between; font-size:12.5px; color:#333; }
+.sign { border-top:1px solid #999; padding-top:6px; width:42%; }
+.tip { text-align:center; font-size:12px; color:#888; margin-top:18px; }
+.btn { display:block; width:200px; margin:16px auto 0; padding:12px; text-align:center; background:#1f6feb; color:#fff; border-radius:8px; text-decoration:none; font-size:15px; }
+@media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; padding:0; margin:0; } .btn,.tip { display:none; } }
+</style></head><body>
+<div class="sheet">
+<h1>${esc(t.title || '对账单')}</h1>
+<div class="sub">${label}（打印版 · A4）</div>
+<div class="meta"><div>${who}：<b>${esc(party)}</b></div><div>账期：${esc(from)} 至 ${esc(to)}</div></div>
+<table>
+<thead><tr><th style="width:38px">#</th><th style="width:92px">日期</th><th>项目/备注</th><th style="width:88px">金额</th><th style="width:88px">本期${type === 'ar' ? '已收' : '已付'}</th><th style="width:70px">核销</th><th style="width:88px">未结</th></tr></thead>
+<tbody>${body || '<tr><td colspan="7" style="text-align:center;color:#888">本期没有发生</td></tr>'}</tbody>
+</table>
+<div class="sum"><table>
+<tr><td>期初${type === 'ar' ? '应收' : '应付'}</td><td class="n">${money(opening)}</td></tr>
+<tr><td>本期新增</td><td class="n">${money(added)}</td></tr>
+<tr><td>本期${type === 'ar' ? '已收' : '已付'}</td><td class="n">-${money(got)}</td></tr>
+<tr><td>本期核销/豁免</td><td class="n">-${money(woff)}</td></tr>
+<tr><td><b>期末${type === 'ar' ? '应收' : '应付'}</b></td><td class="n big">${money(closing)}</td></tr>
+</table></div>
+${t.note ? '<div style="font-size:12.5px;color:#555;margin-top:10px">备注：' + esc(t.note) + '</div>' : ''}
+<div class="foot"><div class="sign">对账单位签章：</div><div class="sign">制表：${esc(t.title || '')}　${esc(today)}</div></div>
+<a class="btn" href="javascript:window.print()">🖨 打印 / 存为 PDF</a>
+<div class="tip">手机上：右上角「…」→ 发送给朋友或用浏览器打开 → 打印</div>
+</div></body></html>`
+  return c.html(html)
+})
+
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
 app.get('/', (c) => c.html(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -102,7 +228,8 @@ app.get('/', (c) => c.html(`<!doctype html>
 // 除 /auth/* 外全部需要口令
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
-  if (path.startsWith('/auth/')) return next()
+  // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
+  if (path.startsWith('/auth/') || path === '/statement-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -145,6 +272,19 @@ app.get('/me', async (c) => {
   return c.json({ role, book: c.env.BOOK || '1', staff_enabled: !!staff })
 })
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
+const addDaysIso = (iso, n) => {
+  const d = new Date(String(iso).slice(0, 10) + 'T00:00:00Z')
+  d.setUTCDate(d.getUTCDate() + n)
+  return d.toISOString().slice(0, 10)
+}
+// 报表抬头（厂名 + 备注）
+const getTitle = async (db) => {
+  try {
+    const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note')").all()).results
+    const g = (k) => { const r = rows.find((x) => x.key === k); return r ? r.value : '' }
+    return { title: g('report_title') || '加工厂', note: g('report_note') || '' }
+  } catch (e) { return { title: '加工厂', note: '' } }
+}
 const toIsoDate = (s) => {
   if (!s) return ''
   const m = String(s).trim().match(/^(\d{4})?[-/年]?(\d{1,2})[-/月](\d{1,2})日?$/)
@@ -952,12 +1092,19 @@ app.post('/import-xlsx', async (c) => {
 // 导出整月全部数据成一个 Excel（多个工作表），直接发给会计或存档
 app.get('/export-xlsx', async (c) => {
   const db = c.env.DB
-  const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
-  const M = (sql) => db.prepare(sql).bind(month).all()
-  const orders = (await M("SELECT * FROM orders WHERE substr(created_at,1,7)=? ORDER BY id")).results
-  const payables = (await M("SELECT * FROM payables WHERE substr(created_at,1,7)=? ORDER BY id")).results
-  const ledger = (await M("SELECT * FROM ledger WHERE substr(created_at,1,7)=? ORDER BY id")).results
-  const writeoffs = (await M("SELECT * FROM writeoffs WHERE substr(created_at,1,7)=? ORDER BY id")).results
+  let month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  let from = String(c.req.query('from') || '').slice(0, 10)
+  let to = String(c.req.query('to') || '').slice(0, 10)
+  const useRange = /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)
+  if (useRange && from > to) { const t = from; from = to; to = t }
+  if (useRange) month = from.slice(0, 7)
+  const where = useRange ? 'substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?' : 'substr(created_at,1,7)=?'
+  const arg = useRange ? [from, to] : [month]
+  const M = (sql) => db.prepare(sql).bind(...arg).all()
+  const orders = (await M('SELECT * FROM orders WHERE ' + where + ' ORDER BY id')).results
+  const payables = (await M('SELECT * FROM payables WHERE ' + where + ' ORDER BY id')).results
+  const ledger = (await M('SELECT * FROM ledger WHERE ' + where + ' ORDER BY id')).results
+  const writeoffs = (await M('SELECT * FROM writeoffs WHERE ' + where + ' ORDER BY id')).results
   const loans = (await db.prepare('SELECT * FROM loans ORDER BY id').all()).results
   const accs = await accountBalances(db)
 
@@ -976,7 +1123,7 @@ app.get('/export-xlsx', async (c) => {
   const S = [
     { name: '总览', rows: [
       ['项目', '金额/数量'],
-      ['账期', month],
+      ['账期', useRange ? (from + ' ~ ' + to) : month],
       ['本月收（现金）', round2(inSum)],
       ['本月付（现金）', round2(outSum)],
       ['本月结余', round2(inSum - outSum)],
@@ -1004,8 +1151,8 @@ app.get('/export-xlsx', async (c) => {
     ) }
   ]
   const xlsx = await makeXlsxSheets(S)
-  const nm = '记账导出_' + month + '.xlsx'
-  return c.json({ ok: true, name: nm, b64: toB64(xlsx), month })
+  const nm = '记账导出_' + (useRange ? (from + '_' + to) : month) + '.xlsx'
+  return c.json({ ok: true, name: nm, b64: toB64(xlsx), month, from, to, range: useRange ? (from + ' ~ ' + to) : month })
 })
 
 app.get('/import-template', async (c) => {
