@@ -3474,6 +3474,49 @@ app.get('/expenses', async (c) => {
 })
 
 // 记应收（加工订单）
+// 记完自查：录单/收款后立刻挑出「一看就可能错」的地方（只提醒，不拦）
+function lev(a, b) {
+  a = String(a || ''); b = String(b || '')
+  if (Math.abs(a.length - b.length) > 1) return 9
+  const m = a.length, n = b.length
+  const dp = Array.from({ length: m + 1 }, (_, i) => [i].concat(new Array(n).fill(0)))
+  for (let j = 0; j <= n; j++) dp[0][j] = j
+  for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++) {
+    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+  }
+  return dp[m][n]
+}
+async function orderChecks(db, o) {
+  const out = []
+  const amt = num(o.amount), c = num(o.cost)
+  const day = String(o.created || '').slice(0, 10)
+  const due = String(o.due || '').slice(0, 10)
+  if (due && day && due < day) out.push({ k: 'due_early', text: `约定日期（${due}）比开单日（${day}）还早，是不是年份填错了？` })
+  if (due && day && (Date.parse(due) - Date.parse(day)) > 400 * 86400000) out.push({ k: 'due_far', text: '约定日期在一年多以后，确认没有填错？' })
+  if (c > 0 && c >= amt) out.push({ k: 'cost_high', text: `成本 ¥${c} 不比金额 ¥${amt} 低，这单不赚钱甚至倒贴，确认一下。` })
+  if (o.party && day) {
+    const dup = await db.prepare('SELECT id FROM ' + o.table + ' WHERE ' + o.who + '=? AND substr(created_at,1,10)=? AND ' + o.amtcol + '=? AND COALESCE(' + o.itemcol + ",'')=?").bind(o.party, day, amt, o.item || '').first()
+    if (dup) out.push({ k: 'dup', text: `${o.party} 今天已经有一张一样的「${o.item || '同项'} ¥${amt}」，是不是重复记了？` })
+    const { results: names } = await db.prepare('SELECT DISTINCT ' + o.who + ' AS party FROM ' + o.table + ' LIMIT 300').all()
+    for (const r of names) {
+      const n = String(r.party || '')
+      const p0 = String(o.party)
+      let pre = 0
+      while (pre < Math.min(n.length, p0.length) && n[pre] === p0[pre]) pre++
+      const likely = n.length === p0.length && lev(n, p0) === 1 && (pre >= 2 || p0.length >= 4)
+      if (n && n !== p0 && likely) {
+        out.push({ k: 'typo', text: `「${o.party}」和已有的「${n}」只差一个字，是不是打错了？（打错会当成两家，欠款就分开了）` })
+        break
+      }
+    }
+    const mx = await db.prepare('SELECT COALESCE(MAX(' + o.amtcol + '),0) AS mx FROM ' + o.table + ' WHERE substr(created_at,1,10)>=?').bind(dayAgo(90)).first()
+    const m = num(mx && mx.mx)
+    if (m > 0 && amt > m * 5 && amt > 20000) out.push({ k: 'big', text: `这一笔 ¥${amt}，比近 90 天最大的一笔（¥${m}）大 5 倍以上，确认没多打一个 0？` })
+    else if (m === 0 && amt >= 50000) out.push({ k: 'big', text: `这一笔 ¥${amt}，是第一次记这么大的数，确认没多打一个 0？` })
+  }
+  return out
+}
+
 app.post('/orders', async (c) => {
   const { customer, item_name, price, due_date, operator, date, cost } = await c.req.json()
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
@@ -3481,6 +3524,7 @@ app.post('/orders', async (c) => {
   const created = stampOf(date)
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date) || (await termDue(db, customer, created))
+  const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
@@ -3493,7 +3537,7 @@ app.post('/orders', async (c) => {
     const over = round2(unpaid - num(lim.limit_amount))
     if (over > 0) warn = { over_limit: true, party: customer, limit_amount: num(lim.limit_amount), unpaid, over, error: `提醒：${customer} 已欠 ¥${unpaid}，超信用额度 ¥${num(lim.limit_amount)}（多出 ¥${over}）` }
   }
-  return c.json(Object.assign({ ok: true }, warn ? { warn } : {}))
+  return c.json(Object.assign({ ok: true }, warn ? { warn } : {}, checks.length ? { checks } : {}))
 })
 
 // 收客户款（可带日期补录）
@@ -3513,7 +3557,10 @@ app.post('/orders/:id/receive', async (c) => {
       .bind(id, a, `收 ${o.customer} ${o.item_name}`, acc, normDate(date))
   ])
   await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`)
-  return c.json({ ok: true })
+  const checks = []
+  const d0 = String(normDate(date)).slice(0, 10)
+  if (d0 && (o.created_at || '').slice(0, 10) && d0 < (o.created_at || '').slice(0, 10)) checks.push({ k: 'pay_early', text: `收款日期（${d0}）比开单日（${(o.created_at || '').slice(0, 10)}）还早，这单是先收钱后开单吗？不是的话改一下日期。` })
+  return c.json(checks.length ? { ok: true, checks } : { ok: true })
 })
 
 // 批量核销收款：客户一次打款，按「先老后新」自动抵掉多张未结单
@@ -3653,10 +3700,11 @@ app.post('/payables', async (c) => {
       .bind(supplier, num(amount), since).first()
     if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
   }
+  const checks = await orderChecks(db, { table: 'payables', who: 'supplier', amtcol: 'amount', itemcol: 'remark', party: supplier, item: remark || '', amount, cost: 0, created: stampOf(date), due: toIsoDate(due_date) })
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
     .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created)) || null, created).run()
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
-  return c.json({ ok: true })
+  return c.json(Object.assign({ ok: true }, checks.length ? { checks } : {}))
 })
 
 // 付供应商款（可带日期补录）

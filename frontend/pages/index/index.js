@@ -1244,6 +1244,7 @@ Page({
       success: (res) => {
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' })
         this.refresh(); this.loadSuggest()
+        this.showChecks(res)
         const w = res.data && res.data.warn
         if (w) {
           wx.showModal({
@@ -1260,7 +1261,7 @@ Page({
     this.req({
       url: API_BASE + '/payables', method: 'POST',
       data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due, date: p_date }, dupRetry: true,
-      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
+      success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest(); this.showChecks(res) }
     })
   },
   addExpense() {
@@ -1270,6 +1271,16 @@ Page({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true,
       data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date },
       success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
+    })
+  },
+  // 记完自查：后端挑出的「可能记错」的地方，一条条摆出来（不影响已记上的账）
+  showChecks(res) {
+    const list = (res && res.data && res.data.checks) || []
+    if (!list.length) return
+    wx.showModal({
+      title: '记上了，但这几处看一下',
+      content: list.map((x, i) => (i + 1) + '. ' + x.text).join('\n\n') + '\n\n（不影响已经记上的账，要改就在列表里点那一条编辑）',
+      showCancel: false, confirmText: '知道了'
     })
   },
   // 找某一单还剩多少没结（先从当前列表里查）
@@ -1296,8 +1307,9 @@ Page({
         this.req({
           url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
           data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
-          success: () => {
+          success: (res) => {
             this.refresh()
+            this.showChecks(res)
             const noLeft = remain > 0 && Math.round((remain - amt) * 100) / 100 <= 0.005
             this._afterPay(id, amt, remain, 'ar', noLeft)
           }
