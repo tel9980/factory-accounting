@@ -1805,6 +1805,56 @@ app.get('/statement', async (c) => {
   return c.json({ text: lines.join('\n') })
 })
 
+// 收/付款收据文本（给客户/供应商看的凭证，可存成图片）
+app.get('/receipt-text', async (c) => {
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const id = Math.round(num(c.req.query('id')))
+  if (!id) return c.json({ error: '缺少单据编号' }, 400)
+  const db = c.env.DB
+  const lines = []
+  if (type === 'ar') {
+    const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+    if (!o) return c.json({ error: '单据不存在' }, 404)
+    const last = await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id=? AND direction='in' ORDER BY id DESC LIMIT 1").bind(id).first()
+    let accName = ''
+    if (last && num(last.account_id)) {
+      const a = await db.prepare('SELECT name FROM accounts WHERE id=?').bind(num(last.account_id)).first()
+      accName = (a && a.name) || ''
+    }
+    const amt = round2(num(c.req.query('amount')) || num(last && last.amount))
+    const day = (last && last.created_at) ? String(last.created_at).slice(0, 10) : now().slice(0, 10)
+    const left = round2(num(o.price) - num(o.paid))
+    lines.push(...(await titled(db, `收款收据 · ${o.customer}`)))
+    lines.push(`收据日期：${day}`)
+    lines.push(`本次收款：${amt || round2(num(o.paid))} 元${accName ? '（' + accName + '）' : ''}`)
+    lines.push(`对应单据：${o.item_name || '加工费'} 总 ${round2(num(o.price))} 元`)
+    lines.push(`已收合计：${round2(num(o.paid))} 元`)
+    lines.push(left > 0.005 ? `期末欠：${left} 元` : '已全部收清 ✓')
+    if (o.operator) lines.push(`经手人：${o.operator}`)
+    return c.json({ text: lines.join('\n'), type: 'ar', id, amount: amt, left })
+  }
+  const p2 = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
+  if (!p2) return c.json({ error: '单据不存在' }, 404)
+  const lastP = await db.prepare("SELECT * FROM ledger WHERE ref_type='payable' AND ref_id=? AND direction='out' ORDER BY id DESC LIMIT 1").bind(id).first()
+  let accName2 = ''
+  if (lastP && num(lastP.account_id)) {
+    const a = await db.prepare('SELECT name FROM accounts WHERE id=?').bind(num(lastP.account_id)).first()
+    accName2 = (a && a.name) || ''
+  }
+  const amt2 = round2(num(c.req.query('amount')) || num(lastP && lastP.amount))
+  const day2 = (lastP && lastP.created_at) ? String(lastP.created_at).slice(0, 10) : now().slice(0, 10)
+  const left2 = round2(num(p2.amount) - num(p2.paid))
+  const desc2 = [p2.category, p2.remark].filter(Boolean).join(' ') || '货款'
+  lines.push(...(await titled(db, `付款收据 · ${p2.supplier}`)))
+  lines.push(`收据日期：${day2}`)
+  lines.push(`本次付款：${amt2 || round2(num(p2.paid))} 元${accName2 ? '（' + accName2 + '）' : ''}`)
+  lines.push(`对应单据：${desc2} 总 ${round2(num(p2.amount))} 元`)
+  lines.push(`已付合计：${round2(num(p2.paid))} 元`)
+  lines.push(left2 > 0.005 ? `期末欠：${left2} 元` : '已全部付清 ✓')
+  if (p2.operator) lines.push(`经手人：${p2.operator}`)
+  return c.json({ text: lines.join('\n'), type: 'ap', id, amount: amt2, left: left2 })
+})
+
 // 月度对账（按单位+月份）
 app.get('/statement-month', async (c) => {
   const type = c.req.query('type')

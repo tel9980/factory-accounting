@@ -860,17 +860,21 @@ Page({
           data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
           success: () => {
             this.refresh()
-            this._afterPay(id, amt, remain, 'ar')
+            const noLeft = remain > 0 && Math.round((remain - amt) * 100) / 100 <= 0.005
+            this._afterPay(id, amt, remain, 'ar', noLeft)
           }
         })
       }
     })
   },
   // 收/付完自动核对：还有余额就顺手问一句“要不要一起结清”
-  _afterPay(id, amt, remain, kind) {
+  _afterPay(id, amt, remain, kind, settled) {
     const left = Math.round((remain - amt) * 100) / 100
-    if (remain > 0 && left <= 0.005) return wx.showToast({ title: kind === 'ar' ? '这单已收清' : '这笔已付清', icon: 'success' })
-    if (left <= 0.005) return
+    if (settled === true || (remain > 0 && left <= 0.005)) {
+      wx.showToast({ title: kind === 'ar' ? '这单已收清' : '这笔已付清', icon: 'success' })
+      return this._offerReceipt(id, kind)
+    }
+    if (left <= 0.005) return this._offerReceipt(id, kind)
     wx.showModal({
       title: '还差 ' + left + ' 元',
       content: (kind === 'ar' ? '这张单还没收完' : '这笔还没付完') + '，剩下的一次结清吗？',
@@ -881,7 +885,7 @@ Page({
           url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'),
           method: 'POST',
           data: { amount: left, account_id: this.data.acc_id },
-          success: () => { this.refresh(); wx.showToast({ title: kind === 'ar' ? '已收清' : '已付清', icon: 'success' }) }
+          success: () => { this.refresh(); wx.showToast({ title: kind === 'ar' ? '已收清' : '已付清', icon: 'success' }); this._offerReceipt(id, kind) }
         })
       }
     })
@@ -1171,6 +1175,33 @@ Page({
         }
         this.drawStatementImage(d, r.tapIndex === 1)
       }
+    })
+  },
+  // 收/付款收据：问一句要不要生成图片发给对方
+  _offerReceipt(id, kind) {
+    wx.showModal({
+      title: kind === 'ar' ? '要发收款收据吗？' : '要发付款收据吗？',
+      content: '生成一张图片发给对方：这次收/付了多少、还差多少，一目了然。',
+      confirmText: '生成', cancelText: '不用',
+      success: (r) => { if (r.confirm) this.makeReceipt(id, kind, true) }
+    })
+  },
+  // 点按钮手动开收据（列表里的「收据」）
+  openReceipt(e) {
+    const { id, type } = e.currentTarget.dataset
+    this.makeReceipt(id, type === 'ap' ? 'ap' : 'ar', true)
+  },
+  makeReceipt(id, kind, share) {
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url: API_BASE + '/receipt-text?type=' + (kind === 'ap' ? 'ap' : 'ar') + '&id=' + id,
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.text) return wx.showToast({ title: d.error || '生成失败', icon: 'none' })
+        this.drawStatementImage({ text: d.text }, share === true)
+      },
+      fail: () => wx.hideLoading()
     })
   },
   // 对账单图片（白底卡片：大字标题 + 明细 + 期末欠款高亮）
