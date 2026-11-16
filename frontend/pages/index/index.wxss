@@ -255,3 +255,23 @@
 .pipe-d { font-size:23rpx; color:#8a94a6; margin-top:2rpx; }
 .pipe-a { font-size:24rpx; color:#2b6cf6; }
 .pipe-row.done .pipe-a { color:#c8ccd4; }
+
+/* 首页账本健康条 + 面板 */
+.hstrip { display:flex; align-items:center; justify-content:space-between; border-radius:12rpx; padding:16rpx 20rpx; margin-bottom:12rpx; background:#eef6ff; border-left:8rpx solid #3b7ddd; }
+.hstrip.good { background:#eaf7ee; border-left-color:#2f9e44; }
+.hstrip.mid { background:#fff8e6; border-left-color:#e6a23c; }
+.hstrip.bad { background:#ffecec; border-left-color:#e64646; }
+.hs-l { display:flex; align-items:baseline; }
+.hs-score { font-size:40rpx; font-weight:700; color:#222; }
+.hs-unit { font-size:22rpx; color:#666; margin-left:2rpx; }
+.hs-grade { font-size:24rpx; color:#555; margin-left:12rpx; }
+.hs-delta { font-size:22rpx; margin-left:10rpx; color:#2f9e44; }
+.hs-delta.down { color:#e64646; }
+.hs-r { font-size:24rpx; color:#666; }
+.hk-row { display:flex; align-items:center; justify-content:space-between; padding:16rpx 0; border-bottom:1rpx solid #f0f0f0; }
+.hk-main { flex:1; padding-right:12rpx; }
+.hk-t { font-size:27rpx; color:#222; }
+.hk-t.ok { color:#2f9e44; }
+.hk-n { font-size:22rpx; color:#e64646; margin-left:10rpx; }
+.hk-d { font-size:22rpx; color:#888; margin-top:4rpx; line-height:1.5; }
+.hk-a { font-size:24rpx; color:#3b7ddd; }

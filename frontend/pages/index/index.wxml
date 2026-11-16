@@ -41,6 +41,16 @@
       <view class="ab-t">今天要盯的款：{{due_brief}}</view>
       <view class="ab-a">去看 ›</view>
     </view>
+    <view class="hstrip {{hc.score>=90?'good':hc.score>=75?'mid':'bad'}}" wx:if="{{hc}}" bindtap="openHealth">
+      <view class="hs-l">
+        <text class="hs-score">{{hc.score}}</text>
+        <text class="hs-unit">分</text>
+        <text class="hs-grade">{{hc.grade}}</text>
+        <text class="hs-delta" wx:if="{{hc.delta>0}}">↑{{hc.delta}}</text>
+        <text class="hs-delta down" wx:if="{{hc.delta<0}}">↓{{-hc.delta}}</text>
+      </view>
+      <view class="hs-r">{{hc.clean?'账本干干净净':hc.count+' 处可以改好'}} ›</view>
+    </view>
     <view class="card ob" wx:if="{{onboard && onboard.show && !onboard.all_done}}">
       <view class="card-h">开账三步<text class="card-n">{{onboard.done}}/{{onboard.total}}</text></view>
       <view class="ob-tip">先把底数填上，欠款合计、毛利、手头现金才准。三步做完一次就行。</view>
@@ -53,6 +63,22 @@
         <text class="ob-a">{{item.done?'已完成':'去填 ›'}}</text>
       </view>
       <view class="ob-x" catchtap="onbDismiss">不再提示</view>
+    </view>
+    <view class="card" wx:if="{{hc_open}}">
+      <view class="card-h">账本健康<text class="card-n" bindtap="closeHealth">收起</text></view>
+      <view class="tip">{{hc.clean?'目前没发现问题，继续保持：记完账点一下「明细」核对一眼，月底记得结账。':'下面这些都是「不影响现在记账、但会让数字不准」的地方，按顺序改掉就行。'}}</view>
+      <block wx:for="{{hc.items}}" wx:key="k">
+        <view class="hk-row" wx:if="{{item.count>0}}" bindtap="hpGo" data-tab="{{item.tab}}">
+          <view class="hk-main">
+            <view class="hk-t">{{item.label}}<text class="hk-n">{{item.count}}</text></view>
+            <view class="hk-d">{{item.fix}}</view>
+          </view>
+          <text class="hk-a">去处理 ›</text>
+        </view>
+        <view class="hk-row" wx:else>
+          <view class="hk-main"><view class="hk-t ok">✓ {{item.label}}</view></view>
+        </view>
+      </block>
     </view>
     <view class="card pipe" wx:if="{{pipe}}">
       <view class="card-h">本月财务流程<text class="card-n">{{pipe.done_count}}/{{pipe.total}}</text></view>

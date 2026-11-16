@@ -34,7 +34,7 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null,
+    hc: null, hc_open: false, import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null,
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -179,6 +179,7 @@ Page({
     this.loadCashflow()
     this.loadTarget()
     this.loadPipeline()
+    this.loadHealth()
     this.loadTermDefault()
     // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
     this.enterTab(this.data.tab)
@@ -1012,6 +1013,28 @@ Page({
     if (this.data.overdue_count > 0 || this.data.due_soon_count > 0) this.setData({ tab: 'ar' })
     else if (this.data.pay_soon_count > 0) this.setData({ tab: 'ap' })
   },
+  loadHealth() {
+    this.req({
+      url: API_BASE + '/health-check',
+      success: (r) => {
+        const items = (r.items || []).map((x) => ({
+          ...x,
+          fix: x.count > 0 ? (x.go || x.tip || '') : ''
+        }))
+        this.setData({ hc: { score: r.score, grade: r.grade, clean: r.clean, count: r.count, delta: r.delta || 0, items } })
+      },
+      fail: () => {}
+    })
+  },
+  openHealth() { this.setData({ hc_open: true }) },
+  closeHealth() { this.setData({ hc_open: false }) },
+  hpGo(e) {
+    const t = e.currentTarget.dataset.tab || 'home'
+    this.setData({ hc_open: false })
+    if (t === 'home') return
+    this.enterTab ? this.enterTab(t) : this.setTab({ currentTarget: { dataset: { t } } })
+  },
+
   loadPipeline() {
     this.req({
       url: API_BASE + '/pipeline',
