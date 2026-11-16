@@ -170,3 +170,9 @@
 .ob-a { font-size: 24rpx; color: #1f6feb; flex: none; margin-left: 12rpx; }
 .ob-item.done .ob-a { color: #17a24b; }
 .ob-x { text-align: center; font-size: 23rpx; color: #99a; padding-top: 12rpx; }
+
+/* 补录日期 */
+.dateRow { display: flex; align-items: center; }
+.datePick { flex: 1; }
+.dateInp { background: #f5f6f8; border-radius: 10rpx; padding: 16rpx 20rpx; font-size: 26rpx; color: #333; margin: 8rpx 0; }
+.dateClr { font-size: 22rpx; color: #1f6feb; padding: 0 10rpx; }

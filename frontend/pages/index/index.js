@@ -13,11 +13,11 @@ Page({
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
-    o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '',
-    p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '',
+    o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '', o_date: '',
+    p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
-    e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0,
+    e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0, e_date: '',
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
     cur_loan: 0, cur_loan_name: '', rl_amount: '', rl_category: 0, rl_remark: '',
     cash_balance: 0, accounts: [], acc_names: [], acc_idx: 0, acc_id: 0, acc_name: '',
@@ -802,33 +802,36 @@ Page({
   onEAmount(e) { this.setData({ e_amount: e.detail.value }) },
   onERemark(e) { this.setData({ e_remark: e.detail.value }) },
   onEOperator(e) { this.setData({ e_operator: e.detail.value }) },
+  // 补录日期：picker 选日期，可清除（清除=默认今天）
+  onDatePick(e) { this.setData({ [e.currentTarget.dataset.f]: e.detail.value }) },
+  clearDate(e) { this.setData({ [e.currentTarget.dataset.f]: '' }) },
   onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
   onImportText(e) { this.setData({ import_text: e.detail.value }) },
   addOrder() {
-    const { o_customer, o_item, o_price, o_due, o_operator } = this.data
+    const { o_customer, o_item, o_price, o_due, o_operator, o_date } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST',
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price), due_date: o_due, operator: o_operator },
-      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price), due_date: o_due, operator: o_operator, date: o_date },
+      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', o_date: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   addPayable() {
-    const { p_supplier, p_amount, p_remark, p_operator, p_due } = this.data
+    const { p_supplier, p_amount, p_remark, p_operator, p_due, p_date } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/payables', method: 'POST',
-      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due }, dupRetry: true,
-      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
+      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due, date: p_date }, dupRetry: true,
+      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   addExpense() {
-    const { e_amount, e_remark, categories, e_category, e_operator } = this.data
+    const { e_amount, e_remark, categories, e_category, e_operator, e_date } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true,
-      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id },
-      success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '' }); this.refresh(); this.loadSuggest() }
+      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date },
+      success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   // 找某一单还剩多少没结（先从当前列表里查）
@@ -1138,23 +1141,122 @@ Page({
     wx.showModal({
       title: '按月对账 · ' + name,
       editable: true,
-      placeholderText: '月份，如 ' + ym,
-      content: ym,
+      placeholderText: '月份，如 ' + ym + '（留空=本月）',
       success: (r) => {
-        if (r.confirm && r.content) {
-          this.req({
-            url: API_BASE + '/statement-month',
-            data: { type, name, month: r.content.trim() },
-            success: (res) => {
-              wx.setClipboardData({
-                data: res.data.text,
-                success: () => wx.showToast({ title: '月对账单已复制', icon: 'none' })
-              })
-            }
-          })
-        }
+        if (!r.confirm) return
+        const m = (r.content || '').trim() || ym
+        wx.showLoading({ title: '生成中…' })
+        this.req({
+          url: API_BASE + '/statement-month',
+          data: { type, name, month: m },
+          success: (res) => {
+            wx.hideLoading()
+            const d2 = res.data || {}
+            if (!d2.text) return wx.showToast({ title: d2.error || '生成失败', icon: 'none' })
+            this.statementActions(d2)
+          },
+          fail: () => wx.hideLoading()
+        })
       }
     })
+  },
+  // 对账单：选“存图片/直接发对方/复制文字”
+  statementActions(d) {
+    wx.showActionSheet({
+      itemList: ['存成图片（可保存/转发）', '直接发给对方', '复制文字'],
+      success: (r) => {
+        if (r.tapIndex === 2) {
+          wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+          return
+        }
+        this.drawStatementImage(d, r.tapIndex === 1)
+      }
+    })
+  },
+  // 对账单图片（白底卡片：大字标题 + 明细 + 期末欠款高亮）
+  drawStatementImage(d, share) {
+    const text = d.text || ''
+    wx.showLoading({ title: '生成图片…' })
+    const W = 750, PAD = 40, DPRMAX = 678
+    const src = text.split('\n')
+    const title = src[0] || '对账单'
+    let note = '', body = src.slice(1)
+    if (body[0] && body[0].trim().startsWith('（')) { note = body[0].trim(); body = body.slice(1) }
+    const unit = (ch) => (/[\u0000-\u00ff]/.test(ch) ? 0.55 : 1)
+    const wrapOf = (line, font) => {
+      const out = []
+      if (!line.trim()) { out.push(''); return out }
+      let cur = '', w = 0
+      for (const ch of line) {
+        const u = unit(ch)
+        if (w + u > DPRMAX / font) { out.push(cur); cur = ch; w = u } else { cur += ch; w += u }
+      }
+      if (cur) out.push(cur)
+      return out
+    }
+    const rows = []
+    rows.push({ t: title, font: 30, lh: 46, bold: true, center: true, color: '#111111' })
+    if (note) rows.push({ t: note, font: 22, lh: 34, center: true, color: '#888888' })
+    rows.push({ t: '', font: 12, lh: 20 })
+    body.forEach((line) => {
+      const isEnd = /^期末(欠|应付|余额)/.test(line.trim())
+      const isKey = /^本月(新增|已收|已付|明细|收款记录|付款记录)/.test(line.trim())
+      const font = isEnd ? 30 : 24
+      wrapOf(line, font).forEach((t, i) => rows.push({
+        t, font, lh: isEnd ? 46 : 36,
+        bold: isEnd || (isKey && i === 0), center: false,
+        color: isEnd ? '#d93025' : (isKey ? '#1f6feb' : '#333333')
+      }))
+    })
+    const H = PAD * 2 + rows.reduce((a, r) => a + r.lh, 0)
+    wx.createSelectorQuery().in(this).select('#reportCanvas')
+      .fields({ node: true, size: true })
+      .exec((res) => {
+        if (!res || !res[0] || !res[0].node) { wx.hideLoading(); return wx.showToast({ title: '生成失败', icon: 'none' }) }
+        const canvas = res[0].node
+        const ctx = canvas.getContext('2d')
+        const dpr = (wx.getWindowInfo ? wx.getWindowInfo() : wx.getSystemInfoSync()).pixelRatio || 2
+        canvas.width = W * dpr
+        canvas.height = H * dpr
+        ctx.scale(dpr, dpr)
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, W, H)
+        // 顶部品牌色细条
+        ctx.fillStyle = '#1f6feb'
+        ctx.fillRect(0, 0, W, 6)
+        ctx.textBaseline = 'top'
+        let y = PAD
+        rows.forEach((r) => {
+          if (r.t) {
+            ctx.font = (r.bold ? 'bold ' : '') + r.font + 'px sans-serif'
+            ctx.fillStyle = r.color
+            if (r.center) {
+              ctx.textAlign = 'center'
+              ctx.fillText(r.t, W / 2, y)
+              ctx.textAlign = 'left'
+            } else ctx.fillText(r.t, PAD, y)
+          }
+          y += r.lh
+        })
+        // 底部细线
+        ctx.fillStyle = '#eeeeee'
+        ctx.fillRect(PAD, H - 14, W - PAD * 2, 2)
+        wx.canvasToTempFilePath({
+          canvas,
+          destWidth: W * dpr,
+          destHeight: H * dpr,
+          success: (rr) => {
+            wx.hideLoading()
+            if (share && wx.showShareImageMenu) {
+              wx.showShareImageMenu({
+                path: rr.tempFilePath,
+                fail: () => wx.previewImage({ urls: [rr.tempFilePath] })
+              })
+            } else wx.previewImage({ urls: [rr.tempFilePath] })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '生成失败', icon: 'none' }) }
+        })
+      })
   },
   doImport() {
     const { import_type, import_text, import_types } = this.data

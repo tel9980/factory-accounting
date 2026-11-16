@@ -98,6 +98,11 @@ const toIsoDate = (s) => {
   if (num(mm) < 1 || num(mm) > 12 || num(dd) < 1 || num(dd) > 31) return ''
   return `${y}-${mm}-${dd}T00:00:00.000Z`
 }
+// 单据日期：填了就用那天（保留当前时刻），没填就是现在
+const stampOf = (date) => {
+  const iso = toIsoDate(date)
+  return iso ? iso : now()
+}
 const looksLikeDate = (s) => !!toIsoDate(s)
 // 收款/付款日期补录：支持 YYYY-MM-DD 或 MM-DD，否则用当前时间
 const normDate = (s) => {
@@ -1433,13 +1438,14 @@ app.get('/expenses', async (c) => {
 
 // 记应收（加工订单）
 app.post('/orders', async (c) => {
-  const { customer, item_name, price, due_date, operator } = await c.req.json()
+  const { customer, item_name, price, due_date, operator, date } = await c.req.json()
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
-  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
+  const created = stampOf(date)
+  if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date)
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?)')
-    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, now()).run()
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, created).run()
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
   return c.json({ ok: true })
 })
@@ -1589,10 +1595,11 @@ app.post('/orders/:id/status', async (c) => {
 
 // 记应付
 app.post('/payables', async (c) => {
-  const { supplier, amount, category, remark, operator, due_date, confirm_dup } = await c.req.json()
+  const { supplier, amount, category, remark, operator, due_date, confirm_dup, date } = await c.req.json()
   if (!supplier || num(amount) <= 0) return c.json({ error: '供应商和金额必填' }, 400)
   const db = c.env.DB
-  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
+  const created = stampOf(date)
+  if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   // 防重复：同供应商 + 同金额，7 天内提醒一次
   if (!confirm_dup) {
     const since = new Date(Date.now() - 7 * 86400000).toISOString()
@@ -1601,7 +1608,7 @@ app.post('/payables', async (c) => {
     if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
   }
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || null, now()).run()
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || null, created).run()
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
@@ -1628,19 +1635,20 @@ app.post('/payables/:id/pay', async (c) => {
 
 // 现付支出
 app.post('/expenses', async (c) => {
-  const { amount, category, remark, operator, account_id, confirm_dup } = await c.req.json()
+  const { amount, category, remark, operator, account_id, confirm_dup, date } = await c.req.json()
   if (num(amount) <= 0) return c.json({ error: '金额必填' }, 400)
   const db = c.env.DB
-  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
+  const created = stampOf(date)
+  if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   // 防重复：同一天 + 同分类 + 同金额，提醒一次
   if (!confirm_dup) {
     const d = await db.prepare("SELECT 1 FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND ref_type='expense' AND amount=? AND COALESCE(NULLIF(category,''),'其他')=? AND substr(created_at,1,10)=?")
-      .bind(num(amount), category || '其他', now().slice(0, 10)).first()
+      .bind(num(amount), category || '其他', created.slice(0, 10)).first()
     if (d) return c.json({ error: `今天已经记过一笔「${category || '其他'} ${num(amount)}」，确认再记一次吗？`, dup: true }, 409)
   }
   const acc = num(account_id) || (await defaultAccountId(db))
   await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,?,1,?)")
-    .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, acc, now()).run()
+    .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, acc, created).run()
   await logAudit(db, '新增支出', category || '其他', `${category || '其他'} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
@@ -1825,6 +1833,15 @@ app.get('/statement-month', async (c) => {
       lines.push(`本月明细：`)
       monthOrders.forEach((o, i) => lines.push(`${i + 1}. ${o.item_name || '加工'} 总${o.price} 已收${o.paid}`))
     }
+    const { results: recv } = await db.prepare(
+      "SELECT l.created_at, l.amount, a.name AS acc FROM ledger l JOIN orders o ON l.ref_id=o.id LEFT JOIN accounts a ON a.id=l.account_id WHERE l.direction='in' AND l.ref_type='order' AND o.customer=? AND l.created_at LIKE ? ORDER BY l.created_at"
+    ).bind(name, prefix).all()
+    if (recv.length) {
+      lines.push(`本月收款记录：`)
+      recv.forEach((r) => lines.push(`${String(r.created_at).slice(5, 10)} 收 ${round2(num(r.amount))}${r.acc ? '（' + r.acc + '）' : ''}`))
+    }
+    lines.push(`—— 制表日期 ${now().slice(0, 10)}`)
+    return c.json({ text: lines.join('\n'), month: m, name, type: 'ar', open: round2(open), inc: round2(cur), inc_cnt: curCnt, got: round2(num(got.t)), end: round2(end) })
   } else {
     const { results: pays } = await db.prepare('SELECT * FROM payables WHERE supplier=? ORDER BY id').bind(name).all()
     let open = 0, cur = 0, curCnt = 0
@@ -1847,8 +1864,17 @@ app.get('/statement-month', async (c) => {
         lines.push(`${i + 1}. ${desc || '货款'} 总${p.amount} 已付${p.paid}`)
       })
     }
+    const { results: payRec } = await db.prepare(
+      "SELECT l.created_at, l.amount, a.name AS acc FROM ledger l JOIN payables p ON l.ref_id=p.id LEFT JOIN accounts a ON a.id=l.account_id WHERE l.direction='out' AND l.ref_type='payable' AND p.supplier=? AND l.created_at LIKE ? ORDER BY l.created_at"
+    ).bind(name, prefix).all()
+    if (payRec.length) {
+      lines.push(`本月付款记录：`)
+      payRec.forEach((r) => lines.push(`${String(r.created_at).slice(5, 10)} 付 ${round2(num(r.amount))}${r.acc ? '（' + r.acc + '）' : ''}`))
+    }
+    lines.push(`—— 制表日期 ${now().slice(0, 10)}`)
+    return c.json({ text: lines.join('\n'), month: m, name, type: 'ap', open: round2(open), inc: round2(cur), inc_cnt: curCnt, got: round2(num(paid.t)), end: round2(end) })
   }
-  return c.json({ text: lines.join('\n') })
+  return c.json({ error: '类型不对，只能是 ar 或 ap' }, 400)
 })
 
 // 一句话记账：收/付/分类 自动识别

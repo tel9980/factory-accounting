@@ -142,6 +142,12 @@
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
       <input class="inp" placeholder="经手人(可选)" value="{{o_operator}}" bindinput="onOOperator"/>
+      <view class="dateRow">
+        <picker mode="date" data-f="o_date" bindchange="onDatePick" class="datePick">
+          <view class="dateInp">{{o_date || '开单日期（默认今天）'}}</view>
+        </picker>
+        <text class="dateClr" wx:if="{{o_date}}" data-f="o_date" bindtap="clearDate">今天</text>
+      </view>
       <button class="btn" size="mini" bindtap="addOrder">记一笔应收</button>
       <view class="chips" wx:if="{{contacts_ar.length}}">
         <text class="chip-label">常用客户：</text>
@@ -257,6 +263,12 @@
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
       <input class="inp" placeholder="经手人(可选)" value="{{p_operator}}" bindinput="onPOperator"/>
+      <view class="dateRow">
+        <picker mode="date" data-f="p_date" bindchange="onDatePick" class="datePick">
+          <view class="dateInp">{{p_date || '发生日期（默认今天）'}}</view>
+        </picker>
+        <text class="dateClr" wx:if="{{p_date}}" data-f="p_date" bindtap="clearDate">今天</text>
+      </view>
       <button class="btn" size="mini" bindtap="addPayable">记一笔应付</button>
       <view class="chips" wx:if="{{contacts_ap.length}}">
         <text class="chip-label">常用供应商：</text>
@@ -355,6 +367,12 @@
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
+      <view class="dateRow">
+        <picker mode="date" data-f="e_date" bindchange="onDatePick" class="datePick">
+          <view class="dateInp">{{e_date || '日期（默认今天）'}}</view>
+        </picker>
+        <text class="dateClr" wx:if="{{e_date}}" data-f="e_date" bindtap="clearDate">今天</text>
+      </view>
       <button class="btn" size="mini" bindtap="addExpense">记支出</button>
     </view>
 
