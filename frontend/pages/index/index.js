@@ -58,7 +58,7 @@ Page({
     bank_hint: '一行一笔：日期,收/付,金额,摘要\n如：2026-11-10,收,8000,张老板货款',
     restore_text: '',
     fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: '',
-    lock_month: '', month_locks: [],
+    lock_month: '', month_locks: [], archives: [], this_month: '',
     audit_logs: [],
     search_kw: '', search_res: null,
     phrases: [], phrase_kind: 0,
@@ -177,6 +177,7 @@ Page({
     this.loadLimits()
     this.loadFixed()
     this.loadMonthLocks()
+    this.loadArchives()
     this.loadAuditLogs()
     this.loadTrash()
     this.loadPhrases()
@@ -2414,6 +2415,95 @@ Page({
   },
   loadMonthLocks() {
     this.req({ url: API_BASE + '/month-locks', success: (res) => this.setData({ month_locks: res.data || [] }) })
+  },
+  loadArchives() {
+    if (!this.data.this_month) {
+      const d = new Date()
+      this.setData({ this_month: d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') })
+    }
+    this.req({
+      url: API_BASE + '/month-archives',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ archives: d.archives || [] })
+      }
+    })
+  },
+  closeMonth() {
+    const d = this.data
+    const m = (d.lock_month || d.this_month || '').trim()
+    if (!/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '填月份，如 2026-10', icon: 'none' })
+    wx.showModal({
+      title: '结转归档 ' + m,
+      content: '会把 ' + m + ' 的收入成本、期末应收应付、现金、净资产打成快照，并锁定该月不许再改。以后报表就用这份快照（改历史不影响已出报表）。',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.showLoading({ title: '结转中…' })
+        this.req({
+          url: API_BASE + '/month-close', method: 'POST', data: { month: m },
+          success: (res) => {
+            wx.hideLoading()
+            const s = (res.data || {}).snapshot
+            if (!s) return wx.showToast({ title: (res.data && res.data.error) || '结转失败', icon: 'none' })
+            wx.showModal({
+              title: m + ' 已结转',
+              content: '接单 ' + s.order_add + '\n成本 ' + s.cost + '（现金 ' + s.cash_expense + ' + 摊销 ' + s.amort + ' + 折旧 ' + s.dep + ' + 预提息 ' + s.accrue_int + '）\n毛利 ' + s.profit + '（毛利率 ' + s.margin + '%）\n期末现金 ' + s.cash_balance + '\n应收 ' + s.ar_left + ' · 应付 ' + s.ap_left + ' · 借款 ' + s.debt_left + '\n净资产 ' + s.net_worth,
+              showCancel: false
+            })
+            this.setData({ lock_month: '' })
+            this.loadArchives(); this.loadMonthLocks(); this.refresh()
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
+  },
+  viewArchive(e) {
+    const m = e.currentTarget.dataset.m
+    this.req({
+      url: API_BASE + '/month-archive?month=' + m,
+      success: (res) => {
+        const s = (res.data || {}).snapshot || {}
+        wx.showModal({
+          title: m + ' 快照' + (s.archived ? '（已归档·定版）' : '（未归档·现算）'),
+          content: '接单 ' + s.order_add + ' / ' + s.order_count + ' 张\n成本 ' + s.cost + '\n毛利 ' + s.profit + '（' + s.margin + '%）\n现金 收 ' + s.income + ' 付 ' + s.outcome + '\n期末现金 ' + s.cash_balance + '\n应收 ' + s.ar_left + ' · 应付 ' + s.ap_left + ' · 借款 ' + s.debt_left + '\n净资产 ' + s.net_worth,
+          showCancel: false
+        })
+      }
+    })
+  },
+  delArchive(e) {
+    const m = e.currentTarget.dataset.m
+    wx.showModal({
+      title: '删掉 ' + m + ' 的归档？',
+      content: '会同时解锁该月（之后又能改这个月的账）。已出过的纸质报表不受影响。',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/month-archive/' + m, method: 'DELETE',
+          success: () => { this.loadArchives(); this.loadMonthLocks(); this.refresh() }
+        })
+      }
+    })
+  },
+  printReport(e) {
+    const ds = (e && e.currentTarget && e.currentTarget.dataset) || {}
+    const m = ds.m || (this.data.lock_month || '').trim() || this.data.this_month
+    this.req({
+      url: API_BASE + '/report-link?month=' + (m || ''),
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '没生成出来', icon: 'none' })
+        wx.setClipboardData({
+          data: u,
+          success: () => wx.showModal({
+            title: '报表打印链接已复制',
+            content: '粘到电脑浏览器打开，Ctrl+P 打印或存 PDF（给会计、银行、客户都行）。手机上打开底部也有「打印」按钮。',
+            showCancel: false
+          })
+        })
+      }
+    })
   },
   loadAuditLogs() {
     this.req({ url: API_BASE + '/audit-logs', success: (res) => this.setData({ audit_logs: res.data || [] }) })

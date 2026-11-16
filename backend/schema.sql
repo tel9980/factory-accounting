@@ -199,3 +199,11 @@ CREATE TABLE IF NOT EXISTS loans (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_loans_staff ON loans(staff);
+
+-- 月度结转归档（月结后打快照，报表以快照为准）
+CREATE TABLE IF NOT EXISTS month_archive (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT UNIQUE,
+  data TEXT,
+  created_at TEXT
+);

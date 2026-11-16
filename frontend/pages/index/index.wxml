@@ -572,15 +572,23 @@
       </view>
     </view>
     <view class="form">
-      <view class="tip">月度结账锁定（锁住后该月账目不能改，防误动）</view>
-      <input class="inp" placeholder="月份，如 2026-11" value="{{lock_month}}" bindinput="onLockMonth"/>
-      <button class="btn" size="mini" bindtap="lockMonth">锁定该月</button>
-      <view class="list" wx:if="{{month_locks.length}}">
-        <view class="item" wx:for="{{month_locks}}" wx:key="month">
-          <view class="row1">已锁定：{{item.month}}</view>
-          <view class="row2">锁定于 {{item.locked_at}}<button size="mini" bindtap="unlockMonth" data-m="{{item.month}}">解锁</button></view>
+      <view class="tip">📦 月度结转归档（把该月账目定版：出报表、打快照、锁定不许改）</view>
+      <input class="inp" placeholder="月份，如 {{this_month}}" value="{{lock_month}}" bindinput="onLockMonth"/>
+      <button class="btn" size="mini" bindtap="closeMonth">结转归档（出报表 + 锁定）</button>
+      <button class="btn" size="mini" bindtap="printReport">🖨 打印报表（A4，资产负债表 / 利润表）</button>
+      <view class="list" wx:if="{{archives.length}}">
+        <view class="item" wx:for="{{archives}}" wx:key="month">
+          <view class="row1"><text class="nm">{{item.month}} 已归档</text><text class="amt">毛利 {{item.profit}}</text></view>
+          <view class="row2">接单 {{item.order_add}} · 成本 {{item.cost}} · 毛利率 {{item.margin}}% · 净资产 {{item.net_worth}}</view>
+          <view class="row2">归档于 {{item.created_at}}</view>
+          <view class="btns">
+            <button size="mini" bindtap="viewArchive" data-m="{{item.month}}">看快照</button>
+            <button size="mini" bindtap="printReport" data-m="{{item.month}}">打印</button>
+            <button size="mini" bindtap="delArchive" data-m="{{item.month}}">删归档（解锁）</button>
+          </view>
         </view>
       </view>
+      <view class="tip" wx:if="{{month_locks.length}}">已锁定月份：{{month_locks.length}} 个（归档会自动锁定）</view>
     </view>
     <view class="form">
       <view class="tip">回收站（删掉的账先放这里，30 天内可恢复）</view>

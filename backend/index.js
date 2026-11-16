@@ -98,7 +98,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -582,6 +582,223 @@ app.get('/accruals', async (c) => {
   const amort = round2(results.filter((r) => r.ref_type === 'amort').reduce((a, r) => a + num(r.amount), 0))
   const interest = round2(results.filter((r) => r.ref_type === 'debt_int').reduce((a, r) => a + num(r.amount), 0))
   return c.json({ month: m, rows: results, amort, interest, total: round2(amort + interest) })
+})
+
+// ==================== 月度结转归档（月结后打快照，报表以快照为准） ====================
+const monthEnd = (mm) => {
+  const [y, mo] = mm.split('-').map(Number)
+  const d = new Date(Date.UTC(y, mo, 0))
+  return d.toISOString().slice(0, 10)
+}
+
+const monthSnapshot = async (db, mm) => {
+  const one = async (sql, ...a) => num(((await db.prepare(sql).bind(...a).first()) || {}).t)
+  const end = monthEnd(mm)
+  const endTs = end + 'T23:59:59Z'
+  const cashIn = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", mm)
+  const cashOut = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", mm)
+  const orderAdd = await one('SELECT COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?', mm)
+  const orderCnt = await one('SELECT COUNT(*) t FROM orders WHERE substr(created_at,1,7)=?', mm)
+  const payableAdd = await one('SELECT COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?', mm)
+  const payableCnt = await one('SELECT COUNT(*) t FROM payables WHERE substr(created_at,1,7)=?', mm)
+  const ledgerCnt = await one('SELECT COUNT(*) t FROM ledger WHERE substr(created_at,1,7)=?', mm)
+  const amort = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE ref_type='amort' AND substr(created_at,1,7)=?", mm)
+  const dep = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE ref_type='dep' AND substr(created_at,1,7)=?", mm)
+  const accrue = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE ref_type='debt_int' AND substr(created_at,1,7)=?", mm)
+  const cashExp = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND substr(created_at,1,7)=?", mm)
+  const cost = round2(cashExp + amort + dep + accrue)
+  const profit = round2(orderAdd - payableAdd - cost)
+  // 期末余额（截至该月最后一天）
+  const opening = await one('SELECT COALESCE(SUM(opening),0) t FROM accounts')
+  const cashFlow = await one("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10)<=?", end)
+  const arLeft = await one('SELECT COALESCE(SUM(CASE WHEN price - paid - COALESCE(written_off,0) > 0 THEN price - paid - COALESCE(written_off,0) ELSE 0 END),0) t FROM orders WHERE substr(created_at,1,10)<=?', end)
+  const apLeft = await one('SELECT COALESCE(SUM(CASE WHEN amount - paid - COALESCE(written_off,0) > 0 THEN amount - paid - COALESCE(written_off,0) ELSE 0 END),0) t FROM payables WHERE substr(created_at,1,10)<=?', end)
+  const debtLeft = await one('SELECT COALESCE(SUM(principal),0) t FROM debts WHERE substr(start_date,1,10)<=?', end)
+  const debtPaid = await one("SELECT COALESCE(SUM(amount),0) t FROM debt_repays WHERE kind='principal' AND substr(COALESCE(rdate,created_at),1,10)<=?", end)
+  const debtB = round2(Math.max(0, debtLeft - debtPaid))
+  const cash = round2(opening + cashFlow)
+  return {
+    month: mm, period_end: end,
+    income: cashIn, outcome: cashOut, net_cash: round2(cashIn - cashOut),
+    order_add: orderAdd, order_count: orderCnt, payable_add: payableAdd, payable_count: payableCnt, ledger_count: ledgerCnt,
+    cash_expense: cashExp, amort, dep, accrue_int: accrue, cost,
+    profit, margin: orderAdd > 0 ? round2((profit / orderAdd) * 100) : 0,
+    cash_balance: cash, ar_left: arLeft, ap_left: apLeft, debt_left: debtB,
+    net_worth: round2(cash + arLeft - apLeft - debtB)
+  }
+}
+
+const saveArchive = async (db, snap) => {
+  const js = JSON.stringify(snap)
+  const has = await db.prepare('SELECT id FROM month_archive WHERE month=?').bind(snap.month).first()
+  if (has) await db.prepare('UPDATE month_archive SET data=?, created_at=? WHERE month=?').bind(js, now(), snap.month).run()
+  else await db.prepare('INSERT INTO month_archive (month, data, created_at) VALUES (?,?,?)').bind(snap.month, js, now()).run()
+  return true
+}
+
+// 读某月数据：已归档就用归档快照（历史改动不影响已出报表）
+const snapOf = async (db, mm) => {
+  const a = await db.prepare('SELECT data FROM month_archive WHERE month=?').bind(mm).first()
+  if (a && a.data) {
+    try {
+      const d = JSON.parse(a.data)
+      d.archived = true
+      return d
+    } catch (e) { /* 归档坏了就现算 */ }
+  }
+  const d = await monthSnapshot(db, mm)
+  d.archived = false
+  return d
+}
+
+app.post('/month-close', async (c) => {
+  const db = c.env.DB
+  const { month: m } = await c.req.json()
+  const mm = String(m || '').trim()
+  if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM，如 2026-11' }, 400)
+  const snap = await monthSnapshot(db, mm)
+  snap.closed_at = now()
+  await saveArchive(db, snap)
+  await db.prepare('INSERT OR IGNORE INTO month_lock (month, locked_at) VALUES (?,?)').bind(mm, now()).run()
+  await logAudit(db, '月结归档', mm, `结转 ${mm}：毛利 ${snap.profit}，成本 ${snap.cost}`)
+  return c.json({ ok: true, snapshot: snap })
+})
+
+app.get('/month-archives', async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT * FROM month_archive ORDER BY month DESC').all()
+  const list = results.map((r) => {
+    let d = {}
+    try { d = JSON.parse(r.data) } catch (e) { d = {} }
+    return {
+      month: r.month, created_at: r.created_at,
+      order_add: d.order_add || 0, cost: d.cost || 0, profit: d.profit || 0,
+      margin: d.margin || 0, net_worth: d.net_worth || 0, cash_balance: d.cash_balance || 0
+    }
+  })
+  return c.json({ archives: list, count: list.length })
+})
+
+app.get('/month-archive', async (c) => {
+  const db = c.env.DB
+  const mm = String(c.req.query('month') || month()).slice(0, 7)
+  const r = await db.prepare('SELECT * FROM month_archive WHERE month=?').bind(mm).first()
+  const snap = await snapOf(db, mm)
+  return c.json({ archived: !!r, month: mm, snapshot: snap, created_at: r ? r.created_at : '' })
+})
+
+app.delete('/month-archive/:month', async (c) => {
+  const mm = c.req.param('month')
+  const db = c.env.DB
+  await db.prepare('DELETE FROM month_archive WHERE month=?').bind(mm).run()
+  await db.prepare('DELETE FROM month_lock WHERE month=?').bind(mm).run()
+  await logAudit(db, '删归档', mm, `删除 ${mm} 的归档并解锁`)
+  return c.json({ ok: true })
+})
+
+// ==================== A4 打印版报表（资产负债表 / 利润表） ====================
+app.get('/report-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const mm = String(c.req.query('month') || month()).slice(0, 7)
+  const t = await sigOf(saved, 'report:' + mm, 'rp')
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t })
+})
+
+app.get('/report-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const mm = String(c.req.query('month') || month()).slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(mm)) return c.html('<h3>月份格式不对（应为 2026-11）</h3>')
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'report:' + mm, 'rp') : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印报表」生成新链接。</h3>')
+  const head = await getTitle(db)
+  const snap = await snapOf(db, mm)
+  const yr = mm.slice(0, 4)
+  // 本年累计
+  let yOrder = 0; let yPayable = 0; let yCashExp = 0; let yAmort = 0; let yDep = 0; let yAccrue = 0
+  for (let i = 1; i <= Number(mm.slice(5, 7)); i += 1) {
+    const s = await snapOf(db, `${yr}-${String(i).padStart(2, '0')}`)
+    yOrder += s.order_add; yPayable += s.payable_add; yCashExp += s.cash_expense; yAmort += s.amort; yDep += s.dep; yAccrue += s.accrue_int
+  }
+  const yCost = round2(yCashExp + yAmort + yDep + yAccrue)
+  const yProfit = round2(yOrder - yPayable - yCost)
+  const cats = (await db.prepare("SELECT category, COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND substr(created_at,1,7)=? GROUP BY category ORDER BY t DESC").bind(mm).all()).results
+  const accounts = (await db.prepare('SELECT * FROM accounts ORDER BY id').all()).results
+  const bal = await accountBalances(db)
+  const money = (n) => Number(n || 0).toFixed(2)
+  const rows = (arr) => arr.map((r) => `<tr><td>${r[0]}</td><td class="n">${r[1]}</td></tr>`).join('')
+  const catRows = cats.map((x) => `<tr><td>　${x.category || '其他'}</td><td class="n">${money(x.t)}</td></tr>`).join('')
+  const accRows = (bal.accounts || []).map((a) => `<tr><td>　${a.name}</td><td class="n">${money(a.balance)}</td></tr>`).join('')
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${(head && head.value) || '经营报表'} ${mm}</title>
+<style>
+@page{size:A4;margin:14mm}
+body{font-family:-apple-system,"Microsoft YaHei",sans-serif;color:#222;font-size:13px;line-height:1.6}
+h1{font-size:18px;text-align:center;margin:0 0 2px}
+h2{font-size:14px;margin:18px 0 6px;border-left:4px solid #333;padding-left:8px}
+.sub{text-align:center;color:#666;font-size:12px;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;margin-bottom:8px}
+td,th{border-bottom:1px solid #ddd;padding:4px 6px}
+th{background:#f5f5f5;text-align:left;font-weight:600}
+.n{text-align:right;font-variant-numeric:tabular-nums}
+.total td{font-weight:700;border-top:2px solid #333;border-bottom:2px solid #333}
+.red{color:#c00}.green{color:#080}
+.btn{display:block;margin:16px auto;padding:10px 22px;background:#07c;color:#fff;border:0;border-radius:6px;font-size:15px}
+.sign{display:flex;justify-content:space-between;margin-top:28px;font-size:12px;color:#555}
+@media print{.btn{display:none}body{font-size:12px}}
+</style></head><body>
+<button class="btn" onclick="window.print()">🖨 打印 / 存 PDF</button>
+<h1>${(head && head.value) || '经营报表'}</h1>
+<div class="sub">报表期间：${mm}（截至 ${snap.period_end}）　单位：元${snap.archived ? '　<b>· 按 ' + mm + ' 月结快照出表</b>' : ''}</div>
+
+<h2>一、利润表（${mm}）</h2>
+<table>
+<tr><th>项目</th><th class="n">本月</th><th class="n">本年累计</th></tr>
+<tr><td>营业收入（接单金额）</td><td class="n">${money(snap.order_add)}</td><td class="n">${money(yOrder)}</td></tr>
+<tr><td>采购/委外（赊购）</td><td class="n">${money(snap.payable_add)}</td><td class="n">${money(yPayable)}</td></tr>
+<tr><td>现金支出</td><td class="n">${money(snap.cash_expense)}</td><td class="n">${money(yCashExp)}</td></tr>
+${catRows}
+<tr><td>　摊销（待摊费用）</td><td class="n">${money(snap.amort)}</td><td class="n">${money(yAmort)}</td></tr>
+<tr><td>　折旧</td><td class="n">${money(snap.dep)}</td><td class="n">${money(yDep)}</td></tr>
+<tr><td>　预提利息</td><td class="n">${money(snap.accrue_int)}</td><td class="n">${money(yAccrue)}</td></tr>
+<tr class="total"><td>成本合计</td><td class="n">${money(snap.cost)}</td><td class="n">${money(yCost)}</td></tr>
+<tr class="total"><td>经营毛利</td><td class="n ${snap.profit >= 0 ? 'green' : 'red'}">${money(snap.profit)}</td><td class="n ${yProfit >= 0 ? 'green' : 'red'}">${money(yProfit)}</td></tr>
+<tr><td>毛利率</td><td class="n">${snap.margin}%</td><td class="n">${yOrder > 0 ? round2((yProfit / yOrder) * 100) : 0}%</td></tr>
+</table>
+
+<h2>二、资产负债表（${snap.period_end} 期末）</h2>
+<table>
+<tr><th>资产</th><th class="n">金额</th></tr>
+<tr><td>货币资金（账户合计）</td><td class="n">${money(snap.cash_balance)}</td></tr>
+${accRows}
+<tr><td>应收账款（别人欠我）</td><td class="n">${money(snap.ar_left)}</td></tr>
+<tr class="total"><td>资产合计</td><td class="n">${money(round2(snap.cash_balance + snap.ar_left))}</td></tr>
+</table>
+<table>
+<tr><th>负债与所有者权益</th><th class="n">金额</th></tr>
+<tr><td>应付账款（我欠供应商）</td><td class="n">${money(snap.ap_left)}</td></tr>
+<tr><td>借款余额</td><td class="n">${money(snap.debt_left)}</td></tr>
+<tr class="total"><td>负债合计</td><td class="n">${money(round2(snap.ap_left + snap.debt_left))}</td></tr>
+<tr><td>所有者权益（净资产）</td><td class="n ${snap.net_worth >= 0 ? 'green' : 'red'}">${money(snap.net_worth)}</td></tr>
+<tr class="total"><td>负债与权益合计</td><td class="n">${money(round2(snap.ap_left + snap.debt_left + snap.net_worth))}</td></tr>
+</table>
+
+<h2>三、本月现金收支</h2>
+<table>
+<tr><td>现金收入</td><td class="n">${money(snap.income)}</td></tr>
+<tr><td>现金支出</td><td class="n">${money(snap.outcome)}</td></tr>
+<tr class="total"><td>净现金</td><td class="n ${snap.net_cash >= 0 ? 'green' : 'red'}">${money(snap.net_cash)}</td></tr>
+</table>
+<div class="sub">本月单据：应收 ${snap.order_count} 张 · 应付 ${snap.payable_count} 张 · 流水 ${snap.ledger_count} 条</div>
+
+<div class="sign"><span>制表：____________</span><span>复核：____________</span><span>日期：${now().slice(0, 10)}</span></div>
+<div class="sub" style="margin-top:18px">本表按「现金支出 + 摊销 + 折旧 + 预提利息」口径计算成本，与小程序内数据一致。</div>
+</body></html>`
+  return c.html(html)
 })
 
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
