@@ -28,3 +28,11 @@
 
 ## 3. 下一步建议
 如果你需要我为你完成“GitHub上传”或“CF配置”的自动化流水线，请告诉我你的 GitHub 用户名，我可以通过脚本为你创建仓库并生成初始化提交。
+
+## 推送遇到 TLS 报错（本机代理问题）
+
+如果 `git push` 报 `gnutls_handshake() failed: The TLS connection was non-properly terminated`，是本机 `http_proxy`（192.168.2.22:20172）对 GitHub 的 TLS 握手不稳，不是仓库问题。绕过代理推即可：
+
+```bash
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY git -c http.proxy= -c https.proxy= push origin main
+```
