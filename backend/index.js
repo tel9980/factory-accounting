@@ -183,7 +183,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -219,6 +219,7 @@ app.use('*', async (c, next) => {
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
       || /^\/(schema-check|books-check)/.test(path)
+      || (/^\/handover-note$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
@@ -381,6 +382,153 @@ app.get('/track-log', async (c) => {
     : await db.prepare('SELECT * FROM track_log ORDER BY id DESC LIMIT 50').all().then((r) => r.results)
   const agg = await db.prepare('SELECT party, COUNT(*) c, MAX(created_at) last FROM track_log GROUP BY party ORDER BY last DESC LIMIT 30').all().then((r) => r.results)
   return c.json({ ok: true, rows, by_party: agg })
+})
+
+
+// ===== 账本交接包：换人管账时，一页说清「这本账怎么记的、还欠谁、接手怎么用」=====
+async function handoverData(db, env) {
+  const t = await getTitle(db)
+  const today = now().slice(0, 10)
+  const q = (sql, ...b) => db.prepare(sql).bind(...b).all().catch(() => ({ results: [] }))
+  const f = (sql, ...b) => db.prepare(sql).bind(...b).first().catch(() => null)
+  const [arF, apF, arTop, apTop, profs, accs, terms, reconF, doubtF, noDueF, invF, advR, loanF, noteF, nw] = await Promise.all([
+    f("SELECT COUNT(*) cnt, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) amt, MIN(created_at) oldest FROM orders WHERE price > paid + COALESCE(written_off,0)"),
+    f("SELECT COUNT(*) cnt, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) amt, MIN(created_at) oldest FROM payables WHERE amount > paid + COALESCE(written_off,0)"),
+    q("SELECT customer AS party, COUNT(*) n, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) amt, MIN(created_at) oldest, MAX(due_date) due FROM orders WHERE price > paid + COALESCE(written_off,0) GROUP BY customer ORDER BY amt DESC LIMIT 5"),
+    q("SELECT supplier AS party, COUNT(*) n, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) amt, MIN(created_at) oldest, MAX(due_date) due FROM payables WHERE amount > paid + COALESCE(written_off,0) GROUP BY supplier ORDER BY amt DESC LIMIT 5"),
+    q('SELECT party, contact, phone, addr FROM party_profiles'),
+    accountBalances(db),
+    q("SELECT party, kind, term_days, recon_day, recon_cycle FROM party_terms ORDER BY party LIMIT 40"),
+    f("SELECT COUNT(*) n FROM recon_log WHERE done=0 AND COALESCE(state,'')<>'match'"),
+    f("SELECT COUNT(*) n FROM statement_log WHERE ack='doubt' AND COALESCE(resolved_at,'')=''"),
+    f("SELECT COUNT(*) n FROM (SELECT 1 FROM orders WHERE paid + COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='') UNION ALL SELECT 1 FROM payables WHERE paid + COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date=''))"),
+    f("SELECT COALESCE(SUM(amount),0) amt, COUNT(*) cnt FROM invoices WHERE COALESCE(order_id,0) > 0"),
+    q('SELECT type, COALESCE(SUM(amount-COALESCE(used,0)),0) amt, COUNT(*) cnt FROM advances WHERE amount - COALESCE(used,0) > 0.005 GROUP BY type'),
+    f("SELECT COALESCE(SUM(amount - used - returned),0) amt, COUNT(*) cnt FROM loans WHERE amount - used - returned > 0.005"),
+    f("SELECT value FROM settings WHERE key='handover_note'"),
+    netNow(db)
+  ])
+  const pmap = {}
+  for (const r of ((profs && profs.results) || [])) pmap[norm(r.party)] = r
+  const adv = { in: 0, out: 0, cnt: 0 }
+  for (const r of ((advR && advR.results) || [])) {
+    if (r.type === 'in') adv.in = round2(num(r.amt)); else adv.out = round2(num(r.amt))
+    adv.cnt += num(r.cnt)
+  }
+  const accList = accs || []
+  const cashTotal = round2(accList.reduce((s, a) => s + num(a.balance), 0))
+  const arAmt = round2(num(arF && arF.amt)), apAmt = round2(num(apF && apF.amt))
+  // 三个账本各是干什么的
+  const envAll = env || {}
+  const books = []
+  const bk = [{ id: '1', db: envAll.DB }, { id: '2', db: envAll.DB2 }, { id: '3', db: envAll.DB3 }]
+  for (const b of bk) {
+    if (!b.db) continue
+    const nm = await b.db.prepare("SELECT value FROM settings WHERE key='book_name'").first().catch(() => null)
+    const c1 = await b.db.prepare('SELECT COUNT(*) n FROM orders').first().catch(() => null)
+    const c2 = await b.db.prepare('SELECT COUNT(*) n FROM ledger').first().catch(() => null)
+    books.push({ id: b.id, name: (nm && nm.value) || ('账本' + b.id), orders: num(c1 && c1.n), flows: num(c2 && c2.n) })
+  }
+  const rowLine = (r, isAr) => {
+    const p = pmap[norm(r.party)] || {}
+    const d = daysSince(r.oldest)
+    return `${r.party}：${isAr ? '欠' : '应付'} ¥${round2(num(r.amt))}（${num(r.n)} 笔${d ? '，最久 ' + d + ' 天' : ''}）${p.phone ? ' 电话 ' + p.phone : ''}${p.contact ? ' 对接 ' + p.contact : ''}`
+  }
+  const sections = []
+  sections.push({ title: '一、这本账是什么', lines: [
+    `厂名：${t.title}${t.phone ? '　电话 ' + t.phone : ''}${t.addr ? '　地址 ' + t.addr : ''}`,
+    `当前账本：${(books.find((b) => b.id === String(envAll.BOOK || '1')) || books[0] || {}).name || '账本1'}`,
+    `这本账记的是：加工费应收（客户欠我）、供应商应付（我欠别人）、日常支出、收付款流水；不做生产工序与工资考勤。`,
+    `赚了多少怎么算（口径）：本月接单额 − 单子上的材料·外协成本 − 现金费用（工资水电房租等）− 摊销 − 折旧 − 预提利息。赊购（应付）不算成本，等付钱时进现金流。`,
+    books.length ? `一共 ${books.length} 本账（互相独立，顶部可切）：` + books.map((b) => `${b.name}（${b.orders} 张单 / ${b.flows} 笔流水）`).join('；') : ''
+  ].filter(Boolean) })
+  sections.push({ title: '二、现在账上有什么', lines: [
+    `应收未收：${num(arF && arF.cnt)} 笔，共 ¥${arAmt}${arF && arF.oldest && daysSince(arF.oldest) > 0 ? '（最久一笔 ' + daysSince(arF.oldest) + ' 天前）' : ''}`,
+    `应付未付：${num(apF && apF.cnt)} 笔，共 ¥${apAmt}${apF && apF.oldest && daysSince(apF.oldest) > 0 ? '（最久一笔 ' + daysSince(apF.oldest) + ' 天前）' : ''}`,
+    `手头现金：¥${cashTotal}` + (accList.length ? '（' + accList.map((a) => `${a.name} ¥${round2(num(a.balance))}`).join('、') + '）' : ''),
+    `借款（要还的）：¥${round2(num(nw.debt))}　预收款还没抵：¥${adv.in}　预付款还没到货：¥${adv.out}　员工借支没清：¥${round2(num(loanF && loanF.amt))}`,
+    `净资产（现金 + 应收 − 应付 − 借款）：¥${round2(num(nw.net))}`,
+    `已开发票：${num(invF && invF.cnt)} 张，共 ¥${round2(num(invF && invF.amt))}（发票只做台账，不影响收支与利润）`
+  ] })
+  const arTopR = (arTop && arTop.results) || []
+  if (arTopR.length) sections.push({ title: '三、欠得最多的客户（先催这几家）', lines: arTopR.map((r) => rowLine(r, true)) })
+  const apTopR = (apTop && apTop.results) || []
+  if (apTopR.length) sections.push({ title: '四、要付出去的（按金额排）', lines: apTopR.map((r) => rowLine(r, false)) })
+  const termR = (terms && terms.results) || []
+  if (termR.length) sections.push({ title: '五、和客商约好的账期', lines: termR.map((r) => `${r.party}：${num(r.term_days) > 0 ? '做单后 ' + num(r.term_days) + ' 天到期' : '没设账期'}${num(r.recon_day) > 0 ? '，每月 ' + num(r.recon_day) + ' 号发对账单' : ''}`) })
+  const todo = []
+  if (num(reconF && reconF.n) > 0) todo.push(`有 ${num(reconF.n)} 条对账差异还没处理（记账 → 批量导入 → 对账台账）`)
+  if (num(doubtF && doubtF.n) > 0) todo.push(`有 ${num(doubtF.n)} 份对账单对方说对不上，还没回（报表 → 争议清单）`)
+  if (num(noDueF && noDueF.n) > 0) todo.push(`有 ${num(noDueF.n)} 张单没约定收付款日（设个默认账期就会自动算）`)
+  if (!cashTotal && !accList.some((a) => num(a.opening))) todo.push('账户期初还是 0：把现在手头现金、银行卡余额填上（设置 → 资金账户）')
+  const negAcc = accList.filter((a) => num(a.balance) < -0.005)
+  if (negAcc.length) todo.push(`${negAcc.map((a) => a.name).join('、')} 余额是负的（${negAcc.map((a) => a.name + ' ¥' + round2(num(a.balance))).join('、')}）：多半是支出没挂账户、或期初忘了填，先核对一下（设置 → 资金账户）`)
+  if (!noteF || !String(noteF.value || '').trim()) todo.push('还没写「交接备注」：谁对接供应商、有什么口头约定，写一句比什么都强')
+  sections.push({ title: '六、还没办完的事', lines: todo.length ? todo : ['没有遗留问题，账是干净的。'] })
+  sections.push({ title: '七、接手的人怎么用（照着做就行）', lines: [
+    '1. 微信里打开小程序「小司记账」，第一次会让你设一个访问口令（自己记住；老板那台已设过的不用再设）。',
+    '2. 先看首页「今天的活」：最上面那一条就是现在最该做的事，点一下就跳过去。',
+    '3. 每天记完单再走人：应收（客户欠我）、应付（我欠供应商）、支出（现金花出去的）各记一笔，收钱付款在对应单据上点「收清」。',
+    '4. 每周做两件事：欠得久的催一遍（首页「催款清单」有话术，发完自动记「已催」）、对账单发给欠款客户（报表 → 批量发对账单）。',
+    '5. 每月月底走一遍「月底收尾」七步，最后点「结账归档」；结账后那个月的单就锁住了，要改先「解锁」。',
+    '记错了：单据点进去改，或删掉（进回收站，30 天内能找回）；已经收过钱的单要先取消收款再改金额。',
+    '换手机/换人：设置 → 备份与恢复，先「云端备份」一次，新手机输口令后「从备份恢复」。'
+  ] })
+  const note = String((noteF && noteF.value) || '').trim()
+  if (note) sections.push({ title: '八、老板留的交接备注', lines: note.split('\n').filter(Boolean) })
+  const head = `【${t.title}】账本交接包　生成于 ${today}`
+  const text = [head, ''].concat(...sections.map((s) => [s.title].concat(s.lines.map((l) => '  ' + l)).concat(['']))) .join('\n')
+  return { ok: true, title: t.title, today, sections, text, stats: { ar: arAmt, ar_cnt: num(arF && arF.cnt), ap: apAmt, ap_cnt: num(apF && apF.cnt), cash: cashTotal, net: round2(num(nw.net)), books: books.length } }
+}
+
+app.get('/handover', async (c) => {
+  const d = await handoverData(c.env.DB, c.env)
+  const saved = await getKey((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
+  const t = saved ? await sigOf(saved, 'handover', 'ho') : ''
+  const base = new URL(c.req.url).origin
+  return c.json({ ...d, url: t ? base + '/handover-print?t=' + t : '' })
+})
+
+app.post('/handover-note', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const note = String(b.note || '').trim().slice(0, 2000)
+  const old = await db.prepare("SELECT value FROM settings WHERE key='handover_note'").first().catch(() => null)
+  if (note) {
+    if (old) await db.prepare("UPDATE settings SET value=? WHERE key='handover_note'").bind(note).run()
+    else await db.prepare("INSERT INTO settings (key, value) VALUES ('handover_note', ?)").bind(note).run()
+  } else if (old) {
+    await db.prepare("DELETE FROM settings WHERE key='handover_note'").run()
+  }
+  await logAudit(db, '改交接备注', '', note.slice(0, 40) || '（清空）', '', act(c))
+  return c.json({ ok: true })
+})
+
+app.get('/handover-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'handover', 'ho') : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成交接包。</h3>')
+  const d = await handoverData(db, c.env)
+  const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const body = d.sections.map((s) => `<h2>${esc(s.title)}</h2><ul>${s.lines.map((l) => '<li>' + esc(l) + '</li>').join('')}</ul>`).join('')
+  return c.html(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>账本交接包 ${esc(d.today)}</title><style>
+@page{size:A4;margin:16mm}
+body{font:14px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#222;margin:0;padding:16px;background:#fff}
+h1{font-size:20px;margin:0 0 4px} .sub{color:#666;font-size:12px;margin-bottom:14px}
+h2{font-size:15px;margin:16px 0 6px;padding-bottom:4px;border-bottom:1px solid #e5e5e5;color:#0a4b8c}
+ul{margin:0;padding-left:20px} li{margin:3px 0}
+.sign{margin-top:26px;color:#666;font-size:12px;display:flex;justify-content:space-between}
+.btn{position:fixed;right:16px;top:16px;background:#0a4b8c;color:#fff;border:0;padding:10px 16px;border-radius:8px;font-size:14px}
+@media print{.btn{display:none} body{padding:0}}
+</style></head><body><button class="btn" onclick="window.print()">🖨 打印 / 存成 PDF</button>
+<h1>【${esc(d.title)}】账本交接包</h1><div class="sub">生成日期 ${esc(d.today)}　·　换人管账时把这页交给接手的人</div>
+${body}
+<div class="sign"><span>交出人签字：____________</span><span>接手人签字：____________</span><span>日期：__________</span></div>
+</body></html>`)
 })
 
 app.get('/statement-print', async (c) => {

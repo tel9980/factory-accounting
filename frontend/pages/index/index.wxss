@@ -335,3 +335,9 @@
 
 /* 断网时看上次的数据 */
 .offbar { background: #fff4e5; color: #8a4b08; font-size: 24rpx; padding: 10rpx 20rpx; border-bottom: 1rpx solid #f0d3ae; }
+
+/* 账本交接包 */
+.ho-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.ho-sec { margin: 10px 0 4px; }
+.ho-t { font-size: 26rpx; font-weight: 600; color: #0a4b8c; margin-bottom: 4px; }
+.ho-l { font-size: 24rpx; color: #444; line-height: 1.6; padding-left: 8rpx; }

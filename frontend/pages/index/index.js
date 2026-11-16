@@ -164,7 +164,7 @@ Page({
     phrases: [], phrase_kind: 0,
     budget_over: [], budget_alert_count: 0,
     budgets: [], b_category: 0, b_amount: '',
-    pending_count: 0,
+    pending_count: 0, ho: null, ho_open: false, ho_note: '',
     offline_at: '',
     btl: null,
     book: 1, book_name: '主账套', books: [], rename_text: '',
@@ -4467,6 +4467,40 @@ Page({
   },
   // 数据量体检 / 清理老日志
   // 回到某一天的账本：列出最近 12 份备份，每份有多少单、多少钱，和现在差多少
+  // 账本交接包：换人管账时一页说清（怎么记的、还欠谁、接手怎么用）
+  loadHandover() {
+    this.req({
+      url: API_BASE + '/handover',
+      success: (res) => {
+        const d = res.data || {}
+        const sec = (d.sections || []).find((x) => String(x.title).indexOf('交接备注') >= 0)
+        this.setData({ ho: d, ho_open: false, ho_note: sec ? sec.lines.join('\n') : '' })
+      }
+    })
+  },
+  copyHandover() {
+    const t = (this.data.ho || {}).text || ''
+    if (!t) return
+    wx.setClipboardData({ data: t, success: () => wx.showToast({ title: '已复制，粘贴给接手人' }) })
+  },
+  openHandover() { this.setData({ ho_open: !this.data.ho_open }) },
+  openHandoverPrint() {
+    const u = (this.data.ho || {}).url
+    if (!u) return wx.showToast({ title: '先点「生成交接包」', icon: 'none' })
+    wx.setClipboardData({
+      data: u,
+      success: () => wx.showModal({ title: '打印页链接已复制', content: '粘贴到浏览器打开，可以打印或存成 PDF。链接里不含你的访问口令，转发出去也安全。', showCancel: false })
+    })
+  },
+  onHoNote(e) { this.setData({ ho_note: e.detail.value }) },
+  saveHoNote() {
+    this.req({
+      url: API_BASE + '/handover-note', method: 'POST', once: 'ho-note',
+      data: { note: this.data.ho_note || '' },
+      success: () => { wx.showToast({ title: '备注已保存' }); this.loadHandover() }
+    })
+  },
+  closeHandover() { this.setData({ ho: null, ho_open: false, ho_note: '' }) },
   loadBackupTimeline() {
     this.req({ url: API_BASE + '/backup-timeline', success: (res) => this.setData({ btl: res.data }) })
   },

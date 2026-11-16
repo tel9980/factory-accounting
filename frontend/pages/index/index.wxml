@@ -1294,6 +1294,35 @@
       <button class="btn ghost" size="mini" bindtap="loadBackupTimeline">刷新备份列表</button>
     </view>
     <view class="form">
+      <view class="tip">🤝 账本交接包：换人管账（或者自己半年后忘了怎么记）时，一页说清这本账怎么记的、还欠谁、接手的人第一步做什么。</view>
+      <button class="btn" size="mini" wx:if="{{!ho}}" bindtap="loadHandover">生成交接包</button>
+      <block wx:if="{{ho}}">
+        <view class="tip">应收 ¥{{ho.stats.ar}} · 应付 ¥{{ho.stats.ap}} · 现金 ¥{{ho.stats.cash}} · 净资产 ¥{{ho.stats.net}}</view>
+        <view class="prev">
+          <view class="prev-row" wx:for="{{ho.sections}}" wx:key="title">
+            <text class="prev-t">{{item.title}}</text>
+            <text class="prev-n">{{item.lines.length}} 条</text>
+          </view>
+        </view>
+        <view class="ho-btns">
+          <button class="btn" size="mini" bindtap="copyHandover">复制全文</button>
+          <button class="btn ghost" size="mini" bindtap="openHandover">{{ho_open ? '收起内容' : '展开看'}}</button>
+          <button class="btn ghost" size="mini" wx:if="{{ho.url}}" bindtap="openHandoverPrint">打印 / 存 PDF</button>
+        </view>
+        <block wx:if="{{ho_open}}">
+          <view class="ho-sec" wx:for="{{ho.sections}}" wx:key="title">
+            <view class="ho-t">{{item.title}}</view>
+            <view class="ho-l" wx:for="{{item.lines}}" wx:for-item="ln" wx:key="*this">· {{ln}}</view>
+          </view>
+        </block>
+        <textarea class="inp restore-ta" placeholder="交接备注：谁对接供应商、有什么口头约定、哪个客户要先收定金…（会写进交接包最后一段）" value="{{ho_note}}" bindinput="onHoNote"></textarea>
+        <view class="ho-btns">
+          <button class="btn" size="mini" bindtap="saveHoNote">保存备注</button>
+          <button class="btn ghost" size="mini" bindtap="closeHandover">收起</button>
+        </view>
+      </block>
+    </view>
+    <view class="form">
       <view class="tip">数据维护：长期用下来，运行日志、操作日志、导入记录会越积越多（不影响账，只是占地方）。业务单据、流水、备份不会被清。</view>
       <view class="prev" wx:if="{{dbst}}">
         <view class="prev-row" wx:for="{{dbst.rows}}" wx:key="k">
