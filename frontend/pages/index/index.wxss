@@ -325,3 +325,6 @@
 /* 「今天的活」展开后的其它事项 */
 .ns-alltip { font-size: 22rpx; color: #8a94a6; padding: 8rpx 20rpx 4rpx; }
 .mwrow.nso { padding-top: 10rpx; padding-bottom: 10rpx; }
+
+/* 月底收尾提示行 */
+.mwrow.mtip { background: #fff8ec; }

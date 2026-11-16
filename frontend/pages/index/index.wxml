@@ -143,6 +143,11 @@
         </view>
         <text class="mwside">去做 ›</text>
       </view>
+      <view class="mwrow mtip" wx:if="{{mtip}}" bindtap="goMonthEnd">
+        <text class="mwdot">月</text>
+        <text class="mwmain">{{mtip.month}} 月底收尾还有 {{mtip.left}} 件没办（{{mtip.done}}/{{mtip.total}}）{{mtip.next ? '，下一步：' + mtip.next.title : ''}}</text>
+        <text class="mwside">去办 ›</text>
+      </view>
       <block wx:if="{{ns_open && ns.others.length}}">
         <view class="ns-alltip">按急慢排好了，点哪条就去哪页办</view>
         <view class="mwrow nso" wx:for="{{ns.others}}" wx:key="k" bindtap="goNextItem" data-i="{{index}}">
