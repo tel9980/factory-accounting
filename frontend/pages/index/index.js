@@ -41,6 +41,7 @@ Page({
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
     pc_month: '', pc: null, rv_month: '', rv: null, ano: null, ys_year: '', ys: null,
     tgt: null, tgt_edit: false, tgt_receive: '', tgt_order: '', trend: null, ps: null,
+    th: null, thTips: [],
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
@@ -1920,6 +1921,22 @@ Page({
         this.loadTarget(); this.loadDashboard()
       },
       fail: () => wx.showToast({ title: '存不了，再试一次', icon: 'none' })
+    })
+  },
+  loadTargetHistory() {
+    this.req({
+      url: API_BASE + '/target-history?months=6',
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return
+        const tips = [{ tone: 'ok', text: d.advice }]
+        const rows = d.rows || []
+        const curM = rows.length ? rows[rows.length - 1].month : ''
+        const miss = rows.filter((x) => x.receive_target > 0 && x.month < curM && !x.hit).slice(-1)[0]
+        if (miss) tips.push({ tone: 'warn', text: miss.label + '只收了 ' + miss.receive + ' 元（目标 ' + miss.receive_target + '），差 ' + Math.round((miss.receive_target - miss.receive) * 100) / 100 + ' 元。' })
+        this.setData({ th: d, thTips: tips })
+      },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
     })
   },
   loadTrend() {

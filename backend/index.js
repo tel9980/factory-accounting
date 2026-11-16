@@ -2393,10 +2393,20 @@ async function pushWeekly(db) {
     if (!cfg.appid || !cfg.secret || !cfg.tpl) return
     const w = await weeklyText(db)
     const s = w.stat
+    // 周报里带上本月目标进度，一眼知道还差多少
+    let goalTxt = ''
+    try {
+      const m = now().slice(0, 7)
+      const t = await db.prepare('SELECT receive FROM targets WHERE month=?').bind(m).first()
+      if (num(t && t.receive) > 0) {
+        const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+        goalTxt = '；目标进度 ' + Math.round(num(inc && inc.t) / num(t.receive) * 1000) / 10 + '%'
+      }
+    } catch (e) { /* 没设目标就不带 */ }
     await wxPush(db, {
       title: `上周收 ¥${s.inc} 付 ¥${s.out}`,
       time: `${s.from.slice(5)} ~ ${s.to.slice(5)}`,
-      note: `毛利约 ¥${s.profit}；被欠 ¥${s.ar_total}，手头 ¥${s.cash}`
+      note: `毛利约 ¥${s.profit}；被欠 ¥${s.ar_total}，手头 ¥${s.cash}${goalTxt}`
     })
   } catch (e) { console.error('weekly push failed', e) }
 }
@@ -5481,7 +5491,13 @@ export default {
           } catch (e) {
             console.error('month pack failed book' + bid, e)
           }
-        } else await runWxReminder(db)
+        } else {
+          await runWxReminder(db)
+          // 每月最后一天：推一条「这个月目标收了多少」
+          const t0 = new Date()
+          const lastDay = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth() + 1, 0)).getUTCDate()
+          if (t0.getUTCDate() === lastDay) await pushTargetSummary(db)
+        }
       } catch (e) {
         console.error('scheduled fixed failed book' + bid, e)
       }
@@ -5513,6 +5529,64 @@ export default {
       console.error('scheduled push-to-notes failed', e)
     }
   }
+}
+
+// 目标完成情况：每月「目标 vs 实际」，看达成率
+async function targetHistory(db, months) {
+  const n = Math.min(24, Math.max(1, num(months) || 6))
+  const out = []
+  const base = new Date()
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() - i, 1))
+    const m = d.toISOString().slice(0, 7)
+    const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+    const ord = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?").bind(m).first()
+    const receive = round2(num(inc && inc.t))
+    const orderAdd = round2(num(ord && ord.t))
+    const tR = num(t && t.receive)
+    const tO = num(t && t.order_add)
+    out.push({
+      month: m, label: String(num(m.slice(5, 7))) + '月',
+      receive, order_add: orderAdd, order_cnt: num(ord && ord.n),
+      receive_target: tR, order_target: tO,
+      receive_pct: tR > 0 ? Math.round(receive / tR * 1000) / 10 : null,
+      order_pct: tO > 0 ? Math.round(orderAdd / tO * 1000) / 10 : null,
+      hit: tR > 0 ? receive >= tR : null
+    })
+  }
+  // 只看已经过完的月份算达成率（本月还没过完，说了不算）
+  const curM = now().slice(0, 7)
+  const withT = out.filter((x) => x.receive_target > 0 && x.month < curM)
+  const hitN = withT.filter((x) => x.hit).length
+  return {
+    rows: out, months: n, target_months: withT.length, hit_months: hitN,
+    hit_rate: withT.length ? Math.round(hitN / withT.length * 1000) / 10 : null,
+    advice: withT.length === 0 ? (out.some((x) => x.receive_target > 0) ? '这个月目标还在进行中，过完这个月就能看达成率了。' : '还没设过月度目标，设一个首页就有进度条。')
+      : (hitN / withT.length >= 0.7 ? '设过 ' + withT.length + ' 个月目标，达成 ' + hitN + ' 个月，目标定得比较实在。'
+        : '设过 ' + withT.length + ' 个月目标，只达成 ' + hitN + ' 个月 —— 要么目标偏高了，要么催款要更紧。')
+  }
+}
+
+app.get('/target-history', async (c) => {
+  const r = await targetHistory(c.env.DB, c.req.query('months') || 6)
+  return c.json(Object.assign({ ok: true }, r))
+})
+
+// 月底最后一天推一条：这个月目标收了多少 / 差多少
+async function pushTargetSummary(db) {
+  try {
+    const m = now().slice(0, 7)
+    const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
+    const tR = num(t && t.receive)
+    if (tR <= 0) return
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+    const got = round2(num(inc && inc.t))
+    const pct = Math.round(got / tR * 1000) / 10
+    const title = got >= tR ? '这个月目标达成啦（' + pct + '%）' : '这个月还差 ' + round2(tR - got) + ' 元'
+    const note = '已收 ' + got + ' / 目标 ' + tR + '（' + pct + '%）'
+    await wxPush(db, { title: title, time: m, note: note })
+  } catch (e) { /* 没配微信提醒就不推 */ }
 }
 
 // 月度报表包生成后推一条微信：告诉老板去哪里下载

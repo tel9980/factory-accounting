@@ -713,6 +713,17 @@
       <view class="frow">
         <button class="btn" size="mini" bindtap="loadTrend">📈 看最近 6 个月</button>
         <button class="btn ghost" size="mini" bindtap="loadPaySpeed">🐢 谁付钱最慢</button>
+        <button class="btn ghost" size="mini" bindtap="loadTargetHistory">🎯 目标完成情况</button>
+      </view>
+      <view wx:if="{{th}}">
+        <view class="prev-h">目标完成　过完的 {{th.months}} 个月里设过 {{th.target_months}} 次目标，达成 {{th.hit_months}} 次</view>
+        <view class="plrow" wx:for="{{th.rows}}" wx:key="month">
+          <text class="pll">{{item.label}}</text>
+          <text class="plv">{{item.receive}}{{item.receive_target>0 ? ' / '+item.receive_target : ''}}</text>
+          <text class="{{item.hit===true?'ok':(item.hit===false?'bad':'')}}" style="width:120rpx;text-align:right">{{item.receive_target>0 ? (item.receive_pct+'%') : '没设'}}</text>
+        </view>
+        <view class="aline {{item.tone}}" wx:for="{{thTips}}" wx:key="text">{{item.text}}</view>
+        <view class="tip">左=实际收到，右=当月目标；百分比是达成率。本月还没过完，只显示进度不算达成。</view>
       </view>
       <view wx:if="{{trend}}">
         <view class="prev-h">每月净利（红=亏）　合计 {{trend.total}}　月均 {{trend.avg}}</view>
