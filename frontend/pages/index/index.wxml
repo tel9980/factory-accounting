@@ -2,6 +2,7 @@
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
+  <view class="sealbar" wx:if="{{sealed}}" bindtap="goSeal">🔒 这本账已封存（只读），{{sealed_at}}起 · 点这里去解封</view>
 
   <view class="card" wx:if="{{er_open}}">
         <view class="ct">📝 申请改一下这张单</view>
@@ -2174,6 +2175,13 @@
       <input class="inp" placeholder="给当前账套改名，如 一车间" value="{{rename_text}}" bindinput="onRenameText"/>
       <button class="btn" size="mini" bindtap="renameBook">改当前账套名</button>
       <button class="btn" size="mini" bindtap="loadBooksCheck">🧾 看看三个账本都在干嘛</button>
+      <view class="tip">🔒 账本封存：老账本对完账就封起来，整本只能看、不能增删改（要改先解封，解封会留痕）。三本账各自单独封。</view>
+      <view class="row2" wx:if="{{sealed}}">这本账从 {{sealed_at}} 起已封存{{seal_note ? '（' + seal_note + '）' : ''}}</view>
+      <view class="row2" wx:else>这本账现在是可改的</view>
+      <view class="frow">
+        <button class="btn" size="mini" wx:if="{{!sealed}}" bindtap="sealBook">🔒 封存这本账</button>
+        <button class="btn ghost" size="mini" wx:if="{{sealed}}" bindtap="unsealBook">🔓 解封</button>
+      </view>
       <block wx:if="{{bck}}">
         <view class="card">
           <view class="bck-adv">{{bck.advice}}</view>

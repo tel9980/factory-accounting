@@ -165,6 +165,7 @@ Page({
     budget_over: [], budget_alert_count: 0,
     budgets: [], b_category: 0, b_amount: '',
     pending_count: 0, ho: null, ho_open: false, ho_note: '',
+    sealed: false, sealed_at: '', seal_note: '',
     offline_at: '',
     btl: null,
     book: 1, book_name: '主账套', books: [], rename_text: '',
@@ -367,6 +368,14 @@ Page({
               wx.showModal({
                 title: '这笔刚有变化', content: d.error, confirmText: '刷新看看', cancelText: '知道了',
                 success: (r3) => { if (r3.confirm) this.refresh() }
+              })
+              opts.fail && opts.fail(res)
+              return
+            }
+            if (d.code === 'sealed') {
+              wx.showModal({
+                title: '这本账已封存', content: d.error, confirmText: '去解封', cancelText: '知道了',
+                success: (r4) => { if (r4.confirm) this.enterTab('me') }
               })
               opts.fail && opts.fail(res)
               return
@@ -1305,7 +1314,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal()
       this.loadEditReqs()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadMyDay()
@@ -4698,6 +4707,48 @@ Page({
       content: '删除后不再每月自动记这笔；已经记过的流水不会删。确定吗？',
       success: (r) => {
         if (r.confirm) this.req({ url: API_BASE + '/fixed/' + id, method: 'DELETE', success: () => this.loadFixed() })
+      }
+    })
+  },
+  // 账本封存：老账本对完账封起来，整本只读
+  loadSeal() {
+    this.req({
+      url: API_BASE + '/seal', silent: true,
+      success: (r) => {
+        const d = r.data || {}
+        this.setData({ sealed: !!d.sealed, sealed_at: String(d.sealed_at || '').slice(0, 10), seal_note: d.note || '' })
+      }
+    })
+  },
+  goSeal() { this.enterTab('me'); },
+  sealBook() {
+    wx.showModal({
+      title: '封存这本账？', editable: true, placeholderText: '写一句为什么封（如 2026 年账已对完），可不填',
+      confirmText: '封存', cancelText: '算了',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/seal', method: 'POST', once: 'seal',
+          data: { note: String(r.content || '') },
+          success: () => {
+            wx.showModal({ title: '封好了', content: '这本账现在只能看。要改先点「解封」。', showCancel: false })
+            this.loadSeal(); this.refresh()
+          }
+        })
+      }
+    })
+  },
+  unsealBook() {
+    wx.showModal({
+      title: '解封这本账？', content: '解封后就能增删改单据和流水了。解封会在操作日志里留一条记录。',
+      confirmText: '解封', cancelText: '算了',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/unseal', method: 'POST', once: 'unseal',
+          data: { confirm: true },
+          success: () => { wx.showToast({ title: '已解封' }); this.loadSeal(); this.refresh() }
+        })
       }
     })
   },

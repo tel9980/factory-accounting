@@ -341,3 +341,6 @@
 .ho-sec { margin: 10px 0 4px; }
 .ho-t { font-size: 26rpx; font-weight: 600; color: #0a4b8c; margin-bottom: 4px; }
 .ho-l { font-size: 24rpx; color: #444; line-height: 1.6; padding-left: 8rpx; }
+
+/* 账本封存（只读）提示条 */
+.sealbar { margin: 8rpx 24rpx 0; padding: 14rpx 20rpx; border-radius: 10rpx; background: #f2f4f7; color: #4a4a4a; font-size: 24rpx; border: 1rpx solid #dfe3e8; }

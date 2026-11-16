@@ -220,9 +220,22 @@ app.use('*', async (c, next) => {
       || /^\/party-merge/.test(path)
       || /^\/(schema-check|books-check)/.test(path)
       || (/^\/handover-note$/.test(path))
+      || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
+  c.set('role', role)
+  // 账本封存：整本只读（GET 照常），要动账先解封。放行：口令类、批量取数、封存开关本身
+  try {
+    const m2 = c.req.method
+    if (m2 === 'POST' || m2 === 'PATCH' || m2 === 'DELETE') {
+      const seal = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed'").first()
+      if (seal && String(seal.value) === '1') {
+        const allow = /^\/(auth\/|batch$|seal$|unseal$|wx-login$)/.test(path)
+        if (!allow) return c.json({ error: '这本账已经封存（只读），要改先解封：设置 → 🔒 账本封存', code: 'sealed' }, 423)
+      }
+    }
+  } catch (e) { /* settings 表缺失时不拦 */ }
   c.set('role', role)
   await next()
 })
@@ -2073,11 +2086,53 @@ app.get('/my-work', async (c) => {
   })
 })
 
+// 账本封存：一整本变成只读（对完账的老账本封起来，谁也别误改）
+const setSetting = async (db, k, v) => {
+  const old = await db.prepare('SELECT value FROM settings WHERE key=?').bind(k).first().catch(() => null)
+  if (old) await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(String(v), k).run()
+  else await db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').bind(k, String(v)).run()
+}
+const delSetting = async (db, k) => { await db.prepare('DELETE FROM settings WHERE key=?').bind(k).run() }
+app.get('/seal', async (c) => {
+  const db = c.env.DB
+  const g = async (k) => { const r = await db.prepare('SELECT value FROM settings WHERE key=?').bind(k).first().catch(() => null); return (r && r.value) || '' }
+  const sealed = (await g('sealed')) === '1'
+  const since = await g('sealed_at')
+  const note = await g('sealed_note')
+  const name = await g('book_name')
+  return c.json({
+    ok: true, sealed, sealed_at: since, note, book: String(c.env.BOOK || '1'), name: name || ('账本' + (c.env.BOOK || '1')),
+    text: sealed ? `这本账（${name || '账本' + (c.env.BOOK || '1')}）从 ${String(since).slice(0, 10)} 起封存了，现在是只读的。要改先解封。` : '这本账现在是可改的。'
+  })
+})
+app.post('/seal', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const note = String(b.note || '').trim().slice(0, 200)
+  await setSetting(db, 'sealed', '1')
+  await setSetting(db, 'sealed_at', now())
+  if (note) await setSetting(db, 'sealed_note', note)
+  await logAudit(db, '封存账本', '账本' + (c.env.BOOK || '1'), note || '（整本只读）', '', act(c))
+  return c.json({ ok: true, sealed: true, note })
+})
+app.post('/unseal', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  if (!b.confirm) return c.json({ ok: false, error: '解封后这本账就能改动了，确认要解开吗？', code: 'need_confirm' }, 409)
+  await setSetting(db, 'sealed', '0')
+  await delSetting(db, 'sealed_at')
+  await delSetting(db, 'sealed_note')
+  await logAudit(db, '解封账本', '账本' + (c.env.BOOK || '1'), String(b.note || '').slice(0, 100) || '（恢复可改）', '', act(c))
+  return c.json({ ok: true, sealed: false })
+})
+
 app.get('/me', async (c) => {
   const role = c.get('role') || 'owner'
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const staff = await getStaffKey(mainDb)
-  return c.json({ role, book: c.env.BOOK || '1', staff_enabled: !!staff })
+  const seal = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed'").first().catch(() => null)
+  const sealAt = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed_at'").first().catch(() => null)
+  return c.json({ role, book: String(c.env.BOOK || '1'), staff_enabled: !!staff, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '' })
 })
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
 const addDaysIso = (iso, n) => {
@@ -8927,11 +8982,19 @@ export default {
     const books = [['1', env.DB], ['2', env.DB2], ['3', env.DB3]]
     for (const [bid, db] of books) {
       if (!db) continue
+      // 封存的账本是只读的：自动记账不再往里写（备份、体检照做）
+      let isSealed = false
       try {
-        await runFixed(db)
-        await runAmort(db)
-        await runAccrual(db)
-        await runDepreciation(db)
+        const ss = await db.prepare("SELECT value FROM settings WHERE key='sealed'").first()
+        isSealed = !!(ss && String(ss.value) === '1')
+      } catch (e) { /* 忽略 */ }
+      try {
+        if (!isSealed) {
+          await runFixed(db)
+          await runAmort(db)
+          await runAccrual(db)
+          await runDepreciation(db)
+        }
         const cron = (event && event.cron) || ''
         if (cron === '0 1 * * 1') await pushWeekly(db)
         else if (cron === '0 2 1 * *') {
