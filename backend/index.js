@@ -1030,8 +1030,10 @@ const reconcileCore = async (db, type, rows) => {
     if (state === 'more' || state === 'less') diffN += 1
     out.push({ party: r.party, matched: s ? s.party : '', imported, system, diff, state })
   }
+  const newN = out.filter((x) => x.state === 'new').length
   return {
-    type, count: out.length, match_count: matchN, diff_count: diffN,
+    type, month: now().slice(0, 7), count: out.length, match_count: matchN, diff_count: diffN,
+    new_count: newN, add_count: diffN + newN,
     imported_total: round2(out.reduce((a, x) => a + x.imported, 0)),
     system_total: round2(out.reduce((a, x) => a + x.system, 0)),
     rows: out
@@ -1065,6 +1067,41 @@ app.post('/recon-save', async (c) => {
   }
   await logAudit(db, '对账台账', type, `${month} 记 ${n} 家核对结果`)
   return c.json({ ok: true, saved: n, month, type })
+})
+
+// 对账差异一键处理：我少记 → 直接补一张单；对不上但不补 → 标记处理完，台账留痕
+app.post('/recon-fix', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  const party = String(b.party || '').trim()
+  const month = String(b.month || now().slice(0, 7)).slice(0, 7)
+  const mode = b.mode === 'ignore' ? 'ignore' : 'add'
+  const amount = round2(num(b.amount))
+  if (!party) return c.json({ error: '缺少单位名称' }, 400)
+  const created = `${month}-01T00:00:00.000Z`
+  let newId = null
+  if (mode === 'add') {
+    if (!(amount > 0)) return c.json({ error: '补记的金额要大于 0' }, 400)
+    if (await isMonthLocked(db, month)) return c.json({ error: `${month} 已结账锁定，先解锁再补记` }, 403)
+    const due = await termDue(db, party, created)
+    if (type === 'ar') {
+      const r = await db.prepare('INSERT INTO orders (customer, item_name, price, cost, status, paid, created_at, due_date, operator) VALUES (?,?,?,?,0,0,?,?,?)')
+        .bind(party, '对账补记', amount, 0, created, due, '对账').run()
+      newId = r.meta && r.meta.last_row_id
+    } else {
+      const r = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at, due_date, operator) VALUES (?,?,0,?,?,?,?,?)')
+        .bind(party, amount, '对账', '对账补记', created, due, '对账').run()
+      newId = r.meta && r.meta.last_row_id
+    }
+    await logAudit(db, '对账补记', type, `${party} 补记 ${amount}`)
+  }
+  const imported = round2(num(b.imported))
+  const system = round2(num(b.system))
+  const state = String(b.state || (mode === 'add' ? 'more' : 'match'))
+  await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)')
+    .bind(month, type, party, imported, system, round2(imported - system), state, mode === 'add' ? `补记 ${amount} 元` : '核对过，不补记', now()).run()
+  return c.json({ ok: true, id: newId, mode, party, amount, month, type })
 })
 
 app.get('/recon-log', async (c) => {

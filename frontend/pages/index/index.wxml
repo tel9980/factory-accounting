@@ -632,10 +632,15 @@
           <text class="prev-t">{{item.party}}</text>
           <text class="prev-n">单上 {{item.imported}} / 我这 {{item.system}}</text>
           <text class="{{item.bad?'red':'ok'}}">{{item.state_text}}</text>
+          <view class="frow" wx:if="{{item.state!='match'}}">
+            <button class="btn" size="mini" wx:if="{{item.state=='more'||item.state=='new'}}" data-i="{{index}}" bindtap="reconFixAdd">＋ 补记这笔</button>
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="reconFixIgnore">✓ 不用补，标记处理完</button>
+          </view>
         </view>
         <view class="tip">「我少记」= 客户的数比系统里大，可能漏单或漏记收款；「我多记」= 系统里偏大，可能记重了或对方已付没记。</view>
         <view class="tip">核对完可以直接改单，不用重复导入。</view>
         <view class="frow">
+          <button class="btn" size="mini" wx:if="{{recon.add_count>0}}" bindtap="reconFixAll">＋ 差异全部补记（{{recon.add_count}} 家）</button>
           <button class="btn" size="mini" bindtap="saveRecon">📌 记进对账台账</button>
           <button class="btn ghost" size="mini" bindtap="copyDiffText">📋 复制差异清单</button>
           <button class="btn ghost" size="mini" bindtap="loadReconLog">看已记的台账</button>

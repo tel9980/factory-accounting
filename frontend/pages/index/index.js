@@ -1830,6 +1830,92 @@ Page({
     })
   },
   cancelPreview() { this.setData({ import_preview: null }) },
+  // 对账差异一键处理：我少记的那笔直接补一张单，不用再手工录
+  reconType() {
+    const it = this.data.import_type
+    return (it === 1 || it === 3 || it === 6) ? 'ap' : 'ar'
+  },
+  reconFixAdd(e) {
+    const r = ((this.data.recon || {}).rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    const type = this.reconType()
+    const amt = Math.abs(Number(r.imported || 0) - Number(r.system || 0))
+    const month = (this.data.recon || {}).month || ''
+    wx.showModal({
+      title: '补记这一笔',
+      content: `给「${r.party}」补记 ${type === 'ap' ? '应付' : '应收'} ${amt} 元，记在 ${month} 月（到期日按这家账期自动算）。`,
+      confirmText: '补记',
+      success: (res) => {
+        if (!res.confirm) return
+        this.req({
+          url: API_BASE + '/recon-fix', method: 'POST',
+          data: { type, party: r.party, amount: amt, month, mode: 'add', imported: r.imported, system: r.system, state: r.state },
+          success: (res2) => {
+            const d = res2.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没补成', icon: 'none' })
+            wx.showToast({ title: '已补记 ' + amt, icon: 'none' })
+            this.markRecon(e.currentTarget.dataset.i, '已补记 ' + amt)
+            this.refresh()
+          }
+        })
+      }
+    })
+  },
+  reconFixIgnore(e) {
+    const r = ((this.data.recon || {}).rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    const type = this.reconType()
+    const month = (this.data.recon || {}).month || ''
+    this.req({
+      url: API_BASE + '/recon-fix', method: 'POST',
+      data: { type, party: r.party, amount: 0, month, mode: 'ignore', imported: r.imported, system: r.system, state: r.state },
+      success: () => {
+        wx.showToast({ title: '已标记处理完', icon: 'none' })
+        this.markRecon(e.currentTarget.dataset.i, '不用补')
+        this.loadReconLog()
+      }
+    })
+  },
+  reconFixAll() {
+    const rows = ((this.data.recon || {}).rows || []).filter((x) => x.state === 'more' || x.state === 'new')
+    if (!rows.length) return wx.showToast({ title: '没有「我少记」的差异', icon: 'none' })
+    const total = rows.reduce((a, x) => a + Math.abs(Number(x.imported || 0) - Number(x.system || 0)), 0)
+    const type = this.reconType()
+    const month = (this.data.recon || {}).month || ''
+    wx.showModal({
+      title: '全部补记',
+      content: `给 ${rows.length} 家补记${type === 'ap' ? '应付' : '应收'}，合计 ${total.toFixed(2)} 元，都记在 ${month} 月。补完可以逐单核对。`,
+      confirmText: '全部补记',
+      success: (res) => {
+        if (!res.confirm) return
+        let i = 0
+        const next = () => {
+          if (i >= rows.length) {
+            wx.showToast({ title: '补记完 ' + rows.length + ' 家', icon: 'none' })
+            this.refresh()
+            return
+          }
+          const r = rows[i]
+          const amt = Math.abs(Number(r.imported || 0) - Number(r.system || 0))
+          i += 1
+          this.req({
+            url: API_BASE + '/recon-fix', method: 'POST',
+            data: { type, party: r.party, amount: amt, month, mode: 'add', imported: r.imported, system: r.system, state: r.state },
+            success: () => { r.state_text = '已补记 ' + amt; next() },
+            fail: () => next()
+          })
+        }
+        next()
+      }
+    })
+  },
+  markRecon(i, text) {
+    const rc = this.data.recon || {}
+    const rows = (rc.rows || []).slice()
+    if (rows[i]) rows[i] = Object.assign({}, rows[i], { state: 'match', state_text: text, bad: false })
+    const left = rows.filter((x) => x.state === 'more' || x.state === 'new').length
+    this.setData({ recon: Object.assign({}, rc, { rows, add_count: left }) })
+  },
   // 把这次核对结果记进对账台账（月底能看谁对过、还差几家没处理）
   saveRecon() {
     const { recon, import_type } = this.data
