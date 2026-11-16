@@ -1018,6 +1018,60 @@ app.get('/last-deal', async (c) => {
   return c.json(r ? { found: true, item: r.item, amount: round2(num(r.price)), operator: r.operator, last_date: (r.created_at || '').slice(0, 10) } : { found: false })
 })
 
+
+// 账龄表：欠款按 30/60/90 天分档，一眼看出哪笔要坏
+app.get('/aging', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const rows = type === 'ar'
+    ? (await db.prepare('SELECT id,customer AS party,item_name AS item,price AS total,paid,written_off,created_at,due_date FROM orders WHERE paid + COALESCE(written_off,0) < price ORDER BY id').all()).results
+    : (await db.prepare('SELECT id,supplier AS party,COALESCE(remark,\'\') AS item,amount AS total,paid,written_off,created_at,due_date FROM payables WHERE paid + COALESCE(written_off,0) < amount ORDER BY id').all()).results
+  const BK = [
+    { k: '30天内', label: '30 天内', key: 'd30', min: 0, max: 30 },
+    { k: '31-60天', label: '31-60 天', key: 'd60', min: 31, max: 60 },
+    { k: '61-90天', label: '61-90 天', key: 'd90', min: 61, max: 90 },
+    { k: '90天以上', label: '90 天以上', key: 'd999', min: 91, max: 99999 }
+  ]
+  const buckets = BK.map((b) => ({ k: b.k, label: b.label, key: b.key, amount: 0, count: 0, cnt: 0, pct: 0 }))
+  const pmap = {}
+  const bad = []
+  let total = 0
+  for (const r of rows) {
+    const unpaid = round2(num(r.total) - num(r.paid) - num(r.written_off))
+    if (unpaid <= 0) continue
+    const days = daysSince(r.created_at)
+    const bi = Math.max(0, BK.findIndex((b) => days >= b.min && days <= b.max))
+    buckets[bi].amount = round2(buckets[bi].amount + unpaid)
+    buckets[bi].count += 1
+    buckets[bi].cnt += 1
+    total = round2(total + unpaid)
+    const key = r.party || '(未填)'
+    if (!pmap[key]) pmap[key] = { party: key, total: 0, cnt: 0, b: [0, 0, 0, 0], oldest_days: 0 }
+    const p = pmap[key]
+    p.total = round2(p.total + unpaid)
+    p.cnt += 1
+    p.b[bi] = round2(p.b[bi] + unpaid)
+    p.oldest_days = Math.max(p.oldest_days, days)
+    if (days > 90) bad.push({ id: r.id, party: key, item: r.item || '', unpaid, amount: unpaid, days, due: (r.due_date || '').slice(0, 10) })
+  }
+  for (const b of buckets) b.pct = total ? Math.round((b.amount / total) * 100) : 0
+  const parties = Object.keys(pmap).map((k) => pmap[k]).sort((a, b2) => b2.total - a.total)
+  bad.sort((a, b2) => b2.days - a.days)
+  const risky = round2(buckets[2].amount + buckets[3].amount)
+  const provision = type === 'ar' ? round2(buckets[2].amount * 0.1 + buckets[3].amount * 0.3) : 0
+  return c.json({
+    type, total, count: rows.length, buckets, parties,
+    bad: bad.slice(0, 20),
+    provision,
+    over60: risky,
+    worst: bad.slice(0, 8),
+    risky, risky_pct: total ? Math.round((risky / total) * 100) : 0,
+    advice: total === 0 ? '没有欠款，很干净。'
+      : risky > 0 ? '有 ' + round2(risky) + ' 元已经拖过 60 天（占 ' + (total ? Math.round((risky / total) * 100) : 0) + '%），建议单独去催，实在收不回的按坏账核销。'
+        : '目前都在 60 天内，正常范围，按月跟进即可。'
+  })
+})
+
 // 智能建议：最近 90 天最常记的几组（客户+产品+金额 / 分类+金额），点一下就填好
 app.get('/suggest', async (c) => {
   const db = c.env.DB
@@ -1663,9 +1717,14 @@ async function importRows(db, type, rows) {
   let n = 0
   let skippedLocked = 0
   const t = now()
-  // 第一行像表头就跳过（Excel 模板带表头）
-  if (rows.length && rows[0] && rows[0].some((x) => /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要/.test(String(x)))) {
-    rows = rows.slice(1)
+  // 第一行像表头才跳过（Excel 模板带表头）。判定要严：整行没有任何数字、且至少 2 个表头关键词，
+  // 否则像“甲客户,加工,1000”这种正常数据行会被误当成表头吃掉。
+  if (rows.length && rows[0] && rows[0].length) {
+    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要/
+    const first = rows[0]
+    const numish = first.filter((x) => /^[\d.,%\-\s]*$/.test(String(x === null || x === undefined ? '' : x).trim()) && String(x === null || x === undefined ? '' : x).trim() !== '').length
+    const wordy = first.filter((x) => KW.test(String(x === null || x === undefined ? '' : x))).length
+    if (numish === 0 && wordy >= 2) rows = rows.slice(1)
   }
   for (const row of rows) {
     let p = row.slice()
@@ -2456,37 +2515,6 @@ app.get('/networth', async (c) => {
     out.push({ m, cash, ar, ap, net: round2(cash + ar - ap) })
   }
   return c.json(out)
-})
-
-// 账龄分析 + 坏账准备建议
-app.get('/aging', async (c) => {
-  const db = c.env.DB
-  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
-  const rows = type === 'ar'
-    ? (await db.prepare("SELECT id, customer AS party, (price - paid - COALESCE(written_off,0)) AS unpaid, created_at FROM orders WHERE paid + COALESCE(written_off,0) < price ORDER BY created_at").all()).results
-    : (await db.prepare("SELECT id, supplier AS party, (amount - paid - COALESCE(written_off,0)) AS unpaid, created_at FROM payables WHERE paid + COALESCE(written_off,0) < amount ORDER BY created_at").all()).results
-  const buckets = [
-    { key: 'd30', label: '30 天内', amount: 0, cnt: 0 },
-    { key: 'd60', label: '31-60 天', amount: 0, cnt: 0 },
-    { key: 'd90', label: '61-90 天', amount: 0, cnt: 0 },
-    { key: 'd999', label: '90 天以上', amount: 0, cnt: 0 }
-  ]
-  const today = Date.now()
-  const detail = []
-  for (const r of rows) {
-    const t = Date.parse(r.created_at || '') || today
-    const days = Math.max(Math.floor((today - t) / 86400000), 0)
-    const amt = round2(num(r.unpaid))
-    const idx = days <= 30 ? 0 : days <= 60 ? 1 : days <= 90 ? 2 : 3
-    buckets[idx].amount = round2(buckets[idx].amount + amt)
-    buckets[idx].cnt++
-    detail.push({ id: r.id, party: r.party, amount: amt, days })
-  }
-  const total = round2(buckets.reduce((s, b) => s + b.amount, 0))
-  // 坏账准备建议：61-90 天按 10%，90 天以上按 30%（只对"别人欠我"）
-  const provision = type === 'ar' ? round2(buckets[2].amount * 0.1 + buckets[3].amount * 0.3) : 0
-  detail.sort((a, b) => b.days - a.days)
-  return c.json({ type, total, buckets, provision, worst: detail.slice(0, 8), over60: round2(buckets[2].amount + buckets[3].amount) })
 })
 
 // 报表抬头（厂名 / 备注）

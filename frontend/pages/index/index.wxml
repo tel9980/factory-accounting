@@ -594,7 +594,7 @@
       </view>
       <view wx:if="{{aging}}">
         <view class="kpi-row" wx:for="{{aging.buckets}}" wx:key="key">
-          <text>{{item.label}}</text><text class="kpi-n {{item.key=='d999'&&item.amount>0?'bad':''}}">{{item.amount}} 元 / {{item.cnt}} 笔</text>
+          <text>{{item.label}}</text><text class="kpi-n {{item.key=='d999'&&item.amount>0?'bad':''}}">{{item.amount}} 元 / {{item.cnt}} 笔 · 占 {{item.pct}}%</text>
         </view>
         <view class="kpi-row"><text>合计未结</text><text class="kpi-n">{{aging.total}} 元</text></view>
         <view class="kpi-row" wx:if="{{aging.type=='ar'}}"><text>建议坏账准备</text><text class="kpi-n {{aging.provision>0?'bad':''}}">{{aging.provision}} 元</text></view>
