@@ -476,6 +476,75 @@
       </view>
     </view>
 
+
+    <view class="form" wx:if="{{rem_items.length}}">
+      <view class="tip">该管的事（{{rem_items.length}} 件）</view>
+      <view class="duesoon" wx:for="{{rem_items}}" wx:key="text">{{item.text}}</view>
+    </view>
+
+    <view class="form">
+      <view class="tip">发票台账</view>
+      <picker range="{{['开出发票（给客户）', '收到发票（供应商）']}}" bindchange="onInvType">
+        <view class="picker">{{inv_type=='out' ? '开出发票（给客户）' : '收到发票（供应商）'}} ▾</view>
+      </picker>
+      <view class="kpi-row" wx:if="{{inv_sum.out}}"><text>本月开出</text><text class="kpi-n">{{inv_sum.out.amount}} 元 / {{inv_sum.out.count}} 张（税 {{inv_sum.out.tax}}）</text></view>
+      <view class="kpi-row" wx:if="{{inv_sum.in}}"><text>本月收到</text><text class="kpi-n">{{inv_sum.in.amount}} 元 / {{inv_sum.in.count}} 张（税 {{inv_sum.in.tax}}）</text></view>
+      <view class="duesoon" wx:if="{{inv_uninv.count>0}}">有 {{inv_uninv.count}} 张已收款的单还没开发票（金额 {{inv_uninv.amount}}）</view>
+      <input class="inp" placeholder="发票号（可不填）" value="{{inv_no}}" bindinput="onInvNo"/>
+      <input class="inp" placeholder="{{inv_type=='out' ? '客户名称' : '供应商名称'}}" value="{{inv_party}}" bindinput="onInvParty"/>
+      <input class="inp" placeholder="开票金额（含税）" type="digit" value="{{inv_amount}}" bindinput="onInvAmount"/>
+      <input class="inp" placeholder="其中税额（可不填）" type="digit" value="{{inv_tax}}" bindinput="onInvTax"/>
+      <input class="inp" placeholder="开票日期，如 11-10（不填=今天）" value="{{inv_date}}" bindinput="onInvDate"/>
+      <input class="inp" placeholder="备注（可不填）" value="{{inv_remark}}" bindinput="onInvRemark"/>
+      <button class="btn" size="mini" bindtap="addInvoice">记一张发票</button>
+      <view class="tip">发票只做台账，不影响收支和利润（免得一笔钱算两次）。</view>
+    </view>
+    <view class="list" wx:if="{{inv_rows.length}}">
+      <view class="item" wx:for="{{inv_rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.type=='out' ? '开出' : '收到'}} · {{item.party}}</text><text class="amt">¥{{item.amount}}</text></view>
+        <view class="row2">{{item.no ? item.no + ' · ' : ''}}税额 {{item.tax}} · {{item.date}}{{item.remark ? ' · ' + item.remark : ''}}</view>
+        <view class="btns"><button size="mini" bindtap="delInvoice" data-id="{{item.id}}">删</button></view>
+      </view>
+    </view>
+
+    <view class="form">
+      <view class="tip">固定资产折旧（原值合计 {{asset_cost_total}}，每月折旧 {{asset_monthly}}，现在值 {{asset_net}}）</view>
+      <input class="inp" placeholder="设备名称，如 数控车床" value="{{asset_name}}" bindinput="onAssetName"/>
+      <input class="inp" placeholder="原值（买入价）" type="digit" value="{{asset_cost}}" bindinput="onAssetCost"/>
+      <input class="inp" placeholder="买入日期，如 2025-06-01" value="{{asset_buy}}" bindinput="onAssetBuy"/>
+      <input class="inp" placeholder="用几年（不填=5 年）" type="digit" value="{{asset_life}}" bindinput="onAssetLife"/>
+      <input class="inp" placeholder="残值率 %（不填=5）" type="digit" value="{{asset_res}}" bindinput="onAssetRes"/>
+      <button class="btn" size="mini" bindtap="addAsset">加一台设备</button>
+      <button class="btn-ghost" size="mini" bindtap="runDepreciation">立即计提本月折旧（记一笔支出）</button>
+      <view class="tip">直线法：每月折旧 =（原值 − 残值）÷ 使用月数；计提后才进成本，不点就不会自动扣。</view>
+    </view>
+    <view class="list" wx:if="{{asset_rows.length}}">
+      <view class="item" wx:for="{{asset_rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">净值 ¥{{item.net}}</text></view>
+        <view class="row2">原值 {{item.cost}} · 月折旧 {{item.monthly}} · 已折 {{item.used_months}} 个月{{item.done ? ' · 已折完' : ' · 还剩 ' + item.remain_months + ' 个月'}}</view>
+        <view class="btns"><button size="mini" bindtap="delAsset" data-id="{{item.id}}">删</button></view>
+      </view>
+    </view>
+
+    <view class="form">
+      <view class="tip">银行流水对账（把银行卡/微信账单粘进来，再一笔笔认领成账）</view>
+      <textarea class="restore-ta" placeholder="{{bank_hint}}" value="{{bank_text}}" bindinput="onBankText"></textarea>
+      <button class="btn" size="mini" bindtap="importBank">导入流水</button>
+      <view class="duesoon" wx:if="{{bank_unmatched.count>0}}">{{bank_unmatched.count}} 笔还没认领，合计 ¥{{bank_unmatched.amount}}</view>
+      <view class="tip">认领＝把这笔钱记到账上（抵某张应收/应付，或当成一笔支出），重复的点会提示。</view>
+    </view>
+    <view class="list" wx:if="{{bank_rows.length}}">
+      <view class="item" wx:for="{{bank_rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.direction=='in' ? '收' : '付'}} · {{item.memo}}</text><text class="amt {{item.direction=='in' ? 'ok' : 'out'}}">¥{{item.amount}}</text></view>
+        <view class="row2">{{item.date}}</view>
+        <view class="btns">
+          <button size="mini" wx:if="{{item.direction=='in'}}" bindtap="matchBankOrder" data-id="{{item.id}}">抵应收</button>
+          <button size="mini" wx:if="{{item.direction=='out'}}" bindtap="matchBankPayable" data-id="{{item.id}}">抵应付</button>
+          <button size="mini" bindtap="matchBankExpense" data-id="{{item.id}}">记成一笔账</button>
+          <button size="mini" bindtap="delBankFlow" data-id="{{item.id}}">删</button>
+        </view>
+      </view>
+    </view>
     <view class="form">
       <view class="tip">报表抬头（写厂名，图片更像正式对账单）</view>
       <input class="inp" placeholder="厂名，如 兴旺五金加工厂" value="{{head_title}}" bindinput="onHeadTitle"/>

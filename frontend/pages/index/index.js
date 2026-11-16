@@ -35,6 +35,13 @@ Page({
     contact_show: false, contact_title: '', contact_text: '',
     trash_list: [],
     cloud_backup_at: '',
+    rem_items: [],
+    inv_type: 'out', inv_month: '', inv_no: '', inv_party: '', inv_amount: '', inv_tax: '', inv_date: '', inv_remark: '',
+    inv_rows: [], inv_sum: { out: {}, in: {} }, inv_uninv: {},
+    asset_name: '', asset_cost: '', asset_buy: '', asset_life: '', asset_res: '',
+    asset_rows: [], asset_cost_total: 0, asset_monthly: 0, asset_net: 0,
+    bank_text: '', bank_rows: [], bank_unmatched: {},
+    bank_hint: '一行一笔：日期,收/付,金额,摘要\n如：2026-11-10,收,8000,张老板货款',
     restore_text: '',
     fixed_list: [], f_amount: '', f_category: 0, f_day: '', f_remark: '',
     lock_month: '', month_locks: [],
@@ -138,6 +145,7 @@ Page({
     this.loadBudgets()
     this.loadLoans()
     this.loadBooks()
+    this.loadReminders()
     this.loadAccounts()
     this.loadCategories()
     this.loadAdvances()
@@ -518,7 +526,7 @@ Page({
     const t = e.currentTarget.dataset.t
     this.setData({ tab: t })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
-    if (t === 'asset') this.loadAsset()
+    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows() }
     if (t === 'expense') this.loadLoans()
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
@@ -1572,5 +1580,181 @@ Page({
         })
       }
     })
-  }
+  },
+  // ── 第三档：提醒汇总 / 发票台账 / 固定资产 / 银行流水对账 ──
+  loadReminders() {
+    this.req({ url: API_BASE + '/reminders', success: (res) => this.setData({ rem_items: (res.data && res.data.items) || [] }) })
+  },
+  loadInvoices() {
+    const m = this.data.inv_month ? '&month=' + this.data.inv_month : ''
+    this.req({
+      url: API_BASE + '/invoices?type=' + this.data.inv_type + m,
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ inv_rows: d.rows || [], inv_sum: d.summary || { out: {}, in: {} }, inv_uninv: d.uninvoiced || {} })
+      }
+    })
+  },
+  onInvType(e) { this.setData({ inv_type: Number(e.detail.value) ? 'in' : 'out' }); this.loadInvoices() },
+  onInvMonth(e) { this.setData({ inv_month: e.detail.value }) },
+  onInvNo(e) { this.setData({ inv_no: e.detail.value }) },
+  onInvParty(e) { this.setData({ inv_party: e.detail.value }) },
+  onInvAmount(e) { this.setData({ inv_amount: e.detail.value }) },
+  onInvTax(e) { this.setData({ inv_tax: e.detail.value }) },
+  onInvDate(e) { this.setData({ inv_date: e.detail.value }) },
+  onInvRemark(e) { this.setData({ inv_remark: e.detail.value }) },
+  queryInv() {
+    const m = this.data.inv_month && /^\d{4}-\d{2}$/.test(this.data.inv_month) ? this.data.inv_month : ''
+    this.setData({ inv_month: m }); this.loadInvoices()
+  },
+  addInvoice() {
+    const d = this.data
+    if (!String(d.inv_party || '').trim()) return wx.showToast({ title: d.inv_type === 'out' ? '填客户名称' : '填供应商名称', icon: 'none' })
+    if (!Number(d.inv_amount)) return wx.showToast({ title: '填开票金额', icon: 'none' })
+    this.req({
+      url: API_BASE + '/invoices', method: 'POST',
+      data: { type: d.inv_type, no: d.inv_no, party: d.inv_party, amount: Number(d.inv_amount), tax: Number(d.inv_tax) || 0, date: d.inv_date, remark: d.inv_remark },
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          this.setData({ inv_no: '', inv_party: '', inv_amount: '', inv_tax: '', inv_date: '', inv_remark: '' })
+          this.loadInvoices(); this.loadReminders()
+          wx.showToast({ title: '已记发票', icon: 'success' })
+        } else wx.showToast({ title: (res.data && res.data.error) || '没记上', icon: 'none' })
+      }
+    })
+  },
+  delInvoice(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删发票', content: '删掉这张发票记录？', confirmColor: '#e64340',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/invoices/' + id, method: 'DELETE', success: () => { this.loadInvoices(); this.loadReminders() } }) }
+    })
+  },
+  loadAssets() {
+    this.req({
+      url: API_BASE + '/assets',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ asset_rows: d.rows || [], asset_cost_total: d.total_cost || 0, asset_monthly: d.total_monthly || 0, asset_net: d.total_net || 0 })
+      }
+    })
+  },
+  onAssetName(e) { this.setData({ asset_name: e.detail.value }) },
+  onAssetCost(e) { this.setData({ asset_cost: e.detail.value }) },
+  onAssetBuy(e) { this.setData({ asset_buy: e.detail.value }) },
+  onAssetLife(e) { this.setData({ asset_life: e.detail.value }) },
+  onAssetRes(e) { this.setData({ asset_res: e.detail.value }) },
+  addAsset() {
+    const d = this.data
+    if (!String(d.asset_name || '').trim()) return wx.showToast({ title: '填设备名称', icon: 'none' })
+    if (!Number(d.asset_cost)) return wx.showToast({ title: '填设备原值', icon: 'none' })
+    this.req({
+      url: API_BASE + '/assets', method: 'POST',
+      data: { name: d.asset_name, cost: Number(d.asset_cost), buy_date: d.asset_buy, life_years: Number(d.asset_life) || 5, residual_rate: d.asset_res === '' ? 5 : Number(d.asset_res) },
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          this.setData({ asset_name: '', asset_cost: '', asset_buy: '', asset_life: '', asset_res: '' })
+          this.loadAssets(); wx.showToast({ title: '已添加', icon: 'success' })
+        } else wx.showToast({ title: (res.data && res.data.error) || '没加成功', icon: 'none' })
+      }
+    })
+  },
+  delAsset(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删设备', content: '删掉这台设备？已计提的折旧支出不会自动删。', confirmColor: '#e64340',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/assets/' + id, method: 'DELETE', success: () => this.loadAssets() }) }
+    })
+  },
+  runDepreciation() {
+    this.req({
+      url: API_BASE + '/assets/run-depreciation', method: 'POST', data: {},
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ tab: this.data.tab })
+        if (d.ok && Number(d.added) > 0) { wx.showToast({ title: '本月折旧已记 ¥' + d.added, icon: 'success' }); this.refresh() }
+        else wx.showToast({ title: d.note || '不用记', icon: 'none' })
+      }
+    })
+  },
+  loadBankFlows() {
+    this.req({
+      url: API_BASE + '/bank-flows?matched=0',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ bank_rows: d.rows || [], bank_unmatched: d.unmatched || {} })
+      }
+    })
+  },
+  onBankText(e) { this.setData({ bank_text: e.detail.value }) },
+  importBank() {
+    const t = String(this.data.bank_text || '').trim()
+    if (!t) return wx.showToast({ title: '先把流水粘进来', icon: 'none' })
+    this.req({
+      url: API_BASE + '/bank-import', method: 'POST', data: { text: t },
+      success: (res) => {
+        const d = res.data || {}
+        if (d.ok) { this.setData({ bank_text: '' }); this.loadBankFlows(); wx.showToast({ title: '导入 ' + d.imported + ' 笔', icon: 'success' }) }
+        else wx.showToast({ title: d.error || '导入失败', icon: 'none' })
+      }
+    })
+  },
+  delBankFlow(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({ url: API_BASE + '/bank-flows/' + id, method: 'DELETE', success: () => this.loadBankFlows() })
+  },
+  matchBankOrder(e) {
+    const id = e.currentTarget.dataset.id
+    const list = (this.data.ar_all || []).filter((o) => Number(o.price) - Number(o.paid) > 0)
+    if (!list.length) return wx.showToast({ title: '没有未结的应收单', icon: 'none' })
+    wx.showActionSheet({
+      itemList: list.slice(0, 6).map((o) => `${o.customer} ${o.item_name} 欠${Math.round(Number(o.price) - Number(o.paid))}`),
+      success: (r) => {
+        const o = list[r.tapIndex]
+        this.req({
+          url: API_BASE + '/bank-flows/' + id + '/match', method: 'POST', data: { target_type: 'order', target_id: o.id },
+          success: (res) => {
+            if (res.data && res.data.ok) { this.loadBankFlows(); this.refresh(); wx.showToast({ title: '已抵应收', icon: 'success' }) }
+            else wx.showToast({ title: (res.data && res.data.error) || '认领失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  matchBankPayable(e) {
+    const id = e.currentTarget.dataset.id
+    const list = (this.data.ap_all || []).filter((p) => Number(p.amount) - Number(p.paid) > 0)
+    if (!list.length) return wx.showToast({ title: '没有未结的应付单', icon: 'none' })
+    wx.showActionSheet({
+      itemList: list.slice(0, 6).map((p) => `${p.supplier} 欠${Math.round(Number(p.amount) - Number(p.paid))}`),
+      success: (r) => {
+        const p = list[r.tapIndex]
+        this.req({
+          url: API_BASE + '/bank-flows/' + id + '/match', method: 'POST', data: { target_type: 'payable', target_id: p.id },
+          success: (res) => {
+            if (res.data && res.data.ok) { this.loadBankFlows(); this.refresh(); wx.showToast({ title: '已抵应付', icon: 'success' }) }
+            else wx.showToast({ title: (res.data && res.data.error) || '认领失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  matchBankExpense(e) {
+    const id = e.currentTarget.dataset.id
+    const cats = (this.data.cats_out || []).map((c) => c.name)
+    const list = cats.length ? cats : ['工资', '水电', '房租', '采购', '辅料', '其他']
+    wx.showActionSheet({
+      itemList: list.slice(0, 6),
+      success: (r) => {
+        this.req({
+          url: API_BASE + '/bank-flows/' + id + '/match', method: 'POST', data: { target_type: 'expense', category: list[r.tapIndex] },
+          success: (res) => {
+            if (res.data && res.data.ok) { this.loadBankFlows(); this.refresh(); wx.showToast({ title: '已记成支出', icon: 'success' }) }
+            else wx.showToast({ title: (res.data && res.data.error) || '认领失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+
 })
