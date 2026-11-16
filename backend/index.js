@@ -477,6 +477,250 @@ app.delete('/loans/:id', async (c) => {
 })
 
 // 导入模板（CSV，可直接用 Excel 打开）
+
+// ===================== Excel（.xlsx）读写：不依赖第三方库 =====================
+// 读：手动解 zip（DecompressionStream）→ 解析 SheetML
+// 写：手动打 zip（CompressionStream deflate-raw）+ 最小 SheetML
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256)
+  for (let i = 0; i < 256; i++) {
+    let c = i
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    t[i] = c >>> 0
+  }
+  return t
+})()
+
+function crc32(u8) {
+  let c = 0xffffffff
+  for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xff] ^ (c >>> 8)
+  return (c ^ 0xffffffff) >>> 0
+}
+
+async function streamBytes(u8, kind) {
+  const Ctor = kind === 'compress' ? CompressionStream : DecompressionStream
+  const st = new Blob([u8]).stream().pipeThrough(new Ctor('deflate-raw'))
+  return new Uint8Array(await new Response(st).arrayBuffer())
+}
+
+async function unzipAll(buf) {
+  const u8 = new Uint8Array(buf)
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength)
+  let eocd = -1
+  const floor = Math.max(0, u8.length - 66000)
+  for (let i = u8.length - 22; i >= floor; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break }
+  }
+  if (eocd < 0) throw new Error('不是有效的 xlsx 文件（请用 Excel 另存为 .xlsx）')
+  const count = dv.getUint16(eocd + 10, true)
+  let off = dv.getUint32(eocd + 16, true)
+  const dec = new TextDecoder()
+  const out = {}
+  for (let i = 0; i < count; i++) {
+    if (off + 46 > u8.length || dv.getUint32(off, true) !== 0x02014b50) break
+    const method = dv.getUint16(off + 10, true)
+    const csize = dv.getUint32(off + 20, true)
+    const nlen = dv.getUint16(off + 28, true)
+    const elen = dv.getUint16(off + 30, true)
+    const clen = dv.getUint16(off + 32, true)
+    const lho = dv.getUint32(off + 42, true)
+    const name = dec.decode(u8.subarray(off + 46, off + 46 + nlen))
+    const lnlen = dv.getUint16(lho + 26, true)
+    const lelen = dv.getUint16(lho + 28, true)
+    const dstart = lho + 30 + lnlen + lelen
+    const data = u8.subarray(dstart, dstart + csize)
+    out[name] = method === 0 ? data : await streamBytes(data, 'decompress')
+    off += 46 + nlen + elen + clen
+  }
+  return out
+}
+
+function xmlUnesc(x) {
+  return String(x).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (m, d) => String.fromCharCode(Number(d))).replace(/&amp;/g, '&')
+}
+
+function colIdx(letters) {
+  let n = 0
+  for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64)
+  return n - 1
+}
+
+// Excel 日期是数字序号（1899-12-30 起），转成 YYYY-MM-DD
+function xlSerialToIso(v) {
+  const n = Number(v)
+  if (!isFinite(n) || n < 20000 || n > 60000) return null
+  const ms = Math.round((n - 25569) * 86400000)
+  return new Date(ms).toISOString().slice(0, 10)
+}
+
+async function xlsxToRows(buf) {
+  const files = await unzipAll(buf)
+  const dec = new TextDecoder()
+  const sheets = Object.keys(files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()
+  if (!sheets.length) throw new Error('这个文件里没有工作表')
+  let shared = []
+  if (files['xl/sharedStrings.xml']) {
+    const sx = dec.decode(files['xl/sharedStrings.xml'])
+    shared = (sx.match(/<si[\s>][\s\S]*?<\/si>/g) || []).map((si) => {
+      const ts = si.match(/<t[^>]*>[\s\S]*?<\/t>/g) || []
+      return xmlUnesc(ts.map((x) => x.replace(/<[^>]+>/g, '')).join(''))
+    })
+  }
+  const sheet = dec.decode(files[sheets[0]])
+  const rows = []
+  for (const rx of sheet.match(/<row[\s>][\s\S]*?<\/row>/g) || []) {
+    const cells = []
+    for (const cx of rx.match(/<c[\s>][\s\S]*?<\/c>|<c[^>]*\/>/g) || []) {
+      const ref = (cx.match(/r="([A-Z]+)\d+"/) || [])[1] || ''
+      const ta = (cx.match(/t="([^"]+)"/) || [])[1] || ''
+      let v = ''
+      if (ta === 's') {
+        const idx = Number((cx.match(/<v>([\s\S]*?)<\/v>/) || [])[1] || -1)
+        v = shared[idx] || ''
+      } else if (ta === 'inlineStr' || ta === 'str') {
+        v = xmlUnesc(((cx.match(/<is>[\s\S]*?<\/is>/) || cx.match(/<v>[\s\S]*?<\/v>/) || [''])[0]).replace(/<[^>]+>/g, ''))
+      } else {
+        const raw = (cx.match(/<v>([\s\S]*?)<\/v>/) || [])[1]
+        if (raw == null) v = ''
+        else {
+          const iso = xlSerialToIso(raw)
+          v = iso || xmlUnesc(raw)
+        }
+      }
+      const col = ref ? colIdx(ref) : cells.length
+      cells[col] = String(v).replace(/\s+/g, ' ').trim()
+    }
+    for (let i = 0; i < cells.length; i++) if (cells[i] == null) cells[i] = ''
+    if (cells.some((x) => x !== '')) rows.push(cells)
+  }
+  return rows
+}
+
+async function zipMake(entries) {
+  const enc = new TextEncoder()
+  const locals = []
+  const centrals = []
+  let offset = 0
+  for (const e of entries) {
+    const nameB = enc.encode(e.name)
+    const raw = typeof e.data === 'string' ? enc.encode(e.data) : e.data
+    const comp = await streamBytes(raw, 'compress')
+    const crc = crc32(raw)
+    const lh = new Uint8Array(30 + nameB.length)
+    const lv = new DataView(lh.buffer)
+    lv.setUint32(0, 0x04034b50, true)
+    lv.setUint16(4, 20, true)
+    lv.setUint16(6, 0x0800, true)
+    lv.setUint16(8, 8, true)
+    lv.setUint32(14, crc, true)
+    lv.setUint32(18, comp.length, true)
+    lv.setUint32(22, raw.length, true)
+    lv.setUint16(26, nameB.length, true)
+    lh.set(nameB, 30)
+    locals.push(lh, comp)
+    const ch = new Uint8Array(46 + nameB.length)
+    const cv = new DataView(ch.buffer)
+    cv.setUint32(0, 0x02014b50, true)
+    cv.setUint16(4, 20, true)
+    cv.setUint16(6, 20, true)
+    cv.setUint16(8, 0x0800, true)
+    cv.setUint16(10, 8, true)
+    cv.setUint32(16, crc, true)
+    cv.setUint32(20, comp.length, true)
+    cv.setUint32(24, raw.length, true)
+    cv.setUint16(28, nameB.length, true)
+    cv.setUint32(42, offset, true)
+    ch.set(nameB, 46)
+    centrals.push(ch)
+    offset += lh.length + comp.length
+  }
+  const cdSize = centrals.reduce((a, x) => a + x.length, 0)
+  const eo = new Uint8Array(22)
+  const ev = new DataView(eo.buffer)
+  ev.setUint32(0, 0x06054b50, true)
+  ev.setUint16(8, entries.length, true)
+  ev.setUint16(10, entries.length, true)
+  ev.setUint32(12, cdSize, true)
+  ev.setUint32(16, offset, true)
+  const all = [...locals, ...centrals, eo]
+  const total = all.reduce((a, x) => a + x.length, 0)
+  const out = new Uint8Array(total)
+  let p = 0
+  for (const x of all) { out.set(x, p); p += x.length }
+  return out
+}
+
+function sheetXml(rows) {
+  const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const colName = (i) => {
+    let s = ''
+    let n = i + 1
+    while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26) }
+    return s
+  }
+  const body = rows.map((r, ri) => '<row r="' + (ri + 1) + '">' + r.map((v, ci) => '<c r="' + colName(ci) + (ri + 1) + '" t="inlineStr"><is><t xml:space="preserve">' + esc(v) + '</t></is></c>').join('') + '</row>').join('')
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="8" width="16" customWidth="1"/></cols><sheetData>' + body + '</sheetData></worksheet>'
+}
+
+async function makeXlsx(rows) {
+  return zipMake([
+    { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>' },
+    { name: '_rels/.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>' },
+    { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="导入数据" sheetId="1" r:id="rId1"/></sheets></workbook>' },
+    { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>' },
+    { name: 'xl/worksheets/sheet1.xml', data: sheetXml(rows) }
+  ])
+}
+
+function toB64(u8) {
+  let s = ''
+  const chunk = 0x8000
+  for (let i = 0; i < u8.length; i += chunk) s += String.fromCharCode.apply(null, u8.subarray(i, i + chunk))
+  return btoa(s)
+}
+
+function fromB64(b64) {
+  const bin = atob(String(b64 || '').replace(/^data:[^,]*,/, ''))
+  const u8 = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i)
+  return u8
+}
+
+const IMPORT_TEMPLATES = {
+  ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '日期(可空)'], ['张老板', '外壳加工', 5000, '11-05'], ['李老板', '法兰件', 3200, '']] },
+  ar_init: { name: '期初应收模板', rows: [['客户', '金额', '日期(可空)'], ['张老板', 5000, ''], ['李老板', 3000, '07-01']] },
+  ap: { name: '应付导入模板', rows: [['供应商', '金额', '备注', '日期(可空)'], ['王五金', 2000, '螺丝款', '11-05'], ['李钢材', 5000, '钢板', '']] },
+  ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
+  expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '日期(可空)'], [1200, '房租', '8月房租', '11-01'], [300, '水电', '电费', '']] },
+  loan: { name: '员工借支模板', rows: [['员工', '金额', '备注', '日期(可空)'], ['张三', 1000, '买辅料', '11-05'], ['李四', 500, '加油', '']] },
+  reimb: { name: '报销模板', rows: [['员工', '金额', '分类', '备注', '日期(可空)'], ['张三', 800, '采购', '买螺丝', '11-06'], ['张三', 200, '运费', '送货油费', '']] }
+}
+
+// 下载 Excel 模板（base64 返回，小程序存文件后可直接用 Excel/WPS 打开编辑）
+app.get('/import-template-xlsx', async (c) => {
+  const t = String(c.req.query('type') || 'ar')
+  const T = IMPORT_TEMPLATES[t] || IMPORT_TEMPLATES.ar
+  const xlsx = await makeXlsx(T.rows)
+  return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx) })
+})
+
+// 直接上传 Excel 文件导入
+app.post('/import-xlsx', async (c) => {
+  const body = await c.req.json()
+  const type = String(body.type || 'ar')
+  const b64 = body.b64 || body.file || ''
+  if (!b64) return c.json({ error: '没有收到文件内容' }, 400)
+  let rows
+  try {
+    rows = await xlsxToRows(fromB64(b64).buffer)
+  } catch (e) {
+    return c.json({ error: '读不了这个 Excel：' + String(e.message || e) }, 400)
+  }
+  if (!rows.length) return c.json({ error: 'Excel 里没有数据行' }, 400)
+  const r = await importRows(c.env.DB, type, rows)
+  return c.json(r)
+})
+
 app.get('/import-template', async (c) => {
   const t = String(c.req.query('type') || 'ar')
   const T = {
@@ -1344,16 +1588,17 @@ app.post('/quick', async (c) => {
 })
 
 // 批量导入
-app.post('/import', async (c) => {
-  const { type, text } = await c.req.json()
-  const rows = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean)
-  if (!rows.length) return c.json({ error: '没有可导入的内容' }, 400)
-  const db = c.env.DB
+// 批量导入核心：rows = [[单元格, ...], ...]（首行若是表头会自动跳过）
+async function importRows(db, type, rows) {
   let n = 0
   let skippedLocked = 0
   const t = now()
+  // 第一行像表头就跳过（Excel 模板带表头）
+  if (rows.length && rows[0] && rows[0].some((x) => /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要/.test(String(x)))) {
+    rows = rows.slice(1)
+  }
   for (const row of rows) {
-    let p = row.split(/[,，\t]/).map((s) => s.trim())
+    let p = row.slice()
     // 最后一列若是日期，单独取出；否则按今天
     let d = t
     if (p.length > 1 && looksLikeDate(p[p.length - 1])) {
@@ -1420,7 +1665,16 @@ app.post('/import', async (c) => {
     }
   }
   await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}`)
-  return c.json({ imported: n, skipped_locked: skippedLocked })
+  await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}`)
+  return { imported: n, skipped_locked: skippedLocked }
+}
+
+app.post('/import', async (c) => {
+  const { type, text } = await c.req.json()
+  const lines = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean)
+  if (!lines.length) return c.json({ error: '没有可导入的内容' }, 400)
+  const rows = lines.map((row) => row.split(/[,，\t]/).map((s) => s.trim()))
+  return c.json(await importRows(c.env.DB, type, rows))
 })
 
 // 年度流水报表

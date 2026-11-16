@@ -374,7 +374,7 @@ Page({
     wx.showLoading({ title: '生成模板…' })
     wx.downloadFile({
       url,
-      header: { 'X-Access-Key': wx.getStorageSync('key') || '', 'X-Book': String(wx.getStorageSync('book') || 1) },
+      header: { 'X-Access-Key': wx.getStorageSync('ak') || '', 'X-Book': String(wx.getStorageSync('book') || 1) },
       success: (r) => {
         wx.hideLoading()
         if (r.statusCode !== 200) return wx.showToast({ title: '生成失败', icon: 'none' })
@@ -389,6 +389,79 @@ Page({
         }
       },
       fail: () => { wx.hideLoading(); wx.showToast({ title: '下载失败', icon: 'none' }) }
+    })
+  },
+  // 下载 Excel（.xlsx）模板：真 Excel 文件，WPS/Excel 直接打开填
+  excelTemplate() {
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const t = types[this.data.import_type] || 'ar'
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url: API_BASE + '/import-template-xlsx?type=' + t,
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.b64) return wx.showToast({ title: '生成失败', icon: 'none' })
+        const dst = wx.env.USER_DATA_PATH + '/' + (d.name || '导入模板.xlsx')
+        wx.getFileSystemManager().writeFile({
+          filePath: dst, data: d.b64, encoding: 'base64',
+          success: () => {
+            wx.showToast({ title: '模板已生成', icon: 'success' })
+            if (wx.shareFileMessage) {
+              wx.shareFileMessage({
+                filePath: dst, fileName: d.name || '导入模板.xlsx',
+                fail: () => {
+                  wx.openDocument({
+                    filePath: dst, showMenu: true,
+                    fail: () => wx.showToast({ title: '可先转发到文件传输助手', icon: 'none' })
+                  })
+                }
+              })
+            } else {
+              wx.openDocument({ filePath: dst, showMenu: true, fail: () => {} })
+            }
+          },
+          fail: () => wx.showToast({ title: '保存失败', icon: 'none' })
+        })
+      }
+    })
+  },
+  // 直接选 .xlsx 文件导入（不用管编码，Excel 存什么都能读）
+  chooseXlsxFile() {
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const t = types[this.data.import_type] || 'ar'
+    if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，请用粘贴方式', icon: 'none' })
+    wx.chooseMessageFile({
+      count: 1, type: 'file', extension: ['xlsx', 'XLSX'],
+      success: (r) => {
+        const f = (r.tempFiles || [])[0]
+        if (!f) return
+        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        wx.showLoading({ title: '读取中…' })
+        wx.getFileSystemManager().readFile({
+          filePath: f.path, encoding: 'base64',
+          success: (fr) => {
+            wx.showLoading({ title: '导入中…' })
+            this.req({
+              url: API_BASE + '/import-xlsx', method: 'POST',
+              data: { type: t, b64: fr.data },
+              success: (res) => {
+                wx.hideLoading()
+                const d = res.data || {}
+                this.setData({ import_file_name: f.name || 'Excel 文件' })
+                wx.showModal({
+                  title: '导入完成',
+                  content: '成功导入 ' + (d.imported || 0) + ' 条' + (d.skipped_locked ? '，跳过已结账月份 ' + d.skipped_locked + ' 条' : '') + '。金额和客户名请在列表里抽两条核对。',
+                  showCancel: false,
+                  success: () => this.refresh()
+                })
+              },
+              fail: () => wx.hideLoading()
+            })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) }
+        })
+      }
     })
   },
   onEAcc(e) {

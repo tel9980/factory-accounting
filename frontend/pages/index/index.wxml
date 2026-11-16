@@ -387,12 +387,14 @@
   <block wx:if="{{tab=='import'}}">
     <view class="form">
       <picker range="{{import_types}}" bindchange="onImportType"><view class="picker">{{import_types[import_type]}} ▾</view></picker>
-      <button class="btn ghost" size="mini" bindtap="exportTemplate">⬇ 导出这一类的导入模板（CSV）</button>
-      <button class="btn" size="mini" bindtap="chooseImportFile">📄 从微信聊天选表格文件</button>
+      <button class="btn" size="mini" bindtap="excelTemplate">⬇ 下载 Excel 模板（.xlsx，推荐）</button>
+      <button class="btn" size="mini" bindtap="chooseXlsxFile">📊 选 Excel 文件直接导入</button>
+      <button class="btn ghost" size="mini" bindtap="exportTemplate">⬇ 老办法：导出 CSV 模板</button>
+      <button class="btn btn-ghost" size="mini" bindtap="chooseImportFile">📄 选 CSV/TXT 文件导入</button>
       <view class="tip" wx:if="{{import_file_name}}">已读入：{{import_file_name}}</view>
       <textarea class="ta" placeholder="{{import_hint}}" value="{{import_text}}" bindinput="onImportText"></textarea>
       <button class="btn" size="mini" bindtap="doImport">开始导入</button>
-      <view class="tip">两种方式：① 点「导出导入模板」→ 发到电脑用 Excel 填好 → 存成 CSV UTF-8 → 微信发给自己 → 点「从微信聊天选表格文件」；② 从 Excel 直接复制多行粘贴到这里</view>
+      <view class="tip">最省事的两步：① 点「下载 Excel 模板」→ 转发到电脑，用 Excel/WPS 填几行（表头别删，日期可留空）→ 微信发回给自己；② 回到这里点「选 Excel 文件直接导入」。Excel 存什么编码都能读，不用另存 CSV。也可以直接从 Excel 复制多行粘到上面的框里。</view>
     </view>
   </block>
 
