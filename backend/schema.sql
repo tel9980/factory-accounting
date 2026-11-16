@@ -240,3 +240,14 @@ CREATE TABLE IF NOT EXISTS import_log (
   undone INTEGER DEFAULT 0,
   created_at TEXT
 );
+
+-- 账期与对账周期：客户月结 N 天、每 N 天对一次账
+CREATE TABLE IF NOT EXISTS party_terms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT UNIQUE,
+  kind TEXT DEFAULT 'ar',
+  term_days INTEGER DEFAULT 0,
+  recon_cycle INTEGER DEFAULT 0,
+  note TEXT,
+  created_at TEXT
+);

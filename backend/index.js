@@ -1184,6 +1184,14 @@ const getTitle = async (db) => {
     return { title: g('report_title') || '加工厂', note: g('report_note') || '' }
   } catch (e) { return { title: '加工厂', note: '' } }
 }
+// 账期：客户/供应商约定「月结 N 天」，建单没填到期日就自动算出到期日
+const termDue = async (db, party, baseIso) => {
+  try {
+    const t = await db.prepare('SELECT term_days FROM party_terms WHERE party=?').bind(String(party || '')).first()
+    if (t && num(t.term_days) > 0) return addDaysIso(baseIso, num(t.term_days)) + 'T00:00:00.000Z'
+  } catch (e) { /* 表还没建也不影响建单 */ }
+  return ''
+}
 const toIsoDate = (s) => {
   if (!s) return ''
   const m = String(s).trim().match(/^(\d{4})?[-/年]?(\d{1,2})[-/月](\d{1,2})日?$/)
@@ -2779,7 +2787,7 @@ app.post('/orders', async (c) => {
   const db = c.env.DB
   const created = stampOf(date)
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
-  const due = toIsoDate(due_date)
+  const due = toIsoDate(due_date) || (await termDue(db, customer, created))
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
@@ -2953,7 +2961,7 @@ app.post('/payables', async (c) => {
     if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
   }
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || null, created).run()
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created)) || null, created).run()
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
   return c.json({ ok: true })
 })
@@ -3427,6 +3435,106 @@ async function importRows(db, type, rows, opts) {
   await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`)
   return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length, ids, total: round2(total) }
 }
+
+// ===== 账期 / 对账周期 / 催款清单 =====
+app.get('/party-terms', async (c) => {
+  const db = c.env.DB
+  const terms = (await db.prepare('SELECT * FROM party_terms ORDER BY party').all()).results || []
+  const ar = (await db.prepare("SELECT customer AS party, COUNT(*) cnt, COALESCE(SUM(MAX(0, price-paid-COALESCE(written_off,0))),0) left_amt, MIN(created_at) oldest FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer").all()).results || []
+  const ap = (await db.prepare("SELECT supplier AS party, COUNT(*) cnt, COALESCE(SUM(MAX(0, amount-paid-COALESCE(written_off,0))),0) left_amt, MIN(created_at) oldest FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier").all()).results || []
+  const recon = (await db.prepare('SELECT party, MAX(created_at) last_at, COUNT(*) times FROM recon_log GROUP BY party').all()).results || []
+  const find = (arr, p) => arr.find((x) => x.party === p)
+  const rows = terms.map((t) => {
+    const a = find(ar, t.party) || {}
+    const b = find(ap, t.party) || {}
+    const r = find(recon, t.party) || {}
+    const oldest = [a.oldest, b.oldest].filter(Boolean).sort()[0] || ''
+    return {
+      id: t.id, party: t.party, kind: t.kind || 'ar', term_days: num(t.term_days), recon_cycle: num(t.recon_cycle), note: t.note || '',
+      ar_left: round2(num(a.left_amt)), ar_cnt: num(a.cnt), ap_left: round2(num(b.left_amt)), ap_cnt: num(b.cnt),
+      oldest_days: oldest ? daysSince(oldest) : 0, last_recon: r.last_at || '', recon_times: num(r.times),
+      recon_due: num(t.recon_cycle) > 0 ? (!r.last_at || daysSince(r.last_at) >= num(t.recon_cycle)) : false
+    }
+  })
+  // 没设账期、但有欠款的单位也列出来，方便一键设置
+  const known = new Set(terms.map((t) => t.party))
+  const extra = []
+  for (const x of ar) if (!known.has(x.party) && num(x.left_amt) > 0) extra.push({ party: x.party, kind: 'ar', left: round2(num(x.left_amt)) })
+  for (const x of ap) if (!known.has(x.party) && num(x.left_amt) > 0) extra.push({ party: x.party, kind: 'ap', left: round2(num(x.left_amt)) })
+  return c.json({ ok: true, rows, unset: extra.slice(0, 30) })
+})
+
+app.post('/party-terms', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json()
+  const party = String(b.party || '').trim()
+  if (!party) return c.json({ error: '要填单位名' }, 400)
+  const kind = (b.kind === 'ap' ? 'ap' : 'ar')
+  const term = Math.max(0, Math.min(365, num(b.term_days)))
+  const cycle = Math.max(0, Math.min(365, num(b.recon_cycle)))
+  const note = String(b.note || '')
+  const old = await db.prepare('SELECT * FROM party_terms WHERE party=?').bind(party).first()
+  if (old) await db.prepare('UPDATE party_terms SET kind=?, term_days=?, recon_cycle=?, note=? WHERE id=?').bind(kind, term, cycle, note, old.id).run()
+  else await db.prepare('INSERT INTO party_terms (party, kind, term_days, recon_cycle, note, created_at) VALUES (?,?,?,?,?,?)').bind(party, kind, term, cycle, note, now()).run()
+  await logAudit(db, '账期设置', party, `账期 ${term} 天，对账周期 ${cycle} 天`)
+  return c.json({ ok: true })
+})
+
+app.delete('/party-terms/:id', async (c) => {
+  await c.env.DB.prepare('DELETE FROM party_terms WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
+
+// 给某个单位现有的未结单补上到期日（按账期算）
+app.post('/party-terms/apply', async (c) => {
+  const db = c.env.DB
+  const { party } = await c.req.json()
+  const p = String(party || '').trim()
+  if (!p) return c.json({ error: '要填单位名' }, 400)
+  const t = await db.prepare('SELECT * FROM party_terms WHERE party=?').bind(p).first()
+  if (!t || num(t.term_days) <= 0) return c.json({ error: '这家还没设账期' }, 400)
+  const days = num(t.term_days)
+  let n = 0
+  for (const tbl of ['orders', 'payables']) {
+    const col = tbl === 'orders' ? 'customer' : 'supplier'
+    const amt = tbl === 'orders' ? 'price' : 'amount'
+    const rows = (await db.prepare(`SELECT id, created_at FROM ${tbl} WHERE ${col}=? AND ${amt}-paid-COALESCE(written_off,0) > 0 AND (due_date IS NULL OR due_date='')`).bind(p).all()).results || []
+    for (const r of rows) {
+      await db.prepare(`UPDATE ${tbl} SET due_date=? WHERE id=?`).bind(addDaysIso(r.created_at || now(), days) + 'T00:00:00.000Z', r.id).run()
+      n++
+    }
+  }
+  return c.json({ ok: true, updated: n })
+})
+
+// 催款清单：按「欠得久 × 欠得多」排，话术现成
+app.get('/collect-list', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const minDays = Math.max(0, num(c.req.query('min_days')))
+  const title = (await getTitle(db)).title
+  const tbl = type === 'ap' ? 'payables' : 'orders'
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  const amt = type === 'ap' ? 'amount' : 'price'
+  const rows = (await db.prepare(`SELECT ${col} AS party, COUNT(*) cnt, COALESCE(SUM(${amt}-paid-COALESCE(written_off,0)),0) left_amt, MIN(created_at) oldest, MAX(CASE WHEN due_date IS NOT NULL THEN due_date END) due FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0 GROUP BY ${col}`).all()).results || []
+  const list = rows.map((r) => {
+    const days = daysSince(r.oldest)
+    const over = num(r.left_amt) * Math.min(days, 180) / 30
+    return {
+      party: r.party || '', left: round2(num(r.left_amt)), cnt: num(r.cnt), oldest_days: days,
+      due: r.due || '', over_due: r.due ? daysSince(r.due) : 0, score: Math.round(over)
+    }
+  }).filter((x) => x.left > 0.005 && x.oldest_days >= minDays)
+  list.sort((a, b) => b.score - a.score)
+  const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, {
+    no: i + 1,
+    text: type === 'ap'
+      ? `${x.party} 你好，我这边欠你 ${x.left} 元（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${title}，这两天安排一下，方便的话把对账单发我对一下。`
+      : `${x.party} 你好，${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${x.due ? `，约定 ${String(x.due).slice(5, 10)} 到期` : ''}。方便的话这两天结一下，或者把对账单发我核一核。`
+  }))
+  const total = round2(list.reduce((a, x) => a + x.left, 0))
+  return c.json({ ok: true, type, total, count: list.length, list: out })
+})
 
 // ===== 导入批次留痕：记下这一次导了哪些单据，导错了能整批撤回 =====
 async function logImport(db, type, r, src) {
@@ -4725,6 +4833,16 @@ app.get('/reminders', async (c) => {
     const rl = await db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(cm).first()
     if (num(rl.n) === 0 && num(now().slice(8, 10)) >= 10) push('gray', `${cm.slice(5)} 月还没和客户/供应商对过账`, 'import')
   }
+  // 约定了对账周期的单位：到日子还没对过账，单独提醒
+  try {
+    const ts = (await db.prepare('SELECT party, recon_cycle FROM party_terms WHERE recon_cycle > 0').all()).results || []
+    if (ts.length) {
+      const done = (await db.prepare('SELECT party, MAX(created_at) last_at FROM recon_log GROUP BY party').all()).results || []
+      const lm = (p) => { const x = done.find((d) => d.party === p); return x ? x.last_at : '' }
+      const due = ts.filter((t) => { const l = lm(t.party); return !l || daysSince(l) >= num(t.recon_cycle) }).map((t) => { const l = lm(t.party); return { party: t.party, amount: 0, note: l ? `上次对账 ${daysSince(l)} 天前` : '还没对过账' } })
+      if (due.length) push('yellow', `${due.length} 家到了该对账的日子`, 'import', due.slice(0, 3))
+    }
+  } catch (e) { /* 没设账期就不提醒 */ }
   return c.json({ items, count: items.length, today })
 })
 

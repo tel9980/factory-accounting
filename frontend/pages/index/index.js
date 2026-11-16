@@ -34,6 +34,7 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', collect: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -201,6 +202,87 @@ Page({
     })
   },
   // ── 资金账户 / 分类 / 预收预付 ──
+  // 账期 / 对账周期
+  loadPartyTerms() {
+    this.req({
+      url: API_BASE + '/party-terms',
+      success: (res) => {
+        const d = res.data || {}
+        const rows = (d.rows || []).map((r) => Object.assign({}, r, {
+          kind_text: r.kind === 'ap' ? '应付' : '应收',
+          term_text: r.term_days > 0 ? '月结 ' + r.term_days + ' 天' : '没设账期',
+          cycle_text: r.recon_cycle > 0 ? '每 ' + r.recon_cycle + ' 天对一次账' : '不对账',
+          due_text: r.recon_due ? '该对账了' : (r.last_recon ? '对过 ' + r.recon_times + ' 次' : '没对过')
+        }))
+        this.setData({ terms: rows, terms_unset: d.unset || [] })
+      }
+    })
+  },
+  onTermParty(e) { this.setData({ term_party: e.detail.value }) },
+  onTermDays(e) { this.setData({ term_days: e.detail.value }) },
+  onTermCycle(e) { this.setData({ term_cycle: e.detail.value }) },
+  saveTerm() {
+    const party = (this.data.term_party || '').trim()
+    if (!party) return wx.showToast({ title: '填单位名', icon: 'none' })
+    this.req({
+      url: API_BASE + '/party-terms', method: 'POST',
+      data: { party, term_days: Number(this.data.term_days) || 0, recon_cycle: Number(this.data.term_cycle) || 0 },
+      success: (res) => {
+        if (res.data && res.data.error) return wx.showToast({ title: res.data.error, icon: 'none' })
+        wx.showToast({ title: '存好了', icon: 'none' })
+        this.setData({ term_party: '' })
+        this.loadPartyTerms()
+      }
+    })
+  },
+  pickUnsetParty(e) { this.setData({ term_party: this.data.terms_unset[e.currentTarget.dataset.i].party }) },
+  editTerm(e) {
+    const t = this.data.terms[e.currentTarget.dataset.i]
+    this.setData({ term_party: t.party, term_days: String(t.term_days || ''), term_cycle: String(t.recon_cycle || '') })
+  },
+  delTerm(e) {
+    const t = this.data.terms[e.currentTarget.dataset.i]
+    wx.showModal({
+      title: '删掉 ' + t.party + ' 的账期？', content: '只删账期设置，不动单据。',
+      success: (m) => { if (m.confirm) this.req({ url: API_BASE + '/party-terms/' + t.id, method: 'DELETE', success: () => this.loadPartyTerms() }) }
+    })
+  },
+  applyTerm(e) {
+    const t = this.data.terms[e.currentTarget.dataset.i]
+    this.req({
+      url: API_BASE + '/party-terms/apply', method: 'POST', data: { party: t.party },
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        wx.showToast({ title: '给 ' + (d.updated || 0) + ' 张单补了到期日', icon: 'none' })
+        this.refresh(); this.loadPartyTerms()
+      }
+    })
+  },
+  // 催款清单：按「欠得久 × 欠得多」排，话术现成
+  openCollect(e) {
+    const type = (e && e.currentTarget && e.currentTarget.dataset.type) || 'ar'
+    this.req({
+      url: API_BASE + '/collect-list?type=' + type,
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.count) return wx.showToast({ title: '没有未结的款', icon: 'none' })
+        this.setData({ collect: Object.assign({}, d, { type_text: d.type === 'ap' ? '要付' : '要收' }) })
+        wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+      }
+    })
+  },
+  copyCollectOne(e) {
+    const x = ((this.data.collect && this.data.collect.list) || [])[e.currentTarget.dataset.i]
+    if (x) wx.setClipboardData({ data: x.text })
+  },
+  copyCollectAll() {
+    const c = this.data.collect
+    if (!c) return
+    const head = (c.type === 'ap' ? '【要付清单】共 ' : '【催款清单】共 ') + c.total + ' 元，' + c.count + ' 家\n\n'
+    wx.setClipboardData({ data: head + (c.list || []).map((x) => x.no + '. ' + x.text).join('\n\n') })
+  },
+  closeCollect() { this.setData({ collect: null }) },
   loadAccounts() {
     this.req({
       url: API_BASE + '/accounts',
@@ -728,7 +810,7 @@ Page({
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
+    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms() }
     if (t === 'expense') this.loadLoans()
     if (t === 'ar' || t === 'ap' || t === 'expense') this.loadSuggest()
   },
@@ -758,7 +840,7 @@ Page({
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare(); this.loadMarginBy() }
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
-    if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
+    if (t === 'contact') { this.loadAccounts(); this.loadTransfers(); this.loadPartyTerms() }
     if (t === 'expense') this.loadLoans()
     if (t === 'import') { this.loadReconLog(); this.loadImportLog(); this.loadReconProgress() }
   },

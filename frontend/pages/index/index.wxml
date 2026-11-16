@@ -210,6 +210,22 @@
         <text class="chip {{ar_view=='order'?'on':''}}" bindtap="pickArView" data-v="order">按单据</text>
         <text class="chip {{ar_view=='party'?'on':''}}" bindtap="pickArView" data-v="party">按客户</text>
       </view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="openCollect" data-type="ar">📣 催款清单（谁欠得久先催谁）</button>
+      </view>
+      <view class="prev" wx:if="{{collect}}">
+        <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
+        <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
+          <text class="prev-t">{{item.no}}. {{item.party}}</text>
+          <text class="prev-n">欠 {{item.left}} · 最久 {{item.oldest_days}} 天</text>
+          <text class="red">点我复制</text>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeCollect">收起</button>
+        </view>
+        <view class="tip">点某一家 = 只复制那家的话（带金额、笔数、天数、约定到期日）；「全部复制」= 一次性把每一家的话都排好，粘到群里挨个发。</view>
+      </view>
     </view>
     <view class="list" wx:if="{{ar_view=='party'}}">
       <view class="grp" wx:for="{{ar_groups}}" wx:key="name">
@@ -323,6 +339,22 @@
         <text class="chip-label">视图：</text>
         <text class="chip {{ap_view=='order'?'on':''}}" bindtap="pickApView" data-v="order">按单据</text>
         <text class="chip {{ap_view=='party'?'on':''}}" bindtap="pickApView" data-v="party">按供应商</text>
+      </view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="openCollect" data-type="ap">💸 要付清单（该安排付款了）</button>
+      </view>
+      <view class="prev" wx:if="{{collect}}">
+        <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
+        <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
+          <text class="prev-t">{{item.no}}. {{item.party}}</text>
+          <text class="prev-n">欠 {{item.left}} · 最久 {{item.oldest_days}} 天</text>
+          <text class="red">点我复制</text>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeCollect">收起</button>
+        </view>
+        <view class="tip">点某一家 = 只复制那家的话（带金额、笔数、天数、约定到期日）；「全部复制」= 一次性把每一家的话都排好，粘到群里挨个发。</view>
       </view>
     </view>
     <view class="list" wx:if="{{ap_view=='party'}}">
@@ -1022,6 +1054,24 @@
   </block>
 
   <block wx:if="{{tab=='contact'}}">
+    <view class="form">
+      <view class="tip">账期与对账周期（设了以后建单自动算到期日，到日子自动提醒你去对账）</view>
+      <input class="inp" placeholder="单位名（客户或供应商）" value="{{term_party}}" bindinput="onTermParty"/>
+      <input class="inp" placeholder="账期天数：月结 30 天就填 30（0=不设）" type="number" value="{{term_days}}" bindinput="onTermDays"/>
+      <input class="inp" placeholder="多久对一次账：30=每月，90=每季（0=不提醒）" type="number" value="{{term_cycle}}" bindinput="onTermCycle"/>
+      <button class="btn" size="mini" bindtap="saveTerm">保存账期</button>
+      <view class="item" wx:for="{{terms}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.recon_due?'red':''}}">{{item.due_text}}</text></view>
+        <view class="row2">{{item.kind_text}} · {{item.term_text}} · {{item.cycle_text}} · 欠{{item.ar_left>0?item.ar_left:item.ap_left}} · 最久{{item.oldest_days}}天</view>
+        <view class="btns">
+          <button size="mini" bindtap="editTerm" data-i="{{index}}">改</button>
+          <button size="mini" bindtap="applyTerm" data-i="{{index}}">补到期日</button>
+          <button size="mini" bindtap="delTerm" data-i="{{index}}">删</button>
+        </view>
+      </view>
+      <view class="tip" wx:if="{{terms_unset.length}}">还没设账期但有欠款：<text wx:for="{{terms_unset}}" wx:key="party" class="red" data-i="{{index}}" bindtap="pickUnsetParty">{{item.party}} </text>——点名字自动填到上面</view>
+      <view class="tip">「补到期日」= 给这家现有还没结完的单，按账期天数补上到期日（这样首页 7 天内到期提醒才准）。</view>
+    </view>
     <view class="form">
       <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>
       <view class="item" wx:for="{{accounts}}" wx:key="id">
