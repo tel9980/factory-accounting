@@ -6919,17 +6919,8 @@ async function runBatch(db, stmts) {
   }
 }
 
-app.post('/restore', async (c) => {
-  const db = c.env.DB
-  let data
-  try {
-    const raw = await c.req.json()
-    data = raw
-    if (typeof raw.text === 'string') data = JSON.parse(raw.text)
-    else if (typeof raw.data === 'string') data = JSON.parse(raw.data)
-  } catch (e) {
-    return c.json({ error: '备份内容不是有效 JSON' }, 400)
-  }
+// 恢复主体：/restore（贴文字）和 /backup-restore/:id（回到某天的账本）共用
+async function restoreCore(db, data) {
   const orders = Array.isArray(data.orders) ? data.orders : []
   const payables = Array.isArray(data.payables) ? data.payables : []
   const ledger = Array.isArray(data.ledger) ? data.ledger : []
@@ -6946,22 +6937,94 @@ app.post('/restore', async (c) => {
   const skipped = { orders: 0, payables: 0, ledger: 0 }
   for (const o of orders) {
     if (!o.customer || num(o.price) <= 0) { skipped.orders++; continue }
-    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now()))
+    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at, cost, written_off, progress, rev) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now(), num(o.cost), num(o.written_off), o.progress || '', num(o.rev)))
   }
   for (const p of payables) {
     if (!p.supplier || num(p.amount) <= 0) { skipped.payables++; continue }
-    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.due_date || null, p.created_at || now()))
+    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, due_date, created_at, written_off, rev) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.due_date || null, p.created_at || now(), num(p.written_off), num(p.rev)))
   }
   for (const l of ledger) {
     if (num(l.amount) <= 0 || !l.direction) { skipped.ledger++; continue }
-    stmts.push(db.prepare('INSERT INTO ledger (id, direction, ref_type, ref_id, amount, category, remark, operator, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now()))
+    stmts.push(db.prepare('INSERT INTO ledger (id, direction, ref_type, ref_id, amount, category, remark, operator, created_at, account_id, cash) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now(), num(l.account_id), l.cash === undefined ? 1 : num(l.cash)))
   }
   await runBatch(db, stmts)
   await logAudit(db, '数据恢复', '', `恢复 应收${orders.length - skipped.orders} 应付${payables.length - skipped.payables} 流水${ledger.length - skipped.ledger}`)
-  return c.json({ ok: true, restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, skipped })
+  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, skipped }
+}
+
+app.post('/restore', async (c) => {
+  const db = c.env.DB
+  let data
+  try {
+    const raw = await c.req.json()
+    data = raw
+    if (typeof raw.text === 'string') data = JSON.parse(raw.text)
+    else if (typeof raw.data === 'string') data = JSON.parse(raw.data)
+  } catch (e) {
+    return c.json({ error: '备份内容不是有效 JSON' }, 400)
+  }
+  const orders = Array.isArray(data.orders) ? data.orders : []
+  const payables = Array.isArray(data.payables) ? data.payables : []
+  const ledger = Array.isArray(data.ledger) ? data.ledger : []
+  if (!orders.length && !payables.length && !ledger.length) return c.json({ error: '备份里没有账目数据' }, 400)
+  const r = await restoreCore(db, data)
+  return c.json(Object.assign({ ok: true }, r))
+})
+
+// 「回到某一天的账本」：列出最近的备份，每份备份里有多少单、多少钱，和现在差多少
+app.get('/backup-timeline', async (c) => {
+  const db = c.env.DB
+  const [curO, curP, curL] = await Promise.all([
+    db.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(price),0) AS t FROM orders').first(),
+    db.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(amount),0) AS t FROM payables').first(),
+    db.prepare('SELECT COUNT(*) AS c FROM ledger').first()
+  ])
+  const cur = { orders: num(curO && curO.c), order_sum: round2(num(curO && curO.t)), payables: num(curP && curP.c), payable_sum: round2(num(curP && curP.t)), ledger: num(curL && curL.c) }
+  let rows = []
+  try { rows = (await db.prepare('SELECT id, created_at, content FROM backups ORDER BY id DESC LIMIT 12').all()).results } catch (e) { rows = [] }
+  const items = []
+  for (const r of rows) {
+    let d = null
+    try { d = JSON.parse(r.content) } catch (e) { d = null }
+    const o = (d && Array.isArray(d.orders)) ? d.orders : []
+    const p = (d && Array.isArray(d.payables)) ? d.payables : []
+    const l = (d && Array.isArray(d.ledger)) ? d.ledger : []
+    const orderSum = round2(o.reduce((a, x) => a + num(x.price), 0))
+    const paySum = round2(p.reduce((a, x) => a + num(x.amount), 0))
+    items.push({
+      id: r.id, at: r.created_at, date: String(r.created_at || '').slice(0, 10), time: String(r.created_at || '').slice(11, 16),
+      orders: o.length, order_sum: orderSum, payables: p.length, payable_sum: paySum, ledger: l.length,
+      d_orders: cur.orders - o.length, d_order_sum: round2(cur.order_sum - orderSum),
+      d_payables: cur.payables - p.length, d_ledger: cur.ledger - l.length
+    })
+  }
+  return c.json({
+    current: cur, count: items.length, items,
+    latest: items[0] || null,
+    note: items.length ? '恢复会用这份备份覆盖现在的应收、应付、流水（账户余额、发票、借支这些不动的）。动手前系统会先把现在的账本存一份快照，选错了还能再回来。' : '还没有备份。先在报表页点一次「立即备份」，以后就能回到那一天。'
+  })
+})
+
+// 回到某一份备份（服务端直接恢复，不用手抄 JSON）
+app.post('/backup-restore', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const id = num(b.id)
+  if (!id) return c.json({ error: '要指定回到哪一份备份' }, 400)
+  const r = await db.prepare('SELECT content FROM backups WHERE id=?').bind(id).first()
+  if (!r) return c.json({ error: '这份备份找不到了（可能已被新备份顶掉）' }, 404)
+  let data
+  try { data = JSON.parse(r.content) } catch (e) { return c.json({ error: '这份备份内容坏了，换一份试试' }, 400) }
+  const o = Array.isArray(data.orders) ? data.orders : []
+  const p = Array.isArray(data.payables) ? data.payables : []
+  const l = Array.isArray(data.ledger) ? data.ledger : []
+  if (!o.length && !p.length && !l.length) return c.json({ error: '这份备份里没有账目数据' }, 400)
+  if (!b.confirm) return c.json({ need_confirm: true, will: { orders: o.length, order_sum: round2(o.reduce((a, x) => a + num(x.price), 0)), payables: p.length, ledger: l.length }, error: '恢复会覆盖现在的账目，请确认' }, 409)
+  const res = await restoreCore(db, data)
+  return c.json(Object.assign({ ok: true, from: id }, res))
 })
 
 

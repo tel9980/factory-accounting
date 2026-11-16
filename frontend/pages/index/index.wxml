@@ -1165,6 +1165,18 @@
       <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>
     </view>
     <view class="form">
+      <view class="tip">⏮ 回到某一天的账本：选一份备份，点一下就回去（动手前系统会先把现在这份存成快照，选错了还能再回来）</view>
+      <view class="prev" wx:if="{{btl && btl.items.length}}">
+        <view class="prev-row" wx:for="{{btl.items}}" wx:key="id">
+          <text class="prev-t">{{item.date}} {{item.time}}</text>
+          <text class="prev-n">应收 {{item.orders}} 单 · 应付 {{item.payables}} 单 · 流水 {{item.ledger}} 条</text>
+          <button size="mini" bindtap="restoreFromBackup" data-id="{{item.id}}">回到这天</button>
+        </view>
+      </view>
+      <view class="tip" wx:if="{{btl}}">{{btl.note}}</view>
+      <button class="btn ghost" size="mini" bindtap="loadBackupTimeline">刷新备份列表</button>
+    </view>
+    <view class="form">
       <view class="tip">数据维护：长期用下来，运行日志、操作日志、导入记录会越积越多（不影响账，只是占地方）。业务单据、流水、备份不会被清。</view>
       <view class="prev" wx:if="{{dbst}}">
         <view class="prev-row" wx:for="{{dbst.rows}}" wx:key="k">

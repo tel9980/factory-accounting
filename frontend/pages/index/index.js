@@ -99,6 +99,7 @@ Page({
     budget_over: [], budget_alert_count: 0,
     budgets: [], b_category: 0, b_amount: '',
     pending_count: 0,
+    btl: null,
     book: 1, book_name: '主账套', books: [], rename_text: '',
     nw: [], nw_max: 1, nw_latest: null,
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
@@ -1107,7 +1108,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline()
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary()
     }
@@ -3878,6 +3879,35 @@ Page({
     })
   },
   // 数据量体检 / 清理老日志
+  // 回到某一天的账本：列出最近 12 份备份，每份有多少单、多少钱，和现在差多少
+  loadBackupTimeline() {
+    this.req({ url: API_BASE + '/backup-timeline', success: (res) => this.setData({ btl: res.data }) })
+  },
+  restoreFromBackup(e) {
+    const id = e.currentTarget.dataset.id
+    const it = ((this.data.btl || {}).items || []).find((x) => String(x.id) === String(id)) || {}
+    const cur = (this.data.btl || {}).current || {}
+    wx.showModal({
+      title: '回到 ' + (it.date || '') + ' 的账本？',
+      content: '备份里：应收 ' + it.orders + ' 单（¥' + it.order_sum + '）、应付 ' + it.payables + ' 单、流水 ' + it.ledger + ' 条\n' +
+        '现在：应收 ' + cur.orders + ' 单（¥' + cur.order_sum + '）、应付 ' + cur.payables + ' 单、流水 ' + cur.ledger + ' 条\n\n' +
+        '恢复会用备份覆盖现在的应收 / 应付 / 流水。现在这份会先存成快照，选错了还能回来。',
+      confirmText: '恢复', cancelText: '算了',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/backup-restore', method: 'POST', once: 'restore-bk',
+          data: { id: Number(id), confirm: true },
+          success: (res) => {
+            const d = res.data || {}
+            const rs = d.restored || {}
+            wx.showModal({ title: '回来了', content: '已恢复到 ' + (it.date || '') + '：应收 ' + rs.orders + ' 单、应付 ' + rs.payables + ' 单、流水 ' + rs.ledger + ' 条', showCancel: false })
+            this.refresh(); this.loadBackupTimeline(); this.loadDbStats()
+          }
+        })
+      }
+    })
+  },
   loadDbStats() {
     this.req({
       url: API_BASE + '/db-stats',
