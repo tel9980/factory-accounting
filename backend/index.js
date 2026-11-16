@@ -709,11 +709,68 @@ const snapOf = async (db, mm) => {
   return d
 }
 
+// 结账前自检：把「结账后就不许改」之前该做的事列清楚（结账不可怕，漏掉才可怕）
+async function closePrecheck(db, mm) {
+  const [diff, anyRecon, summ, bk, unclosed, prevLock] = await Promise.all([
+    db.prepare('SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=? AND done=0').bind(mm).first().catch(() => ({ n: 0 })),
+    db.prepare('SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=?').bind(mm).first().catch(() => ({ n: 0 })),
+    db.prepare("SELECT v FROM settings WHERE key='pipeline_summary'").bind().first().catch(() => null),
+    db.prepare('SELECT MAX(created_at) t FROM backups').bind().first().catch(() => null),
+    db.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,7)=? AND price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005) + (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,7)=? AND amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005) n")
+      .bind(mm, mm).first().catch(() => ({ n: 0 })),
+    (async () => {
+      const [y, m] = mm.split('-').map(Number)
+      const d = new Date(Date.UTC(y, m - 2, 1))
+      const pm = d.toISOString().slice(0, 7)
+      const r = await db.prepare('SELECT COUNT(*) n FROM month_lock WHERE month=?').bind(pm).first().catch(() => ({ n: 0 }))
+      return { pm, locked: num(r && r.n) > 0 }
+    })()
+  ])
+  const items = []
+  const nd = num(diff && diff.n)
+  items.push({ k: 'recon_diff', label: '对账差异还没处理', count: nd, tone: nd ? 'bad' : 'ok',
+    tip: nd ? `还有 ${nd} 家对账差异没处理，结账后就补不进去了` : '对账差异都处理完了' })
+  const na = num(anyRecon && anyRecon.n)
+  items.push({ k: 'never_recon', label: '这个月对过账', count: na ? 1 : 0, tone: na ? 'ok' : 'warn',
+    tip: na ? `本月和 ${na} 家对过账` : '这个月还没跟任何单位对过账（对一遍再结账更稳）' })
+  const okSumm = !!(summ && String(summ.v || '') === mm)
+  items.push({ k: 'summary', label: '出过本月小结', count: okSumm ? 1 : 0, tone: okSumm ? 'ok' : 'warn',
+    tip: okSumm ? '本月小结已出' : '还没出本月小结（报表页「出本月小结」一点就有）' })
+  const bkDays = bk && bk.t ? Math.floor((Date.now() - new Date(bk.t).getTime()) / 86400000) : -1
+  const bkOk = bkDays >= 0 && bkDays <= 7
+  items.push({ k: 'backup', label: '最近 7 天备份过', count: bkOk ? 1 : 0, tone: bkOk ? 'ok' : 'warn',
+    tip: bkDays < 0 ? '还没备份过，结账前先点一次「备份全部数据」' : (bkOk ? `${bkDays} 天前备份过` : `上次备份是 ${bkDays} 天前，建议先备份`) })
+  const nu = num(unclosed && unclosed.n)
+  items.push({ k: 'unclosed', label: '本月还有没结清的单', count: nu, tone: 'info',
+    tip: nu ? `本月还有 ${nu} 张单没收清/付清（结账不影响欠款，但该月就改不了了）` : '本月单据都结清了' })
+  items.push({ k: 'prev', label: `上个月（${prevLock.pm}）已结账`, count: prevLock.locked ? 1 : 0, tone: prevLock.locked ? 'ok' : 'info',
+    tip: prevLock.locked ? '上个月已结账' : `上个月（${prevLock.pm}）还没结账，跳着结账以后对账麻烦` })
+  const blockers = items.filter((x) => x.k === 'recon_diff' && x.count > 0).map((x) => x.k)
+    .concat(items.filter((x) => x.k === 'summary' && !x.count).map((x) => x.k))
+  const warns = items.filter((x) => x.tone === 'warn').map((x) => x.k)
+  return { month: mm, items, blockers, warns, can_close: blockers.length === 0,
+    text: items.filter((x) => x.tone !== 'ok').map((x) => '· ' + x.tip).join('\n') || '该做的都做了，可以放心结账' }
+}
+
+app.get('/close-precheck', async (c) => {
+  const mm = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM' }, 400)
+  return c.json({ ok: true, ...(await closePrecheck(c.env.DB, mm)) })
+})
+
 app.post('/month-close', async (c) => {
   const db = c.env.DB
-  const { month: m } = await c.req.json()
+  const body = await c.req.json()
+  const m = body.month
   const mm = String(m || '').trim()
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM，如 2026-11' }, 400)
+  const confirmed = !!body.confirm
+  if (!confirmed) {
+    const pc = await closePrecheck(db, mm)
+    if (pc.blockers.length) {
+      return c.json({ error: '结账前还有事没做完（' + pc.blockers.length + ' 项）', code: 'need_confirm', blockers: pc.blockers, items: pc.items, text: pc.text, month: mm }, 409)
+    }
+  }
   const snap = await monthSnapshot(db, mm)
   snap.closed_at = now()
   await saveArchive(db, snap)

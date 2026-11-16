@@ -1510,7 +1510,7 @@ Page({
   delOrder(e) {
     const id = e.currentTarget.dataset.id
     wx.showModal({
-      title: '删除应收单', content: '会连同它的收款记录一起删除，确定？',
+      title: '删除应收单', content: '会连同它的收款记录一起删除。删掉后 30 天内在「设置 → 回收站」还能找回。',
       success: (r) => {
         if (r.confirm) {
           this.req({ url: API_BASE + '/orders/' + id, method: 'DELETE', success: () => this.refresh() })
@@ -1521,7 +1521,7 @@ Page({
   delPayable(e) {
     const id = e.currentTarget.dataset.id
     wx.showModal({
-      title: '删除应付单', content: '会连同它的付款记录一起删除，确定？',
+      title: '删除应付单', content: '会连同它的付款记录一起删除。删掉后 30 天内在「设置 → 回收站」还能找回。',
       success: (r) => {
         if (r.confirm) {
           this.req({ url: API_BASE + '/payables/' + id, method: 'DELETE', success: () => this.refresh() })
@@ -1532,7 +1532,7 @@ Page({
   delExpense(e) {
     const id = e.currentTarget.dataset.id
     wx.showModal({
-      title: '删除支出', content: '确定删除这条支出流水？',
+      title: '删除支出', content: '删掉后 30 天内在「设置 → 回收站」还能找回。确定删除这条支出？',
       success: (r) => {
         if (r.confirm) {
           this.req({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => this.refresh() })
@@ -3770,29 +3770,55 @@ Page({
     const d = this.data
     const m = (d.lock_month || d.this_month || '').trim()
     if (!/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '填月份，如 2026-10', icon: 'none' })
-    wx.showModal({
-      title: '结转归档 ' + m,
-      content: '会把 ' + m + ' 的收入成本、期末应收应付、现金、净资产打成快照，并锁定该月不许再改。以后报表就用这份快照（改历史不影响已出报表）。',
-      success: (r) => {
-        if (!r.confirm) return
-        wx.showLoading({ title: '结转中…' })
-        this.req({
-          url: API_BASE + '/month-close', method: 'POST', data: { month: m },
-          success: (res) => {
-            wx.hideLoading()
-            const s = (res.data || {}).snapshot
-            if (!s) return wx.showToast({ title: (res.data && res.data.error) || '结转失败', icon: 'none' })
-            wx.showModal({
-              title: m + ' 已结转',
-              content: '接单 ' + s.order_add + '\n成本 ' + s.cost + '（现金 ' + s.cash_expense + ' + 摊销 ' + s.amort + ' + 折旧 ' + s.dep + ' + 预提息 ' + s.accrue_int + '）\n毛利 ' + s.profit + '（毛利率 ' + s.margin + '%）\n期末现金 ' + s.cash_balance + '\n应收 ' + s.ar_left + ' · 应付 ' + s.ap_left + ' · 借款 ' + s.debt_left + '\n净资产 ' + s.net_worth,
-              showCancel: false
-            })
-            this.setData({ lock_month: '' })
-            this.loadArchives(); this.loadMonthLocks(); this.refresh()
-          },
-          fail: () => wx.hideLoading()
+    wx.showLoading({ title: '结账前检查…' })
+    this.req({
+      url: API_BASE + '/close-precheck?month=' + m,
+      success: (res) => {
+        wx.hideLoading()
+        const pc = res.data || {}
+        const items = pc.items || []
+        if (!items.length) return this._doClose(m)
+        const lines = items.map((it) => (it.tone === 'ok' ? '✓ ' : it.tone === 'bad' ? '✗ ' : it.tone === 'warn' ? '！' : '· ') + it.tip)
+        const tail = (pc.blockers && pc.blockers.length)
+          ? '\n\n带 ✗ 的先处理更稳；现在结账也行，只是这个月以后就改不了了。'
+          : '\n\n结账会出快照并锁定该月，之后不能再增删改。'
+        wx.showModal({
+          title: '结账前自检 · ' + m,
+          content: lines.join('\n') + tail,
+          confirmText: '照样结账',
+          cancelText: '再等等',
+          success: (r) => { if (r.confirm) this._doClose(m) }
         })
-      }
+      },
+      fail: () => { wx.hideLoading(); this._doClose(m) }
+    })
+  },
+  _doClose(m, retry) {
+    wx.showLoading({ title: '结转中…' })
+    this.req({
+      url: API_BASE + '/month-close', method: 'POST', data: { month: m, confirm: !!retry },
+      success: (res) => {
+        wx.hideLoading()
+        const dd = res.data || {}
+        if (dd.code === 'need_confirm' && !retry) {
+          return wx.showModal({
+            title: '还没弄完',
+            content: dd.text || dd.error,
+            confirmText: '仍然结账',
+            success: (r) => { if (r.confirm) this._doClose(m, true) }
+          })
+        }
+        const s = dd.snapshot
+        if (!s) return wx.showToast({ title: dd.error || '结转失败', icon: 'none' })
+        wx.showModal({
+          title: m + ' 已结转',
+          content: '接单 ' + s.order_add + '\n材料·外协成本 ' + (s.mat_cost || 0) + '\n现金费用 ' + s.cash_expense + ' · 摊销 ' + s.amort + ' · 折旧 ' + s.dep + ' · 预提息 ' + s.accrue_int + '\n净利 ' + s.profit + '（净利率 ' + s.margin + '%）\n期末现金 ' + s.cash_balance + '\n应收 ' + s.ar_left + ' · 应付 ' + s.ap_left + ' · 借款 ' + s.debt_left + '\n净资产 ' + s.net_worth + '\n\n以后报表就用这份快照，改历史不影响已出报表。',
+          showCancel: false
+        })
+        this.setData({ lock_month: '' })
+        this.loadArchives(); this.loadMonthLocks(); this.refresh()
+      },
+      fail: () => wx.hideLoading()
     })
   },
   viewArchive(e) {
