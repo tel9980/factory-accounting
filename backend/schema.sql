@@ -324,3 +324,16 @@ CREATE TABLE IF NOT EXISTS net_snapshots (
   note TEXT,
   created_at TEXT NOT NULL
 );
+
+-- 固定资产与折旧（老库用 ALTER TABLE 补 disposed_at / dispose_amount）
+CREATE TABLE IF NOT EXISTS assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  cost REAL NOT NULL,
+  buy_date TEXT,
+  life_years REAL DEFAULT 5,
+  residual_rate REAL DEFAULT 5,   -- 残值率 %
+  disposed_at TEXT,               -- 卖掉/报废那天（空=还在用）
+  dispose_amount REAL DEFAULT 0,  -- 卖了多少钱（报废填 0）
+  created_at TEXT NOT NULL
+);

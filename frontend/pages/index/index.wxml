@@ -1731,7 +1731,8 @@
     </view>
 
     <view class="form">
-      <view class="tip">固定资产折旧（原值合计 {{asset_cost_total}}，每月折旧 {{asset_monthly}}，现在值 {{asset_net}}）</view>
+      <view class="tip">固定资产折旧（在用 {{asset_rows.length}} 台：原值合计 {{asset_cost_total}}，每月折旧 {{asset_monthly}}，现在值 {{asset_net}}）</view>
+      <view class="aline warn" wx:if="{{asset_sold_count>0}}">已处置 {{asset_sold_count}} 台，卖了 {{asset_sold_amount}}，{{asset_sold_gain>=0 ? '合计赚 ' : '合计亏 '}}{{asset_sold_gain>=0 ? asset_sold_gain : -asset_sold_gain}} 元（折旧已停）</view>
       <input class="inp" placeholder="设备名称，如 数控车床" value="{{asset_name}}" bindinput="onAssetName"/>
       <input class="inp" placeholder="原值（买入价）" type="digit" value="{{asset_cost}}" bindinput="onAssetCost"/>
       <input class="inp" placeholder="买入日期，如 2025-06-01" value="{{asset_buy}}" bindinput="onAssetBuy"/>
@@ -1745,7 +1746,11 @@
       <view class="item" wx:for="{{asset_rows}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">净值 ¥{{item.net}}</text></view>
         <view class="row2">原值 {{item.cost}} · 月折旧 {{item.monthly}} · 已折 {{item.used_months}} 个月{{item.done ? ' · 已折完' : ' · 还剩 ' + item.remain_months + ' 个月'}}</view>
-        <view class="btns"><button size="mini" bindtap="delAsset" data-id="{{item.id}}">删</button></view>
+        <view class="row2" wx:if="{{item.disposed}}">已处置（{{item.disposed_at}}）卖了 {{item.dispose_amount}} 元，{{item.gain>=0 ? '赚' : '亏'}} {{item.gain>=0 ? item.gain : -item.gain}} 元</view>
+        <view class="btns">
+          <button size="mini" wx:if="{{!item.disposed && role!='staff'}}" bindtap="disposeAsset" data-id="{{item.id}}">卖掉/报废</button>
+          <button size="mini" bindtap="delAsset" data-id="{{item.id}}">删</button>
+        </view>
       </view>
     </view>
 

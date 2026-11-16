@@ -4651,7 +4651,8 @@ Page({
       url: API_BASE + '/assets',
       success: (res) => {
         const d = res.data || {}
-        this.setData({ asset_rows: d.rows || [], asset_cost_total: d.total_cost || 0, asset_monthly: d.total_monthly || 0, asset_net: d.total_net || 0 })
+        this.setData({ asset_rows: d.rows || [], asset_cost_total: d.total_cost || 0, asset_monthly: d.total_monthly || 0, asset_net: d.total_net || 0,
+          asset_sold_gain: d.sold_gain || 0, asset_sold_amount: d.sold_amount || 0, asset_sold_count: d.sold_count || 0 })
       }
     })
   },
@@ -4680,6 +4681,62 @@ Page({
     wx.showModal({
       title: '删设备', content: '删掉这台设备？已计提的折旧支出不会自动删。', confirmColor: '#e64340',
       success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/assets/' + id, method: 'DELETE', success: () => this.loadAssets() }) }
+    })
+  },
+  // 卖掉/报废：填卖了多少钱 → 进现金、停止折旧、自动算赚了还是亏了
+  disposeAsset(e) {
+    const id = e.currentTarget.dataset.id
+    const row = (this.data.asset_rows || []).find((x) => String(x.id) === String(id)) || {}
+    wx.showModal({
+      title: '卖了多少钱？',
+      content: `「${row.name || ''}」现在的账面是 ¥${row.net || 0}。卖了多少钱填一下（报废就填 0）。`,
+      editable: true,
+      placeholderText: '例如 8000',
+      success: (r) => {
+        if (!r.confirm) return
+        const amount = Number(String(r.content || '').replace(/[^0-9.]/g, ''))
+        if (isNaN(amount)) return wx.showToast({ title: '填个数字，报废填 0', icon: 'none' })
+        this.disposeAskDate(id, amount)
+      }
+    })
+  },
+  disposeAskDate(id, amount) {
+    wx.showActionSheet({
+      itemList: ['今天卖的', '选个别的日子'],
+      success: (r) => {
+        if (r.tapIndex === 1) {
+          // 用当前日期兜底，简单起见让用户输 YYYY-MM-DD
+          wx.showModal({
+            title: '哪一天卖的？',
+            editable: true, placeholderText: '例如 2026-11-16',
+            success: (m) => {
+              if (!m.confirm) return
+              this.doDispose(id, amount, String(m.content || '').trim())
+            }
+          })
+          return
+        }
+        this.doDispose(id, amount, '')
+      },
+      fail: () => {}
+    })
+  },
+  doDispose(id, amount, date) {
+    this.req({
+      url: API_BASE + '/assets/' + id + '/dispose',
+      method: 'POST',
+      once: true,
+      data: { amount, date },
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showModal({ title: '没记上', content: d.error || '重试一下', showCancel: false })
+        wx.showModal({
+          title: d.gain >= 0 ? '卖赚了' : '卖亏了',
+          content: `${d.note}\n\n已经记成一笔现金收入（¥${d.amount}），这台设备的折旧到此为止。`,
+          showCancel: false
+        })
+        this.loadAssets(); this.loadAccounts(); this.refresh()
+      }
     })
   },
   runDepreciation() {

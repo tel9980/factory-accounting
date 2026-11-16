@@ -7567,18 +7567,25 @@ const assetCalc = (a) => {
   const residual = round2(cost * (num(a.residual_rate) / 100))
   const monthly = round2((cost - residual) / (life * 12))
   const buyM = String(a.buy_date || now()).slice(0, 7)
-  const curM = now().slice(0, 7)
+  const dispoM = String(a.disposed_at || '').slice(0, 7)
+  // 卖掉的设备：折旧只算到卖掉那个月为止，净值就是卖的时候的账面
+  const curM = dispoM && dispoM < now().slice(0, 7) ? dispoM : now().slice(0, 7)
   const mGap = (Number(curM.slice(0, 4)) - Number(buyM.slice(0, 4))) * 12 + (Number(curM.slice(5, 7)) - Number(buyM.slice(5, 7)))
   const months = buyM > curM ? 0 : Math.max(0, mGap + 1)
   const cap = Math.round(life * 12)
   const usedMonths = Math.min(months, cap)
   const depCap = round2(cost - residual)
   const acc = round2(Math.min(monthly * usedMonths, depCap))
+  const net = round2(cost - acc)
+  const disposed = !!a.disposed_at
+  const sell = disposed ? round2(num(a.dispose_amount)) : null
   return {
     id: a.id, name: a.name, cost: round2(cost), buy_date: a.buy_date, life_years: life,
     residual_rate: num(a.residual_rate), monthly, residual, acc_dep: acc,
-    net: round2(cost - acc), used_months: usedMonths, remain_months: Math.max(cap - usedMonths, 0),
-    done: acc >= depCap - 0.01
+    net, used_months: usedMonths, remain_months: Math.max(cap - usedMonths, 0),
+    done: acc >= depCap - 0.01,
+    disposed, disposed_at: a.disposed_at || '', dispose_amount: sell,
+    gain: disposed ? round2(sell - net) : null
   }
 }
 
@@ -7586,11 +7593,17 @@ app.get('/assets', async (c) => {
   const db = c.env.DB
   const rows = (await db.prepare('SELECT * FROM assets ORDER BY id DESC').all()).results
   const list = rows.map(assetCalc)
+  const live = list.filter((a) => !a.disposed)
+  const sold = list.filter((a) => a.disposed)
   return c.json({
     rows: list,
-    total_cost: round2(list.reduce((s, a) => s + a.cost, 0)),
-    total_monthly: round2(list.filter((a) => !a.done).reduce((s, a) => s + a.monthly, 0)),
-    total_net: round2(list.reduce((s, a) => s + a.net, 0))
+    live_count: live.length,
+    sold_count: sold.length,
+    total_cost: round2(live.reduce((s, a) => s + a.cost, 0)),
+    total_monthly: round2(live.filter((a) => !a.done).reduce((s, a) => s + a.monthly, 0)),
+    total_net: round2(live.reduce((s, a) => s + a.net, 0)),
+    sold_gain: round2(sold.reduce((s, a) => s + num(a.gain), 0)),
+    sold_amount: round2(sold.reduce((s, a) => s + num(a.dispose_amount), 0))
   })
 })
 
@@ -7614,36 +7627,76 @@ app.delete('/assets/:id', async (c) => {
 })
 
 // 按月自动折旧：每台设备每月一条（cash=0，不动现金，只进成本），当月已提过就跳过
+// 给一台设备补提折旧（从购入当月提 toM 为止），返回这轮提了多少
+const bookDepOne = async (db, a, toM) => {
+  const v = assetCalc(a)
+  if (!(v.monthly > 0)) return { added: 0, amount: 0 }
+  const buyM = String(a.buy_date || now()).slice(0, 7)
+  if (buyM > toM) return { added: 0, amount: 0 }
+  const depCap = round2(v.cost - v.residual)
+  const prev = num((await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='dep' AND ref_id=?").bind(a.id).first()).t)
+  let booked = prev
+  let added = 0, amount = 0
+  for (let k = 0; k < Math.round(v.life_years * 12); k += 1) {
+    const mm = monthOf(monthAdd(buyM + '-01', k))
+    if (mm > toM) break
+    if (booked >= depCap - 0.01) break
+    const has = await db.prepare("SELECT id FROM ledger WHERE ref_type='dep' AND ref_id=? AND substr(created_at,1,7)=?").bind(a.id, mm).first()
+    if (has) continue
+    const amt = round2(Math.min(v.monthly, depCap - booked))
+    if (!(amt > 0)) break
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','dep',?,?,?,?,?,0,?)")
+      .bind(a.id, amt, '折旧', '折旧：' + (a.name || '') + '（' + mm + '）', 0, mm + '-28').run()
+    booked = round2(booked + amt)
+    added += 1
+    amount = round2(amount + amt)
+  }
+  return { added, amount }
+}
+// 按月自动折旧：每台设备每月一条（cash=0，不动现金，只进成本），当月已提过就跳过
 const runDepreciation = async (db) => {
   const m = now().slice(0, 7)
   const rows = (await db.prepare('SELECT * FROM assets').all()).results
   let added = 0
   let amount = 0
   for (const a of rows) {
-    const v = assetCalc(a)
-    if (!(v.monthly > 0)) continue
-    const buyM = String(a.buy_date || now()).slice(0, 7)
-    if (buyM > m) continue
-    const depCap = round2(v.cost - v.residual)
-    const prev = num((await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE ref_type='dep' AND ref_id=?").bind(a.id).first()).t)
-    let booked = prev
-    for (let k = 0; k < Math.round(v.life_years * 12); k += 1) {
-      const mm = monthOf(monthAdd(buyM + '-01', k))
-      if (mm > m) break
-      if (booked >= depCap - 0.01) break
-      const has = await db.prepare("SELECT id FROM ledger WHERE ref_type='dep' AND ref_id=? AND substr(created_at,1,7)=?").bind(a.id, mm).first()
-      if (has) continue
-      const amt = round2(Math.min(v.monthly, depCap - booked))
-      if (!(amt > 0)) break
-      await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','dep',?,?,?,?,?,0,?)")
-        .bind(a.id, amt, '折旧', '折旧：' + (a.name || '') + '（' + mm + '）', 0, mm + '-28').run()
-      booked = round2(booked + amt)
-      added += 1
-      amount = round2(amount + amt)
-    }
+    if (a.disposed_at) continue // 卖掉的设备不再计提折旧
+    const r = await bookDepOne(db, a, m)
+    added += r.added
+    amount = round2(amount + r.amount)
   }
   return { added, amount }
 }
+
+app.post('/assets/:id/dispose', async (c) => {
+  const db = c.env.DB
+  const id = c.req.param('id')
+  const b = await c.req.json().catch(() => ({}))
+  const a = await db.prepare('SELECT * FROM assets WHERE id=?').bind(id).first()
+  if (!a) return c.json({ error: '这台设备没找到（可能已经删了）' }, 404)
+  if (a.disposed_at) return c.json({ error: `这台已经在 ${String(a.disposed_at).slice(0, 10)} 处置过了` }, 400)
+  const amount = round2(num(b.amount))
+  if (!(amount >= 0)) return c.json({ error: '卖了多少钱要填（报废就填 0）' }, 400)
+  const date = toIsoDate(b.date) || now().slice(0, 10)
+  const m = date.slice(0, 7)
+  if (await isMonthLocked(db, m)) return c.json({ error: `${m} 已结账锁定，先解锁再记处置` }, 403)
+  // 处置当月的折旧先提足（卖的那个月也要提），算出来的账面才是真的
+  await bookDepOne(db, a, m)
+  const v = assetCalc({ ...a, disposed_at: date })
+  const book = v.net
+  const gain = round2(amount - book)
+  const acc = num(b.account_id) || (await defaultAccountId(db))
+  const remark = `卖设备：${a.name}（原值 ${v.cost}，账面 ${book}，卖 ${amount}${gain >= 0 ? '，赚 ' : '，亏 '}${Math.abs(gain)}）`
+  const st = []
+  if (amount > 0) {
+    st.push(db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('in','dispose',?,?,?,?,?,1,?)")
+      .bind(a.id, amount, '处置设备', String(b.remark || remark), acc, date))
+  }
+  st.push(db.prepare('UPDATE assets SET disposed_at=?, dispose_amount=? WHERE id=?').bind(date, amount, a.id))
+  await db.batch(st)
+  await logAudit(db, '设备处置', a.name, `${a.name} 卖 ¥${amount}，账面 ¥${book}，${gain >= 0 ? '赚' : '亏'} ¥${Math.abs(gain)}`, `asset:${a.id}`)
+  return c.json({ ok: true, id: num(id), date, amount, book, gain, account_id: acc, note: `账面 ${book}，卖 ${amount}，${gain >= 0 ? '赚' : '亏'} ${Math.abs(gain)} 元` })
+})
 
 app.post('/assets/run-depreciation', async (c) => {
   const db = c.env.DB
