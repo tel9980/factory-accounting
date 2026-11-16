@@ -98,12 +98,70 @@ Page({
     phrases: [], phrase_kind: 0,
     budget_over: [], budget_alert_count: 0,
     budgets: [], b_category: 0, b_amount: '',
+    pending_count: 0,
     book: 1, book_name: '主账套', books: [], rename_text: '',
     nw: [], nw_max: 1, nw_latest: null,
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
     head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', dy: null, dy_year: '', st_log: null, dp: null,
+  },
+  newCid() { return String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8) },
+  enqueueOp(op) {
+    const q = wx.getStorageSync('pending_ops') || []
+    op.data = op.data || {}
+    if (!op.data.client_id) op.data.client_id = this.newCid()
+    op.ts = Date.now()
+    q.push(op)
+    wx.setStorageSync('pending_ops', q)
+    this.setData({ pending_count: q.length })
+  },
+  // 联网后把存着的单子补发上去（success 里 4xx 视为服务端已明确拒绝，不再重试；网络失败就停，等下次）
+  flushPending(silent) {
+    if (this._flushing) return
+    const q = wx.getStorageSync('pending_ops') || []
+    if (!q.length) { if (this.data.pending_count) this.setData({ pending_count: 0 }); return }
+    this._flushing = true
+    const ak = wx.getStorageSync('ak') || ''
+    const bk = String(wx.getStorageSync('book') || 1)
+    let done = 0
+    const stop = () => {
+      this._flushing = false
+      wx.setStorageSync('pending_ops', q.slice(done))
+      this.setData({ pending_count: q.length - done })
+    }
+    const step = (i) => {
+      if (i >= q.length) {
+        this._flushing = false
+        wx.setStorageSync('pending_ops', [])
+        this.setData({ pending_count: 0 })
+        if (done) {
+          if (!silent) wx.showToast({ title: '补上了 ' + done + ' 笔', icon: 'none' })
+          this.refresh()
+        }
+        return
+      }
+      const it = q[i]
+      wx.request({
+        url: it.url, method: it.method || 'POST', data: it.data,
+        header: { 'X-Access-Key': ak, 'X-Book': bk },
+        success: (res) => {
+          if (res.statusCode < 500) { done++; step(i + 1) } else stop()
+        },
+        fail: () => stop()
+      })
+    }
+    step(0)
+  },
+  viewPending() {
+    const q = wx.getStorageSync('pending_ops') || []
+    if (!q.length) return wx.showToast({ title: '没有待补的记录', icon: 'none' })
+    wx.showModal({
+      title: '还有 ' + q.length + ' 笔没发出去',
+      content: q.slice(0, 8).map((x) => '· ' + (x.label || '记账') + ' ' + ((x.data && (x.data.customer || x.data.supplier || x.data.remark || x.data.amount)) || '')).join('\n') + '\n\n现在重发吗？',
+      confirmText: '重发', cancelText: '等一下',
+      success: (r) => { if (r.confirm) this.flushPending(false) }
+    })
   },
   req(opts) {
     // 连点保护：同一个动作（once 名字相同）没回来之前，重复点击直接忽略
@@ -124,6 +182,17 @@ Page({
     const bk = String(wx.getStorageSync('book') || 1)
     const doReq = (key) => {
       wx.request(Object.assign({}, opts, {
+        // 断网时不丢单：标了 queue 的动作先存到手机上，联网后自动补发（后端按 client_id 去重，不会记两遍）
+        fail: (err) => {
+          if (opts.queue) {
+            this.enqueueOp({ url: opts.url, method: opts.method || 'POST', data: Object.assign({}, opts.data), label: opts.queue })
+            wx.showModal({ title: '网络不好', content: '这笔记到手机上了，联网后会自动补上（不用重新录）', showCancel: false, confirmText: '知道了' })
+            opts.queued && opts.queued()
+            return
+          }
+          wx.showToast({ title: '网络不好，稍后再试', icon: 'none' })
+          opts.fail && opts.fail(err)
+        },
         header: Object.assign({ 'X-Access-Key': key, 'X-Book': bk }, opts.header),
         success: (res) => {
           if (res.statusCode === 401) {
@@ -206,6 +275,8 @@ Page({
       const lc = wx.getStorageSync('last_cat')
       if (lc !== '' && lc !== null && lc !== undefined) this.setData({ e_category: Number(lc) })
     }
+    this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).length })
+    this.flushPending(true)
     this.refresh(); this.loadCloudBackup()
   },
   refresh() {
@@ -1288,8 +1359,9 @@ Page({
     const { o_customer, o_item, o_price, o_cost, o_due, o_operator, o_date } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true,
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, operator: o_operator, date: o_date },
+      url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
+      queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' }),
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, operator: o_operator, date: o_date, client_id: this.newCid() },
       success: (res) => {
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' })
         this.refresh(); this.loadSuggest()
@@ -1308,8 +1380,9 @@ Page({
     const { p_supplier, p_amount, p_remark, p_operator, p_due, p_date } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/payables', method: 'POST', once: 'add-payable',
-      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due, date: p_date }, dupRetry: true,
+      url: API_BASE + '/payables', method: 'POST', once: 'add-payable', queue: '记应付',
+      queued: () => this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }),
+      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid() }, dupRetry: true,
       success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest(); this.showChecks(res) }
     })
   },
@@ -1317,8 +1390,9 @@ Page({
     const { e_amount, e_remark, categories, e_category, e_operator, e_date } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
     this.req({
-      url: API_BASE + '/expenses', method: 'POST', dupRetry: true, once: 'add-expense',
-      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date },
+      url: API_BASE + '/expenses', method: 'POST', dupRetry: true, once: 'add-expense', queue: '记支出',
+      queued: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_date: '' }) },
+      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date, client_id: this.newCid() },
       success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
     })
   },
@@ -1354,8 +1428,8 @@ Page({
           return wx.showToast({ title: '比未收的还多（还剩 ' + remain + '）', icon: 'none' })
         }
         this.req({
-          url: API_BASE + '/orders/' + id + '/receive', method: 'POST', once: 'receive-' + id,
-          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
+          url: API_BASE + '/orders/' + id + '/receive', method: 'POST', once: 'receive-' + id, queue: '收客户款',
+          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
             this.refresh()
             this.showChecks(res)
@@ -1467,8 +1541,8 @@ Page({
           return wx.showToast({ title: '比未付的还多（还剩 ' + remain + '）', icon: 'none' })
         }
         this.req({
-          url: API_BASE + '/payables/' + id + '/pay', method: 'POST', once: 'payp-' + id,
-          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
+          url: API_BASE + '/payables/' + id + '/pay', method: 'POST', once: 'payp-' + id, queue: '付供应商款',
+          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id, client_id: this.newCid() },
           success: () => {
             this.refresh()
             this._afterPay(id, amt, remain, 'ap')

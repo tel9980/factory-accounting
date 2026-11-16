@@ -59,6 +59,15 @@ function noteFail(e, tag) {
     if (failBucket.indexOf(t) < 0 && failBucket.length < 20) failBucket.push(t)
   } catch (_) {}
 }
+// 断网补发去重：手机端把没发出去的记账先存本地，联网后重发；同一个 client_id 只入账一次
+async function opSeen(db, cid) {
+  if (!cid) return null
+  try { return await db.prepare('SELECT * FROM op_dedupe WHERE client_id=?').bind(cid).first() } catch (e) { return null }
+}
+async function opMark(db, cid, kind, refId) {
+  if (!cid) return
+  try { await db.prepare('INSERT OR IGNORE INTO op_dedupe (client_id, kind, ref_id, created_at) VALUES (?,?,?,?)').bind(cid, kind, num(refId), now()).run() } catch (e) {}
+}
 const CASH_EXP_WHERE = "direction='out' AND cash=1 AND ref_type IN ('expense','fixed')"
 async function monthPL(db, mm) {
   const sql = `SELECT
@@ -3557,6 +3566,8 @@ app.post('/orders', async (c) => {
   const { customer, item_name, price, due_date, operator, date, cost } = body
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
+  const cid = String(body.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const created = stampOf(date)
   // 手抖/连点保护：同一客户、同一金额，2 分钟内又记一张，先问一句（不是不让记，是防重复点）
   if (!body.confirm_dup) {
@@ -3569,6 +3580,7 @@ app.post('/orders', async (c) => {
   const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
+  await opMark(db, cid, 'order', 0)
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
   // 超信用额度提醒（不拦，只提醒）
   let warn = null
@@ -3585,8 +3597,11 @@ app.post('/orders', async (c) => {
 // 收客户款（可带日期补录）
 app.post('/orders/:id/receive', async (c) => {
   const id = c.req.param('id')
-  const { amount, date, account_id } = await c.req.json()
+  const body = await c.req.json()
+  const { amount, date, account_id } = body
   const db = c.env.DB
+  const cid = String(body.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
@@ -3600,6 +3615,7 @@ app.post('/orders/:id/receive', async (c) => {
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
       .bind(id, a, `收 ${o.customer} ${o.item_name}`, acc, normDate(date))
   ])
+  await opMark(db, cid, 'receive', id)
   await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`)
   const checks = []
   const d0 = String(normDate(date)).slice(0, 10)
@@ -3732,9 +3748,12 @@ app.post('/orders/:id/status', async (c) => {
 
 // 记应付
 app.post('/payables', async (c) => {
-  const { supplier, amount, category, remark, operator, due_date, confirm_dup, date } = await c.req.json()
+  const body = await c.req.json()
+  const { supplier, amount, category, remark, operator, due_date, confirm_dup, date } = body
   if (!supplier || num(amount) <= 0) return c.json({ error: '供应商和金额必填' }, 400)
   const db = c.env.DB
+  const cid = String(body.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const created = stampOf(date)
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   // 防重复：同供应商 + 同金额，7 天内提醒一次
@@ -3747,6 +3766,7 @@ app.post('/payables', async (c) => {
   const checks = await orderChecks(db, { table: 'payables', who: 'supplier', amtcol: 'amount', itemcol: 'remark', party: supplier, item: remark || '', amount, cost: 0, created: stampOf(date), due: toIsoDate(due_date) })
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
     .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created)) || null, created).run()
+  await opMark(db, cid, 'payable', 0)
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`)
   return c.json(Object.assign({ ok: true }, checks.length ? { checks } : {}))
 })
@@ -3754,8 +3774,11 @@ app.post('/payables', async (c) => {
 // 付供应商款（可带日期补录）
 app.post('/payables/:id/pay', async (c) => {
   const id = c.req.param('id')
-  const { amount, date, account_id } = await c.req.json()
+  const body = await c.req.json()
+  const { amount, date, account_id } = body
   const db = c.env.DB
+  const cid = String(body.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
@@ -3769,15 +3792,19 @@ app.post('/payables/:id/pay', async (c) => {
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,?,1,?)")
       .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, acc, normDate(date))
   ])
+  await opMark(db, cid, 'pay', id)
   await logAudit(db, '付款', p.supplier, `${p.supplier} 付 ¥${a}`)
   return c.json({ ok: true })
 })
 
 // 现付支出
 app.post('/expenses', async (c) => {
-  const { amount, category, remark, operator, account_id, confirm_dup, date } = await c.req.json()
+  const body = await c.req.json()
+  const { amount, category, remark, operator, account_id, confirm_dup, date } = body
   if (num(amount) <= 0) return c.json({ error: '金额必填' }, 400)
   const db = c.env.DB
+  const cid = String(body.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const created = stampOf(date)
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   // 防重复：同一天 + 同分类 + 同金额，提醒一次
@@ -3789,6 +3816,7 @@ app.post('/expenses', async (c) => {
   const acc = num(account_id) || (await defaultAccountId(db))
   await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,?,1,?)")
     .bind(num(amount), category || '', remark || '', String(operator || '').trim() || null, acc, created).run()
+  await opMark(db, cid, 'expense', 0)
   await logAudit(db, '新增支出', category || '其他', `${category || '其他'} ¥${num(amount)}`)
   return c.json({ ok: true })
 })

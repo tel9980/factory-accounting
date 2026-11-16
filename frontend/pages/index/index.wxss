@@ -301,3 +301,6 @@
 .maprow { display: flex; align-items: center; padding: 16rpx 0; border-bottom: 1rpx solid #f0f0f0; }
 .mapl { flex: 1; }
 .mapa { color: #b9bec7; font-size: 34rpx; padding-left: 12rpx; }
+
+/* 断网时存到手机上的记录，提醒条 */
+.pendbar { margin: 8rpx 20rpx; padding: 14rpx 18rpx; background: #fff4e5; color: #a35b00; border: 1rpx solid #ffd699; border-radius: 12rpx; font-size: 25rpx; }

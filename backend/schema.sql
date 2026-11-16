@@ -301,3 +301,13 @@ CREATE TABLE IF NOT EXISTS track_log (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_track_log_party ON track_log(party);
+
+-- 断网补发去重：手机端断网时把记账先存本地，联网后重发；同一 client_id 只入账一次
+CREATE TABLE IF NOT EXISTS op_dedupe (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT UNIQUE,
+  kind TEXT,
+  ref_id INTEGER,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_op_client ON op_dedupe(client_id);
