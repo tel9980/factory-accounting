@@ -606,9 +606,8 @@
     </view>
 
 
-    <view class="form" wx:if="{{rem_items.length}}">
-      <view class="tip">该管的事（{{rem_items.length}} 件）</view>
-      <view class="duesoon" wx:for="{{rem_items}}" wx:key="text">{{item.text}}</view>
+    <view class="form">
+      <view class="tip">待办清单一类的东西已经挪到「工作台」首页了，点最上面的「工作台」看</view>
     </view>
 
     <view class="form">
