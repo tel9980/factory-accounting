@@ -1170,7 +1170,26 @@
     <view class="form">
       <view class="tip">📦 月度结转归档（把该月账目定版：出报表、打快照、锁定不许改）</view>
       <input class="inp" placeholder="月份，如 {{this_month}}" value="{{lock_month}}" bindinput="onLockMonth"/>
-      <button class="btn" size="mini" bindtap="closeMonth">结转归档（出报表 + 锁定）</button>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="loadMonthEnd">🗓 月底收尾（一屏看完）</button>
+        <button class="btn" size="mini" bindtap="closeMonth">结转归档（出报表 + 锁定）</button>
+      </view>
+      <view wx:if="{{me}}">
+        <view class="prev-h">{{me.month}} · 六件事办了 {{me.done_count}}/{{me.total}}</view>
+        <view class="aline {{me.ready?'ok':'warn'}}">{{me.advice}}</view>
+        <view class="tip">本月：接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销折旧 {{me.numbers.cost_other}} · 净利 {{me.numbers.profit}}（净利率 {{me.numbers.margin}}%）· 手头现金 {{me.numbers.cash}}</view>
+        <view class="hk-row" wx:for="{{me.steps}}" wx:key="k" bindtap="meGo" data-tab="{{item.tab}}">
+          <view class="hk-main">
+            <view class="hk-t {{item.done?'ok':''}}">{{item.done?'✓':'○'}} {{item.no}}. {{item.title}}</view>
+            <view class="hk-d">{{item.detail}}{{item.done?'':' · ' + item.tip}}</view>
+          </view>
+          <text class="hk-a">{{item.done?'':'去办 ›'}}</text>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="meClose" wx:if="{{!me.locked}}">🧾 结账 {{me.month}}</button>
+          <button class="btn ghost" size="mini" bindtap="closeMonthEnd">收起</button>
+        </view>
+      </view>
       <button class="btn" size="mini" bindtap="printReport">🖨 打印报表（A4，资产负债表 / 利润表）</button>
       <view class="list" wx:if="{{archives.length}}">
         <view class="item" wx:for="{{archives}}" wx:key="month">

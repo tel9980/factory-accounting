@@ -717,7 +717,7 @@ const snapOf = async (db, mm) => {
 // 结账前自检：把「结账后就不许改」之前该做的事列清楚（结账不可怕，漏掉才可怕）
 async function closePrecheck(db, mm) {
   const [diff, anyRecon, summ, bk, unclosed, prevLock] = await Promise.all([
-    db.prepare('SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=? AND done=0').bind(mm).first().catch(() => ({ n: 0 })),
+    db.prepare("SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=? AND done=0 AND COALESCE(state,'')<>'match'").bind(mm).first().catch(() => ({ n: 0 })),
     db.prepare('SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=?').bind(mm).first().catch(() => ({ n: 0 })),
     db.prepare("SELECT v FROM settings WHERE key='pipeline_summary'").bind().first().catch(() => null),
     db.prepare('SELECT MAX(created_at) t FROM backups').bind().first().catch(() => null),
@@ -761,6 +761,58 @@ app.get('/close-precheck', async (c) => {
   const mm = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM' }, 400)
   return c.json({ ok: true, ...(await closePrecheck(c.env.DB, mm)) })
+})
+
+// 月底收尾：一屏把当月该做的事列完，办完就能结账
+app.get('/month-end', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份格式：YYYY-MM' }, 400)
+  const J = (sql, ...b) => db.prepare(sql).bind(...b).first()
+  const [pre, pl, accs, cnt, reconRow, lockRow, sumRow, bkRow] = await Promise.all([
+    closePrecheck(db, m),
+    monthPL(db, m),
+    accountBalances(db),
+    J('SELECT (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,7)=? AND price-paid-COALESCE(written_off,0)>0) AS ar, (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,7)=? AND amount-paid-COALESCE(written_off,0)>0) AS ap, (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,7)=?) AS ord, (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,7)=?) AS pay', m, m, m, m),
+    J('SELECT COUNT(*) c, COUNT(DISTINCT party) p FROM recon_log WHERE month=?', m),
+    J('SELECT COUNT(*) c FROM month_lock WHERE month=?', m),
+    J("SELECT value FROM settings WHERE key='pipeline_summary'"),
+    J('SELECT created_at FROM backups ORDER BY id DESC LIMIT 1')
+  ])
+  const locked = num(lockRow && lockRow.c) > 0
+  const summed = String((sumRow && sumRow.value) || '') === m
+  const bkDays = (bkRow && bkRow.created_at) ? Math.floor((Date.now() - Date.parse(bkRow.created_at)) / 86400000) : 999
+  const openDiff = ((pre && pre.items) || []).filter((x) => x.k === 'recon_diff').reduce((acc, x) => acc + num(x.count), 0)
+  const steps = [
+    { k: 'bill', no: 1, title: '本月单据录完', tab: 'ar', done: num(cnt && cnt.ord) + num(cnt && cnt.pay) > 0,
+      detail: `应收 ${num(cnt && cnt.ord)} 笔 · 应付 ${num(cnt && cnt.pay)} 笔`, tip: '手工录、粘贴导入、Excel 导入都算' },
+    { k: 'recon', no: 2, title: '和客商对过账', tab: 'import', done: num(reconRow && reconRow.c) > 0,
+      detail: num(reconRow && reconRow.c) > 0 ? `对过 ${num(reconRow.p)} 家` : '本月还没对账', tip: '导入页粘对账单 → 对账核对' },
+    { k: 'diff', no: 3, title: '差异处理完', tab: 'import', done: !openDiff,
+      detail: openDiff ? '还有差异没处理' : '没有遗留差异 ✓', tip: '差异可一键补记，或标记「不用补」' },
+    { k: 'summary', no: 4, title: '出一页月度小结', tab: 'report', done: summed,
+      detail: summed ? '小结已出' : '还没出（结账会被提醒）', tip: '留档，也能直接发微信' },
+    { k: 'backup', no: 5, title: '备份一次', tab: 'report', done: bkDays <= 7,
+      detail: bkDays === 999 ? '从没备份过' : `上次备份 ${bkDays} 天前`, tip: '云端备份或整库备份，防误删' },
+    { k: 'close', no: 6, title: '结账归档', tab: 'report', done: locked,
+      detail: locked ? '已结账，单据锁定' : '还没结账', tip: '结完当月不能再改，出错可解锁' }
+  ]
+  const doneCount = steps.filter((x) => x.done).length
+  const todo = steps.filter((x) => !x.done)
+  const numbers = {
+    income: pl.income, cost: pl.cost, profit: pl.profit, margin: pl.margin,
+    mat: pl.mat, cash_exp: pl.cash_exp, amort: pl.amort, dep: pl.dep, accrue: pl.accrue,
+    cash: round2(accs.reduce((a, x) => a + num(x.balance), 0)),
+    ar_open_cnt: num(cnt && cnt.ar), ap_open_cnt: num(cnt && cnt.ap),
+    payable_add: pl.payable_add
+  }
+  return c.json({
+    ok: true, month: m, locked, steps, done_count: doneCount, total: steps.length,
+    numbers, ready: pre.can_close && !locked,
+    blockers: pre.blockers || [], warns: pre.warns || [],
+    todo: todo.map((x) => ({ k: x.k, no: x.no, title: x.title, tab: x.tab, detail: x.detail })),
+    advice: locked ? `${m} 已经结账归档了。` : (doneCount === steps.length ? '六件事都办好了，可以结账了。' : `还有 ${steps.length - doneCount} 件事没办：${todo.map((x) => x.no + '. ' + x.title).join('、')}`)
+  })
 })
 
 app.post('/month-close', async (c) => {
@@ -1123,8 +1175,9 @@ app.post('/recon-save', async (c) => {
     if (!party) continue
     const imported = round2(num(r.imported))
     const system = round2(num(r.system))
-    await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,0,?,?)')
-      .bind(month, type, party, imported, system, round2(imported - system), String(r.state || ''), '', now()).run()
+    const st = String(r.state || '')
+    await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .bind(month, type, party, imported, system, round2(imported - system), st, st === 'match' ? 1 : 0, st === 'match' ? '已核对，两家金额一致' : '', now()).run()
     n++
   }
   await logAudit(db, '对账台账', type, `${month} 记 ${n} 家核对结果`)
