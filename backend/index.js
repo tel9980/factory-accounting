@@ -3504,7 +3504,7 @@ app.get('/party-terms', async (c) => {
     const r = find(recon, t.party) || {}
     const oldest = [a.oldest, b.oldest].filter(Boolean).sort()[0] || ''
     return {
-      id: t.id, party: t.party, kind: t.kind || 'ar', term_days: num(t.term_days), recon_cycle: num(t.recon_cycle), note: t.note || '',
+      id: t.id, party: t.party, kind: t.kind || 'ar', term_days: num(t.term_days), recon_cycle: num(t.recon_cycle), recon_day: num(t.recon_day), note: t.note || '',
       ar_left: round2(num(a.left_amt)), ar_cnt: num(a.cnt), ap_left: round2(num(b.left_amt)), ap_cnt: num(b.cnt),
       oldest_days: oldest ? daysSince(oldest) : 0, last_recon: r.last_at || '', recon_times: num(r.times),
       recon_due: num(t.recon_cycle) > 0 ? (!r.last_at || daysSince(r.last_at) >= num(t.recon_cycle)) : false
@@ -3526,14 +3526,53 @@ app.post('/party-terms', async (c) => {
   const kind = (b.kind === 'ap' ? 'ap' : 'ar')
   const term = Math.max(0, Math.min(365, num(b.term_days)))
   const cycle = Math.max(0, Math.min(365, num(b.recon_cycle)))
+  const rday = Math.max(0, Math.min(28, num(b.recon_day)))  // 每月几号发对账单（0=不设）
   const note = String(b.note || '')
   const old = await db.prepare('SELECT * FROM party_terms WHERE party=?').bind(party).first()
-  if (old) await db.prepare('UPDATE party_terms SET kind=?, term_days=?, recon_cycle=?, note=? WHERE id=?').bind(kind, term, cycle, note, old.id).run()
-  else await db.prepare('INSERT INTO party_terms (party, kind, term_days, recon_cycle, note, created_at) VALUES (?,?,?,?,?,?)').bind(party, kind, term, cycle, note, now()).run()
-  await logAudit(db, '账期设置', party, `账期 ${term} 天，对账周期 ${cycle} 天`)
+  if (old) await db.prepare('UPDATE party_terms SET kind=?, term_days=?, recon_cycle=?, recon_day=?, note=? WHERE id=?').bind(kind, term, cycle, rday, note, old.id).run()
+  else await db.prepare('INSERT INTO party_terms (party, kind, term_days, recon_cycle, recon_day, note, created_at) VALUES (?,?,?,?,?,?,?)').bind(party, kind, term, cycle, rday, note, now()).run()
+  await logAudit(db, '账期设置', party, `账期 ${term} 天，对账周期 ${cycle} 天` + (rday ? `，每月 ${rday} 号发对账单` : ''))
   return c.json({ ok: true })
 })
 
+// 对账日历：每家约好「每月几号发对账单」，到点提醒，别漏
+app.get('/recon-calendar', async (c) => {
+  const db = c.env.DB
+  const today = now().slice(0, 10)
+  const dnum = num(today.slice(8, 10))
+  const curM = today.slice(0, 7)
+  const terms = (await db.prepare('SELECT * FROM party_terms WHERE COALESCE(recon_day,0) > 0 ORDER BY recon_day').all()).results || []
+  const ar = (await db.prepare("SELECT customer party, COALESCE(SUM(MAX(0, price-paid-COALESCE(written_off,0))),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer").all()).results || []
+  const ap = (await db.prepare("SELECT supplier party, COALESCE(SUM(MAX(0, amount-paid-COALESCE(written_off,0))),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier").all()).results || []
+  const sent = (await db.prepare("SELECT party, MAX(created_at) last_at FROM statement_log WHERE substr(created_at,1,7)=? GROUP BY party").bind(curM).all()).results || []
+  const left = {}, sentM = {}
+  for (const x of ar.concat(ap)) left[norm(x.party)] = round2(num(left[norm(x.party)]) + num(x.t))
+  for (const x of sent) sentM[norm(x.party)] = String(x.last_at || '').slice(0, 10)
+  const rows = terms.map((t) => {
+    const k = norm(t.party)
+    const d = num(t.recon_day)
+    const done = !!sentM[k]
+    const late = dnum - d
+    const st = done ? 'sent' : (late === 0 ? 'today' : (late > 0 ? 'overdue' : 'upcoming'))
+    return {
+      party: t.party, kind: t.kind === 'ap' ? 'ap' : 'ar', day: d, left: round2(num(left[k])),
+      sent_at: sentM[k] || '', state: st,
+      state_text: st === 'sent' ? '本月已发' : (st === 'today' ? '今天该发' : (st === 'overdue' ? '晚了 ' + late + ' 天' : late === -1 ? '明天发' : Math.abs(late) + ' 天后')),
+      days_late: st === 'overdue' ? late : 0
+    }
+  })
+  const pick = (st) => rows.filter((r) => r.state === st)
+  const todayList = pick('today'), over = pick('overdue'), soon = pick('upcoming')
+  const pend = over.concat(todayList)
+  const advice = pend.length
+    ? '有 ' + pend.length + ' 家到点没发对账单（涉及欠款 ¥' + round2(pend.reduce((a, r) => a + r.left, 0)) + '），先发单再催，效果最好。'
+    : (soon.length ? '今天没有到期的，最近 ' + soon.length + ' 家在这几天发单。' : '该发的对账单都发过了，节奏稳。')
+  return c.json({
+    ok: true, today, rows, today_count: todayList.length, overdue_count: over.length,
+    upcoming_count: soon.length, pending_total: round2(pend.reduce((a, r) => a + r.left, 0)),
+    today_list: todayList, overdue_list: over, upcoming_list: soon, advice
+  })
+})
 app.delete('/party-terms/:id', async (c) => {
   await c.env.DB.prepare('DELETE FROM party_terms WHERE id=?').bind(num(c.req.param('id'))).run()
   return c.json({ ok: true })
@@ -5859,6 +5898,19 @@ app.get('/reminders', async (c) => {
     if (soonRows.length) {
       const sum2 = round2(soonRows.reduce((a, x) => a + num(lmap[norm(x.party)]), 0))
       push('yellow', `${soonRows.length} 家答应明天付（共 ¥${sum2}），今天提一句`, 'ar', soonRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
+    }
+  } catch (e) {}
+  // 今天/这几天该发对账单的（按每家约定的对账日）
+  try {
+    const rc = await (async () => {
+      const today0 = today, dnum0 = num(today0.slice(8, 10)), curM0 = today0.slice(0, 7)
+      const ts = (await db.prepare('SELECT party, recon_day FROM party_terms WHERE COALESCE(recon_day,0) > 0').all()).results || []
+      const sents = (await db.prepare('SELECT party, MAX(created_at) last_at FROM statement_log WHERE substr(created_at,1,7)=? GROUP BY party').bind(curM0).all()).results || []
+      const done0 = new Set(sents.map((x) => norm(x.party)))
+      return ts.filter((t) => num(t.recon_day) <= dnum0 && !done0.has(norm(t.party)))
+    })()
+    if (rc && rc.length) {
+      push('yellow', `${rc.length} 家到点该发对账单了`, 'ar', rc.slice(0, 3).map((x) => ({ party: x.party || '', amount: 0, note: '约定每月 ' + num(x.recon_day) + ' 号' })))
     }
   } catch (e) {}
   // 对账单有异议还没处理（最容易变死账）

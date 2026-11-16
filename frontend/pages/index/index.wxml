@@ -1433,7 +1433,23 @@
       <input class="inp" placeholder="单位名（客户或供应商）" value="{{term_party}}" bindinput="onTermParty"/>
       <input class="inp" placeholder="账期天数：月结 30 天就填 30（0=不设）" type="number" value="{{term_days}}" bindinput="onTermDays"/>
       <input class="inp" placeholder="多久对一次账：30=每月，90=每季（0=不提醒）" type="number" value="{{term_cycle}}" bindinput="onTermCycle"/>
+      <input class="inp" placeholder="每月几号发对账单：15=每月15号（0=不设，1-28）" type="number" value="{{term_day}}" bindinput="onTermDay"/>
       <button class="btn" size="mini" bindtap="saveTerm">保存账期</button>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadReconCal">📅 对账日历</button>
+        <text class="tip" wx:if="{{rc}}">{{rc.advice}}</text>
+      </view>
+      <view wx:if="{{rc}}">
+        <view class="item" wx:for="{{rc.rows}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.state==='sent'?'ok':(item.state==='today'?'red':'warn')}}">{{item.state_text}}</text></view>
+          <view class="row2">约定每月 {{item.day}} 号 · 现在欠 ¥{{item.left}}{{item.sent_at ? ' · 本月已发 ' + item.sent_at.slice(5) : ''}}</view>
+          <view class="btns" wx:if="{{item.state!=='sent'}}">
+            <button size="mini" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 发好了，记一笔</button>
+          </view>
+        </view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closeReconCal">收起</button></view>
+        <view class="tip">到点没发的首页会提醒；发完用「📄 发好了，记一笔」登记，日历上就变成本月已发。</view>
+      </view>
       <view class="item" wx:for="{{terms}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.recon_due?'red':''}}">{{item.due_text}}</text></view>
         <view class="row2">{{item.kind_text}} · {{item.term_text}} · {{item.cycle_text}} · 欠{{item.ar_left>0?item.ar_left:item.ap_left}} · 最久{{item.oldest_days}}天</view>
