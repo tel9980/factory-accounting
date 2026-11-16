@@ -111,3 +111,12 @@
 .chip.on { background: #3d7bf5; color: #fff; border-color: #3d7bf5; }
 .chip-label { font-size: 22rpx; color: #999; margin-right: 8rpx; align-self: center; }
 .detail-line { font-size: 24rpx; color: #444; padding: 5rpx 0; border-bottom: 1rpx solid #f2f2f2; }
+
+/* 应收应付分组视图 */
+.grp { margin: 16rpx 24rpx; background: #fff; border-radius: 14rpx; box-shadow: 0 2rpx 10rpx rgba(0,0,0,.05); overflow: hidden; }
+.grp-h { padding: 22rpx 24rpx; }
+.grp-h .row1 .amt { color: #e64646; font-weight: 700; font-size: 30rpx; }
+.grp-b { border-top: 1rpx solid #f0f0f0; background: #fafbfc; padding: 4rpx 0 14rpx; }
+.gitem { padding: 16rpx 24rpx; border-bottom: 1rpx dashed #eee; }
+.gitem:last-child { border-bottom: none; }
+.grp-b .btns { padding: 12rpx 24rpx 0; }

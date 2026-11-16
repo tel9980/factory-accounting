@@ -37,6 +37,7 @@ Page({
     contact_show: false, contact_title: '', contact_text: '',
     trash_list: [],
     ar_filter: 'open', ar_sort: 'new', ar_sum: {}, ap_filter: 'open', ap_sort: 'new', ap_sum: {},
+    ar_view: 'order', ap_view: 'order', ar_groups: [], ap_groups: [], ar_open: '', ap_open: '',
     detail_show: false, detail_title: '', detail_head: '', detail_rows: [], detail_text: '',
     ar_filters: [{ k: 'open', n: '全部未结' }, { k: 'overdue', n: '逾期 30 天+' }, { k: 'due', n: '7 天内到期' }, { k: 'closed', n: '已结清' }],
     ar_sorts: [{ k: 'new', n: '最新' }, { k: 'old', n: '最久未结' }, { k: 'amount', n: '金额大' }, { k: 'due', n: '最近到期' }],
@@ -141,6 +142,8 @@ Page({
     this.loadAr()
     this.loadAp()
     this.loadArSummary()
+    this.loadGroups('ar')
+    this.loadGroups('ap')
     this.loadExpenses()
     this.loadHistory()
     this.loadContacts()
@@ -490,10 +493,70 @@ Page({
     this.req({ url: API_BASE + '/ar-summary?type=ar', success: (res) => this.setData({ ar_sum: res.data || {} }) })
     this.req({ url: API_BASE + '/ar-summary?type=ap', success: (res) => this.setData({ ap_sum: res.data || {} }) })
   },
-  pickArFilter(e) { this.setData({ ar_filter: e.currentTarget.dataset.k }); this.loadAr() },
+  pickArFilter(e) { this.setData({ ar_filter: e.currentTarget.dataset.k }); this.loadAr(); this.loadGroups('ar') },
   pickArSort(e) { this.setData({ ar_sort: e.currentTarget.dataset.k }); this.loadAr() },
-  pickApFilter(e) { this.setData({ ap_filter: e.currentTarget.dataset.k }); this.loadAp() },
+  pickApFilter(e) { this.setData({ ap_filter: e.currentTarget.dataset.k }); this.loadAp(); this.loadGroups('ap') },
   pickApSort(e) { this.setData({ ap_sort: e.currentTarget.dataset.k }); this.loadAp() },
+  loadGroups(t) {
+    const st = t === 'ar' ? this.data.ar_filter : this.data.ap_filter
+    const kw = t === 'ar' ? this.data.ar_kw : this.data.ap_kw
+    this.req({
+      url: API_BASE + '/party-groups?type=' + t + '&status=' + st + '&kw=' + encodeURIComponent(kw || ''),
+      success: (res) => {
+        const d = res.data || {}
+        const key = t === 'ar' ? 'ar_groups' : 'ap_groups'
+        const patch = {}
+        patch[key] = d.groups || []
+        this.setData(patch)
+      }
+    })
+  },
+  pickArView(e) {
+    const v = e.currentTarget.dataset.v
+    this.setData({ ar_view: v, ar_open: '' })
+    if (v === 'party') this.loadGroups('ar')
+  },
+  pickApView(e) {
+    const v = e.currentTarget.dataset.v
+    this.setData({ ap_view: v, ap_open: '' })
+    if (v === 'party') this.loadGroups('ap')
+  },
+  toggleGroupAr(e) {
+    const n = e.currentTarget.dataset.n
+    this.setData({ ar_open: this.data.ar_open === n ? '' : n })
+  },
+  toggleGroupAp(e) {
+    const n = e.currentTarget.dataset.n
+    this.setData({ ap_open: this.data.ap_open === n ? '' : n })
+  },
+  // 整户批量收款（预填客户与未收合计，走先老后新核销）
+  groupReceive(e) {
+    const ds = e.currentTarget.dataset
+    this.setData({ rb_customer: ds.n, rb_amount: String(ds.amt), rb_date: '' })
+    this.receiveBatch()
+  },
+  groupPay(e) {
+    const ds = e.currentTarget.dataset
+    this.setData({ rb_customer: ds.n, rb_amount: String(ds.amt), rb_date: '' })
+    wx.showModal({
+      title: '整户付款',
+      content: '付给 ' + ds.n + ' ¥' + ds.amt + '，按「先老后新」抵掉未结应付，确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/pay-batch', method: 'POST',
+          data: { supplier: ds.n, amount: Number(ds.amt), account_id: this.data.acc_id },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) {
+              wx.showModal({ title: '付款成功', content: '共冲 ¥' + d.total + '，' + (d.used || []).length + ' 笔' + (d.rest > 0 ? '\n还剩 ¥' + d.rest + ' 没抵完' : ''), showCancel: false })
+              this.refresh()
+            } else wx.showToast({ title: d.error || '失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
   loadAr(more) {
     const off = more ? this.data.ar_off : 0
     const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort
@@ -536,8 +599,8 @@ Page({
   filterAr(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.customer + ' ' + (x.item_name || '')).indexOf(kw) >= 0) : list },
   filterAp(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.supplier + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
   filterEx(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => ((x.category || '') + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
-  onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }) },
-  onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }) },
+  onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }); this.loadGroups('ar') },
+  onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }); this.loadGroups('ap') },
   onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this.data.exp_all, e.detail.value) }) },
   setTab(e) {
     const t = e.currentTarget.dataset.t

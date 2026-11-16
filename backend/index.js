@@ -789,6 +789,49 @@ app.get('/ap', async (c) => {
   return c.json(results.map(fmtPayable))
 })
 
+// 按客户/供应商分组（应收应付分组视图）
+app.get('/party-groups', async (c) => {
+  const db = c.env.DB
+  const sp = new URL(c.req.url).searchParams
+  const type = sp.get('type') === 'ap' ? 'ap' : 'ar'
+  const status = ['open', 'overdue', 'due', 'all', 'closed'].includes(sp.get('status')) ? sp.get('status') : 'open'
+  const kw = (sp.get('kw') || '').trim()
+  const today = dayStr(new Date())
+  const d7 = dayAfter(7)
+  const isAr = type === 'ar'
+  const T = isAr ? 'orders' : 'payables'
+  const NAME = isAr ? 'customer' : 'supplier'
+  const AMT = isAr ? 'price' : 'amount'
+  const conds = ['COALESCE(paid,0)+COALESCE(written_off,0) < ' + AMT]
+  const binds = []
+  if (status === 'closed') {
+    conds[0] = 'COALESCE(paid,0)+COALESCE(written_off,0) >= ' + AMT
+  } else if (status === 'overdue') {
+    conds.push("date(created_at) <= date('" + dayAgo(30) + "')")
+  } else if (status === 'due') {
+    conds.push("due_date IS NOT NULL AND due_date != '' AND date(due_date) >= date('" + today + "') AND date(due_date) <= date('" + d7 + "')")
+  }
+  if (kw) { conds.push(NAME + " LIKE ?"); binds.push('%' + kw + '%') }
+  const sql = 'SELECT * FROM ' + T + ' WHERE ' + conds.join(' AND ') + ' ORDER BY created_at ASC, id ASC'
+  let rows = []
+  try { rows = (await db.prepare(sql).bind(...binds).all()).results || [] } catch (e) { rows = [] }
+  const map = new Map()
+  for (const r of rows) {
+    const name = (r[NAME] || '未填写') + ''
+    const it = isAr ? fmtOrder(r) : fmtPayable(r)
+    if (!map.has(name)) map.set(name, { name, unpaid: 0, cnt: 0, oldest_days: 0, due_soon: 0, overdue: 0, items: [] })
+    const g = map.get(name)
+    g.unpaid = round2(g.unpaid + it.unpaid)
+    g.cnt += 1
+    if (it.days > g.oldest_days) g.oldest_days = it.days
+    if (it.due_short && it.due_short >= today && it.due_short <= d7 && !it.settled) g.due_soon += 1
+    if (it.days > 30 && !it.settled) g.overdue += 1
+    g.items.push({ id: it.id, unpaid: it.unpaid, days: it.days, due_short: it.due_short, created_at: it.created_at, title: isAr ? (it.item_name || '加工') : (it.remark || '采购'), total: isAr ? num(it.price) : num(it.amount), paid: num(it.paid), written_off: it.written_off, operator: it.operator || '' })
+  }
+  const groups = [...map.values()].sort((a, b) => b.unpaid - a.unpaid)
+  return c.json({ type, count: groups.length, groups })
+})
+
 // 支出流水
 app.get('/expenses', async (c) => {
   const db = c.env.DB
@@ -869,6 +912,40 @@ app.post('/receive-batch', async (c) => {
     ])
   }
   await logAudit(db, '批量收款', name, `${name} 共收 ¥${total}，核销 ${detail.length} 张单`)
+  return c.json({ ok: true, total: round2(total), used: detail, rest: round2(left) })
+})
+
+// 整户批量付款（应付，先老后新核销）
+app.post('/pay-batch', async (c) => {
+  const { supplier, amount, date, remark, account_id } = await c.req.json()
+  const db = c.env.DB
+  const acc = num(account_id) || (await defaultAccountId(db))
+  const name = String(supplier || '').trim()
+  let left = num(amount)
+  if (!name) return c.json({ error: '请填供应商名称' }, 400)
+  if (left <= 0) return c.json({ error: '金额无效' }, 400)
+  const { results: list } = await db.prepare(
+    'SELECT * FROM payables WHERE supplier=? AND paid + COALESCE(written_off,0) < amount ORDER BY created_at, id'
+  ).bind(name).all()
+  if (!list.length) return c.json({ error: `${name} 没有未结清的应付` }, 400)
+  const d = normDate(date)
+  const detail = []
+  let total = 0
+  for (const p of list) {
+    if (left <= 0) break
+    const unpaid = round2(num(p.amount) - num(p.paid) - num(p.written_off))
+    if (unpaid <= 0) continue
+    const use = round2(Math.min(left, unpaid))
+    total += use
+    left = round2(left - use)
+    detail.push({ id: p.id, item: p.remark || '采购', unpaid, use })
+    await db.batch([
+      db.prepare('UPDATE payables SET paid=paid+? WHERE id=?').bind(use, p.id),
+      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,1,?)")
+        .bind(p.id, use, `付 ${name} ${p.remark || ''}${remark ? ' ' + remark : ''}`, acc, d)
+    ])
+  }
+  await logAudit(db, '整户付款', name, `${name} 共付 ¥${total}，核销 ${detail.length} 笔`)
   return c.json({ ok: true, total: round2(total), used: detail, rest: round2(left) })
 })
 

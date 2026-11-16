@@ -127,8 +127,40 @@
         <text class="chip-label">排序：</text>
         <text class="chip {{ar_sort==item.k?'on':''}}" wx:for="{{ar_sorts}}" wx:key="k" bindtap="pickArSort" data-k="{{item.k}}">{{item.n}}</text>
       </view>
+      <view class="chips">
+        <text class="chip-label">视图：</text>
+        <text class="chip {{ar_view=='order'?'on':''}}" bindtap="pickArView" data-v="order">按单据</text>
+        <text class="chip {{ar_view=='party'?'on':''}}" bindtap="pickArView" data-v="party">按客户</text>
+      </view>
     </view>
-    <view class="list">
+    <view class="list" wx:if="{{ar_view=='party'}}">
+      <view class="grp" wx:for="{{ar_groups}}" wx:key="name">
+        <view class="grp-h" bindtap="toggleGroupAr" data-n="{{item.name}}">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{ar_open==item.name?'收起':'欠'+item.unpaid}}</text></view>
+          <view class="row2">{{item.cnt}} 单 · 欠款合计 {{item.unpaid}} · 最久 {{item.oldest_days}} 天{{item.overdue>0?' · 逾期'+item.overdue+'单':''}}{{item.due_soon>0?' · 7天内到期'+item.due_soon+'单':''}}</view>
+        </view>
+        <view class="grp-b" wx:if="{{ar_open==item.name}}">
+          <view class="gitem" wx:for="{{item.items}}" wx:for-item="it" wx:key="id">
+            <view class="row1"><text class="nm">{{it.title}}</text><text class="amt">欠{{it.unpaid}}</text></view>
+            <view class="row2">总{{it.total}} · 已收{{it.paid}}{{it.written_off>0?' · 核销'+it.written_off:''}} · 已欠{{it.days}}天{{it.due_short?' · 约定'+it.due_short:''}}{{it.operator?' · '+it.operator:''}}</view>
+            <view class="btns">
+              <button size="mini" bindtap="receiveAll" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">收清</button>
+              <button size="mini" bindtap="payOrder" data-id="{{it.id}}">收款</button>
+              <button size="mini" bindtap="showDetail" data-id="{{it.id}}" data-type="ar">明细</button>
+              <button size="mini" bindtap="editDue" data-id="{{it.id}}" data-type="ar" data-due="{{it.due_short}}">改期</button>
+              <button size="mini" bindtap="writeoffOrder" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">核销</button>
+            </view>
+          </view>
+          <view class="btns">
+            <button size="mini" bindtap="groupReceive" data-n="{{item.name}}" data-amt="{{item.unpaid}}">整户收款</button>
+            <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.name}}">对账单</button>
+            <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.name}}">月结</button>
+          </view>
+        </view>
+      </view>
+      <view class="empty" wx:if="{{!ar_groups.length}}">按{{ar_filter=='overdue'?'逾期':'未结'}}没有客户欠款</view>
+    </view>
+    <view class="list" wx:if="{{ar_view=='order'}}">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
         <view class="row2">总{{item.price}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
@@ -193,8 +225,39 @@
         <text class="chip-label">排序：</text>
         <text class="chip {{ap_sort==item.k?'on':''}}" wx:for="{{ar_sorts}}" wx:key="k" bindtap="pickApSort" data-k="{{item.k}}">{{item.n}}</text>
       </view>
+      <view class="chips">
+        <text class="chip-label">视图：</text>
+        <text class="chip {{ap_view=='order'?'on':''}}" bindtap="pickApView" data-v="order">按单据</text>
+        <text class="chip {{ap_view=='party'?'on':''}}" bindtap="pickApView" data-v="party">按供应商</text>
+      </view>
     </view>
-    <view class="list">
+    <view class="list" wx:if="{{ap_view=='party'}}">
+      <view class="grp" wx:for="{{ap_groups}}" wx:key="name">
+        <view class="grp-h" bindtap="toggleGroupAp" data-n="{{item.name}}">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{ap_open==item.name?'收起':'欠'+item.unpaid}}</text></view>
+          <view class="row2">{{item.cnt}} 笔 · 欠款合计 {{item.unpaid}} · 最久 {{item.oldest_days}} 天{{item.overdue>0?' · 超30天'+item.overdue+'笔':''}}{{item.due_soon>0?' · 7天内要付'+item.due_soon+'笔':''}}</view>
+        </view>
+        <view class="grp-b" wx:if="{{ap_open==item.name}}">
+          <view class="gitem" wx:for="{{item.items}}" wx:for-item="it" wx:key="id">
+            <view class="row1"><text class="nm">{{it.title}}</text><text class="amt">欠{{it.unpaid}}</text></view>
+            <view class="row2">总{{it.total}} · 已付{{it.paid}}{{it.written_off>0?' · 核销'+it.written_off:''}} · 已欠{{it.days}}天{{it.due_short?' · 约定'+it.due_short:''}}</view>
+            <view class="btns">
+              <button size="mini" bindtap="payAll" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">付清</button>
+              <button size="mini" bindtap="payPayable" data-id="{{it.id}}">付款</button>
+              <button size="mini" bindtap="showDetail" data-id="{{it.id}}" data-type="ap">明细</button>
+              <button size="mini" bindtap="editDue" data-id="{{it.id}}" data-type="ap" data-due="{{it.due_short}}">改期</button>
+              <button size="mini" bindtap="writeoffPayable" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">核销</button>
+            </view>
+          </view>
+          <view class="btns">
+            <button size="mini" bindtap="groupPay" data-n="{{item.name}}" data-amt="{{item.unpaid}}">整户付款</button>
+            <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.name}}">对账单</button>
+          </view>
+        </view>
+      </view>
+      <view class="empty" wx:if="{{!ap_groups.length}}">按{{ap_filter=='overdue'?'超30天':'未结'}}没有供应商欠款</view>
+    </view>
+    <view class="list" wx:if="{{ap_view=='order'}}">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
         <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
