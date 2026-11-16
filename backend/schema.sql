@@ -258,3 +258,7 @@ CREATE TABLE IF NOT EXISTS party_profiles (
   party TEXT NOT NULL UNIQUE,
   kind TEXT, contact TEXT, phone TEXT, addr TEXT, note TEXT, created_at TEXT
 );
+
+-- 催款记录（哪天跟谁催过）
+CREATE TABLE IF NOT EXISTS dunning_log (id INTEGER PRIMARY KEY AUTOINCREMENT, party TEXT, type TEXT, channel TEXT, note TEXT, created_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_dunning_party ON dunning_log(party);

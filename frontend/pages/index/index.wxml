@@ -238,7 +238,8 @@
         <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
           <text class="prev-t">{{item.no}}. {{item.party}}</text>
           <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
-          <text class="red">点我复制</text>
+          <text class="prev-n {{item.told_days!==null && item.told_days<=3 ? 'red':''}}">{{item.told_text}}</text>
+          <text class="red" catchtap="recordDunning" data-party="{{item.party}}" data-type="{{collect.type}}">记一笔催款</text>
         </view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
@@ -404,7 +405,8 @@
         <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
           <text class="prev-t">{{item.no}}. {{item.party}}</text>
           <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
-          <text class="red">点我复制</text>
+          <text class="prev-n {{item.told_days!==null && item.told_days<=3 ? 'red':''}}">{{item.told_text}}</text>
+          <text class="red" catchtap="recordDunning" data-party="{{item.party}}" data-type="{{collect.type}}">记一笔催款</text>
         </view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
@@ -1259,7 +1261,13 @@
       <view class="tip">报表抬头（写厂名，图片更像正式对账单）</view>
       <input class="inp" placeholder="厂名，如 兴旺五金加工厂" value="{{head_title}}" bindinput="onHeadTitle"/>
       <input class="inp" placeholder="备注，如 账期：当月 1 日至月底" value="{{head_note}}" bindinput="onHeadNote"/>
+      <input class="inp" placeholder="厂里电话（打印版对账单会印上）" value="{{head_phone}}" bindinput="onHeadPhone"/>
+      <input class="inp" placeholder="厂里地址（打印版对账单会印上）" value="{{head_addr}}" bindinput="onHeadAddr"/>
+      <input class="inp" placeholder="收款信息，如 农行 6228…  张三" value="{{head_bank}}" bindinput="onHeadBank"/>
       <button class="btn" size="mini" bindtap="saveHead">保存抬头</button>
+      <view class="tip">催款门槛：只把「欠满 N 天」的家列进催款清单（填 0 = 全都列）</view>
+      <input class="inp" type="number" placeholder="默认 0" value="{{collect_min}}" bindinput="onCollectMin"/>
+      <button class="btn ghost" size="mini" bindtap="saveCollectConfig">保存催款门槛</button>
     </view>
     <view class="form">
       <view class="tip">到期微信提醒（可选）：配好后，每天早上 9 点如果 7 天内有该收/该付的款，会自动给你发一条微信服务通知。微信这个功能免费。</view>

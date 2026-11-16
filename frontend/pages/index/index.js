@@ -75,7 +75,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: ''
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '',
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -2471,20 +2471,56 @@ Page({
     this.drawTextImage(this.data.mr_text)
   },
   loadHead() {
+    this.loadCollectConfig()
     this.req({
       url: API_BASE + '/report-head',
       success: (res) => {
         const d = res.data || {}
-        this.setData({ head_title: d.title || '', head_note: d.note || '' })
+        this.setData({ head_title: d.title || '', head_note: d.note || '', head_phone: d.phone || '', head_addr: d.addr || '', head_bank: d.bank || '' })
       }
     })
   },
   onHeadTitle(e) { this.setData({ head_title: e.detail.value }) },
   onHeadNote(e) { this.setData({ head_note: e.detail.value }) },
+  onHeadPhone(e) { this.setData({ head_phone: e.detail.value }) },
+  onHeadAddr(e) { this.setData({ head_addr: e.detail.value }) },
+  onHeadBank(e) { this.setData({ head_bank: e.detail.value }) },
+  onCollectMin(e) { this.setData({ collect_min: e.detail.value }) },
+  loadCollectConfig() {
+    this.req({
+      url: API_BASE + '/collect-config',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ collect_min: String(d.min_days || 0) }) }
+    })
+  },
+  saveCollectConfig() {
+    const v = Number(this.data.collect_min || 0)
+    if (!(v >= 0 && v <= 365)) return wx.showToast({ title: '填 0~365 之间的天数', icon: 'none' })
+    this.req({
+      url: API_BASE + '/collect-config', method: 'POST', data: { min_days: v },
+      success: (res) => {
+        if (res.data && res.data.ok) { wx.showToast({ title: v > 0 ? '只列欠满 ' + v + ' 天的' : '全部列出来', icon: 'none' }); const c = this.data.collect; if (c) this.openCollect(c.type) }
+        else wx.showToast({ title: '没存上', icon: 'none' })
+      }
+    })
+  },
+  recordDunning(e) {
+    const party = e.currentTarget.dataset.party
+    const type = e.currentTarget.dataset.type || 'ar'
+    wx.showModal({
+      title: '记一笔催款：' + party, editable: true, placeholderText: '说了什么？（例：他说月底结，已答应）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/dunning-log', method: 'POST', data: { party, type, note: r.content || '' },
+          success: () => { wx.showToast({ title: '记下了', icon: 'success' }); const c = this.data.collect; if (c) this.openCollect(c.type) }
+        })
+      }
+    })
+  },
   saveHead() {
     this.req({
       url: API_BASE + '/report-head', method: 'POST',
-      data: { title: this.data.head_title, note: this.data.head_note },
+      data: { title: this.data.head_title, note: this.data.head_note, phone: this.data.head_phone, addr: this.data.head_addr, bank: this.data.head_bank },
       success: (res) => {
         if (res.data && res.data.ok) wx.showToast({ title: '已保存', icon: 'success' })
         else wx.showToast({ title: (res.data && res.data.error) || '保存失败', icon: 'none' })

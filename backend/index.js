@@ -169,6 +169,7 @@ app.get('/statement-print', async (c) => {
   if (from > to) { const t = from; from = to; to = t }
 
   const t = await getTitle(db)
+  const prof = await db.prepare('SELECT * FROM party_profiles WHERE party=?').bind(party).first().catch(() => null)
   const q = (sql, ...a) => db.prepare(sql).bind(...a).all().then((r) => r.results)
   const docs = type === 'ar'
     ? await q('SELECT * FROM orders WHERE customer=? ORDER BY id', party)
@@ -217,7 +218,9 @@ app.get('/statement-print', async (c) => {
 body { font-family: "Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif; color:#111; margin:0; padding:18px; background:#f4f5f7; }
 .sheet { background:#fff; max-width:210mm; margin:0 auto; padding:14mm 12mm; box-shadow:0 2px 14px rgba(0,0,0,.12); }
 h1 { font-size: 22px; text-align:center; margin:0 0 4px; letter-spacing:2px; }
-.sub { text-align:center; font-size:12px; color:#666; margin-bottom:14px; }
+.sub { text-align:center; font-size:12px; color:#666; margin-bottom:8px; }
+.who { text-align:center; font-size:12.5px; color:#444; margin-bottom:10px; }
+.meta2 { font-size:12px; color:#555; margin:-4px 0 8px; }
 .meta { display:flex; justify-content:space-between; font-size:13px; margin:10px 0; border-bottom:1px solid #ddd; padding-bottom:8px; }
 table { width:100%; border-collapse:collapse; font-size:12.5px; }
 th,td { border:1px solid #bbb; padding:6px 8px; }
@@ -237,7 +240,9 @@ td.b { font-weight:700; }
 <div class="sheet">
 <h1>${esc(t.title || '对账单')}</h1>
 <div class="sub">${label}（打印版 · A4）</div>
-<div class="meta"><div>${who}：<b>${esc(party)}</b></div><div>账期：${esc(from)} 至 ${esc(to)}</div></div>
+<div class="who">${esc(t.title)}${t.phone ? '　电话 ' + esc(t.phone) : ''}${t.addr ? '　' + esc(t.addr) : ''}</div>
+<div class="meta"><div>${who}：<b>${esc(party)}</b>${prof && prof.contact ? '（' + esc(prof.contact) + '）' : ''}</div><div>账期：${esc(from)} 至 ${esc(to)}</div></div>
+${prof && (prof.phone || prof.addr || prof.note) ? `<div class="meta2">${prof.phone ? '联系电话：' + esc(prof.phone) + '　' : ''}${prof.addr ? '地址：' + esc(prof.addr) + '　' : ''}${prof.note ? '备注：' + esc(prof.note) : ''}</div>` : ''}
 <table>
 <thead><tr><th style="width:38px">#</th><th style="width:92px">日期</th><th>项目/备注</th><th style="width:88px">金额</th><th style="width:88px">本期${type === 'ar' ? '已收' : '已付'}</th><th style="width:70px">核销</th><th style="width:88px">未结</th></tr></thead>
 <tbody>${body || '<tr><td colspan="7" style="text-align:center;color:#888">本期没有发生</td></tr>'}</tbody>
@@ -250,6 +255,7 @@ td.b { font-weight:700; }
 <tr><td><b>期末${type === 'ar' ? '应收' : '应付'}</b></td><td class="n big">${money(closing)}</td></tr>
 </table></div>
 ${t.note ? '<div style="font-size:12.5px;color:#555;margin-top:10px">备注：' + esc(t.note) + '</div>' : ''}
+${t.bank ? '<div style="font-size:12.5px;color:#333;margin-top:6px">收款信息：' + esc(t.bank) + '</div>' : ''}
 <div class="foot"><div class="sign">对账单位签章：</div><div class="sign">制表：${esc(t.title || '')}　${esc(today)}</div></div>
 <a class="btn" href="javascript:window.print()">🖨 打印 / 存为 PDF</a>
 <div class="tip">手机上：右上角「…」→ 发送给朋友或用浏览器打开 → 打印</div>
@@ -1181,10 +1187,10 @@ const addDaysIso = (iso, n) => {
 // 报表抬头（厂名 + 备注）
 const getTitle = async (db) => {
   try {
-    const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note')").all()).results
+    const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note','report_phone','report_addr','report_bank')").all()).results
     const g = (k) => { const r = rows.find((x) => x.key === k); return r ? r.value : '' }
-    return { title: g('report_title') || '加工厂', note: g('report_note') || '' }
-  } catch (e) { return { title: '加工厂', note: '' } }
+    return { title: g('report_title') || '加工厂', note: g('report_note') || '', phone: g('report_phone') || '', addr: g('report_addr') || '', bank: g('report_bank') || '' }
+  } catch (e) { return { title: '加工厂', note: '', phone: '', addr: '', bank: '' } }
 }
 // 账期：客户/供应商约定「月结 N 天」，建单没填到期日就自动算出到期日
 const termDue = async (db, party, baseIso) => {
@@ -3535,7 +3541,9 @@ app.post('/party-terms/apply', async (c) => {
 app.get('/collect-list', async (c) => {
   const db = c.env.DB
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
-  const minDays = Math.max(0, num(c.req.query('min_days')))
+  const cfgRow = await db.prepare("SELECT value FROM settings WHERE key='collect_min_days'").first().catch(() => null)
+  const cfgMin = num(cfgRow && cfgRow.value)
+  const minDays = Math.max(0, c.req.query('min_days') != null ? num(c.req.query('min_days')) : cfgMin)
   const title = (await getTitle(db)).title
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
@@ -3572,7 +3580,17 @@ app.get('/collect-list', async (c) => {
     }
   }).filter((x) => x.left > 0.005 && x.oldest_days >= minDays)
   list.sort((a, b) => b.score - a.score)
-  const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, {
+  // 催款记录：这一家催过几次、上次哪天、几天前
+  const dmap = {}
+  try {
+    const drows = (await db.prepare("SELECT party, COUNT(*) n, MAX(created_at) last FROM dunning_log GROUP BY party").all()).results || []
+    drows.forEach((r) => { dmap[norm(r.party)] = { n: num(r.n), last: String(r.last || '') } })
+  } catch (e) {}
+  const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, (() => {
+    const dm = dmap[norm(x.party)]
+    const last = dm && dm.last ? dm.last.slice(0, 10) : ''
+    return { told_times: dm ? dm.n : 0, told_last: last, told_days: last ? daysSince(last) : null, told_text: dm ? ('已催 ' + dm.n + ' 次，上次 ' + last.slice(5) + '（' + daysSince(last) + ' 天前）') : '还没催过' }
+  })(), {
     no: i + 1,
     text: type === 'ap'
       ? `${x.party} 你好，我这边欠你 ${x.left} 元（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${title}，这两天安排一下，方便的话把对账单发我对一下。`
@@ -3580,6 +3598,64 @@ app.get('/collect-list', async (c) => {
   }))
   const total = round2(list.reduce((a, x) => a + x.left, 0))
   return c.json({ ok: true, type, total, count: list.length, list: out })
+})
+
+// ===== 催款记录：哪天跟谁催过、说了什么，避免一周催三次同一家 =====
+app.get('/dunning-log', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const type = c.req.query('type') === 'ap' ? 'ap' : (c.req.query('type') === 'ar' ? 'ar' : '')
+  let sql = 'SELECT * FROM dunning_log WHERE 1=1'
+  const b = []
+  if (party) { sql += ' AND party=?'; b.push(party) }
+  if (month) { sql += ' AND substr(created_at,1,7)=?'; b.push(month) }
+  if (type) { sql += ' AND type=?'; b.push(type) }
+  sql += ' ORDER BY id DESC LIMIT 100'
+  const rows = (await (b.length ? db.prepare(sql).bind(...b) : db.prepare(sql)).all()).results || []
+  const stat = {}
+  for (const r of rows) {
+    const s2 = stat[r.party] || (stat[r.party] = { party: r.party, times: 0, last: '' })
+    s2.times++
+    if (!s2.last || String(r.created_at) > s2.last) s2.last = String(r.created_at)
+  }
+  const monthCount = (await db.prepare("SELECT COUNT(*) n FROM dunning_log WHERE substr(created_at,1,7)=?").bind(now().slice(0, 7)).first()).n
+  return c.json({
+    ok: true, count: rows.length, month_count: num(monthCount),
+    rows: rows.map((r) => ({ ...r, date: String(r.created_at || '').slice(0, 10), days: daysSince(r.created_at) })),
+    parties: Object.keys(stat).map((k) => ({ party: k, times: stat[k].times, last: stat[k].last.slice(0, 10), days_since: daysSince(stat[k].last) })).sort((a, b) => b.times - a.times)
+  })
+})
+app.post('/dunning-log', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const party = String(b.party || '').trim()
+  if (!party) return c.json({ error: '要写清楚催的是哪一家' }, 400)
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  await db.prepare('INSERT INTO dunning_log (party,type,channel,note,created_at) VALUES (?,?,?,?,?)')
+    .bind(party, type, String(b.channel || '微信').slice(0, 10), String(b.note || '').slice(0, 100), now()).run()
+  await logAudit(db, 'dunning', party, '催款：' + (String(b.note || '').slice(0, 30) || '已催'))
+  return c.json({ ok: true })
+})
+app.delete('/dunning-log/:id', async (c) => {
+  const db = c.env.DB
+  await db.prepare('DELETE FROM dunning_log WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
+// 催款阈值：欠多少天才进催款清单（默认 0 = 全都进）
+app.get('/collect-config', async (c) => {
+  const db = c.env.DB
+  const r = await db.prepare("SELECT value FROM settings WHERE key='collect_min_days'").first().catch(() => null)
+  return c.json({ ok: true, min_days: num(r && r.value) })
+})
+app.post('/collect-config', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const v = Math.max(0, Math.min(365, Math.round(num(b.min_days))))
+  const has = await db.prepare("SELECT 1 FROM settings WHERE key='collect_min_days'").first()
+  if (has) await db.prepare("UPDATE settings SET value=? WHERE key='collect_min_days'").bind(String(v)).run()
+  else await db.prepare("INSERT INTO settings (key, value) VALUES ('collect_min_days',?)").bind(String(v)).run()
+  return c.json({ ok: true, min_days: v })
 })
 
 // ===== 到期表：按账期排出「哪张单哪天到期」，能导 Excel 发客户 =====
@@ -4985,12 +5061,12 @@ app.get('/networth', async (c) => {
 // 报表抬头（厂名 / 备注）
 app.get('/report-head', async (c) => {
   const db = c.env.DB
-  const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note')").all()).results
+  const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note','report_phone','report_addr','report_bank')").all()).results
   const g = (k) => (rows.find((r) => r.key === k) || {}).value || ''
-  return c.json({ title: g('report_title'), note: g('report_note') })
+  return c.json({ title: g('report_title'), note: g('report_note'), phone: g('report_phone'), addr: g('report_addr'), bank: g('report_bank') })
 })
 app.post('/report-head', async (c) => {
-  const { title, note } = await c.req.json()
+  const { title, note, phone, addr, bank } = await c.req.json()
   const db = c.env.DB
   const put = async (k, v) => {
     const has = await db.prepare('SELECT 1 FROM settings WHERE key=?').bind(k).first()
@@ -4999,6 +5075,9 @@ app.post('/report-head', async (c) => {
   }
   await put('report_title', String(title || '').slice(0, 30))
   await put('report_note', String(note || '').slice(0, 60))
+  await put('report_phone', String(phone || '').slice(0, 30))
+  await put('report_addr', String(addr || '').slice(0, 60))
+  await put('report_bank', String(bank || '').slice(0, 60))
   return c.json({ ok: true })
 })
 
@@ -5484,6 +5563,17 @@ app.get('/reminders', async (c) => {
     const rl = await db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(cm).first()
     if (num(rl.n) === 0 && num(now().slice(8, 10)) >= 10) push('gray', `${cm.slice(5)} 月还没和客户/供应商对过账`, 'import')
   }
+  // 欠了很久又一直没催过的家
+  try {
+    const mc = await db.prepare("SELECT value FROM settings WHERE key='collect_min_days'").first()
+    const minD = Math.max(7, num(mc && mc.value) || 15)
+    const nc = await db.prepare("SELECT o.customer AS party, COUNT(*) n, COALESCE(SUM(o.price-o.paid-COALESCE(o.written_off,0)),0) t FROM orders o WHERE o.price-o.paid-COALESCE(o.written_off,0) > 0 AND substr(o.created_at,1,10) <= date(?, '-" + minD + " day') AND NOT EXISTS (SELECT 1 FROM dunning_log d WHERE d.party=o.customer AND substr(d.created_at,1,10) >= date(?, '-7 day')) GROUP BY o.customer ORDER BY t DESC").bind(today, today).all()
+    const nn = (nc.results || []).length
+    if (nn > 0) {
+      const tsum = round2((nc.results || []).reduce((a, r) => a + num(r.t), 0))
+      push('yellow', `${nn} 家欠超 ${minD} 天、这周还没催过（共 ¥${tsum}）`, 'ar', (nc.results || []).slice(0, 3).map((r) => ({ party: r.party || '', amount: round2(num(r.t)), note: num(r.n) + ' 笔' })))
+    }
+  } catch (e) {}
   // 约定了对账周期的单位：到日子还没对过账，单独提醒
   try {
     const ts = (await db.prepare('SELECT party, recon_cycle FROM party_terms WHERE recon_cycle > 0').all()).results || []
