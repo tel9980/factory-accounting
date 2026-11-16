@@ -1184,6 +1184,98 @@ app.post('/recon-save', async (c) => {
   return c.json({ ok: true, saved: n, month, type })
 })
 
+// 价格表：从历史单据里自动提炼「客户 × 产品」的成交价，录单时带出来、对账时查异常
+app.get('/price-book', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const kw = String(c.req.query('kw') || '').trim()
+  let sql = `SELECT customer AS party, COALESCE(NULLIF(item_name,''),'（没写产品）') AS item,
+      COUNT(*) AS cnt, COALESCE(SUM(price),0) AS total,
+      MIN(price) AS min_price, MAX(price) AS max_price, AVG(price) AS avg_price,
+      MAX(created_at) AS last_at
+    FROM orders WHERE 1=1`
+  const binds = []
+  if (party) { sql += ' AND customer=?'; binds.push(party) }
+  if (kw) { sql += " AND (customer LIKE ? OR item_name LIKE ?)"; binds.push('%' + kw + '%', '%' + kw + '%') }
+  sql += ' GROUP BY customer, item ORDER BY last_at DESC LIMIT 200'
+  const rows = ((await db.prepare(sql).bind(...binds).all()).results || []).map((r) => ({
+    party: r.party, item: r.item, cnt: num(r.cnt), total: round2(num(r.total)),
+    min_price: round2(num(r.min_price)), max_price: round2(num(r.max_price)),
+    avg_price: round2(num(r.avg_price)), last_at: String(r.last_at || '').slice(0, 10)
+  }))
+  // 补上最近一次的单价与成本
+  if (rows.length) {
+    const lastRows = ((await db.prepare(`SELECT customer, COALESCE(NULLIF(item_name,''),'（没写产品）') AS item, price, COALESCE(cost,0) AS cost, created_at
+      FROM orders ORDER BY id DESC LIMIT 800`).all()).results || [])
+    const m = {}
+    for (const r of lastRows) {
+      const k = r.customer + '\u0001' + r.item
+      if (!m[k]) m[k] = { last_price: round2(num(r.price)), last_cost: round2(num(r.cost)), last_date: String(r.created_at || '').slice(0, 10) }
+    }
+    for (const r of rows) Object.assign(r, m[r.party + '\u0001' + r.item] || { last_price: 0, last_cost: 0, last_date: r.last_at })
+    for (const r of rows) r.gross_pct = r.last_price > 0 ? round2(((r.last_price - r.last_cost) / r.last_price) * 100) : null
+  }
+  const parties = Array.from(new Set(rows.map((x) => x.party)))
+  return c.json({ ok: true, rows, count: rows.length, parties, party_filter: party })
+})
+
+// 录单时查这个客户这个产品上次多少钱
+app.get('/price-lookup', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const item = String(c.req.query('item') || '').trim()
+  if (!party) return c.json({ ok: true, found: false })
+  const binds = [party]
+  let where = 'customer=?'
+  if (item) { where += " AND item_name=?"; binds.push(item) }
+  const last = await db.prepare(`SELECT price, COALESCE(cost,0) AS cost, created_at, COALESCE(NULLIF(item_name,''),'') AS item FROM orders WHERE ${where} ORDER BY id DESC LIMIT 1`).bind(...binds).first()
+  const agg = await db.prepare(`SELECT COUNT(*) AS cnt, AVG(price) AS avg_price, MAX(price) AS max_price, MIN(price) AS min_price FROM orders WHERE ${where}`).bind(...binds).first()
+  const exists = await db.prepare('SELECT COUNT(*) AS c FROM orders WHERE customer=?').bind(party).first()
+  if (!last) return c.json({ ok: true, found: false, party, item, seen_party: num(exists && exists.c) > 0 })
+  return c.json({
+    ok: true, found: true, party, item: last.item || item,
+    last_price: round2(num(last.price)), last_cost: round2(num(last.cost)),
+    last_date: String(last.created_at || '').slice(0, 10),
+    days_ago: daysSince(last.created_at),
+    cnt: num(agg && agg.cnt), avg_price: round2(num(agg && agg.avg_price)),
+    min_price: round2(num(agg && agg.min_price)), max_price: round2(num(agg && agg.max_price)),
+    text: `上次给 ${party}${last.item ? ' 的「' + last.item + '」' : ''} 报 ${round2(num(last.price))} 元${num(last.cost) > 0 ? '（成本 ' + round2(num(last.cost)) + '）' : ''}，${daysSince(last.created_at)} 天前`
+  })
+})
+
+// 价格异常：单价明显偏离这个客户这个产品的历史均价（录错、报错价的提醒）
+app.get('/price-anomaly', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(365, Math.max(7, num(c.req.query('days'), 90)))
+  const pctLimit = Math.min(100, Math.max(5, num(c.req.query('pct'), 15)))
+  const since = new Date(Date.now() - days * 86400000).toISOString()
+  const avgRows = ((await db.prepare(`SELECT customer, COALESCE(NULLIF(item_name,''),'（没写产品）') AS item, AVG(price) AS avg_price, COUNT(*) AS cnt
+    FROM orders GROUP BY customer, item HAVING cnt>=2`).all()).results || [])
+  const am = {}
+  for (const r of avgRows) am[r.customer + '\u0001' + r.item] = { avg: round2(num(r.avg_price)), cnt: num(r.cnt) }
+  const recent = ((await db.prepare(`SELECT id, customer, COALESCE(NULLIF(item_name,''),'（没写产品）') AS item, price, paid, created_at
+    FROM orders WHERE created_at >= ? ORDER BY id DESC LIMIT 300`).bind(since).all()).results || [])
+  const rows = []
+  for (const r of recent) {
+    const base = am[r.customer + '\u0001' + r.item]
+    if (!base || base.avg <= 0) continue
+    const pct = round2(((num(r.price) - base.avg) / base.avg) * 100)
+    if (Math.abs(pct) < pctLimit) continue
+    rows.push({
+      id: r.id, party: r.customer, item: r.item, price: round2(num(r.price)), avg_price: base.avg,
+      pct, dir: pct > 0 ? 'high' : 'low', hist_cnt: base.cnt,
+      date: String(r.created_at || '').slice(0, 10), paid: round2(num(r.paid))
+    })
+  }
+  rows.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+  return c.json({
+    ok: true, days, pct_limit: pctLimit, rows, count: rows.length,
+    advice: rows.length
+      ? `近 ${days} 天有 ${rows.length} 笔单价偏离该客户该产品的老价超过 ${pctLimit}%${rows.some((x) => x.dir === 'low') ? '，其中低的几笔建议核对是不是漏算工序' : ''}。`
+      : `近 ${days} 天价格都对得上（偏离都在 ${pctLimit}% 以内）。`
+  })
+})
+
 // 对账差异一键处理：我少记 → 直接补一张单；对不上但不补 → 标记处理完，台账留痕
 app.post('/recon-fix', async (c) => {
   const b = await c.req.json()

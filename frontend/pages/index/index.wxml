@@ -208,8 +208,10 @@
         <text class="chip" wx:for="{{sug_ar}}" wx:key="index" bindtap="fillSug" data-t="ar" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
       </view>
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}（已自动填好，改金额直接记）</view>
-      <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem"/>
+      <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem" bindblur="blurOItem"/>
+      <view class="tip" wx:if="{{price_tip}}">{{price_tip}}</view>
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
+      <view class="duesoon" wx:if="{{price_warn}}">{{price_warn}} —— 确认是这个价再记</view>
       <input class="inp" placeholder="材料·外协成本(可选，填了才算真实毛利)" type="digit" value="{{o_cost}}" bindinput="onOCost"/>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
@@ -1384,6 +1386,34 @@
         <view class="tip" wx:if="{{mb.worst.length}}">最不赚钱：{{mb.worst[0].name}}（毛利 {{mb.worst[0].profit}}，毛利率 {{mb.worst[0].margin_pct}}%）</view>
       </view>
       <view class="tip" wx:else>点「查一下」看这个月哪个客户 / 哪个产品最赚钱。录入应收时填了成本才算得准；不填就按 0 成本算，毛利会偏高。</view>
+    </view>
+
+    <view class="form">
+      <view class="tip">🏷 价格表（从历史单据自动提炼「客户 × 产品」的成交价，录单时会自动带出来）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="客户或产品（可选）" value="{{pb_kw}}" bindinput="onPbKw" bindconfirm="loadPriceBook"/>
+        <button class="btn half" size="mini" bindtap="loadPriceBook">看价格表</button>
+      </view>
+      <button class="btn ghost" size="mini" bindtap="loadPriceAnomaly">🔍 查近 90 天价格异常</button>
+      <view wx:if="{{pb}}">
+        <view class="tip">{{pb.count}} 组价格{{pb.party_filter ? '（' + pb.party_filter + '）' : ''}}，按最近成交排序</view>
+        <view class="list">
+          <view class="item" wx:for="{{pb.rows}}" wx:key="index">
+            <view class="row1"><text class="nm">{{item.party}} · {{item.item}}</text><text class="amt">{{item.last_price}}</text></view>
+            <view class="row2">{{item.cnt}} 单 · 平均 {{item.avg_price}} · 区间 {{item.min_price}}~{{item.max_price}}{{item.last_cost>0 ? ' · 成本 ' + item.last_cost + ' · 毛利率 ' + item.gross_pct + '%' : ' · 没填成本'}}</view>
+            <view class="row2">最近一次 {{item.last_date}}</view>
+          </view>
+        </view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closePriceBook">收起</button></view>
+      </view>
+      <view wx:if="{{pa}}">
+        <view class="aline {{pa.count ? 'warn':'ok'}}">{{pa.advice}}</view>
+        <view class="item" wx:for="{{pa.rows}}" wx:key="id" bindtap="openOrderFromPrice" data-id="{{item.id}}">
+          <view class="row1"><text class="nm">{{item.party}} · {{item.item}}</text><text class="amt {{item.dir=='low'?'red':'ok'}}">{{item.price}}（老价 {{item.avg_price}}）</text></view>
+          <view class="row2">{{item.date}} · {{item.dir=='low' ? '便宜了 ' : '贵了 '}}{{item.pct}}% · 历史 {{item.hist_cnt}} 单 · 点开看单子</view>
+        </view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closePriceAnomaly">收起</button></view>
+      </view>
     </view>
 
     <view class="form">

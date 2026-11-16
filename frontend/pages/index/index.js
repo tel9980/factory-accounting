@@ -34,7 +34,7 @@ Page({
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    hc: null, hc_open: false, me: null, dbk: null, import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null,
+    hc: null, hc_open: false, me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null,
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -1214,7 +1214,7 @@ Page({
     })
   },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
-  onOPrice(e) { this.setData({ o_price: e.detail.value }) },
+  onOPrice(e) { this.setData({ o_price: e.detail.value }); this.priceWarn(e.detail.value) },
   onOCost(e) { this.setData({ o_cost: e.detail.value }) },
   onODue(e) { this.setData({ o_due: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
@@ -2390,6 +2390,61 @@ Page({
       }
     })
   },
+  blurOItem() { this.priceLookup() },
+  priceLookup() {
+    const party = (this.data.o_customer || '').trim()
+    const item = (this.data.o_item || '').trim()
+    if (!party) return
+    this.req({
+      url: API_BASE + '/price-lookup?party=' + encodeURIComponent(party) + (item ? '&item=' + encodeURIComponent(item) : ''),
+      success: (r) => {
+        const d = r.data || {}
+        if (!d.found) return this.setData({ price_tip: '', price_last: 0, price_warn: '' })
+        this._pb = d
+        const up = { price_tip: d.text + '（共 ' + d.cnt + ' 单，平均 ' + d.avg_price + '）', price_last: d.last_price }
+        if (!this.data.o_price) up.o_price = String(d.last_price)
+        if (!this.data.o_cost && d.last_cost > 0) up.o_cost = String(d.last_cost)
+        this.setData(up, () => this.priceWarn(this.data.o_price))
+      }
+    })
+  },
+  priceWarn(val) {
+    const last = Number(this.data.price_last || 0)
+    const v = Number(val || 0)
+    if (!last || !v) return this.setData({ price_warn: '' })
+    const pct = Math.round(((v - last) / last) * 1000) / 10
+    this.setData({ price_warn: Math.abs(pct) >= 10 ? (pct > 0 ? '比上次高 ' + pct + '%（上次 ' + last + ' 元）' : '比上次低 ' + Math.abs(pct) + '%（上次 ' + last + ' 元）') : '' })
+  },
+  loadPriceBook() {
+    const kw = (this.data.pb_kw || '').trim()
+    this.req({
+      url: API_BASE + '/price-book' + (kw ? '?kw=' + encodeURIComponent(kw) : ''),
+      success: (r) => {
+        const d = r.data || {}
+        if (!d.ok) return wx.showToast({ title: '读取失败', icon: 'none' })
+        this.setData({ pb: d })
+      }
+    })
+  },
+  closePriceBook() { this.setData({ pb: null }) },
+  loadPriceAnomaly() {
+    this.req({
+      url: API_BASE + '/price-anomaly?days=90&pct=15',
+      success: (r) => {
+        const d = r.data || {}
+        if (!d.ok) return wx.showToast({ title: '读取失败', icon: 'none' })
+        this.setData({ pa: d })
+      }
+    })
+  },
+  closePriceAnomaly() { this.setData({ pa: null }) },
+  openOrderFromPrice(e) {
+    const id = e.currentTarget.dataset.id
+    if (!id) return
+    if (this.showDetail) this.showDetail({ currentTarget: { dataset: { id: id, type: 'ar' } } })
+  },
+  onPbKw(e) { this.setData({ pb_kw: e.detail.value }) },
+
   openDisputeBook(e) {
     const party = (e.currentTarget.dataset.party || '').trim()
     this.req({
