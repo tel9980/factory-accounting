@@ -1691,6 +1691,28 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
       </block>
+      <view class="tip">💸 支出结构（这个月比上个月、比平时多花在哪）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空这个月）" value="{{ec_month}}" bindinput="onEcMonth" bindconfirm="loadExpenseCompare"/>
+        <button class="btn half" size="mini" bindtap="loadExpenseCompare">看支出</button>
+      </view>
+      <block wx:if="{{ec}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{ec.month}} 共支出</text><text class="amt">¥{{ec.cur_total}}</text></view>
+          <view class="row2">上个月 ¥{{ec.prev_total}}<text wx:if="{{ec.delta>0}}" class="red"> · 多 ¥{{ec.delta}}</text><text wx:elif="{{ec.delta<0}}" class="green"> · 少 ¥{{-ec.delta}}</text> · 近几个月平均 ¥{{ec.avg6_total}}</view>
+        </view>
+        <view class="box" wx:if="{{ec.rows.length}}">
+          <view class="item" wx:for="{{ec.rows}}" wx:key="cat">
+            <view class="row1"><text class="nm">{{item.cat}}</text><text class="amt {{item.flag=='up'?'red':''}}">¥{{item.cur}}<text class="row2">　占 {{item.pct_of_total}}%</text></text></view>
+            <view class="bar-line"><view class="bar-i" style="width:{{item.bar}}%"></view></view>
+            <view class="row2" wx:if="{{item.flag_text}}">{{item.flag_text}}</view>
+          </view>
+        </view>
+        <view class="box" wx:if="{{ec.advice.length}}">
+          <view class="aline" wx:for="{{ec.advice}}" wx:key="*this">· {{item}}</view>
+        </view>
+        <view class="frow"><button class="btn" size="mini" bindtap="copyEcCompare">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeEcCompare">收起</button></view>
+      </block>
       <view class="tip">💸 损失台账（这个月/这一年，亏掉的和少赚的都在哪）</view>
       <view class="frow">
         <input class="inp half" placeholder="月份 YYYY-MM（留空看整年）" value="{{lb_month}}" bindinput="onLbMonth" bindconfirm="loadLossBook"/>

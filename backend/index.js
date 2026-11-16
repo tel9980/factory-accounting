@@ -4764,6 +4764,80 @@ app.post('/run-fixed', async (c) => {
   return c.json({ ok: true, added: n })
 })
 
+// ── 支出结构：这个月比上个月、比平时多花在哪 ──
+// 口径：只算真花出去的现金费用（费用 + 固定支出），不含采购进料（那算成本）
+app.get('/expense-compare', async (c) => {
+  const db = c.env.DB
+  const cur = String(c.req.query('month') || '').match(/^\d{4}-\d{2}$/) ? c.req.query('month') : now().slice(0, 7)
+  const n = Math.min(12, Math.max(3, num(c.req.query('months'), 6)))
+  const prev = new Date(Date.parse(cur + '-01T00:00:00Z') - 86400000).toISOString().slice(0, 7)
+  const fromM = new Date(Date.UTC(Number(cur.slice(0, 4)), Number(cur.slice(5, 7)) - 1 - n, 1)).toISOString().slice(0, 7)
+  const { results } = await db.prepare(`SELECT substr(created_at,1,7) AS m, COALESCE(NULLIF(TRIM(category),''),'其他') AS c,
+      COALESCE(SUM(amount),0) AS s, COUNT(*) AS n
+    FROM ledger WHERE ${CASH_EXP_WHERE} AND substr(created_at,1,7)>=? AND substr(created_at,1,7)<=?
+    GROUP BY m, c`).bind(fromM, cur).all()
+  const byCat = {}
+  const monthsWithData = new Set()
+  for (const r of results || []) {
+    const cat = r.c || '其他'
+    byCat[cat] = byCat[cat] || { cur: 0, prev: 0, hist: 0, cur_n: 0 }
+    const v = num(r.s)
+    if (r.m === cur) { byCat[cat].cur += v; byCat[cat].cur_n += num(r.n) }
+    else if (r.m === prev) byCat[cat].prev += v
+    else if (r.m < cur && r.m !== prev) byCat[cat].hist += v
+    monthsWithData.add(r.m)
+  }
+  const curTotal = round2(Object.keys(byCat).reduce((a, k) => a + byCat[k].cur, 0))
+  const prevTotal = round2(Object.keys(byCat).reduce((a, k) => a + byCat[k].prev, 0))
+  const rows = Object.keys(byCat).map((cat) => {
+    const x = byCat[cat]
+    const avg = round2(x.hist / Math.max(1, n - 1))
+    let flag = 'flat'
+    let flag_text = ''
+    if (x.cur > 0 && avg >= 1 && x.cur >= avg * 1.5 && x.cur - avg >= 200) {
+      flag = 'up'; flag_text = `比平时多花 ¥${round2(x.cur - avg)}（近 ${n - 1} 个月平均 ${avg}）`
+    } else if (x.cur > 0 && x.prev === 0 && avg < 1) {
+      flag = 'new'; flag_text = '这个月新出现的一类开销'
+    } else if (x.cur === 0 && x.prev > 0) {
+      flag = 'gone'; flag_text = `上个月花了 ¥${round2(x.prev)}，这个月没有`
+    } else if (x.prev > 0 && x.cur >= x.prev + 200 && x.cur >= x.prev * 1.5) {
+      flag = 'up'; flag_text = `比上个月多 ¥${round2(x.cur - x.prev)}`
+    } else if (x.prev >= 1 && x.cur <= x.prev * 0.6) {
+      flag = 'down'; flag_text = `比上个月少 ¥${round2(x.prev - x.cur)}`
+    }
+    return {
+      cat, cur: round2(x.cur), prev: round2(x.prev), cur_n: num(x.cur_n), avg6: avg,
+      delta: round2(x.cur - x.prev),
+      pct: x.prev > 0 ? round2(((x.cur - x.prev) / x.prev) * 100) : null,
+      vs_avg_pct: avg > 0 ? round2(((x.cur - avg) / avg) * 100) : null,
+      pct_of_total: curTotal > 0 ? round2((x.cur / curTotal) * 100) : 0,
+      bar: curTotal > 0 ? Math.max(x.cur > 0 ? 3 : 0, Math.round((x.cur / curTotal) * 100)) : 0,
+      flag, flag_text
+    }
+  }).sort((a, b) => b.cur - a.cur || b.prev - a.prev)
+  const ups = rows.filter((r) => r.flag === 'up')
+  const totalDelta = round2(curTotal - prevTotal)
+  const avgTotal = round2(rows.reduce((a, r) => a + r.avg6, 0))
+  const advice = []
+  if (!rows.length) advice.push('这个月还没记支出，记一笔就能对比了')
+  else {
+    if (totalDelta > 0) advice.push(`总支出比上个月多 ¥${totalDelta}${prevTotal > 0 ? '（' + round2((totalDelta / prevTotal) * 100) + '%）' : ''}`)
+    else if (totalDelta < 0) advice.push(`总支出比上个月少 ¥${round2(-totalDelta)}`)
+    else advice.push('总支出和上个月一样')
+    if (ups.length) advice.push(`${ups[0].cat} 花得最突：${ups[0].flag_text}`)
+    if (rows[0] && rows[0].pct_of_total >= 50 && curTotal >= 500) advice.push(`光「${rows[0].cat}」就占了 ${rows[0].pct_of_total}%（¥${rows[0].cur}）`)
+    const gone = rows.filter((r) => r.flag === 'gone')
+    if (gone.length) advice.push(`${gone.map((g) => g.cat).slice(0, 3).join('、')} 这个月没花钱`)
+  }
+  const L = [`【${cur} 支出对比】共支出 ¥${curTotal}（上个月 ¥${prevTotal}${totalDelta !== 0 ? '，' + (totalDelta > 0 ? '多' : '少') + ' ¥' + Math.abs(totalDelta) : ''}）`]
+  rows.filter((r) => r.cur > 0).forEach((r) => {
+    L.push(`· ${r.cat} ¥${r.cur}（占 ${r.pct_of_total}%${r.prev > 0 ? '，上月 ¥' + r.prev : ''}）${r.flag_text ? '｜' + r.flag_text : ''}`)
+  })
+  if (advice.length) L.push('— ' + advice.join('；'))
+  return c.json({ ok: true, month: cur, prev_month: prev, months: n, cur_total: curTotal, prev_total: prevTotal,
+    delta: totalDelta, avg6_total: avgTotal, rows, ups: ups.length, advice, text: L.join('\n') })
+})
+
 // ── 支出预算 ──
 app.get('/budgets', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT * FROM budgets ORDER BY id').all()

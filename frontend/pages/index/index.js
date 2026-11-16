@@ -135,7 +135,7 @@ Page({
       ] }
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', lb: null, lb_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
+    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -3229,6 +3229,24 @@ Page({
         this.setData({ mbr: r.data })
       }
     })
+  },
+  onEcMonth(e) { this.setData({ ec_month: e.detail.value }) },
+  loadExpenseCompare() {
+    const mv = (this.data.ec_month || '').trim()
+    const q = /^\d{4}-\d{2}$/.test(mv) ? '?month=' + encodeURIComponent(mv) : ''
+    this.req({
+      url: API_BASE + '/expense-compare' + q,
+      success: (r) => {
+        if (!r.data || !r.data.ok) return wx.showToast({ title: '查不到', icon: 'none' })
+        this.setData({ ec: r.data, ec_month: r.data.month })
+      }
+    })
+  },
+  closeEcCompare() { this.setData({ ec: null }) },
+  copyEcCompare() {
+    const d = this.data.ec
+    if (!d) return
+    wx.setClipboardData({ data: d.text || '', success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
   },
   onLbMonth(e) { this.setData({ lb_month: e.detail.value }) },
   loadLossBook() {
