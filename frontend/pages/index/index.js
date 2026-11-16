@@ -830,19 +830,55 @@ Page({
       success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '' }); this.refresh(); this.loadSuggest() }
     })
   },
+  // 找某一单还剩多少没结（先从当前列表里查）
+  _remainOf(list, id) {
+    const it = (list || []).find((x) => String(x.id) === String(id)) || {}
+    return Math.max(0, Math.round(Number(it.unpaid || 0) * 100) / 100)
+  },
   payOrder(e) {
     const id = e.currentTarget.dataset.id
+    const remain = this._remainOf(this.data.ar_all, id)
     wx.showModal({
-      title: '收客户款', editable: true, placeholderText: '金额 或 金额,日期(如 5000,07-05)',
+      title: '收客户款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
+      editable: true,
+      placeholderText: remain > 0 ? '不填=一次收清 ' + remain + '；也可填 金额,日期(5000,07-05)' : '填金额，可带日期(5000,07-05)',
       success: (r) => {
-        if (r.confirm && r.content) {
-          const parts = r.content.split(/[,，\s]+/)
-          this.req({
-            url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
-            data: { amount: Number(parts[0]), date: parts[1] || '', account_id: this.data.acc_id },
-            success: () => this.refresh()
-          })
+        if (!r.confirm) return
+        const txt = String(r.content || '').trim()
+        const parts = txt ? txt.split(/[,，\s]+/) : []
+        const amt = parts[0] ? Number(parts[0]) : remain
+        if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
+        if (remain > 0 && amt > remain + 0.005) {
+          return wx.showToast({ title: '比未收的还多（还剩 ' + remain + '）', icon: 'none' })
         }
+        this.req({
+          url: API_BASE + '/orders/' + id + '/receive', method: 'POST',
+          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
+          success: () => {
+            this.refresh()
+            this._afterPay(id, amt, remain, 'ar')
+          }
+        })
+      }
+    })
+  },
+  // 收/付完自动核对：还有余额就顺手问一句“要不要一起结清”
+  _afterPay(id, amt, remain, kind) {
+    const left = Math.round((remain - amt) * 100) / 100
+    if (remain > 0 && left <= 0.005) return wx.showToast({ title: kind === 'ar' ? '这单已收清' : '这笔已付清', icon: 'success' })
+    if (left <= 0.005) return
+    wx.showModal({
+      title: '还差 ' + left + ' 元',
+      content: (kind === 'ar' ? '这张单还没收完' : '这笔还没付完') + '，剩下的一次结清吗？',
+      confirmText: '一次结清', cancelText: '先这样',
+      success: (rr) => {
+        if (!rr.confirm) return
+        this.req({
+          url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'),
+          method: 'POST',
+          data: { amount: left, account_id: this.data.acc_id },
+          success: () => { this.refresh(); wx.showToast({ title: kind === 'ar' ? '已收清' : '已付清', icon: 'success' }) }
+        })
       }
     })
   },
@@ -907,18 +943,30 @@ Page({
       fail: () => wx.hideLoading()
     })
   },
-  payPayable(e) {    const id = e.currentTarget.dataset.id
+  payPayable(e) {
+    const id = e.currentTarget.dataset.id
+    const remain = this._remainOf(this.data.ap_all, id)
     wx.showModal({
-      title: '付供应商款', editable: true, placeholderText: '金额 或 金额,日期(如 5000,07-05)',
+      title: '付供应商款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
+      editable: true,
+      placeholderText: remain > 0 ? '不填=一次付清 ' + remain + '；也可填 金额,日期(5000,07-05)' : '填金额，可带日期(5000,07-05)',
       success: (r) => {
-        if (r.confirm && r.content) {
-          const parts = r.content.split(/[,，\s]+/)
-          this.req({
-            url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
-            data: { amount: Number(parts[0]), date: parts[1] || '', account_id: this.data.acc_id },
-            success: () => this.refresh()
-          })
+        if (!r.confirm) return
+        const txt = String(r.content || '').trim()
+        const parts = txt ? txt.split(/[,，\s]+/) : []
+        const amt = parts[0] ? Number(parts[0]) : remain
+        if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
+        if (remain > 0 && amt > remain + 0.005) {
+          return wx.showToast({ title: '比未付的还多（还剩 ' + remain + '）', icon: 'none' })
         }
+        this.req({
+          url: API_BASE + '/payables/' + id + '/pay', method: 'POST',
+          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id },
+          success: () => {
+            this.refresh()
+            this._afterPay(id, amt, remain, 'ap')
+          }
+        })
       }
     })
   },
