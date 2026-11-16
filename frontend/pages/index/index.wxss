@@ -280,3 +280,15 @@
 .tl { display:flex; padding:8rpx 0; border-left:3rpx solid #e6e6e6; margin-left:6rpx; padding-left:14rpx; }
 .tl-d { font-size:22rpx; color:#999; width:130rpx; flex:none; }
 .tl-t { font-size:24rpx; color:#333; flex:1; line-height:1.5; }
+
+/* 我的活 */
+.mwrow { display: flex; align-items: center; padding: 12rpx 0; border-bottom: 1rpx solid #f4f4f4; }
+.mwdot { width: 40rpx; height: 40rpx; line-height: 40rpx; text-align: center; border-radius: 8rpx; background: #eef4ff; color: #2b6cb0; font-size: 22rpx; margin-right: 12rpx; flex: none; }
+.mwdot.red { background: #fff1f0; color: #d64545; }
+.mwmain { flex: 1; font-size: 26rpx; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mwside { font-size: 24rpx; color: #888; flex: none; margin-left: 10rpx; }
+.mwside.red, .red { color: #d64545; }
+/* 一页纸帮助 */
+.help-h { font-size: 28rpx; font-weight: 600; color: #2b6cb0; margin: 18rpx 0 8rpx; }
+.help-p { font-size: 25rpx; color: #444; line-height: 1.7; margin-bottom: 6rpx; }
+.sheet-x { float: right; font-size: 30rpx; color: #999; padding: 0 6rpx; }

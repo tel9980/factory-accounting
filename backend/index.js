@@ -1689,6 +1689,41 @@ app.get('/', (c) => c.html(`<!doctype html>
 
 
 // 我是谁（老板/员工）
+// 我的活（员工/老板通用）：今天该收、该付、该更新工序的单子
+app.get('/my-work', async (c) => {
+  const db = c.env.DB
+  const role = c.get('role') || 'owner'
+  const today = now().slice(0, 10)
+  const soon = addDaysIso(today, 3)
+  const [recv, pay, prog] = await Promise.all([
+    db.prepare(`SELECT id, customer party, item_name item, price, COALESCE(paid,0) paid, due_date,
+        (price - COALESCE(paid,0) - COALESCE(written_off,0)) left_amt
+      FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price
+        AND due_date IS NOT NULL AND substr(due_date,1,10) <= ?
+      ORDER BY substr(due_date,1,10) ASC LIMIT 8`).bind(soon).all(),
+    db.prepare(`SELECT id, supplier party, remark item, amount, COALESCE(paid,0) paid, due_date,
+        (amount - COALESCE(paid,0) - COALESCE(written_off,0)) left_amt
+      FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount
+        AND due_date IS NOT NULL AND substr(due_date,1,10) <= ?
+      ORDER BY substr(due_date,1,10) ASC LIMIT 8`).bind(soon).all(),
+    db.prepare(`SELECT id, customer party, item_name item, price, COALESCE(progress,'') progress, status, created_at
+      FROM orders WHERE (status IS NULL OR status < 2) ORDER BY created_at DESC LIMIT 6`).all()
+  ])
+  const rows = (x) => (x && x.results) || []
+  const R = rows(recv).map(r => ({ ...r, days: daysSince(r.due_date), late: daysSince(r.due_date) > 0 })),
+    P = rows(pay).map(r => ({ ...r, days: daysSince(r.due_date), late: daysSince(r.due_date) > 0 })),
+    G = rows(prog).map(r => ({ ...r, status_text: r.status === 1 ? '加工中' : '待加工', no_progress: !r.progress }))
+  const count = R.length + P.length + G.filter(g => g.no_progress).length
+  return c.json({
+    ok: true, role, today,
+    recv: R, pay: P, prog: G,
+    recv_total: round2(R.reduce((a, r) => a + num(r.left_amt), 0)),
+    pay_total: round2(P.reduce((a, r) => a + num(r.left_amt), 0)),
+    count,
+    text: count ? `今天有 ${count} 件事：该收 ${R.length} 笔、该付 ${P.length} 笔、${G.filter(g => g.no_progress).length} 张单还没更新进度` : '今天没有非办不可的事 👍'
+  })
+})
+
 app.get('/me', async (c) => {
   const role = c.get('role') || 'owner'
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB

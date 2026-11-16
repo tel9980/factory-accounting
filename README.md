@@ -273,6 +273,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 151. ✅ **价格表与比价（客户 × 产品，录单自动带价）**：`GET /price-book?party=&kw=` 从历史单据自动提炼「客户 × 产品」的成交价——次数、总额、最低/最高/平均、最近一次单价与成本、毛利率；不用手工维护价格表，记过的账就是价格表。`GET /price-lookup?party=&item=` 查这一家这一个产品上次报了多少（含成本、几天前、共几单、均价），前端录应收时产品框失焦即自动查：有历史就提示「上次给 甲客户 的「切割」 报 3200 元（成本 1200），0 天前（共 3 单，平均 3066.67）」，金额/成本留空时自动填上次的值；手输价格偏离上次超过 10% 时当场飘一条「比上次低 8%（上次 3200 元）—— 确认是这个价再记」。`GET /price-anomaly?days=90&pct=15` 反过来查「录错价的单」：近 90 天单价偏离该客户该产品历史均价超过 15% 的单据，按偏离幅度排序，标红显示「便宜了 28.6% / 贵了 20%」，点一条直接打开那张单核对。前端报表页新增「🏷 价格表」面板（可搜客户或产品）与「🔍 查近 90 天价格异常」。
 152. ✅ **钱和票对一下（发票与收款对照）**：`GET /invoice-check?month=` 把「这个月收了多少、开了多少票」摆在一页——本月接单额、实收额、开票张数与金额（含税额）、差额一句话（「收的钱和开的票对得上 ✓」/「还有 5000 元收了没开票」/「多开了 800 元票，钱还没到账」）；三个清单：**收了钱没开票**（按已收金额算）、**开了部分票**（还差多少票额）、**开了票钱没到**（按票额−已收算），每条点一下直接打开那张单核对。「📋 复制给会计」输出可直接发微信的文字：【厂名】2026-11 发票与收款对照 / 本月接单、收到、开票（含税额）张数 / 差额 / 三个清单摘要。发票仍只做台账、不影响收支和利润（避免一笔钱算两次），这张表只做「钱与票是否对得上」的对照。
 153. ✅ **客户进度页（一条链接，客户自己看做到哪了）**：单位页每个客户行加「发进度」——生成一条只读签名链接（不用登录、不含口令，篡改即失效），复制发微信给客户，他点开就看到：还没收的钱合计、共几单/合计/已收，以及每单的日期、产品、当前工序（待加工/加工中/已交付 + 最近一次工序记录如「11-16 已切完，在打磨」）、已收金额、未收金额与逾期天数；页脚带厂名、电话、地址。**只能看到自己这一家的单，看不到别家、也改不了账**。每次点开会留痕，小程序里再点「发进度」会告诉老板「对方点开过 N 次，最近一次 X」——问过没问过心里有数。
+154. ✅ **我的活（今天该干什么，一进来就看见）**：`GET /my-work` 把「非办不可的事」按人摆出来——①**该收**（3 天内到期或已逾期的应收，带还剩多少、超几天）②**该付**（同口径的应付）③**在做但没记进度**的单子（客户随时会问「做到哪了」）。首页「我的活」卡片逐行列出，点「收/付」直接跳到应收/应付，点工序那行直接打开那张单；顶部一句话「今天有 6 件事：该收 2 笔、该付 1 笔、3 张单还没更新进度」。老板和员工看到的是同一个清单（这也解决了「员工登录后不知道自己要干什么」）。
+155. ✅ **一页纸用法 + 接口清单自动同步**：首页新增「❓ 怎么用（一页纸）」——每天 30 秒、每周 5 分钟、每月 20 分钟各做什么，加上「要给别人用（员工口令/客户进度链接）」「换手机或丢了手机」「记错了怎么办」四段，新接手的人不用问。README 末尾新增「接口清单」附录，由 `python3 scripts/gen-api-list.py` 从 `backend/index.js` 自动抽取（当前 238 个接口、37 组），改完后端跑一次脚本就同步，避免文档与代码越走越偏。
    - 顺手修了两个真 bug：①`/recon-save` 存台账时一律写 `done=0`，导致「两家金额一致」的核对也被算成未处理，结账前的差异阻断永远存在 → 一致时写 `done=1` 并注明「已核对，两家金额一致」；②`closePrecheck` 统计未处理差异时只看 `done=0`、不看 `state`，把一致项也算进去 → 改成 `done=0 AND state<>'match'`。修完实测：一致的对账不再阻断结账，真差异（900 vs 500）仍能拦住并显示「还有差异没处理」。
 
 
@@ -313,3 +315,360 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - **「赚了多少」只有一个算法（权责口径）**：净利 = 本月接单额 − 单子上的材料·外协成本 − 现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息。赊购只算欠款、不重复算成本。想看「按收付现金算赚多少」，用报表页「两口径」（现金口径 = 实收 − 实付）。
 - 本项目为**个人记账工具**，不含发票、报税、银行对账等企业财务功能；需要正式财务软件请另选。
 - 微信**个人主体**小程序无法开通微信支付，若后续要收款到小程序，需升级企业主体（约 300 元/年认证）。
+
+<!-- API-LIST:BEGIN -->
+
+## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
+
+共 238 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+
+**accounts**（4）
+
+- `DELETE /accounts/:id`
+- `GET /accounts`
+- `PATCH /accounts/:id`
+- `POST /accounts`
+
+**advances**（3）
+
+- `DELETE /advances/:id`
+- `GET /advances`
+- `POST /advances`
+
+**assets**（4）
+
+- `DELETE /assets/:id`
+- `GET /assets`
+- `POST /assets`
+- `POST /assets/run-depreciation`
+
+**bank-flows**（3）
+
+- `DELETE /bank-flows/:id`
+- `GET /bank-flows`
+- `POST /bank-flows/:id/match`
+
+**budgets**（3）
+
+- `DELETE /budgets/:id`
+- `GET /budgets`
+- `POST /budgets`
+
+**categories**（3）
+
+- `DELETE /categories/:id`
+- `GET /categories`
+- `POST /categories`
+
+**credit-limits**（3）
+
+- `DELETE /credit-limits/:id`
+- `GET /credit-limits`
+- `POST /credit-limits`
+
+**debts**（6）
+
+- `DELETE /debts/:id`
+- `GET /debts`
+- `GET /debts/:id/schedule`
+- `PATCH /debts/:id`
+- `POST /debts`
+- `POST /debts/:id/repay`
+
+**dunning-log**（3）
+
+- `DELETE /dunning-log/:id`
+- `GET /dunning-log`
+- `POST /dunning-log`
+
+**error-log**（2）
+
+- `DELETE /error-log`
+- `GET /error-log`
+
+**fixed**（3）
+
+- `DELETE /fixed/:id`
+- `GET /fixed`
+- `POST /fixed`
+
+**import-log**（3）
+
+- `DELETE /import-log/:id`
+- `GET /import-log`
+- `GET /import-log/:id`
+
+**invoices**（4）
+
+- `DELETE /invoices/:id`
+- `GET /invoices`
+- `PATCH /invoices/:id`
+- `POST /invoices`
+
+**ledger**（2）
+
+- `DELETE /ledger/:id`
+- `PATCH /ledger/:id`
+
+**loans**（5）
+
+- `DELETE /loans/:id`
+- `GET /loans`
+- `POST /loans`
+- `POST /loans/:id/reimburse`
+- `POST /loans/:id/return`
+
+**month-archive**（2）
+
+- `DELETE /month-archive/:month`
+- `GET /month-archive`
+
+**month-lock**（2）
+
+- `DELETE /month-lock/:month`
+- `POST /month-lock`
+
+**orders**（10）
+
+- `DELETE /orders/:id`
+- `GET /orders/:id/detail`
+- `GET /orders/:id/processes`
+- `PATCH /orders/:id`
+- `PATCH /orders/:id/progress`
+- `POST /orders`
+- `POST /orders/:id/apply-advance`
+- `POST /orders/:id/receive`
+- `POST /orders/:id/status`
+- `POST /orders/:id/writeoff`
+
+**party-terms**（4）
+
+- `DELETE /party-terms/:id`
+- `GET /party-terms`
+- `POST /party-terms`
+- `POST /party-terms/apply`
+
+**payables**（7）
+
+- `DELETE /payables/:id`
+- `GET /payables/:id/detail`
+- `PATCH /payables/:id`
+- `POST /payables`
+- `POST /payables/:id/apply-advance`
+- `POST /payables/:id/pay`
+- `POST /payables/:id/writeoff`
+
+**phrases**（3）
+
+- `DELETE /phrases/:id`
+- `GET /phrases`
+- `POST /phrases`
+
+**prepaids**（4）
+
+- `DELETE /prepaids/:id`
+- `GET /prepaids`
+- `PATCH /prepaids/:id`
+- `POST /prepaids`
+
+**profiles**（3）
+
+- `DELETE /profiles/:id`
+- `GET /profiles`
+- `POST /profiles`
+
+**recon-log**（4）
+
+- `DELETE /recon-log`
+- `DELETE /recon-log/:id`
+- `GET /recon-log`
+- `PATCH /recon-log/:id`
+
+**statement-log**（5）
+
+- `DELETE /statement-log/:id`
+- `GET /statement-log`
+- `POST /statement-log`
+- `POST /statement-log/:id/ack`
+- `POST /statement-log/:id/resolve`
+
+**transfers**（2）
+
+- `DELETE /transfers/:id`
+- `GET /transfers`
+
+**trash**（3）
+
+- `DELETE /trash/:id`
+- `GET /trash`
+- `POST /trash/:id/restore`
+
+**writeoffs**（2）
+
+- `DELETE /writeoffs/:id`
+- `GET /writeoffs`
+
+**collect-config**（2）
+
+- `GET /collect-config`
+- `POST /collect-config`
+
+**expenses**（2）
+
+- `GET /expenses`
+- `POST /expenses`
+
+**onboarding**（2）
+
+- `GET /onboarding`
+- `POST /onboarding/dismiss`
+
+**report-head**（2）
+
+- `GET /report-head`
+- `POST /report-head`
+
+**target**（2）
+
+- `GET /target`
+- `POST /target`
+
+**term-default**（2）
+
+- `GET /term-default`
+- `POST /term-default`
+
+**wx-config**（2）
+
+- `GET /wx-config`
+- `POST /wx-config`
+
+**auth**（3）
+
+- `POST /auth/change`
+- `POST /auth/setup`
+- `POST /auth/staff`
+
+**其它（单个接口）**（119）
+
+- `GET /`
+- `GET /accruals`
+- `GET /aging`
+- `GET /anomaly`
+- `GET /ap`
+- `GET /ar`
+- `GET /ar-summary`
+- `GET /audit-logs`
+- `GET /backup`
+- `GET /backup-get`
+- `GET /backup-list`
+- `POST /backup-to-notes`
+- `POST /bank-import`
+- `POST /book-name`
+- `GET /books`
+- `GET /break-even`
+- `GET /cashflow`
+- `GET /close-precheck`
+- `POST /cloud-backup`
+- `GET /collect-list`
+- `GET /compare`
+- `GET /contact-detail`
+- `GET /contacts`
+- `GET /credits`
+- `GET /dashboard`
+- `POST /db-clean`
+- `GET /db-stats`
+- `POST /detect-import`
+- `GET /dispute-book`
+- `GET /disputes`
+- `GET /due-schedule`
+- `GET /due-schedule-xlsx`
+- `GET /dunning`
+- `GET /dunning-effect`
+- `GET /dunning-month`
+- `GET /dunning-year`
+- `GET /export`
+- `GET /export-all`
+- `GET /export-xlsx`
+- `GET /flows`
+- `GET /forecast`
+- `GET /health-check`
+- `GET /history`
+- `POST /import`
+- `POST /import-all`
+- `POST /import-rows`
+- `GET /import-template`
+- `GET /import-template-xlsx`
+- `POST /import-undo/:id`
+- `POST /import-xlsx`
+- `GET /invoice-check`
+- `GET /kpi`
+- `GET /last-deal`
+- `GET /margin-by`
+- `GET /me`
+- `GET /month-archives`
+- `POST /month-close`
+- `GET /month-end`
+- `GET /month-locks`
+- `GET /month-pack`
+- `POST /month-pack-run`
+- `GET /month-report`
+- `GET /month-reports`
+- `GET /my-work`
+- `GET /networth`
+- `POST /parse-import`
+- `GET /party-groups`
+- `POST /pay-batch`
+- `GET /pay-speed`
+- `GET /pipeline`
+- `POST /pipeline-summary`
+- `GET /price-anomaly`
+- `GET /price-book`
+- `GET /price-lookup`
+- `GET /profit-compare`
+- `POST /quick`
+- `GET /receipt-text`
+- `POST /receive-batch`
+- `GET /recon-calendar`
+- `GET /recon-diff-text`
+- `GET /recon-dunning`
+- `POST /recon-fix`
+- `GET /recon-month`
+- `GET /recon-progress`
+- `POST /recon-save`
+- `POST /reconcile`
+- `GET /reminders`
+- `GET /report`
+- `GET /report-data`
+- `GET /report-link`
+- `GET /report-print`
+- `GET /report-view`
+- `POST /restore`
+- `GET /risk-list`
+- `POST /run-accrual`
+- `POST /run-amort`
+- `POST /run-fixed`
+- `GET /search`
+- `GET /selfcheck`
+- `GET /statement`
+- `GET /statement-link`
+- `GET /statement-month`
+- `GET /statement-pack`
+- `GET /statement-print`
+- `GET /suggest`
+- `GET /target-forecast`
+- `GET /target-history`
+- `GET /target-weeks`
+- `GET /track`
+- `GET /track-link`
+- `GET /track-log`
+- `POST /transfer`
+- `GET /trend`
+- `GET /weekly-text`
+- `POST /wx-login`
+- `GET /wx-status`
+- `POST /wx-subscribed`
+- `POST /wx-test`
+- `GET /year-summary`
+
+<!-- API-LIST:END -->

@@ -27,7 +27,7 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
-    role: 'owner', staff_enabled: false, cf: null,
+    role: 'owner', staff_enabled: false, cf: null, mw: null, help_open: false,
     prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
     month_amort: 0, month_accrue_int: 0, month_dep: 0, month_expense_cash: 0,
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
@@ -180,6 +180,7 @@ Page({
     this.loadTarget()
     this.loadPipeline()
     this.loadHealth()
+    this.loadMyWork()
     this.loadTermDefault()
     // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
     this.enterTab(this.data.tab)
@@ -2463,6 +2464,14 @@ Page({
   },
   onPbKw(e) { this.setData({ pb_kw: e.detail.value }) },
 
+  loadMyWork() {
+    this.req({
+      url: API_BASE + '/my-work',
+      success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ mw: d }) }
+    })
+  },
+  openHelp() { this.setData({ help_open: true }) },
+  closeHelp() { this.setData({ help_open: false }) },
   openDisputeBook(e) {
     const party = (e.currentTarget.dataset.party || '').trim()
     this.req({
