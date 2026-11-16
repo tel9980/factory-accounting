@@ -292,3 +292,12 @@ CREATE TABLE IF NOT EXISTS error_log (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_error_created ON error_log(created_at);
+
+-- 客户进度页查看留痕
+CREATE TABLE IF NOT EXISTS track_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT NOT NULL,
+  ua TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_track_log_party ON track_log(party);

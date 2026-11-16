@@ -1793,6 +1793,7 @@
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ar" data-name="{{item.name}}">打印版</button>
+            <button size="mini" bindtap="trackLink" data-name="{{item.name}}">发进度</button>
             <button size="mini" wx:if="{{role!='staff'}}" bindtap="setCreditLimit" data-name="{{item.name}}">设额度</button>
           </view>
         </view>

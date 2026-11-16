@@ -153,7 +153,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -205,6 +205,85 @@ app.get('/statement-link', async (c) => {
 })
 
 // A4 打印版对账单（电脑/手机浏览器打开 → Ctrl+P / 分享打印）
+// 客户进度页：一条只读链接，客户在微信里点开就能看自己的单做到哪了（不用登录）
+app.get('/track-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  if (!party) return c.json({ error: '缺少客户名' }, 400)
+  const t = await sigOf(saved, party, 'track')
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/track?party=' + encodeURIComponent(party) + '&t=' + t })
+})
+
+app.get('/track', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  const want = String(c.req.query('t') || '')
+  const good = saved && party ? await sigOf(saved, party, 'track') : ''
+  if (!good || want !== good) return c.html('<meta name="viewport" content="width=device-width,initial-scale=1"><div style="padding:24px;font-size:16px;line-height:1.8">链接已失效：请让对方在小程序里重新发一次进度链接。</div>')
+  const t = await getTitle(db)
+  const docs = await db.prepare('SELECT * FROM orders WHERE customer=? ORDER BY id DESC LIMIT 40').bind(party).all().then((r) => r.results)
+  const ids = docs.map((d) => d.id)
+  let pays = [], procs = []
+  if (ids.length) {
+    const ph = ids.map(() => '?').join(',')
+    pays = await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id IN (" + ph + ')').bind(...ids).all().then((r) => r.results).catch(() => [])
+    procs = await db.prepare("SELECT * FROM process_log WHERE order_id IN (" + ph + ') ORDER BY id DESC').bind(...ids).all().then((r) => r.results).catch(() => [])
+  }
+  const today = now().slice(0, 10)
+  const paidOf = (d) => pays.filter((p) => p.ref_id === d.id).reduce((a, p) => a + num(p.amount), 0)
+  const totalOpen = docs.reduce((a, d) => a + Math.max(0, num(d.price) - paidOf(d) - num(d.written_off)), 0)
+  const totalAll = docs.reduce((a, d) => a + num(d.price), 0)
+  const totalPaid = docs.reduce((a, d) => a + paidOf(d), 0)
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]))
+  const dnum = (a, b) => {
+    const da = new Date(String(a || '').slice(0, 10) + 'T00:00:00Z'), db2 = new Date(String(b || '').slice(0, 10) + 'T00:00:00Z')
+    return Math.round((db2 - da) / 86400000)
+  }
+  const rows = docs.map((d) => {
+    const paid = paidOf(d), left = Math.max(0, num(d.price) - paid - num(d.written_off))
+    const due = String(d.due_date || '').slice(0, 10)
+    let late = ''
+    if (left > 0 && due && dnum(due, today) > 0) late = '<span style="color:#c0392b">超 ' + dnum(due, today) + ' 天</span>'
+    const lastP = procs.find((x) => x.order_id === d.id)
+    const st = esc(d.status || '待加工')
+    const prog = lastP ? '<br><span style="color:#888;font-size:13px">' + esc(String(lastP.created_at || '').slice(5, 10)) + ' ' + esc(lastP.progress || '') + '</span>' : ''
+    return '<tr><td>' + esc(String(d.created_at || '').slice(5, 10)) + '</td><td>' + esc(d.item_name || '加工') +
+      '<br><span style="color:#2d6cdf;font-size:13px">' + st + '</span>' + prog + '</td>' +
+      '<td style="text-align:right">' + num(d.price) + (paid ? '<br><span style="color:#888;font-size:13px">已收 ' + paid + '</span>' : '') +
+      (left ? '<br><span style="color:#c0392b">未收 ' + round2(left) + ' ' + late + '</span>' : '<br><span style="color:#27ae60">已结清</span>') +
+      '</td></tr>'
+  }).join('')
+  const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>' + esc(t.title || '') + ' 进度</title><style>body{margin:0;background:#f4f5f7;font-family:-apple-system,"PingFang SC",sans-serif;color:#222}' +
+    '.wrap{max-width:640px;margin:0 auto;padding:14px}.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:10px}' +
+    'h1{font-size:17px;margin:0 0 4px}.sub{color:#888;font-size:13px}.big{font-size:26px;font-weight:700;color:#c0392b}' +
+    'table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 4px;border-bottom:1px solid #eee;vertical-align:top}' +
+    '.foot{color:#999;font-size:12px;text-align:center;padding:10px 0 24px}</style></head><body><div class="wrap">' +
+    '<div class="card"><h1>' + esc(party) + ' · 加工进度</h1><div class="sub">' + esc(t.title || '') + (t.phone ? ' · ' + esc(t.phone) : '') + '　更新于 ' + today + '</div></div>' +
+    '<div class="card"><div class="sub">还没收的钱</div><div class="big">¥' + round2(totalOpen) + '</div>' +
+    '<div class="sub">共 ' + docs.length + ' 单 · 合计 ¥' + round2(totalAll) + ' · 已收 ¥' + round2(totalPaid) + '</div></div>' +
+    '<div class="card"><table>' + (rows || '<tr><td>暂时没有单子</td></tr>') + '</table></div>' +
+    '<div class="foot">这是一条只读链接，看不到别的客户，也不能改账。<br>' + esc(t.title || '') + (t.addr ? ' · ' + esc(t.addr) : '') + '</div></div></body></html>'
+  // 留痕：谁什么时候看过
+  const ua = String(c.req.header('user-agent') || '').slice(0, 60)
+  await db.prepare('INSERT INTO track_log (party, ua, created_at) VALUES (?,?,?)').bind(party, ua, now()).run().catch(() => {})
+  return c.html(html)
+})
+
+app.get('/track-log', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const rows = party
+    ? await db.prepare('SELECT * FROM track_log WHERE party=? ORDER BY id DESC LIMIT 20').bind(party).all().then((r) => r.results)
+    : await db.prepare('SELECT * FROM track_log ORDER BY id DESC LIMIT 50').all().then((r) => r.results)
+  const agg = await db.prepare('SELECT party, COUNT(*) c, MAX(created_at) last FROM track_log GROUP BY party ORDER BY last DESC LIMIT 30').all().then((r) => r.results)
+  return c.json({ ok: true, rows, by_party: agg })
+})
+
 app.get('/statement-print', async (c) => {
   const db = c.env.DB
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
