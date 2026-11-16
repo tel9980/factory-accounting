@@ -1870,7 +1870,7 @@ app.get('/next-step', async (c) => {
   const total = num(c0.ar_soon) + num(c0.ap_soon) + num(c0.no_cost) + num(c0.recon_open) + num(u0.ar_n) + num(u0.ap_n)
   return c.json({
     ok: true, today, item: top,
-    others: cand.slice(1, 4).map((x) => ({ k: x.k, title: x.title, tab: x.tab })),
+    others: cand.slice(1, 6).map((x) => ({ k: x.k, title: x.title, why: x.why, tab: x.tab, amount: x.amount })),
     rest: Math.max(cand.length - 1, 0),
     text: top ? `现在先做这一件：${top.title}——${top.why}` : (total === 0 ? '今天没有必须处理的事，有空把今天的单记上就行。' : '没有急事，往下翻有别的提醒。')
   })

@@ -134,7 +134,7 @@
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
     <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="card" wx:if="{{ns || (mw && mw.count>0)}}">
-      <view class="card-h">今天的活<text class="card-n" wx:if="{{ns.rest>0}}" bindtap="showNextAll">还有 {{ns.rest}} 件 ›</text></view>
+      <view class="card-h">今天的活<text class="card-n" wx:if="{{ns.rest>0}}" bindtap="toggleNextAll">{{ns_open ? '收起' : '还有 ' + ns.rest + ' 件 ›'}}</text></view>
       <view class="mwrow pri" wx:if="{{ns && ns.item}}" bindtap="goNext">
         <text class="mwdot blue">急</text>
         <view class="mwmain2">
@@ -143,6 +143,17 @@
         </view>
         <text class="mwside">去做 ›</text>
       </view>
+      <block wx:if="{{ns_open && ns.others.length}}">
+        <view class="ns-alltip">按急慢排好了，点哪条就去哪页办</view>
+        <view class="mwrow nso" wx:for="{{ns.others}}" wx:key="k" bindtap="goNextItem" data-i="{{index}}">
+          <text class="mwdot blue">{{index + 2}}</text>
+          <view class="mwmain2">
+            <text class="ns-t2">{{item.title}}</text>
+            <text class="ns-w2">{{item.why}}</text>
+          </view>
+          <text class="mwside">去办 ›</text>
+        </view>
+      </block>
       <view class="mwrow" wx:if="{{(!mw || !mw.count) && ns && !ns.item}}">
         <text class="mwdot">☕</text>
         <text class="mwmain">{{ns.text}}</text>
