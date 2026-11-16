@@ -1390,6 +1390,30 @@ const headInfo = async (db) => {
     return { title: g('report_title') || '加工费记账', note: g('report_note') }
   } catch (e) { return { title: '加工费记账', note: '' } }
 }
+// 对方档案（联系人/电话/地址/备注）——对账单、收据上带出来
+const profLine = async (db, party) => {
+  try {
+    const p = await db.prepare('SELECT * FROM party_profiles WHERE party=?').bind(String(party || '')).first()
+    if (!p) return ''
+    const bits = []
+    if (p.contact) bits.push('联系人 ' + p.contact)
+    if (p.phone) bits.push('电话 ' + p.phone)
+    if (p.addr) bits.push('地址 ' + p.addr)
+    if (p.note) bits.push(p.note)
+    return bits.length ? bits.join('　') : ''
+  } catch (e) { return '' }
+}
+// 把档案行插到「期初/共 N 笔」之前，标题之后
+const stampWithProf = async (db, party, lines) => {
+  const arr = lines.slice()
+  const pf = await profLine(db, party)
+  if (pf) {
+    let at = arr.findIndex((x) => /^(期初|共 \d+ 笔|本月新增)/.test(String(x)))
+    if (at < 0) at = Math.min(1, arr.length)
+    arr.splice(at, 0, pf)
+  }
+  return arr.join('\n')
+}
 const titled = async (db, rest) => {
   const h = await headInfo(db)
   const out = [`【${h.title}】${rest}`]
@@ -3185,7 +3209,7 @@ app.get('/statement', async (c) => {
     })
     lines.push(`合计欠款：${round2(total)} 元`)
   }
-  return c.json({ text: lines.join('\n') })
+  return c.json({ text: await stampWithProf(db, name, lines) })
 })
 
 // 收/付款收据文本（给客户/供应商看的凭证，可存成图片）
@@ -3274,7 +3298,7 @@ app.get('/statement-month', async (c) => {
       recv.forEach((r) => lines.push(`${String(r.created_at).slice(5, 10)} 收 ${round2(num(r.amount))}${r.acc ? '（' + r.acc + '）' : ''}`))
     }
     lines.push(`—— 制表日期 ${now().slice(0, 10)}`)
-    return c.json({ text: lines.join('\n'), month: m, name, type: 'ar', open: round2(open), inc: round2(cur), inc_cnt: curCnt, got: round2(num(got.t)), end: round2(end) })
+    return c.json({ text: await stampWithProf(db, name, lines), month: m, name, type: 'ar', open: round2(open), inc: round2(cur), inc_cnt: curCnt, got: round2(num(got.t)), end: round2(end) })
   } else {
     const { results: pays } = await db.prepare('SELECT * FROM payables WHERE supplier=? ORDER BY id').bind(name).all()
     let open = 0, cur = 0, curCnt = 0
@@ -3305,7 +3329,7 @@ app.get('/statement-month', async (c) => {
       payRec.forEach((r) => lines.push(`${String(r.created_at).slice(5, 10)} 付 ${round2(num(r.amount))}${r.acc ? '（' + r.acc + '）' : ''}`))
     }
     lines.push(`—— 制表日期 ${now().slice(0, 10)}`)
-    return c.json({ text: lines.join('\n'), month: m, name, type: 'ap', open: round2(open), inc: round2(cur), inc_cnt: curCnt, got: round2(num(paid.t)), end: round2(end) })
+    return c.json({ text: await stampWithProf(db, name, lines), month: m, name, type: 'ap', open: round2(open), inc: round2(cur), inc_cnt: curCnt, got: round2(num(paid.t)), end: round2(end) })
   }
   return c.json({ error: '类型不对，只能是 ar 或 ap' }, 400)
 })
@@ -3620,9 +3644,30 @@ app.get('/dunning-log', async (c) => {
     if (!s2.last || String(r.created_at) > s2.last) s2.last = String(r.created_at)
   }
   const monthCount = (await db.prepare("SELECT COUNT(*) n FROM dunning_log WHERE substr(created_at,1,7)=?").bind(now().slice(0, 7)).first()).n
+  // 每家现在还欠多少（判断「答应付款的日子过了还没付」）
+  const unpaid = {}
+  try {
+    const ar = (await db.prepare('SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer').all()).results || []
+    const ap = (await db.prepare('SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier').all()).results || []
+    for (const r of ar.concat(ap)) unpaid[norm(r.party)] = round2(num(unpaid[norm(r.party)]) + num(r.t))
+  } catch (e) {}
+  const today = now().slice(0, 10)
+  const withState = rows.map((r) => {
+    const d = String(r.created_at || '').slice(0, 10)
+    const pr = String(r.promise_date || '').slice(0, 10)
+    const left = round2(num(unpaid[norm(r.party)]))
+    let pstate = 'none'
+    if (pr) {
+      if (left <= 0.005) pstate = 'kept'
+      else if (pr < today) pstate = 'broken'
+      else pstate = 'pending'
+    }
+    return { ...r, date: d, days: daysSince(r.created_at), promise_date: pr, promise_left: pr ? round2(dayDiff(pr)) : null, left, pstate }
+  })
   return c.json({
     ok: true, count: rows.length, month_count: num(monthCount),
-    rows: rows.map((r) => ({ ...r, date: String(r.created_at || '').slice(0, 10), days: daysSince(r.created_at) })),
+    broken_count: withState.filter((x) => x.pstate === 'broken').length,
+    rows: withState,
     parties: Object.keys(stat).map((k) => ({ party: k, times: stat[k].times, last: stat[k].last.slice(0, 10), days_since: daysSince(stat[k].last) })).sort((a, b) => b.times - a.times)
   })
 })
@@ -3632,9 +3677,10 @@ app.post('/dunning-log', async (c) => {
   const party = String(b.party || '').trim()
   if (!party) return c.json({ error: '要写清楚催的是哪一家' }, 400)
   const type = b.type === 'ap' ? 'ap' : 'ar'
-  await db.prepare('INSERT INTO dunning_log (party,type,channel,note,created_at) VALUES (?,?,?,?,?)')
-    .bind(party, type, String(b.channel || '微信').slice(0, 10), String(b.note || '').slice(0, 100), now()).run()
-  await logAudit(db, 'dunning', party, '催款：' + (String(b.note || '').slice(0, 30) || '已催'))
+  const pdate = toIsoDate(b.promise_date) || null
+  await db.prepare('INSERT INTO dunning_log (party,type,channel,note,promise_date,created_at) VALUES (?,?,?,?,?,?)')
+    .bind(party, type, String(b.channel || '微信').slice(0, 10), String(b.note || '').slice(0, 100), pdate, now()).run()
+  await logAudit(db, 'dunning', party, '催款：' + (String(b.note || '').slice(0, 30) || '已催') + (pdate ? '，答应 ' + pdate.slice(5) + ' 付' : ''))
   return c.json({ ok: true })
 })
 app.delete('/dunning-log/:id', async (c) => {
@@ -5563,6 +5609,19 @@ app.get('/reminders', async (c) => {
     const rl = await db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(cm).first()
     if (num(rl.n) === 0 && num(now().slice(8, 10)) >= 10) push('gray', `${cm.slice(5)} 月还没和客户/供应商对过账`, 'import')
   }
+  // 答应付款的日子过了还没付
+  try {
+    const br = await db.prepare("SELECT d.party, d.promise_date, d.note FROM dunning_log d WHERE d.promise_date IS NOT NULL AND d.promise_date < ? AND d.id = (SELECT MAX(x.id) FROM dunning_log x WHERE x.party=d.party AND x.promise_date IS NOT NULL)").bind(today).all()
+    const arLeft = (await db.prepare('SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer').all()).results || []
+    const apLeft = (await db.prepare('SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier').all()).results || []
+    const lmap = {}
+    for (const r of arLeft.concat(apLeft)) lmap[norm(r.party)] = round2(num(lmap[norm(r.party)]) + num(r.t))
+    const brokenRows = (br.results || []).filter((x) => num(lmap[norm(x.party)]) > 0.005)
+    if (brokenRows.length) {
+      const sum = round2(brokenRows.reduce((a, x) => a + num(lmap[norm(x.party)]), 0))
+      push('red', `${brokenRows.length} 家答应付的日子过了还没付（共 ¥${sum}）`, 'ar', brokenRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
+    }
+  } catch (e) {}
   // 欠了很久又一直没催过的家
   try {
     const mc = await db.prepare("SELECT value FROM settings WHERE key='collect_min_days'").first()

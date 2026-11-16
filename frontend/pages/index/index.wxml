@@ -244,7 +244,18 @@
         <view class="frow">
           <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
           <button class="btn ghost" size="mini" bindtap="makeCollectImage">🖼 存成图片发微信</button>
+          <button class="btn ghost" size="mini" bindtap="openDunLog" data-type="{{collect.type}}">📋 催款台账</button>
           <button class="btn ghost" size="mini" bindtap="closeCollect">收起</button>
+        </view>
+        <view class="prev" wx:if="{{dun_log}}">
+          <view class="prev-h">催款台账{{dun_log.type=='ap' ? '（应付）' : '（应收）'}}　共 {{dun_log.count}} 条　本月 {{dun_log.month_count}} 条{{dun_log.broken_count>0 ? '　失约 ' + dun_log.broken_count + ' 次' : ''}}</view>
+          <view class="prev-row" wx:for="{{dun_log.rows}}" wx:key="id">
+            <text class="prev-t">{{item.date}} · {{item.party}}</text>
+            <text class="prev-n">{{item.note || '已催'}}{{item.promise_date ? '　答应 ' + item.promise_date + ' 付' : ''}}{{item.pstate_text ? '（' + item.pstate_text + '）' : ''}}</text>
+            <text class="red" catchtap="delDunLog" data-id="{{item.id}}">删</text>
+          </view>
+          <view class="frow"><button class="btn ghost" size="mini" bindtap="closeDunLog">收起台账</button></view>
+          <view class="tip">催完一家马上记一笔，系统记得「催过几次、上次哪天、答应哪天付」；答应的日子过了还没付，首页会单独提醒。</view>
         </view>
         <view class="tip">点某一家 = 只复制那家的话；「存成图片」= 生成一张提醒卡，微信里可以直接转发给对方。</view>
       </view>
@@ -411,7 +422,18 @@
         <view class="frow">
           <button class="btn" size="mini" bindtap="copyCollectAll">📋 全部复制</button>
           <button class="btn ghost" size="mini" bindtap="makeCollectImage">🖼 存成图片发微信</button>
+          <button class="btn ghost" size="mini" bindtap="openDunLog" data-type="{{collect.type}}">📋 催款台账</button>
           <button class="btn ghost" size="mini" bindtap="closeCollect">收起</button>
+        </view>
+        <view class="prev" wx:if="{{dun_log}}">
+          <view class="prev-h">催款台账{{dun_log.type=='ap' ? '（应付）' : '（应收）'}}　共 {{dun_log.count}} 条　本月 {{dun_log.month_count}} 条{{dun_log.broken_count>0 ? '　失约 ' + dun_log.broken_count + ' 次' : ''}}</view>
+          <view class="prev-row" wx:for="{{dun_log.rows}}" wx:key="id">
+            <text class="prev-t">{{item.date}} · {{item.party}}</text>
+            <text class="prev-n">{{item.note || '已催'}}{{item.promise_date ? '　答应 ' + item.promise_date + ' 付' : ''}}{{item.pstate_text ? '（' + item.pstate_text + '）' : ''}}</text>
+            <text class="red" catchtap="delDunLog" data-id="{{item.id}}">删</text>
+          </view>
+          <view class="frow"><button class="btn ghost" size="mini" bindtap="closeDunLog">收起台账</button></view>
+          <view class="tip">催完一家马上记一笔，系统记得「催过几次、上次哪天、答应哪天付」；答应的日子过了还没付，首页会单独提醒。</view>
         </view>
         <view class="tip">点某一家 = 只复制那家的话；「存成图片」= 生成一张提醒卡，微信里可以直接转发给对方。</view>
       </view>

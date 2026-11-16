@@ -75,7 +75,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '',
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null,
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -2510,10 +2510,50 @@ Page({
       title: '记一笔催款：' + party, editable: true, placeholderText: '说了什么？（例：他说月底结，已答应）',
       success: (r) => {
         if (!r.confirm) return
-        this.req({
-          url: API_BASE + '/dunning-log', method: 'POST', data: { party, type, note: r.content || '' },
-          success: () => { wx.showToast({ title: '记下了', icon: 'success' }); const c = this.data.collect; if (c) this.openCollect(c.type) }
+        const note = r.content || ''
+        // 第二步：他说哪天付（答应付款日）
+        wx.showActionSheet({
+          itemList: ['没答应具体日子', '今天', '3 天后', '7 天后', '月底'],
+          success: (r2) => {
+            const d = new Date()
+            let pd = ''
+            if (r2.tapIndex === 1) pd = d.toISOString().slice(0, 10)
+            else if (r2.tapIndex === 2) pd = new Date(d.getTime() + 3 * 86400000).toISOString().slice(0, 10)
+            else if (r2.tapIndex === 3) pd = new Date(d.getTime() + 7 * 86400000).toISOString().slice(0, 10)
+            else if (r2.tapIndex === 4) pd = new Date(Date.UTC(d.getFullYear(), d.getMonth() + 1, 0)).toISOString().slice(0, 10)
+            this.req({
+              url: API_BASE + '/dunning-log', method: 'POST', data: { party, type, note, promise_date: pd },
+              success: () => {
+                wx.showToast({ title: pd ? '记下了，答应 ' + pd.slice(5) + ' 付' : '记下了', icon: 'none' })
+                const c = this.data.collect; if (c) this.openCollect(c.type)
+                if (this.data.dun_log) this.openDunLog(type)
+              }
+            })
+          }
         })
+      }
+    })
+  },
+  openDunLog(type) {
+    const t = type || (this.data.dun_log && this.data.dun_log.type) || 'ar'
+    this.req({
+      url: API_BASE + '/dunning-log?type=' + t,
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return
+        const st = { none: '', pending: '还没到日子', broken: '过了日子没付', kept: '已经付了' }
+        this.setData({ dun_log: { type: t, count: d.count, month_count: d.month_count, broken_count: d.broken_count, rows: (d.rows || []).map((x) => Object.assign({}, x, { pstate_text: st[x.pstate] || '' })) } })
+      }
+    })
+  },
+  closeDunLog() { this.setData({ dun_log: null }) },
+  delDunLog(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删掉这条催款记录？', content: '删了就不算催过（催款清单里会重新出现）',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/dunning-log/' + id, method: 'DELETE', success: () => { if (this.data.dun_log) this.openDunLog(this.data.dun_log.type) } })
       }
     })
   },

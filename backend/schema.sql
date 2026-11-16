@@ -262,3 +262,6 @@ CREATE TABLE IF NOT EXISTS party_profiles (
 -- 催款记录（哪天跟谁催过）
 CREATE TABLE IF NOT EXISTS dunning_log (id INTEGER PRIMARY KEY AUTOINCREMENT, party TEXT, type TEXT, channel TEXT, note TEXT, created_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_dunning_party ON dunning_log(party);
+
+-- 催款时对方答应的付款日（答应 X 日付，过了没付就提醒）
+ALTER TABLE dunning_log ADD COLUMN promise_date TEXT;
