@@ -242,3 +242,16 @@
 .tbar-in { height: 26rpx; background: #2f6fed; border-radius: 6rpx; }
 .tbar-in.bad { background: #e53935; }
 .tval { width: 130rpx; text-align: right; }
+
+/* 本月财务流程（流水线） */
+.pipe-row { display:flex; align-items:center; padding:10rpx 0; border-bottom:1rpx solid #f2f2f2; }
+.pipe-row:last-child { border-bottom:none; }
+.pipe-dot { width:40rpx; height:40rpx; line-height:40rpx; text-align:center; border-radius:20rpx; background:#eef1f5; color:#8a94a6; font-size:24rpx; margin-right:14rpx; }
+.pipe-row.done .pipe-dot { background:#e6f7ec; color:#18a05a; }
+.pipe-row.now .pipe-dot { background:#fff2dd; color:#e08a12; }
+.pipe-body { flex:1; }
+.pipe-t { font-size:28rpx; color:#222; }
+.pipe-row.done .pipe-t { color:#8a94a6; }
+.pipe-d { font-size:23rpx; color:#8a94a6; margin-top:2rpx; }
+.pipe-a { font-size:24rpx; color:#2b6cf6; }
+.pipe-row.done .pipe-a { color:#c8ccd4; }

@@ -1099,8 +1099,16 @@ app.post('/recon-fix', async (c) => {
   const imported = round2(num(b.imported))
   const system = round2(num(b.system))
   const state = String(b.state || (mode === 'add' ? 'more' : 'match'))
-  await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)')
-    .bind(month, type, party, imported, system, round2(imported - system), state, mode === 'add' ? `补记 ${amount} 元` : '核对过，不补记', now()).run()
+  const note = mode === 'add' ? `补记 ${amount} 元` : '核对过，不补记'
+  // 已经有这家待处理的核对记录就把它改成已处理，不重复堆一条
+  const old = await db.prepare('SELECT id FROM recon_log WHERE month=? AND type=? AND party=? AND done=0 ORDER BY id DESC').bind(month, type, party).first()
+  if (old) {
+    await db.prepare('UPDATE recon_log SET imported=?, system=?, diff=?, state=?, done=1, note=? WHERE id=?')
+      .bind(imported, system, round2(imported - system), state, note, old.id).run()
+  } else {
+    await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)')
+      .bind(month, type, party, imported, system, round2(imported - system), state, note, now()).run()
+  }
   return c.json({ ok: true, id: newId, mode, party, amount, month, type })
 })
 
@@ -1173,6 +1181,63 @@ app.get('/recon-month', async (c) => {
   const m = (c.req.query('month') || now().slice(0, 7)).slice(0, 7)
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   return c.json(await reconMonthStat(c.env.DB, m, type))
+})
+
+// 每月财务流水线：这个月做到哪一步了（小白照着走不会漏）
+app.get('/pipeline', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  const J = (sql, ...b) => db.prepare(sql).bind(...b).first()
+  const [ord, pay, expN, rl, lock, arch, sumRow] = await Promise.all([
+    J('SELECT COUNT(*) c, COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=?', m),
+    J('SELECT COUNT(*) c, COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=?', m),
+    J("SELECT COUNT(*) c FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND substr(created_at,1,7)=?", m),
+    J('SELECT COUNT(*) c, COUNT(DISTINCT party) p, SUM(CASE WHEN done=1 THEN 1 ELSE 0 END) d, SUM(CASE WHEN done=0 AND state<>\'match\' THEN 1 ELSE 0 END) o, SUM(CASE WHEN state<>\'match\' THEN 1 ELSE 0 END) df FROM recon_log WHERE month=?', m),
+    J('SELECT COUNT(*) c FROM month_lock WHERE month=?', m),
+    J('SELECT COUNT(*) c FROM month_archive WHERE month=?', m),
+    db.prepare("SELECT value FROM settings WHERE key='pipeline_summary'").first()
+  ])
+  const oc = num(ord && ord.c), pc = num(pay && pay.c), ec = num(expN && expN.c)
+  const rc = num(rl && rl.c), rp = num(rl && rl.p), rd = num(rl && rl.d), ro = num(rl && rl.o), rdf = num(rl && rl.df)
+  const locked = num(lock && lock.c) > 0 || num(arch && arch.c) > 0
+  const summed = String((sumRow && sumRow.value) || '') === m
+  const steps = [
+    { k: 'bill', no: 1, title: '把单子录进来', tab: 'ar',
+      done: oc + pc + ec > 0,
+      detail: `应收 ${oc} 笔 / 应付 ${pc} 笔 / 支出 ${ec} 笔`,
+      tip: '手工录、粘贴导入、Excel 导入都算' },
+    { k: 'recon', no: 2, title: '和客户供应商对账', tab: 'import',
+      done: rc > 0,
+      detail: rc > 0 ? `对过 ${rp} 家（一致 ${rc - rdf} / 有差异 ${rdf}）` : '这个月还没对过账',
+      tip: '导入页粘对账单 → 点对账核对' },
+    { k: 'diff', no: 3, title: '把差异处理掉', tab: 'import',
+      done: rc > 0 && ro === 0,
+      detail: rc === 0 ? '先做第 2 步' : (ro > 0 ? `还有 ${ro} 家没处理完` : '差异都处理完了 ✓'),
+      tip: '差异可以直接补记一笔，或标记「不用补」' },
+    { k: 'summary', no: 4, title: '出一页月度小结', tab: 'report',
+      done: summed,
+      detail: summed ? `${m} 的小结已出` : '还没出',
+      tip: '给老板/自己留档，也能直接发微信' },
+    { k: 'close', no: 5, title: '结账归档', tab: 'report',
+      done: locked,
+      detail: locked ? `${m} 已结账，单据锁定` : '这个月还没结账',
+      tip: '结完账当月单据不能再改，出错可解锁' }
+  ]
+  const done_count = steps.filter((x) => x.done).length
+  const next = steps.find((x) => !x.done) || null
+  const advice = locked ? `${m} 已结账，下个月接着从第 1 步走`
+    : next ? `下一步：${next.no}. ${next.title}（${next.tip}）`
+    : '这个月流程走完了，可以结账'
+  return c.json({ ok: true, month: m, steps, done_count, total: steps.length, percent: Math.round(done_count * 100 / steps.length), locked, next_key: next ? next.k : '', advice })
+})
+
+// 出了月度小结就打一个勾（流水线第 4 步）
+app.post('/pipeline-summary', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const m = String((b && b.month) || now().slice(0, 7)).slice(0, 7)
+  const db = c.env.DB
+  await db.prepare("INSERT INTO settings (key,value) VALUES ('pipeline_summary',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(m).run()
+  return c.json({ ok: true, month: m })
 })
 
 app.get('/recon-log', async (c) => {

@@ -54,6 +54,19 @@
       </view>
       <view class="ob-x" catchtap="onbDismiss">不再提示</view>
     </view>
+    <view class="card pipe" wx:if="{{pipe}}">
+      <view class="card-h">本月财务流程<text class="card-n">{{pipe.done_count}}/{{pipe.total}}</text></view>
+      <view class="goalbar"><view class="goalbar-in {{pipe.done_count>=pipe.total?'done':''}}" style="width:{{pipe.percent}}%"></view></view>
+      <view class="pipe-row {{item.done?'done':''}} {{pipe.next_key==item.k?'now':''}}" wx:for="{{pipe.steps}}" wx:key="k" bindtap="pipeGo" data-tab="{{item.tab}}">
+        <text class="pipe-dot">{{item.done?'✓':item.no}}</text>
+        <view class="pipe-body">
+          <view class="pipe-t">{{item.title}}</view>
+          <view class="pipe-d">{{item.detail}}</view>
+        </view>
+        <text class="pipe-a">{{item.done?'':'去办 ›'}}</text>
+      </view>
+      <view class="tip">{{pipe.advice}}</view>
+    </view>
     <view class="card" wx:if="{{rem_items.length}}">
       <view class="card-h">今天要做的事<text class="card-n">{{rem_items.length}}</text></view>
       <view wx:for="{{rem_items}}" wx:key="text" wx:for-item="ri">
