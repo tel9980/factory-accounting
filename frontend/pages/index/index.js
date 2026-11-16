@@ -689,7 +689,8 @@ Page({
     if (!a_party || !(Number(a_amount) > 0)) return wx.showToast({ title: '名称和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/advances', method: 'POST',
-      data: { type: adv_type, party: a_party, amount: Number(a_amount), remark: a_remark, account_id: this.data.acc_id },
+      data: { type: adv_type, party: a_party, amount: Number(a_amount), remark: a_remark, account_id: this.data.acc_id, client_id: this.newCid() },
+      queue: '记预收款/预付款',
       success: () => { this.setData({ a_party: '', a_amount: '', a_remark: '' }); this.refresh() }
     })
   },
@@ -699,7 +700,8 @@ Page({
     if (!a_party || !(Number(a_amount) > 0)) return wx.showToast({ title: '名称和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/advances', method: 'POST',
-      data: { type: 'out', party: a_party, amount: Number(a_amount), remark: a_remark, account_id: this.data.acc_id },
+      data: { type: 'out', party: a_party, amount: Number(a_amount), remark: a_remark, account_id: this.data.acc_id, client_id: this.newCid() },
+      queue: '记预收款/预付款',
       success: () => { this.setData({ a_party: '', a_amount: '', a_remark: '' }); this.refresh() }
     })
   },

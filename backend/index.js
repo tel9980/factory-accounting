@@ -2307,13 +2307,16 @@ app.get('/advances', async (c) => {
 })
 
 app.post('/advances', async (c) => {
-  const { type, party, amount, remark, account_id, date } = await c.req.json()
+  const body = await c.req.json()
+  const { type, party, amount, remark, account_id, date } = body
   const t = type === 'out' ? 'out' : 'in'
   const nm = String(party || '').trim()
   const a = num(amount)
   if (!nm) return c.json({ error: t === 'in' ? '客户名称必填' : '供应商名称必填' }, 400)
   if (a <= 0) return c.json({ error: '金额必须大于 0' }, 400)
   const db = c.env.DB
+  const cid = String(body.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   const acc = num(account_id) || (await defaultAccountId(db))
   const created = normDate(date)
@@ -2322,6 +2325,7 @@ app.post('/advances', async (c) => {
   const aid = r.meta && r.meta.last_row_id ? r.meta.last_row_id : 0
   await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES (?,?,?,?,?,?,?,1,?)")
     .bind(t === 'in' ? 'in' : 'out', 'advance', aid, a, t === 'in' ? '预收款' : '预付款', `${t === 'in' ? '收预收' : '付预付'} ${nm}${remark ? ' ' + remark : ''}`, acc, created).run()
+  await opMark(db, cid, 'advance', aid)
   await logAudit(db, t === 'in' ? '收预收款' : '付预付款', nm, `${nm} ¥${a}`)
   return c.json({ ok: true, id: aid })
 })
@@ -8050,11 +8054,12 @@ app.get('/reminders', async (c) => {
     db.prepare("SELECT o.customer AS party, COUNT(*) n, COALESCE(SUM(o.price-o.paid-COALESCE(o.written_off,0)),0) t FROM orders o WHERE o.price-o.paid-COALESCE(o.written_off,0) > 0 AND substr(o.created_at,1,10) <= date(?, '-" + minD + " day') AND NOT EXISTS (SELECT 1 FROM dunning_log d WHERE d.party=o.customer AND substr(d.created_at,1,10) >= date(?, '-7 day')) GROUP BY o.customer ORDER BY t DESC").bind(today, today).all(),
     db.prepare('SELECT party, MAX(created_at) last_at FROM recon_log GROUP BY party').all(),
     db.prepare("SELECT COUNT(*) n FROM (SELECT 1 FROM orders WHERE paid + COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='') UNION ALL SELECT 1 FROM payables WHERE paid + COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date=''))").first(),
-    db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
+    db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null),
+    db.prepare('SELECT type, party, (amount - COALESCE(used,0)) AS remain, created_at FROM advances WHERE amount - COALESCE(used,0) > 0.005 ORDER BY created_at').all()
   ]
   const R = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e); return null })))
   const rows0 = (x) => ((x && x.results) || [])
-  const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm] = R
+  const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm, advRows] = R
   const items = []
   const push = (level, text, tab, list) => items.push({ level, text, tab, list: list || [] })
   const odR = rows0(od)
@@ -8079,6 +8084,31 @@ app.get('/reminders', async (c) => {
   if (num(iv && iv.n) > 0) push('gray', `${num(iv.n)} 张已收款的单还没开发票`, 'nw')
   // 新用户最容易漏：没设账期 → 未结单没有到期日 → 到期提醒、逾期榜都是空的
   if (num(noDue && noDue.n) > 0 && num(dterm && dterm.value) === 0) push('yellow', `${num(noDue.n)} 张单还没到期日（设个默认账期就会自动算）`, 'me')
+  // 预收款/预付款：钱先动了、活还没抵 —— 这类最容易过期作废或忘记催
+  try {
+    const advAll = rows0(advRows)
+    // 按「家」合并（同一家可能收了多笔），天数取该家最早那笔
+    const grp = (t) => {
+      const m = {}
+      for (const r of advAll.filter((x) => x.type === t && num(x.remain) > 0.005)) {
+        const k = norm(r.party)
+        const o = m[k] || (m[k] = { party: r.party || '', amount: 0, days: 0 })
+        o.amount = round2(o.amount + num(r.remain))
+        o.days = Math.max(o.days, daysSince(r.created_at))
+      }
+      const rs = Object.values(m).sort((x, y) => y.days - x.days)
+      return { n: rs.length, sum: round2(rs.reduce((a, r) => a + r.amount, 0)), oldest: rs.length ? rs[0].days : 0, rs }
+    }
+    const ai = grp('in'), ao = grp('out')
+    if (ai.n > 0 && ai.oldest >= 30) {
+      push('yellow', `${ai.n} 家客户先给了钱还没抵（共 ¥${ai.sum}），最早 ${ai.oldest} 天前`, 'me',
+        ai.rs.slice(0, 3).map((r) => ({ party: r.party, amount: r.amount, note: r.days ? `${r.days} 天前收的` : '今天收的' })))
+    }
+    if (ao.n > 0 && ao.oldest >= 15) {
+      push('yellow', `${ao.n} 家预付款付了料还没到（共 ¥${ao.sum}），最早 ${ao.oldest} 天前`, 'me',
+        ao.rs.slice(0, 3).map((r) => ({ party: r.party, amount: r.amount, note: r.days ? `${r.days} 天前付的` : '今天付的' })))
+    }
+  } catch (e) {}
   // 对账：有差异没处理优先提醒，其次「这个月还没对过账」
   if (num(ro && ro.n) > 0) {
     const lst = rows0(await db.prepare("SELECT party, type, diff FROM recon_log WHERE done=0 AND state<>'match' ORDER BY id DESC LIMIT 3").all())
