@@ -1408,6 +1408,37 @@
     </view>
 
     <view class="form">
+      <view class="tip">💰 现金流水账（这个月钱怎么变的：月初多少、进多少、出多少、月底多少）</view>
+      <view class="frow">
+        <input class="inp" placeholder="月份 YYYY-MM（留空本月）" value="{{cb_month}}" bindinput="onCbMonth" bindconfirm="loadCashbook"/>
+        <button class="btn half" size="mini" bindtap="loadCashbook">看现金账</button>
+      </view>
+      <block wx:if="{{cb}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{cb.month}} 合计</text><text class="amt">月底 ¥{{cb.total_end}}</text></view>
+          <view class="row2">月初 {{cb.total_open}} · 进 {{cb.total_in}} · 出 {{cb.total_out}}</view>
+          <view class="item" wx:for="{{cb.rows}}" wx:key="id">
+            <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.neg?'red':''}}">¥{{item.end}}</text></view>
+            <view class="row2">月初 {{item.opening}} · 进 {{item.income}} · 出 {{item.outgo}}</view>
+          </view>
+        </view>
+        <view class="box" wx:if="{{cb.cats.length}}">
+          <view class="tip">本月花在哪些地方</view>
+          <view class="row2" wx:for="{{cb.cats}}" wx:key="k">{{item.k}} ¥{{item.s}}</view>
+        </view>
+        <view class="box" wx:if="{{cb.bigs.length}}">
+          <view class="tip">大额支出（≥{{cb.big}}）</view>
+          <view class="item" wx:for="{{cb.bigs}}" wx:key="id">
+            <view class="row1"><text class="nm">{{item.date}} {{item.category || item.remark || '支出'}}</text><text class="amt">¥{{item.amount}}</text></view>
+            <view class="row2" wx:if="{{item.remark && item.category}}">{{item.remark}}</view>
+          </view>
+        </view>
+        <view class="box" wx:if="{{cb.issues.length}}">
+          <view class="tip">对不上的地方</view>
+          <view class="aline" wx:for="{{cb.issues}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
+      </block>
       <view class="tip">🏷 价格表（从历史单据自动提炼「客户 × 产品」的成交价，录单时会自动带出来）</view>
       <view class="frow">
         <input class="inp half" placeholder="客户或产品（可选）" value="{{pb_kw}}" bindinput="onPbKw" bindconfirm="loadPriceBook"/>

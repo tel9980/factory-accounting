@@ -3873,6 +3873,68 @@ app.get('/audit-logs', async (c) => {
 
 // 对账单（按单位）
 // 一句话对账：某家到底欠我多少（截至今天，含未结清单、争议、对账进度）
+// 现金流水账：这个月钱怎么变的（按账户列期初/进/出/期末 + 大额 + 对不上检查）
+app.get('/cashbook', async (c) => {
+  const db = c.env.DB
+  const m = (c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  const big = num(c.req.query('big')) || 5000
+  const accounts = await accountBalances(db)
+  const { results: flow } = await db.prepare(
+    "SELECT COALESCE(NULLIF(account_id,0),0) AS acc, direction, SUM(amount) AS s FROM ledger WHERE cash=1 AND substr(created_at,1,7)<=? GROUP BY acc, direction"
+  ).bind(m).all()
+  const { results: before } = await db.prepare(
+    "SELECT COALESCE(NULLIF(account_id,0),0) AS acc, direction, SUM(amount) AS s FROM ledger WHERE cash=1 AND substr(created_at,1,7)<? GROUP BY acc, direction"
+  ).bind(m).all()
+  const { results: monthAgg } = await db.prepare(
+    "SELECT COALESCE(NULLIF(account_id,0),0) AS acc, direction, SUM(amount) AS s FROM ledger WHERE cash=1 AND substr(created_at,1,7)=? GROUP BY acc, direction"
+  ).bind(m).all()
+  const map = (rows) => {
+    const o = {}
+    for (const r of rows) { o[r.acc] = o[r.acc] || { in: 0, out: 0 }; o[r.acc][r.direction === 'in' ? 'in' : 'out'] = num(r.s) }
+    return o
+  }
+  const mb = map(before), mm = map(monthAgg)
+  const get = (o, id) => o[id] || { in: 0, out: 0 }
+  const uB = mb[0] || { in: 0, out: 0 }, uM = mm[0] || { in: 0, out: 0 }
+  const rows = accounts.map((a, idx) => {
+    const b0 = get(mb, a.id), m0 = get(mm, a.id)
+    const inB = round2(num(b0.in) + (idx === 0 ? num(uB.in) : 0))
+    const outB = round2(num(b0.out) + (idx === 0 ? num(uB.out) : 0))
+    const inM = round2(num(m0.in) + (idx === 0 ? num(uM.in) : 0))
+    const outM = round2(num(m0.out) + (idx === 0 ? num(uM.out) : 0))
+    const open = round2(num(a.opening) + inB - outB)
+    const income = inM, outgo = outM
+    return { id: a.id, name: a.name, opening: open, income, outgo, end: round2(open + income - outgo), neg: round2(open + income - outgo) < 0 }
+  })
+  const { results: bigs } = await db.prepare(
+    "SELECT id, direction, amount, COALESCE(remark,'') AS remark, COALESCE(category,'') AS category, substr(created_at,1,10) AS date FROM ledger WHERE cash=1 AND direction='out' AND amount>=? AND substr(created_at,1,7)=? ORDER BY amount DESC LIMIT 15"
+  ).bind(big, m).all()
+  const { results: cats } = await db.prepare(
+    "SELECT COALESCE(NULLIF(category,''), remark, '其他') AS k, SUM(amount) AS s FROM ledger WHERE cash=1 AND direction='out' AND substr(created_at,1,7)=? GROUP BY k ORDER BY s DESC LIMIT 8"
+  ).bind(m).all()
+  const { results: paidAgg } = await db.prepare(
+    "SELECT SUM(paid) AS s FROM orders WHERE substr(created_at,1,7)<=?"
+  ).bind(m).all()
+  const { results: ledAgg } = await db.prepare(
+    "SELECT SUM(amount) AS s FROM ledger WHERE cash=1 AND direction='in' AND ref_type='order' AND substr(created_at,1,7)<=?"
+  ).bind(m).all()
+  const paidSum = round2(num(paidAgg[0] && paidAgg[0].s)), ledSum = round2(num(ledAgg[0] && ledAgg[0].s))
+  const issues = []
+  const negs = rows.filter((r) => r.neg)
+  if (negs.length) issues.push({ tone: 'bad', text: `${negs.map((x) => x.name).join('、')} 期末是负数，可能是漏记了收入，或者从别的账户花了没记转账。` })
+  const gap = round2(paidSum - ledSum)
+  if (Math.abs(gap) >= 1) issues.push({ tone: 'warn', text: `应收单据上「已收」合计 ¥${paidSum}，但流水里记的收款是 ¥${ledSum}，差 ¥${gap}（可能删过流水，或收预付款/抵扣没走现金）。` })
+  const totalIn = round2(rows.reduce((a, x) => a + x.income, 0))
+  const totalOut = round2(rows.reduce((a, x) => a + x.outgo, 0))
+  const totalOpen = round2(rows.reduce((a, x) => a + x.opening, 0))
+  const totalEnd = round2(rows.reduce((a, x) => a + x.end, 0))
+  const lines = [`【${(await getTitle(db)).title}】${m} 现金流水账`, `月初手头 ¥${totalOpen}，本月进 ¥${totalIn}，出 ¥${totalOut}，月底手头 ¥${totalEnd}`]
+  for (const r of rows) lines.push(`${r.name}：月初 ${r.opening}，进 ${r.income}，出 ${r.outgo}，月底 ${r.end}`)
+  if (bigs.length) { lines.push(`大额支出（≥${big}）：`); for (const b of bigs.slice(0, 8)) lines.push(`  ${b.date} ${b.category || b.remark || '支出'} ¥${b.amount}`) }
+  for (const it of issues) lines.push('注意：' + it.text)
+  return c.json({ ok: true, month: m, rows, total_open: totalOpen, total_in: totalIn, total_out: totalOut, total_end: totalEnd, big, bigs, cats: cats.map((x) => ({ k: x.k, s: round2(num(x.s)) })), issues, text: lines.join('\n') })
+})
+
 app.get('/party-balance', async (c) => {
   const db = c.env.DB
   const type = (c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
@@ -7413,6 +7475,30 @@ app.post('/transfer', async (c) => {
       .bind(tid, a, '内部转账', `转到 ${at.name}${memo ? ' ' + memo : ''}`, f, d),
     db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('in','transfer',?,?,?,?,?,1,?)")
       .bind(tid, a, '内部转账', `从 ${af.name} 转入${memo ? ' ' + memo : ''}`, t, d)
+  ])
+  await logAudit(db, '内部转账', `${af.name}→${at.name}`, `${af.name} 转 ${at.name} ¥${a}`)
+  return c.json({ ok: true, id: tid })
+})
+
+// 兼容别名：POST /transfers（参数名也支持 from_acc / to_acc）
+app.post('/transfers', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const db = c.env.DB
+  const f = num(b.from || b.from_acc), t = num(b.to || b.to_acc), a = num(b.amount)
+  if (!f || !t) return c.json({ error: '请选择转出和转入账户' }, 400)
+  if (f === t) return c.json({ error: '转出和转入不能是同一个账户' }, 400)
+  if (a <= 0) return c.json({ error: '金额必须大于 0' }, 400)
+  const af = await db.prepare('SELECT * FROM accounts WHERE id=?').bind(f).first()
+  const at = await db.prepare('SELECT * FROM accounts WHERE id=?').bind(t).first()
+  if (!af || !at) return c.json({ error: '账户不存在' }, 404)
+  const d = normDate(b.date)
+  if (await isMonthLocked(db, (d || now()).slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
+  const memo = String(b.remark || '').trim()
+  const r = await db.prepare('INSERT INTO transfers (from_id, to_id, amount, remark, created_at) VALUES (?,?,?,?,?)').bind(f, t, a, memo, d).run()
+  const tid = r.meta && r.meta.last_row_id ? r.meta.last_row_id : 0
+  await db.batch([
+    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','transfer',?,?,?,?,?,1,?)").bind(tid, a, '内部转账', `转到 ${at.name}${memo ? ' ' + memo : ''}`, f, d),
+    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('in','transfer',?,?,?,?,?,1,?)").bind(tid, a, '内部转账', `从 ${af.name} 转入${memo ? ' ' + memo : ''}`, t, d)
   ])
   await logAudit(db, '内部转账', `${af.name}→${at.name}`, `${af.name} 转 ${at.name} ¥${a}`)
   return c.json({ ok: true, id: tid })
