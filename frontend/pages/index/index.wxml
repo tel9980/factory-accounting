@@ -1583,8 +1583,9 @@
       <block wx:if="{{sb}}">
         <view class="box">
           <view class="row1"><text class="nm">{{sb.month}} · {{sb.count}} 家</text><text class="amt">合计 {{sb.total}} 元</text></view>
+          <view class="tip" wx:if="{{sb.sent_note}}">{{sb.sent_this_month ? '' : ''}}{{sb.sent_note}}</view>
           <view class="row2" wx:for="{{sb.rows}}" wx:key="party">
-            <text>{{item.party}}　{{item.left}} 元（{{item.cnt}} 笔{{item.overdue_days ? '，最早超 ' + item.overdue_days + ' 天' : ''}}）</text>
+            <text class="{{item.sent_this_month ? '' : 'red'}}">{{item.party}}　{{item.left}} 元（{{item.cnt}} 笔{{item.overdue_days ? '，最早超 ' + item.overdue_days + ' 天' : ''}}）{{item.sent_this_month ? ' · 已发' + item.sent_last : ' · 还没发'}}</text>
             <button class="btn mini" size="mini" data-i="{{index}}" catchtap="copyStOne">话术</button>
             <button class="btn mini" size="mini" data-i="{{index}}" catchtap="openStUrl">打印页</button>
           </view>

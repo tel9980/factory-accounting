@@ -2732,6 +2732,32 @@ Page({
     const row = (this.data.sb && this.data.sb.rows && this.data.sb.rows[i]) || null
     if (!row) return
     wx.setClipboardData({ data: row.text })
+    this.markStSent(i, '微信')
+  },
+  // 复制话术 / 拿打印页 = 这家的对账单发出去了，自动记一笔（同一天同一家只记一条）
+  markStSent(i, channel) {
+    const sb = this.data.sb
+    const row = (sb && sb.rows && sb.rows[i]) || null
+    if (!row) return
+    this.req({
+      url: API_BASE + '/statement-log',
+      method: 'POST',
+      data: { party: row.party, type: sb.type, month: sb.month, channel: channel },
+      once: 'stsent',
+      success: () => {
+        if (row.sent_this_month) return
+        const d0 = new Date()
+        const td = d0.getFullYear() + '-' + String(d0.getMonth() + 1).padStart(2, '0') + '-' + String(d0.getDate()).padStart(2, '0')
+        const rows = sb.rows.slice()
+        rows[i] = { ...row, sent_this_month: true, sent_last: td, sent_times: row.sent_times + 1 }
+        const unsent = rows.filter((x) => !x.sent_this_month)
+        const unsentTotal = Number(unsent.reduce((s2, x) => s2 + x.left, 0).toFixed(2))
+        this.setData({
+          sb: { ...sb, rows: rows, sent_count: rows.length - unsent.length, unsent_count: unsent.length, unsent_total: unsentTotal,
+            sent_note: `${sb.month} 已发 ${rows.length - unsent.length} 家，还没发 ${unsent.length} 家${unsent.length ? '（欠 ' + unsentTotal + ' 元）' : ''}` }
+        })
+      }
+    })
   },
   openStUrl(e) {
     const i = Number(e.currentTarget.dataset.i)
@@ -2740,7 +2766,10 @@ Page({
     if (!row.url) return wx.showToast({ title: '先设访问口令才能生成打印页', icon: 'none' })
     wx.setClipboardData({
       data: row.url,
-      success: () => wx.showModal({ title: '打印页链接已复制', content: '发到对方微信，他用浏览器打开就能看明细、打印或存 PDF。', showCancel: false })
+      success: () => {
+        this.markStSent(i, '打印页')
+        wx.showModal({ title: '打印页链接已复制', content: '发到对方微信，他用浏览器打开就能看明细、打印或存 PDF。', showCancel: false })
+      }
     })
   },
   copyStAll() {
