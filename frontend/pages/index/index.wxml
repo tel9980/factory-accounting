@@ -458,6 +458,8 @@
       <view class="tip" wx:if="{{import_file_name}}">已读入：{{import_file_name}}</view>
       <textarea class="ta" placeholder="{{import_hint}}" value="{{import_text}}" bindinput="onImportText"></textarea>
       <button class="btn" size="mini" bindtap="doImport">① 先看预览（确认后再入账）</button>
+      <button class="btn" size="mini" bindtap="excelTemplate" data-t="recon">⬇ 下载对账模板（单位 / 金额 两列）</button>
+      <button class="btn" size="mini" bindtap="chooseReconFile">📊 选对账表格直接核对</button>
       <button class="btn ghost" size="mini" bindtap="doReconcile">🔍 对账核对（和系统里的数比一比）</button>
 
       <view class="prev" wx:if="{{import_preview}}">

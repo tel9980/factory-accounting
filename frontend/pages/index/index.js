@@ -422,9 +422,10 @@ Page({
     })
   },
   // 下载 Excel（.xlsx）模板：真 Excel 文件，WPS/Excel 直接打开填
-  excelTemplate() {
+  excelTemplate(e) {
     const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
-    const t = types[this.data.import_type] || 'ar'
+    const ov = e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.t : ''
+    const t = ov || types[this.data.import_type] || 'ar'
     wx.showLoading({ title: '生成中…' })
     this.req({
       url: API_BASE + '/import-template-xlsx?type=' + t,
@@ -1407,6 +1408,16 @@ Page({
     })
   },
   cancelPreview() { this.setData({ import_preview: null }) },
+  reconView(d) {
+    const rows = (d.rows || []).map((r) => {
+      let st = '一致'
+      if (r.state === 'more') st = '我少记 ' + r.diff
+      else if (r.state === 'less') st = '我多记 ' + Math.abs(r.diff)
+      else if (r.state === 'new') st = '系统里没这家'
+      return Object.assign({}, r, { state_text: st, bad: r.state !== 'match' })
+    })
+    return Object.assign({}, d, { rows })
+  },
   doReconcile() {
     const { import_type, import_text } = this.data
     if (!import_text.trim()) return wx.showToast({ title: '先把对账单粘到上面的框', icon: 'none' })
@@ -1418,16 +1429,40 @@ Page({
         wx.hideLoading()
         const d = res.data || {}
         if (!d.count) return wx.showToast({ title: '没看懂，检查下格式', icon: 'none' })
-        const rows = (d.rows || []).map((r) => {
-          let st = '一致'
-          if (r.state === 'more') st = '我少记 ' + r.diff
-          else if (r.state === 'less') st = '我多记 ' + Math.abs(r.diff)
-          else if (r.state === 'new') st = '系统里没这家'
-          return Object.assign({}, r, { state_text: st, bad: r.state !== 'match' })
-        })
-        this.setData({ recon: Object.assign({}, d, { rows }), import_preview: null })
+        this.setData({ recon: this.reconView(d), import_preview: null })
       },
       fail: () => wx.hideLoading()
+    })
+  },
+  // 选对账表格（.xlsx：单位 / 金额 两列）直接核对
+  chooseReconFile() {
+    const it = this.data.import_type
+    const t = (it === 1 || it === 3 || it === 6) ? 'recon_ap' : 'recon'
+    if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，请用粘贴方式', icon: 'none' })
+    wx.chooseMessageFile({
+      count: 1, type: 'file', extension: ['xlsx', 'XLSX'],
+      success: (r) => {
+        const f = (r.tempFiles || [])[0]
+        if (!f) return
+        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        wx.showLoading({ title: '核对中…' })
+        wx.getFileSystemManager().readFile({
+          filePath: f.path, encoding: 'base64',
+          success: (fr) => {
+            this.req({
+              url: API_BASE + '/import-xlsx', method: 'POST', data: { type: t, b64: fr.data },
+              success: (res) => {
+                wx.hideLoading()
+                const d = (res.data && res.data.recon) || null
+                if (!d || !d.count) return wx.showToast({ title: (res.data && res.data.error) || '没认出数据', icon: 'none' })
+                this.setData({ recon: this.reconView(d), import_preview: null, import_file_name: f.name || '' })
+              },
+              fail: () => wx.hideLoading()
+            })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) }
+        })
+      }
     })
   },
   onReportYear(e) { this.setData({ report_year: e.detail.value }) },

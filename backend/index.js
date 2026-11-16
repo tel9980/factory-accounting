@@ -935,11 +935,7 @@ app.post('/import-rows', async (c) => {
 })
 
 // 对账核对：粘贴「客户 金额」，和系统里当前未结金额比
-app.post('/reconcile', async (c) => {
-  const b = await c.req.json()
-  const db = c.env.DB
-  const type = String(b.type || 'ar')
-  const rows = parseImportRows(type === 'ap' ? 'ap' : 'ar', b.text).filter((r) => r.ok)
+const reconcileCore = async (db, type, rows) => {
   const sys = type === 'ap'
     ? (await db.prepare("SELECT supplier AS party, COALESCE(SUM(CASE WHEN amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0 THEN amount - COALESCE(paid,0) - COALESCE(written_off,0) ELSE 0 END),0) AS left FROM payables GROUP BY supplier").all()).results
     : (await db.prepare("SELECT customer AS party, COALESCE(SUM(CASE WHEN price - COALESCE(paid,0) - COALESCE(written_off,0) > 0 THEN price - COALESCE(paid,0) - COALESCE(written_off,0) ELSE 0 END),0) AS left FROM orders GROUP BY customer").all()).results
@@ -965,12 +961,19 @@ app.post('/reconcile', async (c) => {
     if (state === 'more' || state === 'less') diffN += 1
     out.push({ party: r.party, matched: s ? s.party : '', imported, system, diff, state })
   }
-  return c.json({
+  return {
     type, count: out.length, match_count: matchN, diff_count: diffN,
     imported_total: round2(out.reduce((a, x) => a + x.imported, 0)),
     system_total: round2(out.reduce((a, x) => a + x.system, 0)),
     rows: out
-  })
+  }
+}
+
+app.post('/reconcile', async (c) => {
+  const b = await c.req.json()
+  const type = String(b.type || 'ar')
+  const rows = parseImportRows(type === 'ap' ? 'ap' : 'ar', b.text).filter((r) => r.ok)
+  return c.json(await reconcileCore(c.env.DB, type, rows))
 })
 
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
@@ -1784,6 +1787,7 @@ const IMPORT_TEMPLATES = {
   ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
   expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '日期(可空)'], [1200, '房租', '8月房租', '11-01'], [300, '水电', '电费', '']] },
   loan: { name: '员工借支模板', rows: [['员工', '金额', '备注', '日期(可空)'], ['张三', 1000, '买辅料', '11-05'], ['李四', 500, '加油', '']] },
+  recon: { name: '对账模板（客户/供应商对账单）', rows: [['单位', '金额'], ['张老板', 5000], ['李老板', 4000], ['王老板', 35000]] },
   reimb: { name: '报销模板', rows: [['员工', '金额', '分类', '备注', '日期(可空)'], ['张三', 800, '采购', '买螺丝', '11-06'], ['张三', 200, '运费', '送货油费', '']] }
 }
 
@@ -1808,8 +1812,16 @@ app.post('/import-xlsx', async (c) => {
     return c.json({ error: '读不了这个 Excel：' + String(e.message || e) }, 400)
   }
   if (!rows.length) return c.json({ error: 'Excel 里没有数据行' }, 400)
+  // 对账：只核对不入账
+  if (type === 'recon' || type === 'recon_ap') {
+    let body2 = rows.slice()
+    if (body2.length && /单位|客户|供应|金额/.test(String((body2[0] || []).join('')))) body2 = body2.slice(1)
+    const list = body2.map((r2) => ({ party: String((r2 || [])[0] || '').trim(), amount: num((r2 || [])[1]), ok: !!(String((r2 || [])[0] || '').trim() && num((r2 || [])[1]) > 0) })).filter((x) => x.ok)
+    if (!list.length) return c.json({ error: '这个表格里没认出「单位 + 金额」两列' }, 400)
+    return c.json({ ok: true, recon: await reconcileCore(c.env.DB, type === 'recon_ap' ? 'ap' : 'ar', list) })
+  }
   const r = await importRows(c.env.DB, type, rows)
-  return c.json(r)
+  return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked) })
 })
 
 
