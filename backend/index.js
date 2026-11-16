@@ -3873,24 +3873,39 @@ app.get('/party-groups', async (c) => {
     conds.push("due_date IS NOT NULL AND due_date != '' AND date(due_date) >= date('" + today + "') AND date(due_date) <= date('" + d7 + "')")
   }
   if (kw) { conds.push(NAME + " LIKE ?"); binds.push('%' + kw + '%') }
-  const sql = 'SELECT * FROM ' + T + ' WHERE ' + conds.join(' AND ') + ' ORDER BY created_at ASC, id ASC'
+  const AMTEXP = '(COALESCE(' + AMT + ',0) - COALESCE(paid,0) - COALESCE(written_off,0))'
+  const AGE = "CAST(julianday('now') - julianday(substr(created_at,1,10)) AS INTEGER)"
+  const sql = 'SELECT ' + NAME + ' AS name, COUNT(*) AS cnt, SUM(' + AMTEXP + ') AS unpaid, MAX(' + AGE + ') AS oldest_days, ' +
+    "SUM(CASE WHEN substr(COALESCE(due_date,''),1,10) >= ? AND substr(COALESCE(due_date,''),1,10) <= ? THEN 1 ELSE 0 END) AS due_soon, " +
+    'SUM(CASE WHEN ' + AGE + ' > 30 THEN 1 ELSE 0 END) AS overdue ' +
+    'FROM ' + T + ' WHERE ' + conds.join(' AND ') + ' GROUP BY ' + NAME + ' ORDER BY unpaid DESC'
   let rows = []
-  try { rows = (await db.prepare(sql).bind(...binds).all()).results || [] } catch (e) { rows = [] }
-  const map = new Map()
-  for (const r of rows) {
-    const name = (r[NAME] || '未填写') + ''
+  try { rows = (await db.prepare(sql).bind(today, d7, ...binds).all()).results || [] } catch (e) { rows = [] }
+  const groups = rows.map((r) => ({ name: (r.name || '未填写') + '', unpaid: round2(num(r.unpaid)), cnt: num(r.cnt), oldest_days: num(r.oldest_days), due_soon: num(r.due_soon), overdue: num(r.overdue), items: [], items_total: num(r.cnt) }))
+  return c.json({ type, count: groups.length, lazy: true, groups })
+})
+
+// 某一家未结的单（分组视图点开时才取）
+app.get('/party-items', async (c) => {
+  const db = c.env.DB
+  const sp = new URL(c.req.url).searchParams
+  const isAr = sp.get('type') !== 'ap'
+  const party = (sp.get('party') || '').trim()
+  if (!party) return c.json({ ok: false, error: '没说是哪一家' })
+  const lim = Math.min(200, Math.max(1, Math.round(Number(sp.get('limit')) || 100)))
+  const T = isAr ? 'orders' : 'payables'
+  const NAME = isAr ? 'customer' : 'supplier'
+  const AMT = isAr ? 'price' : 'amount'
+  const rs = (await db.prepare(
+    'SELECT * FROM ' + T + ' WHERE ' + NAME + '=? AND COALESCE(paid,0)+COALESCE(written_off,0) < ' + AMT +
+    ' ORDER BY created_at ASC, id ASC LIMIT ?').bind(party, lim).all()).results || []
+  const items = rs.map((r) => {
     const it = isAr ? fmtOrder(r) : fmtPayable(r)
-    if (!map.has(name)) map.set(name, { name, unpaid: 0, cnt: 0, oldest_days: 0, due_soon: 0, overdue: 0, items: [] })
-    const g = map.get(name)
-    g.unpaid = round2(g.unpaid + it.unpaid)
-    g.cnt += 1
-    if (it.days > g.oldest_days) g.oldest_days = it.days
-    if (it.due_short && it.due_short >= today && it.due_short <= d7 && !it.settled) g.due_soon += 1
-    if (it.days > 30 && !it.settled) g.overdue += 1
-    g.items.push({ id: it.id, unpaid: it.unpaid, days: it.days, due_short: it.due_short, created_at: it.created_at, title: isAr ? (it.item_name || '加工') : (it.remark || '采购'), total: isAr ? num(it.price) : num(it.amount), paid: num(it.paid), written_off: it.written_off, operator: it.operator || '' })
-  }
-  const groups = [...map.values()].sort((a, b) => b.unpaid - a.unpaid)
-  return c.json({ type, count: groups.length, groups })
+    return { id: it.id, unpaid: it.unpaid, days: it.days, due_short: it.due_short, created_at: it.created_at,
+      title: isAr ? (it.item_name || '加工') : (it.remark || '采购'), total: isAr ? num(it.price) : num(it.amount),
+      paid: num(it.paid), written_off: it.written_off, operator: it.operator || '' }
+  })
+  return c.json({ ok: true, party, count: items.length, more: rs.length >= lim, items })
 })
 
 // 支出流水

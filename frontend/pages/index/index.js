@@ -1078,11 +1078,37 @@ Page({
   },
   toggleGroupAr(e) {
     const n = e.currentTarget.dataset.n
-    this.setData({ ar_open: this.data.ar_open === n ? '' : n })
+    const open = this.data.ar_open === n ? '' : n
+    this.setData({ ar_open: open })
+    if (open) this.loadPartyItems('ar', n)
   },
   toggleGroupAp(e) {
     const n = e.currentTarget.dataset.n
-    this.setData({ ap_open: this.data.ap_open === n ? '' : n })
+    const open = this.data.ap_open === n ? '' : n
+    this.setData({ ap_open: open })
+    if (open) this.loadPartyItems('ap', n)
+  },
+  // 点开某一家才去取它的单据（客户多时首屏不扛几百条）
+  loadPartyItems(t, name) {
+    const key = t === 'ar' ? 'ar_groups' : 'ap_groups'
+    const gs = this.data[key] || []
+    const i = gs.findIndex((g) => g.name === name)
+    if (i < 0) return
+    if ((gs[i].items || []).length) return
+    this.req({
+      url: API_BASE + '/party-items?type=' + t + '&party=' + encodeURIComponent(name),
+      silent: true,
+      success: (res) => {
+        const d = res.data || {}
+        const arr = (this.data[key] || []).slice()
+        const j = arr.findIndex((g) => g.name === name)
+        if (j < 0) return
+        arr[j] = Object.assign({}, arr[j], { items: d.items || [], items_more: !!d.more })
+        const patch = {}
+        patch[key] = arr
+        this.setData(patch)
+      }
+    })
   },
   // 整户批量收款（预填客户与未收合计，走先老后新核销）
   groupReceive(e) {

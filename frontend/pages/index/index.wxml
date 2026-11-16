@@ -439,6 +439,8 @@
               <button size="mini" bindtap="writeoffOrder" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">核销</button>
             </view>
           </view>
+          <view class="tip" wx:if="{{item.items_more}}">列表最多 100 笔（先早后晚），要全的可以看对账单</view>
+          <view class="row2" wx:if="{{!item.items.length}}">正在取这家单据…</view>
           <view class="btns">
             <button size="mini" bindtap="groupReceive" data-n="{{item.name}}" data-amt="{{item.unpaid}}">整户收款</button>
             <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.name}}">对账单</button>
@@ -618,6 +620,8 @@
               <button size="mini" bindtap="writeoffPayable" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">核销</button>
             </view>
           </view>
+          <view class="tip" wx:if="{{item.items_more}}">列表最多 100 笔（先早后晚），要全的可以看对账单</view>
+          <view class="row2" wx:if="{{!item.items.length}}">正在取这家单据…</view>
           <view class="btns">
             <button size="mini" bindtap="groupPay" data-n="{{item.name}}" data-amt="{{item.unpaid}}">整户付款</button>
             <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.name}}">对账单</button>
