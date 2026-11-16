@@ -723,6 +723,31 @@
           <text class="{{item.hit===true?'ok':(item.hit===false?'bad':'')}}" style="width:120rpx;text-align:right">{{item.receive_target>0 ? (item.receive_pct+'%') : '没设'}}</text>
         </view>
         <view class="aline {{item.tone}}" wx:for="{{thTips}}" wx:key="text">{{item.text}}</view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="loadTargetWeeks">📅 拆到每周</button>
+          <button class="btn ghost" size="mini" bindtap="loadTargetForecast">🔮 这月能完成吗</button>
+        </view>
+        <view wx:if="{{tw}}">
+          <view class="prev-h">每周该收多少　合计实收 {{tw.total_actual}} / 目标 {{tw.receive_target}}</view>
+          <view class="plrow" wx:for="{{tw.rows}}" wx:key="w">
+            <text class="pll">{{item.label}} {{item.from}}</text>
+            <text class="plv">{{item.actual}} / {{item.target}}</text>
+            <text class="{{item.pct>=100?'ok':(item.state=='已过完'?'bad':'')}}" style="width:110rpx;text-align:right">{{item.pct}}%</text>
+          </view>
+          <view class="aline warn">{{tw.advice}}</view>
+        </view>
+        <view wx:if="{{tf}}">
+          <view class="prev-h">这月能完成吗</view>
+          <view class="plrow"><text class="pll">已经收到</text><text class="plv ok">{{tf.received}}</text></view>
+          <view class="plrow"><text class="pll">本月内到期还没收（{{tf.open_count}} 单）</text><text class="plv">{{tf.open_amount}}</text></view>
+          <view class="plrow"><text class="pll">按回款率 {{tf.rate}}% 预计还能收</text><text class="plv">{{tf.expected_more}}</text></view>
+          <view class="plrow"><text class="pll strong">月底预计合计</text><text class="plv {{tf.will_hit?'ok':'bad'}}">{{tf.expected_total}} / 目标 {{tf.receive_target}}</text></view>
+          <view class="aline {{tf.will_hit?'ok':'bad'}}">{{tf.note}}</view>
+        </view>
+        <view wx:if="{{th.suggest && th.suggest.receive>0}}" class="frow">
+          <button class="btn" size="mini" bindtap="applySuggest">✨ 下月就按 {{th.suggest.receive}} 设</button>
+        </view>
+        <view class="tip" wx:if="{{th.suggest && th.suggest.basis}}">建议依据：{{th.suggest.basis}}</view>
         <view class="tip">左=实际收到，右=当月目标；百分比是达成率。本月还没过完，只显示进度不算达成。</view>
       </view>
       <view wx:if="{{trend}}">

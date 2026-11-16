@@ -41,7 +41,7 @@ Page({
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
     pc_month: '', pc: null, rv_month: '', rv: null, ano: null, ys_year: '', ys: null,
     tgt: null, tgt_edit: false, tgt_receive: '', tgt_order: '', trend: null, ps: null,
-    th: null, thTips: [],
+    th: null, thTips: [], tw: null, tf: null,
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
@@ -1937,6 +1937,36 @@ Page({
         this.setData({ th: d, thTips: tips })
       },
       fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadTargetWeeks() {
+    this.req({
+      url: API_BASE + '/target-weeks',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ tw: d }) },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  loadTargetForecast() {
+    this.req({
+      url: API_BASE + '/target-forecast',
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ tf: d }) },
+      fail: () => wx.showToast({ title: '拿不到，下拉刷新再试', icon: 'none' })
+    })
+  },
+  applySuggest() {
+    const sg = (this.data.th && this.data.th.suggest) || {}
+    if (!(sg.receive > 0)) return
+    wx.showModal({
+      title: '设 ' + sg.month + ' 目标',
+      content: '收款目标 ' + sg.receive + ' 元' + (sg.order_add > 0 ? '，接单目标 ' + sg.order_add + ' 元' : '') + '。这样设吗？',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({
+          url: API_BASE + '/target?month=' + sg.month, method: 'POST', data: { receive: sg.receive, order_add: sg.order_add || 0 },
+          success: () => { wx.showToast({ title: sg.month.slice(5) + '月目标设好了', icon: 'none' }); this.loadTargetHistory(); this.loadTarget() },
+          fail: () => wx.showToast({ title: '没存上，再试一次', icon: 'none' })
+        })
+      }
     })
   },
   loadTrend() {

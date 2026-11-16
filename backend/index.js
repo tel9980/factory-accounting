@@ -3885,7 +3885,7 @@ app.get('/target', async (c) => {
 app.post('/target', async (c) => {
   const db = c.env.DB
   const b = await c.req.json().catch(() => ({}))
-  const m = (b.month || now().slice(0, 7))
+  const m = (b.month || c.req.query('month') || now().slice(0, 7))
   if (!/^\d{4}-\d{2}$/.test(m)) return c.json({ error: '月份写成 2026-11 这样' }, 400)
   const r = round2(num(b.receive))
   const o = round2(num(b.order_add))
@@ -5531,6 +5531,81 @@ export default {
   }
 }
 
+// 月目标拆成每周：这周该收多少、已经收了多少、剩几天每天要收多少
+app.get('/target-weeks', async (c) => {
+  const db = c.env.DB
+  const m = c.req.query('month') || now().slice(0, 7)
+  const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
+  const tR = round2(num(t && t.receive))
+  const yy = num(m.slice(0, 4))
+  const mm = num(m.slice(5, 7))
+  const dim = new Date(Date.UTC(yy, mm, 0)).getUTCDate()
+  const todayM = now().slice(0, 7)
+  const todayD = m === todayM ? num(now().slice(8, 10)) : (m < todayM ? dim : 0)
+  const rs = (await db.prepare("SELECT substr(created_at,1,10) d, amount FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).all()).results || []
+  const byDay = {}
+  rs.forEach((r) => { const d = num(String(r.d).slice(8, 10)); byDay[d] = round2(num(byDay[d]) + num(r.amount)) })
+  const spans = [[1, 7], [8, 14], [15, 21], [22, dim]]
+  const rows = spans.map(([f, to], i) => {
+    const days = to - f + 1
+    let actual = 0
+    for (let d = f; d <= to; d++) actual += num(byDay[d])
+    const target = tR > 0 ? Math.round(tR * days / dim) : 0
+    const state = todayD > to ? '已过完' : (todayD >= f ? '本周' : '还没到')
+    const leftDays = state === '已过完' ? 0 : Math.max(1, to - Math.max(f - 1, todayD))
+    const gapW = round2(target - actual)
+    return {
+      w: i + 1, label: '第' + (i + 1) + '周', from: m + '-' + String(f).padStart(2, '0'), to: m + '-' + String(to).padStart(2, '0'),
+      days, target, actual: round2(actual), pct: target > 0 ? Math.round(actual / target * 1000) / 10 : null,
+      state, gap: gapW, need_per_day: (state !== '已过完' && gapW > 0) ? round2(gapW / leftDays) : 0, left_days: leftDays
+    }
+  })
+  const cur = rows.find((r) => r.state === '本周')
+  const done = rows.filter((r) => r.state === '已过完')
+  return c.json({
+    ok: true, month: m, receive_target: tR, total_actual: round2(rows.reduce((a, x) => a + x.actual, 0)), rows,
+    advice: tR <= 0 ? '这个月还没设目标，设了才能拆到每周。' : (cur
+      ? (cur.gap <= 0 ? '这周已经收够了（多 ' + round2(-cur.gap) + ' 元）' : '这周该收 ' + cur.target + ' 元，还差 ' + cur.gap + ' 元，剩 ' + cur.left_days + ' 天每天要收 ' + cur.need_per_day + ' 元')
+      : (done.length === rows.length ? '这个月过完了，共收 ' + round2(rows.reduce((a, x) => a + x.actual, 0)) + ' 元' : '这个月还没开始'))
+  })
+})
+
+// 目标能不能达成：已收 + 预计还能收回的，和目标比
+app.get('/target-forecast', async (c) => {
+  const db = c.env.DB
+  const m = c.req.query('month') || now().slice(0, 7)
+  const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
+  const tR = round2(num(t && t.receive))
+  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,7)=?").bind(m).first()
+  const got = round2(num(inc && inc.a))
+  // 回款率：近 6 个月「实收 / 开单」，下限 30%、上限 100%
+  const since = (() => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 5, 1)).toISOString().slice(0, 10) })()
+  const sixIn = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,10)>=?").bind(since).first()
+  const sixOrd = await db.prepare('SELECT COALESCE(SUM(price),0) a FROM orders WHERE substr(created_at,1,10)>=?').bind(since).first()
+  const rate = Math.min(1, Math.max(0.3, num(sixOrd && sixOrd.a) > 0 ? num(sixIn && sixIn.a) / num(sixOrd && sixOrd.a) : 0.3))
+  // 本月内到期的未结应收（含已逾期的）
+  const yy = num(m.slice(0, 4))
+  const mm = num(m.slice(5, 7))
+  const monthEnd = m + '-' + String(new Date(Date.UTC(yy, mm, 0)).getUTCDate()).padStart(2, '0')
+  const open = (await db.prepare("SELECT COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) a, COUNT(*) n FROM orders WHERE price - paid - COALESCE(written_off,0) > 0.005 AND substr(COALESCE(due_date, created_at),1,10) <= ?").bind(monthEnd).all()).results
+  const openAmt = round2(num(open && open[0] && open[0].a))
+  const openCnt = num(open && open[0] && open[0].n)
+  const expect = round2(openAmt * rate)
+  const expectTotal = round2(got + expect)
+  const gap = tR > 0 ? round2(tR - expectTotal) : null
+  const willHit = tR > 0 ? expectTotal >= tR : null
+  return c.json({
+    ok: true, month: m, receive_target: tR, received: got, rate: Math.round(rate * 1000) / 10,
+    rate_basis: { six_in: round2(num(sixIn && sixIn.a)), six_order: round2(num(sixOrd && sixOrd.a)) },
+    open_amount: openAmt, open_count: openCnt, expected_more: expect, expected_total: expectTotal,
+    gap, will_hit: willHit,
+    note: tR <= 0 ? '这个月还没设目标。'
+      : (willHit
+        ? '按现在进度，月底大概能收 ' + expectTotal + ' 元，能完成目标（目标 ' + tR + '）。'
+        : '按现在进度，月底大概只能收 ' + expectTotal + ' 元，离目标还差 ' + round2(tR - expectTotal) + ' 元 —— 得加把劲催款或者多接单。')
+  })
+})
+
 // 目标完成情况：每月「目标 vs 实际」，看达成率
 async function targetHistory(db, months) {
   const n = Math.min(24, Math.max(1, num(months) || 6))
@@ -5555,12 +5630,23 @@ async function targetHistory(db, months) {
       hit: tR > 0 ? receive >= tR : null
     })
   }
-  // 只看已经过完的月份算达成率（本月还没过完，说了不算）
   const curM = now().slice(0, 7)
   const withT = out.filter((x) => x.receive_target > 0 && x.month < curM)
   const hitN = withT.filter((x) => x.hit).length
+  // 下月目标建议：上一个过完月份的实收 ×1.1，取整到 500（最低 500）
+  const finished = out.filter((x) => x.month < curM)
+  const lastDone = finished.filter((x) => x.receive > 0 || x.order_add > 0).slice(-1)[0]
+  const lastR = lastDone ? lastDone.receive : 0
+  const lastO = lastDone ? lastDone.order_add : 0
+  const rnd = (v, step) => Math.max(step, Math.round(v / step) * step)
+  const suggest = {
+    month: (() => { const d = new Date(); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString().slice(0, 7) })(),
+    receive: lastR > 0 ? rnd(lastR * 1.1, 500) : 0,
+    order_add: lastO > 0 ? rnd(lastO * 1.1, 1000) : 0,
+    basis: lastDone ? (lastDone.label + '实际收 ' + lastR + ' 元、接单 ' + lastO + ' 元，按 +10% 给的') : ''
+  }
   return {
-    rows: out, months: n, target_months: withT.length, hit_months: hitN,
+    rows: out, months: n, target_months: withT.length, hit_months: hitN, suggest,
     hit_rate: withT.length ? Math.round(hitN / withT.length * 1000) / 10 : null,
     advice: withT.length === 0 ? (out.some((x) => x.receive_target > 0) ? '这个月目标还在进行中，过完这个月就能看达成率了。' : '还没设过月度目标，设一个首页就有进度条。')
       : (hitN / withT.length >= 0.7 ? '设过 ' + withT.length + ' 个月目标，达成 ' + hitN + ' 个月，目标定得比较实在。'
