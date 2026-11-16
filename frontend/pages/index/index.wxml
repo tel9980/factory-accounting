@@ -835,6 +835,24 @@
     <view class="form">
       <view class="tip">月度催款小结：这个月催了几家、催回多少、谁还欠着（可复制发微信 / 存图）</view>
       <button class="btn" size="mini" bindtap="loadDunMonth">📣 出本月催款小结</button>
+      <view class="tip">年度催款汇总：12 个月催了几次、催回多少、失约几次、发单几份（看全年催款效率）</view>
+      <view class="frow">
+        <input class="in" type="number" placeholder="年（默认今年）" value="{{dy_year}}" bindinput="onDyYear" />
+        <button class="btn" size="mini" bindtap="loadDunYear">📅 看年度汇总</button>
+      </view>
+      <view wx:if="{{dy}}">
+        <view class="prev-h">{{dy.year}} 年 · 催 {{dy.total.times}} 次 · 催后收回 ¥{{dy.total.recovered}} · 平均一次 ¥{{dy.total.avg}} · 失约 {{dy.total.broken}} 次</view>
+        <view class="prev-row" wx:for="{{dy.rows}}" wx:key="m">
+          <text class="k">{{item.label}}</text>
+          <text class="v">{{item.times ? '催 ' + item.times + ' 次 · 收回 ¥' + item.recovered : '—'}}{{item.broken ? ' · 失约 ' + item.broken : ''}}{{item.disputes ? ' · 争议 ' + item.disputes : ''}}</text>
+        </view>
+        <view class="tip">发对账单 {{dy.total.statements}} 份 · 对方有异议 {{dy.total.disputes}} 份</view>
+        <view class="line" wx:for="{{dy.advice}}" wx:key="text" class="{{item.tone==='warn'?'warn':'ok'}}">{{item.text}}</view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="copyDunYear">复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeDunYear">收起</button>
+        </view>
+      </view>
       <view wx:if="{{dsum}}">
         <view class="prev-h">{{dsum.month}} · 催 {{dsum.times}} 次 / {{dsum.count}} 家 · 催后收回 ¥{{dsum.recovered}} · 还欠 ¥{{dsum.left_total}}</view>
         <view class="prev-row" wx:for="{{dsum.still}}" wx:key="party">

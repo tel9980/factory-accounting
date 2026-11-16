@@ -3688,6 +3688,62 @@ app.delete('/dunning-log/:id', async (c) => {
   await db.prepare('DELETE FROM dunning_log WHERE id=?').bind(num(c.req.param('id'))).run()
   return c.json({ ok: true })
 })
+// 年度催款汇总：12 个月一张表，看全年催回多少
+app.get('/dunning-year', async (c) => {
+  const db = c.env.DB
+  const y = String(c.req.query('year') || now().slice(0, 4)).slice(0, 4)
+  const pre = y + '-'
+  const months = []
+  for (let i = 1; i <= 12; i++) months.push(pre + String(i).padStart(2, '0'))
+  const dun = (await db.prepare('SELECT substr(created_at,1,7) m, COUNT(*) n, COUNT(DISTINCT party) p FROM dunning_log WHERE substr(created_at,1,4)=? GROUP BY substr(created_at,1,7)').bind(y).all()).results || []
+  const firstDun = (await db.prepare('SELECT party, MIN(created_at) f FROM dunning_log GROUP BY party').all()).results || []
+  const fmap = {}
+  for (const r of firstDun) fmap[norm(r.party)] = String(r.f || '').slice(0, 10)
+  const flows = (await db.prepare("SELECT o.customer party, l.created_at d, l.amount a FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,4)=? UNION ALL SELECT p.supplier party, l.created_at d, l.amount a FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND substr(l.created_at,1,4)=?").bind(y, y).all()).results || []
+  const stl = (await db.prepare("SELECT substr(created_at,1,7) m, COUNT(*) n, SUM(CASE WHEN ack='doubt' THEN 1 ELSE 0 END) bad FROM statement_log WHERE substr(created_at,1,4)=? GROUP BY substr(created_at,1,7)").bind(y).all()).results || []
+  const bro = (await db.prepare("SELECT substr(promise_date,1,7) m, COUNT(*) n FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,4)=? AND substr(promise_date,1,10) < ? GROUP BY substr(promise_date,1,7)").bind(y, now().slice(0, 10)).all()).results || []
+  const rec = {}
+  for (const f of flows) {
+    const k = norm(f.party)
+    const start = fmap[k]
+    if (!start) continue
+    if (String(f.d).slice(0, 10) < start) continue
+    const mm = String(f.d).slice(0, 7)
+    rec[mm] = round2(num(rec[mm]) + num(f.a))
+  }
+  const g = (arr, m, key) => { const hit = arr.find((x) => x.m === m); return num(hit && hit[key]) }
+  const rows = months.map((m, i) => {
+    const times = g(dun, m, 'n')
+    const recovered = round2(num(rec[m]))
+    return {
+      m, label: (i + 1) + '月', times, parties: g(dun, m, 'p'),
+      recovered, broken: g(bro, m, 'n'),
+      statements: g(stl, m, 'n'), disputes: g(stl, m, 'bad'),
+      avg: times ? round2(recovered / times) : 0
+    }
+  })
+  const total = {
+    times: rows.reduce((a, r) => a + r.times, 0),
+    recovered: round2(rows.reduce((a, r) => a + r.recovered, 0)),
+    broken: rows.reduce((a, r) => a + r.broken, 0),
+    statements: rows.reduce((a, r) => a + r.statements, 0),
+    disputes: rows.reduce((a, r) => a + r.disputes, 0)
+  }
+  total.avg = total.times ? round2(total.recovered / total.times) : 0
+  const active = rows.filter((r) => r.times > 0)
+  const best = active.slice().sort((a, b) => b.recovered - a.recovered)[0]
+  const worst = active.slice().sort((a, b) => (b.broken - a.broken) || (a.recovered - b.recovered))[0]
+  const advice = []
+  if (!total.times) advice.push({ tone: 'ok', text: year0(y) + ' 年还没记过催款，催完点「记一笔催款」，这里才看得出全年催回多少。' })
+  else {
+    advice.push({ tone: 'ok', text: y + ' 年催款 ' + total.times + ' 次，催后收回 ¥' + total.recovered + '，平均一次 ¥' + total.avg + '；发对账单 ' + total.statements + ' 份，其中对方有异议 ' + total.disputes + ' 份。' })
+    if (best && best.recovered > 0) advice.push({ tone: 'ok', text: '催得最顺的是 ' + best.label + '（收回 ¥' + best.recovered + '、' + best.times + ' 次）。' })
+    if (worst && worst.broken >= 2) advice.push({ tone: 'warn', text: worst.label + ' 失约 ' + worst.broken + ' 次最多，那个月是不是放松了催款节奏。' })
+    if (total.disputes) advice.push({ tone: 'warn', text: '全年有 ' + total.disputes + ' 份对账单对方说对不上，对账习惯还要再紧一点（最好每月固定一天发单）。' })
+  }
+  return c.json({ ok: true, year: y, rows, total, best: best || null, worst: worst || null, advice })
+})
+function year0(y) { return y }
 // 对账单争议清单：对方说对不上的，攒一页专门处理（这类最容易拖成死账）
 app.get('/disputes', async (c) => {
   const db = c.env.DB

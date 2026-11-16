@@ -75,7 +75,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', st_log: null, dp: null,
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', dy: null, dy_year: '', st_log: null, dp: null,
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -2161,6 +2161,31 @@ Page({
       })
     }
   },
+  onDyYear(e) { this.setData({ dy_year: e.detail.value }) },
+  loadDunYear() {
+    const y = this.data.dy_year || ''
+    this.req({
+      url: API_BASE + '/dunning-year' + (y ? '?year=' + y : ''),
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没取到', icon: 'none' })
+        this.setData({ dy: d })
+      }
+    })
+  },
+  copyDunYear() {
+    const d = this.data.dy
+    if (!d) return
+    const lines = [d.year + ' 年催款汇总', '催款 ' + d.total.times + ' 次 · 催后收回 ¥' + d.total.recovered + '（平均一次 ¥' + d.total.avg + '）']
+    for (const r of d.rows) {
+      if (!r.times && !r.broken && !r.disputes) continue
+      lines.push('  ' + r.label + '：催 ' + r.times + ' 次 · 收回 ¥' + r.recovered + (r.broken ? ' · 失约 ' + r.broken : '') + (r.disputes ? ' · 争议 ' + r.disputes : ''))
+    }
+    lines.push('发对账单 ' + d.total.statements + ' 份 · 对方有异议 ' + d.total.disputes + ' 份')
+    for (const a of (d.advice || [])) lines.push('· ' + a.text)
+    wx.setClipboardData({ data: lines.join('\n'), success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+  },
+  closeDunYear() { this.setData({ dy: null }) },
   loadDunMonth() {
     this.req({
       url: API_BASE + '/dunning-month',
