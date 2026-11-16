@@ -294,3 +294,10 @@
 .sheet-x { float: right; font-size: 30rpx; color: #999; padding: 0 6rpx; }
 
 .pbtext { background:#f8fafc; border:1px solid #e6eaf0; border-radius:10rpx; padding:16rpx 20rpx; font-size:25rpx; color:#334155; line-height:1.7; white-space:pre-wrap; }
+
+/* 功能地图 */
+.mapg { margin-top: 12rpx; }
+.mapt { font-size: 26rpx; color: #8a8f99; margin: 16rpx 0 6rpx; }
+.maprow { display: flex; align-items: center; padding: 16rpx 0; border-bottom: 1rpx solid #f0f0f0; }
+.mapl { flex: 1; }
+.mapa { color: #b9bec7; font-size: 34rpx; padding-left: 12rpx; }

@@ -1141,6 +1141,19 @@
       <view class="tip" wx:if="{{role=='staff'}}">你现在用的是员工口令：能记账、收款付款、查欠款；毛利、删单、改设置需要老板口令。</view>
     </view>
     <view class="form">
+      <view class="tip">🗺 功能地图（不知道在哪找？按「多久用一次」排的，点一下就跳过去）</view>
+      <view class="mapg" wx:for="{{map_groups}}" wx:key="title" wx:for-item="g">
+        <view class="mapt">{{g.title}}</view>
+        <view class="maprow" wx:for="{{g.items}}" wx:key="name" bindtap="jumpMap" data-go="{{item.go}}">
+          <view class="mapl">
+            <view class="nm">{{item.name}}</view>
+            <view class="row2">{{item.desc}}</view>
+          </view>
+          <text class="mapa">›</text>
+        </view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">换手机不用备份：新手机装好小程序、输同一个访问口令，账就在云端。整库备份是防「误删、停机、想搬到别处」用的——包里不含访问口令，转发出去也安全。</view>
       <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>
       <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>

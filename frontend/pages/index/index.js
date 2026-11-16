@@ -33,6 +33,33 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
+    map_groups: [
+      { title: '每天都用（1~3 分钟）', items: [
+        { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
+        { name: '收钱', desc: '在应收那行点「收款」，可一次收清', go: 'bill:ar' },
+        { name: '记一笔应付 / 支出', desc: '欠供应商的记应付，当场花的记支出', go: 'bill:ap' },
+        { name: '今天要做什么', desc: '首页「我的活」：谁该付我、我该付谁', go: 'home' }
+      ] },
+      { title: '每周用一次（5 分钟）', items: [
+        { name: '批量导入', desc: 'Excel 填模板 / 直接粘贴多行，先看预览再入账', go: 'bill:import' },
+        { name: '对账核对', desc: '对方报的金额和我这边逐个比，差异可一键补记', go: 'bill:import' },
+        { name: '催款清单', desc: '按该催的先后排好，带话术，可记「催了一次」', go: 'me:contact' },
+        { name: '发对账单', desc: '单位页每家「发对账单」，图片 / 打印链接 / 记送达', go: 'me:contact' }
+      ] },
+      { title: '每月用一次（20 分钟）', items: [
+        { name: '月底收尾', desc: '六步清单：录完单 → 对账 → 处理差异 → 小结 → 备份 → 结账', go: 'stat:report' },
+        { name: '本月一页纸', desc: '三句话汇报 + 最大三件事，可发家人/合伙人', go: 'stat:report' },
+        { name: '月度报表包', desc: '八张表打包成一个 Excel，可归档可发人', go: 'stat:report' },
+        { name: '损失台账', desc: '这个月亏了多少、少赚了多少，是谁', go: 'stat:report' }
+      ] },
+      { title: '出事了 / 半年看一次', items: [
+        { name: '利润去哪了', desc: '净利和现金变化对不上时，一笔笔解释清楚', go: 'stat:report' },
+        { name: '数据体检 + 运行日志', desc: '健康分多少、哪里该补，出错记录在这', go: 'stat:report' },
+        { name: '家底 / 账龄 / 借款', desc: '设备、发票、银行流水、借出去的钱', go: 'stat:asset' },
+        { name: '全年 × 客户 / 年度汇总', desc: '这一年从谁那儿赚的、谁在拖钱', go: 'stat:report' },
+        { name: '备份与恢复', desc: '整库备份、从备份恢复、回收站找回', go: 'me:contact' }
+      ] }
+    ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
     hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', lb: null, lb_month: '', mbr: null, mb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
@@ -999,6 +1026,14 @@ Page({
     } else {
       this.loadAr(); this.loadAp(); this.loadArSummary()
     }
+  },
+  jumpMap(e) {
+    const go = String(e.currentTarget.dataset.go || '')
+    const [g, t] = go.indexOf(':') > 0 ? go.split(':') : [go, '']
+    this.setData({ group: g })
+    if (t) this.setData({ tab: t })
+    this.enterTab(t || (g === 'home' ? 'home' : this.data.tab))
+    wx.pageScrollTo({ scrollTop: 0, duration: 200 })
   },
   setGroup(e) {
     const g = e.currentTarget.dataset.g
