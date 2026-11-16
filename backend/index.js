@@ -119,6 +119,7 @@ app.use('*', async (c, next) => {
       (/^\/auth\/(change|staff)$/.test(path)) ||
       (/^\/(report-head|book-name|wx-config)$/.test(path)) ||
       (/^\/month-lock/.test(path)) ||
+      (/^\/import-undo/.test(path) && m !== 'OPTIONS') ||
       (/^\/accounts/.test(path) && m !== 'GET') ||
       (/^\/categories/.test(path) && m !== 'GET') ||
       (/^\/budgets/.test(path) && m !== 'GET') ||
@@ -932,7 +933,8 @@ app.post('/import-rows', async (c) => {
   const n = (r && typeof r === 'object') ? num(r.imported) : num(r)
   const locked = (r && typeof r === 'object') ? num(r.skipped_locked) : 0
   const dup = (r && typeof r === 'object' && Array.isArray(r.dup)) ? r.dup : []
-  return c.json({ ok: true, imported: n, skipped_locked: locked, dup, dup_count: dup.length, count: rows.length })
+  await logImport(db, type, r, 'preview')
+  return c.json({ ok: true, imported: n, skipped_locked: locked, dup, dup_count: dup.length, count: rows.length, total: num(r && r.total) })
 })
 
 // 对账核对：粘贴「客户 金额」，和系统里当前未结金额比
@@ -1012,6 +1014,29 @@ app.get('/recon-log', async (c) => {
   const months = (await db.prepare("SELECT month, type, COUNT(*) AS cnt, SUM(CASE WHEN state<>'match' THEN 1 ELSE 0 END) AS diff_cnt, SUM(CASE WHEN done=1 THEN 1 ELSE 0 END) AS done_cnt, MAX(created_at) AS last_at FROM recon_log GROUP BY month, type ORDER BY month DESC, type LIMIT 24").all()).results || []
   const open = (await db.prepare("SELECT COUNT(*) AS c FROM recon_log WHERE done=0 AND state<>'match'").first()) || { c: 0 }
   return c.json({ ok: true, rows, months, open_diff: num(open.c) })
+})
+
+// 对账差异汇总：复制成一段话，直接发微信给对方
+app.get('/recon-diff-text', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const type = String(c.req.query('type') || '')
+  const where = ["done=0", "state<>'match'"]
+  const args = []
+  if (month) { where.push('month=?'); args.push(month) }
+  if (type === 'ar' || type === 'ap') { where.push('type=?'); args.push(type) }
+  const rows = (await db.prepare('SELECT * FROM recon_log WHERE ' + where.join(' AND ') + ' ORDER BY type, id DESC').bind(...args).all()).results || []
+  const head = (await titled(db, '对账差异清单')).join('\n')
+  const lines = []
+  lines.push(`${month ? month + ' ' : ''}待查差异 ${rows.length} 条`)
+  for (const r of rows) {
+    const st = r.state === 'more' ? `我这边少 ${round2(Math.abs(num(r.diff)))}` : r.state === 'less' ? `我这边多 ${round2(Math.abs(num(r.diff)))}` : '系统里没这家'
+    lines.push(`· ${r.party}（${r.type === 'ap' ? '应付' : '应收'}）单上 ${round2(num(r.imported))} / 我这 ${round2(num(r.system))} → ${st}`)
+  }
+  if (!rows.length) lines.push('没有没处理的差异，账已经对平了 ✅')
+  lines.push('（有出入的麻烦帮我核一下是哪一笔，确认后我这边改）')
+  const text = head + '\n' + lines.join('\n')
+  return c.json({ ok: true, text, count: rows.length, month })
 })
 
 app.patch('/recon-log/:id', async (c) => {
@@ -1898,7 +1923,8 @@ app.post('/import-xlsx', async (c) => {
   }
   const r = await importRows(c.env.DB, type, rows, { confirmDup: !!body.confirm_dup })
   const dup = (r && Array.isArray(r.dup)) ? r.dup : []
-  return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked), dup, dup_count: dup.length })
+  await logImport(c.env.DB, type, r, 'excel')
+  return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked), dup, dup_count: dup.length, total: num(r && r.total) })
 })
 
 
@@ -2241,6 +2267,25 @@ const weeklyText = async (db) => {
 app.get('/weekly-text', async (c) => c.json(await weeklyText(c.env.DB)))
 
 // 周一早上推周报（一次性订阅消费一条额度）
+// 每月 1 号推一条上个月的「对账进度」：对了多少家、还有几条差异没处理
+async function pushReconRemind(db) {
+  try {
+    const cfg = await wxCfg(db)
+    if (!cfg.appid || !cfg.secret || !cfg.tpl) return
+    const d = new Date()
+    d.setDate(1)
+    d.setMonth(d.getMonth() - 1)
+    const lm = d.toISOString().slice(0, 7)
+    const all = await db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(lm).first()
+    const open = await db.prepare("SELECT COUNT(*) n FROM recon_log WHERE done=0 AND state<>'match'").first()
+    await wxPush(db, {
+      title: `${lm.slice(5)} 月对账：核对 ${num(all && all.n)} 家`,
+      time: lm,
+      note: num(open.n) > 0 ? `还有 ${num(open.n)} 条差异没处理，进去看看` : '差异都处理完了，账对平了'
+    })
+  } catch (e) { console.error('recon remind failed', e) }
+}
+
 async function pushWeekly(db) {
   try {
     const cfg = await wxCfg(db)
@@ -3192,6 +3237,8 @@ async function importRows(db, type, rows, opts) {
   let skippedLocked = 0
   const o = opts || {}
   const dups = []
+  const ids = []
+  let total = 0
   const t = now()
   // 第一行像表头才跳过（Excel 模板带表头）。判定要严：整行没有任何数字、且至少 2 个表头关键词，
   // 否则像“甲客户,加工,1000”这种正常数据行会被误当成表头吃掉。
@@ -3220,15 +3267,19 @@ async function importRows(db, type, rows, opts) {
         const from = addDaysIso(dk, -7)
         const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(customer, num(price), from, dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar' }); continue }
-        await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, created_at) VALUES (?,?,?,0,0,?,?)')
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, created_at) VALUES (?,?,?,0,0,?,?)')
           .bind(customer, item || '批量导入', num(price), round2(num(cost)), d).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(price)
         n++
       }
     } else if (type === 'ar_init') {
       const [customer, price] = p
       if (customer && num(price) > 0) {
-        await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
           .bind(customer, '期初欠款', num(price), d).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(price)
         n++
       }
     } else if (type === 'ap') {
@@ -3237,15 +3288,19 @@ async function importRows(db, type, rows, opts) {
         const dk = (d || t).slice(0, 10)
         const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
-        await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
+        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
           .bind(supplier, num(amount), '', remark || '', d).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(amount)
         n++
       }
     } else if (type === 'ap_init') {
       const [supplier, amount] = p
       if (supplier && num(amount) > 0) {
-        await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
+        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at) VALUES (?,?,0,?,?,?)')
           .bind(supplier, num(amount), '', '期初欠款', d).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(amount)
         n++
       }
     } else if (type === 'expense') {
@@ -3255,8 +3310,10 @@ async function importRows(db, type, rows, opts) {
         const hit = await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type='expense' AND amount=? AND category=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(num(amount), category || '', addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: category || '支出', amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'expense' }); continue }
         const accI = await defaultAccountId(db)
-        await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
+        const w = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
           .bind(num(amount), category || '', remark || '', accI, d).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(amount)
         n++
       }
     } else if (type === 'loan') {
@@ -3266,6 +3323,8 @@ async function importRows(db, type, rows, opts) {
         const r = await db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at) VALUES (?,?,0,0,?,?,?)')
           .bind(staff, num(amount), remark || '', accI, d).run()
         const lid = r.meta && r.meta.last_row_id ? r.meta.last_row_id : 0
+        if (lid) ids.push(lid)
+        total += num(amount)
         await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','loan',?,?,'借支',?,?,1,?)")
           .bind(lid, num(amount), `借支 ${staff}${remark ? ' ' + remark : ''}`, accI, d).run()
         n++
@@ -3280,8 +3339,92 @@ async function importRows(db, type, rows, opts) {
     }
   }
   await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`)
-  return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length }
+  return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length, ids, total: round2(total) }
 }
+
+// ===== 导入批次留痕：记下这一次导了哪些单据，导错了能整批撤回 =====
+async function logImport(db, type, r, src) {
+  try {
+    const cnt = num(r && r.imported)
+    if (!cnt) return
+    await db.prepare('INSERT INTO import_log (type, cnt, total, dup_count, skipped_locked, ids, src, undone, created_at) VALUES (?,?,?,?,?,?,?,0,?)')
+      .bind(String(type), cnt, round2(num(r && r.total)), num(r && r.dup_count), num(r && r.skipped_locked), JSON.stringify((r && r.ids) || []), String(src || ''), now()).run()
+  } catch (e) { /* 记录失败不影响导入本身 */ }
+}
+
+app.get('/import-log', async (c) => {
+  const db = c.env.DB
+  const rows = (await db.prepare('SELECT * FROM import_log ORDER BY id DESC LIMIT 50').all()).results || []
+  const out = rows.map((r) => {
+    let n = 0
+    try { n = (JSON.parse(r.ids || '[]') || []).length } catch (e) { n = 0 }
+    return { id: r.id, type: r.type, cnt: num(r.cnt), total: round2(num(r.total)), dup_count: num(r.dup_count), skipped_locked: num(r.skipped_locked), ids_count: n, src: r.src, undone: num(r.undone), created_at: r.created_at }
+  })
+  return c.json({ ok: true, rows: out, count: out.length })
+})
+
+// 整批撤回：把这一批导入产生的单据/流水删掉（只删这一批，别的批次不动）
+app.post('/import-undo/:id', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const log = await db.prepare('SELECT * FROM import_log WHERE id=?').bind(id).first()
+  if (!log) return c.json({ error: '找不到这一批导入记录' }, 404)
+  if (num(log.undone)) return c.json({ error: '这一批已经撤回过' }, 400)
+  let ids = []
+  try { ids = JSON.parse(log.ids || '[]') || [] } catch (e) { ids = [] }
+  if (!ids.length) return c.json({ error: '这一批没有可撤回的单据（报销类请到借支里处理）' }, 400)
+  const type = String(log.type || '')
+  let del = 0
+  let skipped = 0
+  let reason = ''
+  if (type === 'ar' || type === 'ar_init') {
+    for (const oid of ids) {
+      const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oid).first()
+      if (!o) { skipped++; continue }
+      if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) { skipped++; reason = '有单据在已结账月份'; continue }
+      if (num(o.paid) > 0 || num(o.written_off) > 0) { skipped++; reason = '有单据已经收过款或核销过'; continue }
+      await db.prepare('DELETE FROM orders WHERE id=?').bind(oid).run()
+      del++
+    }
+  } else if (type === 'ap' || type === 'ap_init') {
+    for (const pid of ids) {
+      const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(pid).first()
+      if (!p) { skipped++; continue }
+      if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) { skipped++; reason = '有单据在已结账月份'; continue }
+      if (num(p.paid) > 0 || num(p.written_off) > 0) { skipped++; reason = '有单据已经付过款或核销过'; continue }
+      await db.prepare('DELETE FROM payables WHERE id=?').bind(pid).run()
+      del++
+    }
+  } else if (type === 'expense') {
+    for (const lid of ids) {
+      const l = await db.prepare('SELECT * FROM ledger WHERE id=?').bind(lid).first()
+      if (!l) { skipped++; continue }
+      if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) { skipped++; reason = '有流水在已结账月份'; continue }
+      if (String(l.ref_type || '') !== 'expense') { skipped++; continue }
+      await db.prepare('DELETE FROM ledger WHERE id=?').bind(lid).run()
+      del++
+    }
+  } else if (type === 'loan') {
+    for (const lid of ids) {
+      const l = await db.prepare('SELECT * FROM loans WHERE id=?').bind(lid).first()
+      if (!l) { skipped++; continue }
+      if (num(l.used) > 0 || num(l.returned) > 0) { skipped++; reason = '这笔借支已经报销或退回过'; continue }
+      await db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('loan', lid).run()
+      await db.prepare('DELETE FROM loans WHERE id=?').bind(lid).run()
+      del++
+    }
+  } else {
+    return c.json({ error: '这一类不支持整批撤回' }, 400)
+  }
+  await db.prepare('UPDATE import_log SET undone=1 WHERE id=?').bind(id).run()
+  await logAudit(db, '撤回导入', type, `撤回 ${del} 条${skipped ? `，跳过 ${skipped} 条` : ''}`)
+  return c.json({ ok: true, deleted: del, skipped, reason })
+})
+
+app.delete('/import-log/:id', async (c) => {
+  await c.env.DB.prepare('DELETE FROM import_log WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
 
 app.post('/import', async (c) => {
   const { type, text, confirm_dup: cd } = await c.req.json()
@@ -3289,7 +3432,8 @@ app.post('/import', async (c) => {
   if (!lines.length) return c.json({ error: '没有可导入的内容' }, 400)
   const rows = lines.map((row) => row.split(/[,，\t]/).map((s) => s.trim()))
   const rr = await importRows(c.env.DB, type, rows, { confirmDup: !!cd })
-  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count) })
+  await logImport(c.env.DB, type, rr, 'paste')
+  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count), total: num(rr && rr.total) })
 })
 
 // 年度流水报表
@@ -4484,6 +4628,17 @@ app.get('/reminders', async (c) => {
   if (num(lo.n) > 0 && num(lo.t) > 0) push('yellow', `员工借支还有 ¥${round2(num(lo.t))} 没清`, 'expense')
   const iv = await db.prepare('SELECT COUNT(*) n FROM orders o WHERE o.paid > 0 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.order_id=o.id)').first()
   if (num(iv.n) > 0) push('gray', `${num(iv.n)} 张已收款的单还没开发票`, 'nw')
+  // 对账：有差异没处理优先提醒，其次「这个月还没对过账」
+  const ro = await db.prepare("SELECT COUNT(*) n FROM recon_log WHERE done=0 AND state<>'match'").first()
+  if (num(ro.n) > 0) {
+    const lst = await db.prepare("SELECT party, type, diff FROM recon_log WHERE done=0 AND state<>'match' ORDER BY id DESC LIMIT 3").all()
+    push('yellow', `对账还有 ${num(ro.n)} 条差异没处理`, 'import',
+      (lst.results || []).map((x) => ({ party: x.party || '', amount: round2(Math.abs(num(x.diff))), note: x.type === 'ap' ? '应付' : '应收' })))
+  } else {
+    const cm = now().slice(0, 7)
+    const rl = await db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(cm).first()
+    if (num(rl.n) === 0 && num(now().slice(8, 10)) >= 10) push('gray', `${cm.slice(5)} 月还没和客户/供应商对过账`, 'import')
+  }
   return c.json({ items, count: items.length, today })
 })
 
@@ -4630,6 +4785,7 @@ export default {
         await runDepreciation(db)
         const cron = (event && event.cron) || ''
         if (cron === '0 1 * * 1') await pushWeekly(db)
+        else if (cron === '0 2 1 * *') await pushReconRemind(db)
         else await runWxReminder(db)
       } catch (e) {
         console.error('scheduled fixed failed book' + bid, e)

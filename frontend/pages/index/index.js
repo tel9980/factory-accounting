@@ -33,7 +33,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
-    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null,
+    import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, import_log: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -742,7 +742,7 @@ Page({
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
-    if (t === 'import') this.loadReconLog()
+    if (t === 'import') { this.loadReconLog(); this.loadImportLog() }
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
@@ -1471,6 +1471,61 @@ Page({
           return Object.assign({}, r, { state_text: st, bad: r.state !== 'match' && !r.done, done_text: r.done ? '已处理' : '待处理' })
         })
         this.setData({ recon_log: { rows, months: d.months || [], open_diff: d.open_diff || 0 } })
+      }
+    })
+  },
+  // 导入记录（每批留痕，导错了整批撤回）
+  loadImportLog() {
+    const kinds = { ar: '应收', ap: '应付', expense: '支出', loan: '借支', reimb: '报销', ar_init: '期初应收', ap_init: '期初应付' }
+    this.req({
+      url: API_BASE + '/import-log',
+      success: (res) => {
+        const rows = ((res.data && res.data.rows) || []).map((r) => Object.assign({}, r, {
+          kind_text: kinds[r.type] || r.type,
+          time_text: String(r.created_at || '').replace('T', ' ').slice(5, 16),
+          src_text: r.src === 'excel' ? 'Excel' : r.src === 'preview' ? '预览后入账' : '粘贴'
+        }))
+        this.setData({ import_log: { rows } })
+      }
+    })
+  },
+  undoImport(e) {
+    const r = ((this.data.import_log || {}).rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    wx.showModal({
+      title: '撤回这一批导入？',
+      content: '把这批导入的 ' + r.cnt + ' 条（' + r.total + ' 元）删掉。已经收过款/付过款的不动，会告诉你有几条没撤。',
+      confirmText: '撤回', confirmColor: '#c00',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({
+          url: API_BASE + '/import-undo/' + r.id, method: 'POST', data: {},
+          success: (res) => {
+            const d = res.data || {}
+            wx.showModal({
+              title: '撤回完成',
+              content: '删掉 ' + (d.deleted || 0) + ' 条' + (d.skipped ? '，跳过 ' + d.skipped + ' 条（' + (d.reason || '') + '）' : ''),
+              showCancel: false,
+              success: () => { this.loadImportLog(); this.refresh() }
+            })
+          }
+        })
+      }
+    })
+  },
+  delImportLog(e) {
+    const r = ((this.data.import_log || {}).rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    this.req({ url: API_BASE + '/import-log/' + r.id, method: 'DELETE', success: () => this.loadImportLog() })
+  },
+  // 把「还没处理的差异」复制成一段话，直接发微信给对方
+  copyDiffText() {
+    const type = (this.data.import_type === 1 || this.data.import_type === 3 || this.data.import_type === 6) ? 'ap' : 'ar'
+    this.req({
+      url: API_BASE + '/recon-diff-text?type=' + type,
+      success: (res) => {
+        const t = (res.data && res.data.text) || ''
+        wx.setClipboardData({ data: t, success: () => wx.showToast({ title: '已复制，可发给对方', icon: 'none' }) })
       }
     })
   },

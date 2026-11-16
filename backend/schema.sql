@@ -226,3 +226,17 @@ CREATE TABLE IF NOT EXISTS recon_log (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recon_log_month ON recon_log(month);
+
+-- 导入批次留痕：每批导入留一条，导错了可整批撤回
+CREATE TABLE IF NOT EXISTS import_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT,
+  cnt INTEGER DEFAULT 0,
+  total REAL DEFAULT 0,
+  dup_count INTEGER DEFAULT 0,
+  skipped_locked INTEGER DEFAULT 0,
+  ids TEXT,
+  src TEXT,
+  undone INTEGER DEFAULT 0,
+  created_at TEXT
+);

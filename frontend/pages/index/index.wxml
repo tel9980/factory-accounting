@@ -489,6 +489,7 @@
         <view class="tip">核对完可以直接改单，不用重复导入。</view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="saveRecon">📌 记进对账台账</button>
+          <button class="btn ghost" size="mini" bindtap="copyDiffText">📋 复制差异清单</button>
           <button class="btn ghost" size="mini" bindtap="loadReconLog">看已记的台账</button>
         </view>
       </view>
@@ -501,6 +502,20 @@
           <text class="{{item.bad?'red':'ok'}}">{{item.state_text}} · {{item.done_text}}</text>
         </view>
         <view class="tip">点一下 = 标记已处理／未处理；长按 = 删掉这条记录（不动单据）。每月对完一次，月底看「还差几家没处理」就知道有没有漏。</view>
+      </view>
+
+      <view class="prev" wx:if="{{import_log}}">
+        <view class="prev-h">导入记录（最近 50 批，导错了能整批撤回）</view>
+        <view class="prev-row" wx:for="{{import_log.rows}}" wx:key="id" data-i="{{index}}">
+          <text class="prev-t">{{item.kind_text}} · {{item.cnt}} 条 · {{item.total}} 元{{item.dup_count ? ' · 跳重复 ' + item.dup_count : ''}}</text>
+          <text class="prev-n">{{item.time_text}} · {{item.src_text}}</text>
+          <view class="frow" wx:if="{{!item.undone}}">
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="undoImport">撤回这批</button>
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="delImportLog">删记录</button>
+          </view>
+          <text class="tip" wx:else>这批已撤回</text>
+        </view>
+        <view class="tip">撤回只删「这一批」导入的单据；已经收过款、付过款或所在月份已结账的不会删，会告诉你几条没撤。</view>
       </view>
       <view class="tip">最省事的两步：① 点「下载 Excel 模板」→ 转发到电脑，用 Excel/WPS 填几行（表头别删，日期可留空）→ 微信发回给自己；② 回到这里点「选 Excel 文件直接导入」。Excel 存什么编码都能读，不用另存 CSV。也可以直接从 Excel 复制多行粘到上面的框里。</view>
     </view>
