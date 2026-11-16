@@ -1062,6 +1062,10 @@
       <button class="btn" size="mini" bindtap="backup">备份全部数据</button>
       <button class="btn" size="mini" bindtap="cloudBackup">云端备份</button>
       <button class="btn" size="mini" bindtap="backupToNotes">备份到笔记站</button>
+      </view>
+      <view class="frow">
+      <button class="btn" size="mini" bindtap="exportAll">📦 整库备份</button>
+      <button class="btn ghost" size="mini" bindtap="restoreAll">📦 从整库包恢复</button>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="copyWeekText">📋 复制上周经营速览</button>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
@@ -1069,6 +1073,7 @@
       <view class="tip" wx:if="{{role=='staff'}}">你现在用的是员工口令：能记账、收款付款、查欠款；毛利、删单、改设置需要老板口令。</view>
     </view>
     <view class="form">
+      <view class="tip">换手机不用备份：新手机装好小程序、输同一个访问口令，账就在云端。整库备份是防「误删、停机、想搬到别处」用的——包里不含访问口令，转发出去也安全。</view>
       <textarea class="inp restore-ta" placeholder="粘贴备份文本（在报表页先点「备份全部数据」复制的那段 JSON）" value="{{restore_text}}" bindinput="onRestoreInput"></textarea>
       <button class="btn" size="mini" bindtap="restoreData">从备份恢复</button>
     </view>

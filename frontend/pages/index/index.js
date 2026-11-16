@@ -3359,6 +3359,83 @@ Page({
       }
     })
   },
+  // 整库备份：38 张表原样打包，换环境能整包搬回去（口令不进包）
+  exportAll() {
+    wx.showLoading({ title: '打包中…' })
+    this.req({
+      url: API_BASE + '/export-all',
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error || d.kind !== 'factory-accounting-full') { wx.showToast({ title: (d.error || '打包失败'), icon: 'none' }); return }
+        const json = JSON.stringify(d)
+        const kb = Math.max(1, Math.round(json.length / 1024))
+        wx.showModal({
+          title: '整库备份',
+          content: '共 ' + d.table_count + ' 张表、' + d.rows_total + ' 行，约 ' + kb + ' KB。包里不含口令，转发也安全。',
+          confirmText: '复制', cancelText: '存成文件',
+          success: (m) => {
+            if (m.confirm) {
+              wx.setClipboardData({ data: json, success: () => wx.showToast({ title: '已复制，粘到微信/笔记里存好', icon: 'none' }) })
+              return
+            }
+            const fp = wx.env.USER_DATA_PATH + '/整库备份_' + new Date().toISOString().slice(0, 10) + '.json'
+            wx.getFileSystemManager().writeFile({
+              filePath: fp, data: json, encoding: 'utf8',
+              success: () => wx.shareFileMessage({
+                filePath: fp,
+                fail: () => wx.showModal({ title: '文件已生成', content: fp + '\n可以点右上角转发到电脑保存。', showCancel: false })
+              }),
+              fail: () => wx.showToast({ title: '写文件失败', icon: 'none' })
+            })
+          }
+        })
+      },
+      fail: () => { wx.hideLoading(); wx.showToast({ title: '网络不给力，再试一次', icon: 'none' }) }
+    })
+  },
+  // 从整库包恢复（整包覆盖，要手动输「覆盖」）
+  restoreAll() {
+    const t = (this.data.restore_text || '').trim()
+    if (!t) return wx.showToast({ title: '先把整库备份的 JSON 粘到上面的框', icon: 'none' })
+    let pkg = null
+    try { pkg = JSON.parse(t) } catch (e) { pkg = null }
+    if (!pkg || pkg.kind !== 'factory-accounting-full') {
+      wx.showModal({
+        title: '不是整库包',
+        content: '整库包是一段以 kind":"factory-accounting-full" 开头的 JSON。只想补几张单据的话，用下面的「从备份恢复」。',
+        showCancel: false
+      })
+      return
+    }
+    const at = String(pkg.at || '').slice(0, 10)
+    wx.showModal({
+      title: '整包覆盖',
+      content: '这是 ' + at + ' 的整库备份，共 ' + (pkg.rows_total || 0) + ' 行。覆盖后现在的单据、流水、账户期初都会变成包里的样子（访问口令不变）。确认请输入「覆盖」。',
+      editable: true, placeholderText: '输入 覆盖', confirmText: '恢复', confirmColor: '#c00',
+      success: (m) => {
+        if (!m.confirm) return
+        if (String(m.content || '').trim() !== '覆盖') return wx.showToast({ title: '没输入「覆盖」，已取消', icon: 'none' })
+        wx.showLoading({ title: '恢复中…' })
+        this.req({
+          url: API_BASE + '/import-all', method: 'POST',
+          data: { pkg, mode: 'replace', confirm: '覆盖' },
+          success: (r) => {
+            wx.hideLoading()
+            const d = r.data || {}
+            if (d.error) { wx.showToast({ title: d.error, icon: 'none' }); return }
+            wx.showModal({
+              title: '恢复完成',
+              content: '灌入 ' + d.rows + ' 行、' + Object.keys(d.done || {}).length + ' 张表。访问口令没变，下拉刷新就能看到。',
+              showCancel: false,
+              success: () => { this.setData({ restore_text: '' }); this.refresh() }
+            })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '网络中断，没恢复成功', icon: 'none' }) }
+        })
+      }
+    })
+  },
   onRestoreInput(e) { this.setData({ restore_text: e.detail.value }) },
   restoreData() {
     const t = this.data.restore_text.trim()

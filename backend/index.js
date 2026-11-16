@@ -4973,6 +4973,90 @@ app.post('/import', async (c) => {
   return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked), dup: rr.dup || [], dup_count: num(rr && rr.dup_count), total: num(rr && rr.total), batch: (rr && rr.batch) || '' })
 })
 
+// ===== 整库备份 / 搬家：把每一张表原样导出成一个 JSON 包，换设备、换环境都能整包搬回去 =====
+const DUMP_SKIP = new Set(['sqlite_sequence', 'd1_migrations'])
+async function tableList(db) {
+  const r = (await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()).results || []
+  // _cf_KV 之类的内部表不能 SELECT，跳过（表名带下划线开头）
+  return r.map((x) => x.name).filter((n) => !DUMP_SKIP.has(n) && !String(n).startsWith('_'))
+}
+async function dumpAll(db) {
+  const tabs = await tableList(db)
+  const tables = {}
+  const counts = {}
+  for (const t of tabs) {
+    const rs = (await db.prepare(`SELECT * FROM ${t} LIMIT 20000`).all()).results || []
+    tables[t] = rs
+    counts[t] = rs.length
+  }
+  // 口令不随包走（包可能被转发、被存到网盘），恢复后口令还是原来的
+  if (Array.isArray(tables.settings)) {
+    const keep = tables.settings.filter((x) => !['access_key', 'staff_key'].includes(String(x.key)))
+    tables.settings = keep
+    counts.settings = keep.length
+  }
+  return { ok: true, kind: 'factory-accounting-full', v: 1, at: now(), book: null, tables, counts, table_count: tabs.length, rows_total: Object.values(counts).reduce((a, b) => a + b, 0) }
+}
+app.get('/export-all', async (c) => {
+  const db = c.env.DB
+  const only = String(c.req.query('only') || '')
+  if (only) {
+    const tabs = await tableList(db)
+    if (!tabs.includes(only)) return c.json({ error: '没有这张表', tables: tabs }, 400)
+    const rs = (await db.prepare(`SELECT * FROM ${only} LIMIT 20000`).all()).results || []
+    return c.json({ ok: true, only, rows: rs.length, sample: rs.slice(0, 3) })
+  }
+  const d = await dumpAll(db)
+  const nm = await getTitle(db).catch(() => ({ title: '' }))
+  d.book = (nm && nm.title) || ''
+  return c.json(d)
+})
+
+// 整包恢复：replace=先清空再灌（同 id 保留）；merge=只补缺的行
+app.post('/import-all', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const pkg = b.pkg && typeof b.pkg === 'object' ? b.pkg : null
+  if (!pkg || pkg.kind !== 'factory-accounting-full' || !pkg.tables) return c.json({ error: '这个包不是本小程序的整库备份（缺 kind 标记）' }, 400)
+  const mode = b.mode === 'merge' ? 'merge' : 'replace'
+  if (mode === 'replace' && String(b.confirm || '') !== '覆盖') return c.json({ error: '整包覆盖会清空现在所有数据，确认请在 confirm 里写「覆盖」' }, 400)
+  await saveBackup(db, 'restore-all')
+  // 口令不随包走：整包覆盖时先把当前口令留一份，灌完再放回去（否则会被清空、下次打不开）
+  let keepKeys = []
+  if (mode === 'replace') {
+    try { keepKeys = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('access_key','staff_key')").all()).results || [] } catch (e) { keepKeys = [] }
+  }
+  const have = new Set(await tableList(db))
+  const done = {}
+  const skipped = {}
+  for (const t of Object.keys(pkg.tables)) {
+    if (!have.has(t)) { skipped[t] = 'no_table'; continue }
+    const rows = Array.isArray(pkg.tables[t]) ? pkg.tables[t] : []
+    if (mode === 'replace') { try { await db.prepare(`DELETE FROM ${t}`).run() } catch (e) { skipped[t] = 'delete_fail'; continue } }
+    let ins = 0
+    for (let i = 0; i < rows.length; i += 40) {
+      const chunk = rows.slice(i, i + 40)
+      const stmts = []
+      for (const r of chunk) {
+        const cols = Object.keys(r || {})
+        if (!cols.length) continue
+        const ph = cols.map((x) => (r[x] === null || r[x] === undefined ? 'NULL' : '?')).join(',')
+        const vals = cols.filter((x) => r[x] !== null && r[x] !== undefined).map((x) => r[x])
+        const verb = mode === 'merge' ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE'
+        stmts.push(db.prepare(`${verb} INTO ${t} (${cols.map((x) => `"${x}"`).join(',')}) VALUES (${ph})`).bind(...vals))
+      }
+      if (!stmts.length) continue
+      try { await db.batch(stmts); ins += stmts.length } catch (e) { skipped[t] = 'insert_fail: ' + String(e).slice(0, 60) }
+    }
+    done[t] = ins
+  }
+  for (const k of keepKeys) {
+    try { await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)").bind(k.key, k.value).run() } catch (e) { /* 忽略 */ }
+  }
+  await logAudit(db, '整库恢复', mode, `灌入 ${Object.keys(done).length} 张表${keepKeys.length ? '，口令保持不变' : ''}`)
+  return c.json({ ok: true, mode, done, skipped, rows: Object.values(done).reduce((a, x) => a + x, 0), at: pkg.at || '', book: pkg.book || '' })
+})
+
 // 年度流水报表
 app.get('/report', async (c) => {
   const y = String(c.req.query('year') || new Date().getFullYear())
