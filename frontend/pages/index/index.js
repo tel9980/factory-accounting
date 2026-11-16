@@ -60,7 +60,7 @@ Page({
     budgets: [], b_category: 0, b_amount: '',
     book: 1, book_name: '主账套', books: [], rename_text: '',
     nw: [], nw_max: 1, nw_latest: null,
-    aging_type: 'ar', aging: null,
+    aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
     head_title: '', head_note: ''
@@ -1406,7 +1406,7 @@ Page({
       })
   },
   // ── 家底 / 账龄 / 财务指标 / 月度归档 / 报表抬头 ──
-  loadAsset() { this.loadNetworth(); this.loadKpi(); this.loadAging(); this.loadHead(); this.loadLoans() },
+  loadAsset() { this.loadWx(); this.loadNetworth(); this.loadKpi(); this.loadAging(); this.loadHead(); this.loadLoans() },
   loadNetworth() {
     this.req({
       url: API_BASE + '/networth?months=12',
@@ -1621,6 +1621,76 @@ Page({
           fail: () => wx.hideLoading()
         })
       }
+    })
+  },
+  // ---------- 微信订阅消息（到期提醒） ----------
+  loadWx() {
+    this.req({
+      url: API_BASE + '/wx-config',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ wx_appid: d.appid || '', wx_tpl: d.tpl || '', wx_fields: d.fields || '', wx_info: d, wx_secret: '' })
+      }
+    })
+  },
+  onWxAppid(e) { this.setData({ wx_appid: e.detail.value }) },
+  onWxSecret(e) { this.setData({ wx_secret: e.detail.value }) },
+  onWxTpl(e) { this.setData({ wx_tpl: e.detail.value }) },
+  onWxFields(e) { this.setData({ wx_fields: e.detail.value }) },
+  saveWx() {
+    const b = { appid: this.data.wx_appid, tpl: this.data.wx_tpl }
+    if (this.data.wx_secret) b.secret = this.data.wx_secret
+    if (this.data.wx_fields) b.fields = this.data.wx_fields
+    this.req({
+      url: API_BASE + '/wx-config', method: 'POST', data: b,
+      success: () => { wx.showToast({ title: '已保存', icon: 'none' }); this.setData({ wx_secret: '' }); this.loadWx() }
+    })
+  },
+  // 开启微信提醒：先登记 openid，再申请一次性订阅
+  enableWx() {
+    const tpl = (this.data.wx_tpl || '').trim()
+    if (!tpl) return wx.showToast({ title: '先填模板ID并保存', icon: 'none' })
+    wx.login({
+      success: (lr) => {
+        if (!lr.code) return wx.showToast({ title: '微信登录失败', icon: 'none' })
+        this.req({
+          url: API_BASE + '/wx-login', method: 'POST', data: { code: lr.code },
+          success: (r) => {
+            const openid = (r.data || {}).openid
+            if (!openid) return
+            this.setData({ wx_openid: openid })
+            if (!wx.requestSubscribeMessage) return wx.showToast({ title: '微信版本过低', icon: 'none' })
+            wx.requestSubscribeMessage({
+              tmplIds: [tpl],
+              success: (sr) => {
+                if (sr[tpl] === 'accept') {
+                  this.req({
+                    url: API_BASE + '/wx-subscribed', method: 'POST', data: { openid, n: 1 },
+                    success: () => { wx.showToast({ title: '已开启，明早会推一条', icon: 'none' }); this.loadWx() }
+                  })
+                } else {
+                  wx.showModal({ title: '没允许', content: '你点了拒绝。想收到提醒，再点一次「开启微信提醒」并选「允许」。', showCancel: false })
+                }
+              },
+              fail: (e) => wx.showToast({ title: (e && e.errMsg) || '授权失败', icon: 'none' })
+            })
+          }
+        })
+      }
+    })
+  },
+  testWx() {
+    wx.showLoading({ title: '发送中…' })
+    this.req({
+      url: API_BASE + '/wx-test', method: 'POST', data: {},
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        const line = (d.sent || []).map((x) => x.openid + (x.ok ? ' 成功' : ' 失败：' + x.msg)).join('\n')
+        wx.showModal({ title: '发送结果', content: line || '已发送', showCancel: false })
+        this.loadWx()
+      },
+      fail: () => wx.hideLoading()
     })
   },
   loadFixed() {

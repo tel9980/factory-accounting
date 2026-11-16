@@ -110,6 +110,161 @@ const normDate = (s) => {
   return now()
 }
 
+
+// ---------------- 微信订阅消息（到期提醒） ----------------
+const WX_API = 'https://api.weixin.qq.com'
+const getSetting = async (db, k) => {
+  const r = await db.prepare('SELECT value FROM settings WHERE key=?').bind(k).first()
+  return (r && r.value) || ''
+}
+const putSetting = async (db, k, v) => {
+  await db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(k, String(v)).run()
+}
+const wxCfg = async (db) => ({
+  appid: await getSetting(db, 'wx_appid'),
+  secret: await getSetting(db, 'wx_secret'),
+  tpl: await getSetting(db, 'wx_tpl'),
+  fields: (await getSetting(db, 'wx_fields')) || 'thing1,time2,thing3'
+})
+async function wxToken(db) {
+  const cfg = await wxCfg(db)
+  if (!cfg.appid || !cfg.secret) throw new Error('还没填 AppID / AppSecret')
+  const cached = await getSetting(db, 'wx_token')
+  const exp = Number((await getSetting(db, 'wx_token_exp')) || 0)
+  if (cached && exp > Date.now() + 60000) return cached
+  const r = await fetch(WX_API + '/cgi-bin/token?grant_type=client_credential&appid=' + encodeURIComponent(cfg.appid) + '&secret=' + encodeURIComponent(cfg.secret))
+  const d = await r.json()
+  if (!d.access_token) throw new Error('拿不到 access_token：' + (d.errmsg || JSON.stringify(d).slice(0, 80)))
+  await putSetting(db, 'wx_token', d.access_token)
+  await putSetting(db, 'wx_token_exp', String(Date.now() + (num(d.expires_in, 7200)) * 1000))
+  return d.access_token
+}
+const wxClip = (v) => {
+  const t = String(v === null || v === undefined ? '' : v)
+  return t.length > 20 ? t.slice(0, 19) + '…' : t
+}
+async function wxPush(db, items) {
+  const cfg = await wxCfg(db)
+  if (!cfg.appid || !cfg.secret || !cfg.tpl) throw new Error('微信提醒还没配置完整（AppID / AppSecret / 模板ID）')
+  const token = await wxToken(db)
+  const users = (await db.prepare('SELECT * FROM wx_users WHERE quota > 0 ORDER BY id').all()).results
+  if (!users.length) throw new Error('还没有人授权过接收提醒')
+  const keys = String(cfg.fields || 'thing1,time2,thing3').split(',').map((x) => x.trim()).filter(Boolean)
+  const out = []
+  for (const u of users) {
+    const data = {}
+    if (keys[0]) data[keys[0]] = { value: wxClip(items.title) }
+    if (keys[1]) data[keys[1]] = { value: wxClip(items.time) }
+    if (keys[2]) data[keys[2]] = { value: wxClip(items.note) }
+    let ok = false
+    let msg = ''
+    try {
+      const r = await fetch(WX_API + '/cgi-bin/message/subscribe/send?access_token=' + encodeURIComponent(token), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ touser: u.openid, template_id: cfg.tpl, page: 'pages/index/index', data, miniprogram_state: 'formal' })
+      })
+      const d = await r.json()
+      ok = num(d.errcode) === 0
+      msg = d.errmsg || ''
+    } catch (e) {
+      msg = String(e).slice(0, 80)
+    }
+    if (ok) {
+      await db.prepare('UPDATE wx_users SET quota = quota - 1, last_at=? WHERE id=?').bind(now(), u.id).run()
+    }
+    out.push({ openid: String(u.openid).slice(0, 8) + '**', ok, msg })
+  }
+  return out
+}
+// 到期提醒内容：7 天内该收/该付
+async function dueReminderItems(db) {
+  const today = now().slice(0, 10)
+  const soon = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
+  const ar = (await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?").bind(today, soon).first())
+  const ap = (await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?").bind(today, soon).first())
+  const na = num(ar && ar.n)
+  const np = num(ap && ap.n)
+  if (!na && !np) return null
+  const parts = []
+  if (na) parts.push('要收 ' + round2(num(ar.t)) + ' 元（' + na + ' 笔）')
+  if (np) parts.push('要付 ' + round2(num(ap.t)) + ' 元（' + np + ' 笔）')
+  return { title: '7 天内到期款项', time: soon, note: parts.join('，') }
+}
+async function runWxReminder(db) {
+  try {
+    const cfg = await wxCfg(db)
+    if (!cfg.appid || !cfg.secret || !cfg.tpl) return
+    const items = await dueReminderItems(db)
+    if (!items) return
+    await wxPush(db, items)
+  } catch (e) {
+    // 定时任务里失败不抛出，避免影响其它任务
+  }
+}
+app.get('/wx-config', async (c) => {
+  const db = c.env.DB
+  const cfg = await wxCfg(db)
+  const u = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(quota),0) q FROM wx_users').first()
+  return c.json({ appid: cfg.appid, has_secret: !!cfg.secret, tpl: cfg.tpl, fields: cfg.fields, users: num(u && u.n), quota: num(u && u.q) })
+})
+app.post('/wx-config', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json()
+  if (b.appid !== undefined) await putSetting(db, 'wx_appid', String(b.appid).trim())
+  if (b.secret) await putSetting(db, 'wx_secret', String(b.secret).trim())
+  if (b.tpl !== undefined) await putSetting(db, 'wx_tpl', String(b.tpl).trim())
+  if (b.fields) await putSetting(db, 'wx_fields', String(b.fields).trim())
+  await logAudit(db, '微信提醒配置', '设置', '更新微信订阅消息配置')
+  return c.json({ ok: true })
+})
+// 前端 wx.login 拿到的 code 换 openid
+app.post('/wx-login', async (c) => {
+  const db = c.env.DB
+  const { code } = await c.req.json()
+  if (!code) return c.json({ error: '缺少 code' }, 400)
+  const cfg = await wxCfg(db)
+  if (!cfg.appid || !cfg.secret) return c.json({ error: '后台还没填 AppID / AppSecret' }, 400)
+  const r = await fetch(WX_API + '/sns/jscode2session?appid=' + encodeURIComponent(cfg.appid) + '&secret=' + encodeURIComponent(cfg.secret) + '&js_code=' + encodeURIComponent(code) + '&grant_type=authorization_code')
+  const d = await r.json()
+  if (!d.openid) return c.json({ error: '换 openid 失败：' + (d.errmsg || JSON.stringify(d).slice(0, 80)) }, 400)
+  const old = await db.prepare('SELECT * FROM wx_users WHERE openid=?').bind(d.openid).first()
+  if (old) await db.prepare('UPDATE wx_users SET last_at=? WHERE id=?').bind(now(), old.id).run()
+  else await db.prepare('INSERT INTO wx_users (openid, nickname, quota, created_at, last_at) VALUES (?,?,0,?,?)').bind(d.openid, '', now(), now()).run()
+  return c.json({ ok: true, openid: d.openid })
+})
+// 用户点了「允许」之后加一条推送额度
+app.post('/wx-subscribed', async (c) => {
+  const db = c.env.DB
+  const { openid, n } = await c.req.json()
+  if (!openid) return c.json({ error: '缺少 openid' }, 400)
+  const add = Math.max(1, Math.min(10, num(n, 1)))
+  const u = await db.prepare('SELECT * FROM wx_users WHERE openid=?').bind(openid).first()
+  if (!u) return c.json({ error: '这个微信还没登记，先点「开启微信提醒」' }, 400)
+  await db.prepare('UPDATE wx_users SET quota = quota + ?, last_at=? WHERE id=?').bind(add, now(), u.id).run()
+  return c.json({ ok: true, quota: num(u.quota) + add })
+})
+app.post('/wx-test', async (c) => {
+  const db = c.env.DB
+  try {
+    const items = (await dueReminderItems(db)) || { title: '测试提醒', time: now().slice(0, 10), note: '能收到就说明配通了' }
+    const res = await wxPush(db, items)
+    return c.json({ ok: true, sent: res })
+  } catch (e) {
+    return c.json({ error: String(e.message || e).slice(0, 120) }, 400)
+  }
+})
+app.get('/wx-status', async (c) => {
+  const db = c.env.DB
+  const cfg = await wxCfg(db)
+  const us = (await db.prepare('SELECT openid, quota, last_at FROM wx_users ORDER BY id').all()).results
+  return c.json({
+    ready: !!(cfg.appid && cfg.secret && cfg.tpl),
+    appid: cfg.appid, tpl: cfg.tpl, fields: cfg.fields,
+    users: us.map((u) => ({ openid: String(u.openid).slice(0, 8) + '**', quota: num(u.quota), last_at: u.last_at }))
+  })
+})
+
 // 报表抬头（厂名 / 备注），所有对外单据统一带上
 const headInfo = async (db) => {
   try {
@@ -3013,6 +3168,7 @@ export default {
       if (!db) continue
       try {
         await runFixed(db)
+        await runWxReminder(db)
       } catch (e) {
         console.error('scheduled fixed failed book' + bid, e)
       }

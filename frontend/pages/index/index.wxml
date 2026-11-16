@@ -709,6 +709,17 @@
       <input class="inp" placeholder="备注，如 账期：当月 1 日至月底" value="{{head_note}}" bindinput="onHeadNote"/>
       <button class="btn" size="mini" bindtap="saveHead">保存抬头</button>
     </view>
+    <view class="form">
+      <view class="tip">到期微信提醒（可选）：配好后，每天早上 9 点如果 7 天内有该收/该付的款，会自动给你发一条微信服务通知。微信这个功能免费。</view>
+      <input class="inp" placeholder="小程序 AppID（wx 开头）" value="{{wx_appid}}" bindinput="onWxAppid"/>
+      <input class="inp" placeholder="小程序 AppSecret（只存服务器，不显示）" value="{{wx_secret}}" bindinput="onWxSecret"/>
+      <input class="inp" placeholder="订阅消息模板ID（公众平台复制）" value="{{wx_tpl}}" bindinput="onWxTpl"/>
+      <input class="inp" placeholder="模板字段（默认 thing1,time2,thing3，不用改）" value="{{wx_fields}}" bindinput="onWxFields"/>
+      <button class="btn" size="mini" bindtap="saveWx">保存配置</button>
+      <button class="btn" size="mini" bindtap="enableWx">开启微信提醒（要我手机上点允许）</button>
+      <button class="btn" size="mini" bindtap="testWx">发一条测试通知</button>
+      <view class="tip" wx:if="{{wx_info}}">已登记 {{wx_info.users}} 个微信，剩余可推 {{wx_info.quota}} 条{{wx_info.has_secret?'':'（还没存 AppSecret）'}}</view>
+    </view>
   </block>
 
   <block wx:if="{{tab=='history'}}">
