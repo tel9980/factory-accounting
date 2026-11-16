@@ -161,6 +161,14 @@
       <view class="tip">{{md.text}}</view>
       <view class="aline warn" wx:for="{{md.tips}}" wx:key="*this">{{item}}</view>
     </view>
+    <view class="card" wx:if="{{fund && fund.count}}">
+      <view class="card-h">💼 钱的三条线<text class="card-n" bindtap="jumpFund" data-t="me">去处理 ›</text></view>
+      <view class="item" wx:for="{{fund.rows}}" wx:key="k" bindtap="jumpFund" data-t="{{item.tab}}">
+        <view class="row1"><text class="nm">{{item.label}}</text><text class="amt">¥{{item.amt}}</text></view>
+        <view class="row2">{{item.tip}}</view>
+      </view>
+      <view class="tip">{{fund.text}}</view>
+    </view>
     <view class="card" bindtap="openHelp"><view class="card-h">❓ 怎么用（一页纸）<text class="tip">新接手的人看这个 ›</text></view></view>
     <view class="card" bindtap="openFeatSearch"><view class="card-h">🔎 找功能<text class="tip">170 多项，不知道在哪点？输个词 ›</text></view></view>
     <view class="card" wx:if="{{feat_open}}">

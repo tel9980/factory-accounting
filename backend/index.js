@@ -2174,6 +2174,51 @@ app.delete('/categories/:id', async (c) => {
 })
 
 // 预收款（客户先打钱给活还没做）/ 预付款（先付供应商定金）
+// 钱的三条线：客户先给的（预收）/ 员工借支未清 / 外面借的钱——首页一屏看清
+app.get('/funding', async (c) => {
+  const db = c.env.DB
+  const one = (sql) => db.prepare(sql).first().catch((e) => { noteFail(e, '资金三条线'); return null })
+  const [adv, loan, debts, reps] = await Promise.all([
+    db.prepare('SELECT type, COUNT(*) n, COALESCE(SUM(amount - COALESCE(used,0)),0) r FROM advances GROUP BY type').all().catch((e) => { noteFail(e, '资金三条线'); return { results: [] } }),
+    one('SELECT COUNT(DISTINCT staff) s, COUNT(*) n, COALESCE(SUM(amount - COALESCE(used,0) - COALESCE(returned,0)),0) r FROM loans WHERE amount - COALESCE(used,0) - COALESCE(returned,0) > 0.005'),
+    db.prepare("SELECT * FROM debts WHERE COALESCE(status,'')<>'closed'").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT debt_id, COALESCE(SUM(amount),0) t FROM debt_repays WHERE kind='principal' GROUP BY debt_id").all().catch(() => ({ results: [] }))
+  ])
+  const advRows = (adv && adv.results) || []
+  const g = (t) => {
+    const x = advRows.find((r) => r.type === t)
+    return { amt: x ? round2(num(x.r)) : 0, cnt: x ? num(x.n) : 0 }
+  }
+  const pin = g('in'), pout = g('out')
+  const L = loan || { s: 0, n: 0, r: 0 }
+  const repMap = {}
+  for (const r of ((reps && reps.results) || [])) repMap[r.debt_id] = num(r.t)
+  let dPrin = 0, dInt = 0, dCnt = 0, dOver = 0
+  const today = now().slice(0, 10)
+  for (const d of ((debts && debts.results) || [])) {
+    const remain = round2(Math.max(num(d.principal) - num(repMap[d.id]), 0))
+    if (remain <= 0.005) continue
+    dPrin += remain
+    dInt += remain * num(d.rate) / 1200
+    dCnt++
+    if (d.next_due && String(d.next_due).slice(0, 10) < today) dOver++
+  }
+  dPrin = round2(dPrin); dInt = round2(dInt)
+  const rows = []
+  if (pin.amt > 0) rows.push({ k: 'prepaid_in', label: '客户先给的钱（预收款）', amt: pin.amt, cnt: pin.cnt, tab: 'me', tip: '还没干活就已经收的钱，要用货/加工抵掉，不是赚到的' })
+  if (pout.amt > 0) rows.push({ k: 'prepaid_out', label: '付给供应商的预付款', amt: pout.amt, cnt: pout.cnt, tab: 'me', tip: '钱付了、料还没到，记着催货或抵货款' })
+  if (num(L.r) > 0) rows.push({ k: 'loan', label: '员工借支没清', amt: round2(num(L.r)), cnt: num(L.n), tab: 'me', tip: `${num(L.s)} 个人还挂着钱，报销或退回来就平了` })
+  if (dPrin > 0) rows.push({ k: 'debt', label: '外面借的钱（还没还完）', amt: dPrin, cnt: dCnt, tab: 'me', tip: `每月利息约 ${dInt} 元${dOver ? `，有 ${dOver} 笔还款已过期` : ''}` })
+  const parts = rows.map((r) => `${r.label} ${r.amt}`)
+  const text = rows.length
+    ? `还没结清的往来：${parts.join('；')}。这些钱都不算收入/利润，只是欠着或被欠着。`
+    : '没有预收款、没有员工借支、没有借款，这三块都是干净的。'
+  return c.json({ ok: true, prepaid_in: pin, prepaid_out: pout,
+    loan: { amt: round2(num(L.r)), cnt: num(L.n), staff: num(L.s) },
+    debt: { amt: dPrin, cnt: dCnt, month_interest: dInt, overdue: dOver },
+    count: rows.length, rows, text })
+})
+
 app.get('/advances', async (c) => {
   const db = c.env.DB
   const t = c.req.query('type') === 'out' ? 'out' : 'in'

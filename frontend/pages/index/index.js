@@ -2,6 +2,10 @@ const API_BASE = 'https://jz.qy663.de5.net'
 
 // 功能索引：170 多项功能太多，用「找功能」搜索直接跳过去（纯前端，不发请求）
 const FEATS = [
+  { n: "预收款（客户先给的钱）", go: "me:contact", desc: "客户没干活先给的钱，记成预收款；以后发货/加工完成抵扣，不重复算收入", kw: "预收 预付款 定金 先给 打款 客户先给 抵扣" },
+  { n: "员工借支（借钱给伙计）", go: "me:contact", desc: "借出去、报销冲抵、退回余款，一笔一笔挂着", kw: "借支 借钱 伙计 员工 报销 预支 备用金" },
+  { n: "借款（外面借的钱）", go: "me:contact", desc: "本金、利率、每月利息、还款计划；净资产会自动扣掉", kw: "借款 贷款 借钱 利息 月供 还款 银行贷款" },
+  { n: "钱的三条线（首页）", go: "home:home", desc: "预收款、预付供应商、员工借支、借款一屏看清", kw: "三条线 资金 往来 挂着 没结清 概览" },
   { n: "改单（填错了要改）", go: "bill:ar", desc: "客户、产品、金额、成本、到期日都能改；收过钱的不能改到比已收还少", kw: "改 修改 改错 填错 错了 改金额 改客户 重开" },
   { n: "历史流水（每笔进出）", go: "stat:history", desc: "一天一天看收了多少、付了多少、花在哪", kw: "流水 明细 历史 每笔 台账 进出 收了哪些" },
   { n: "记一笔应收（接单）", go: "bill:ar", desc: "客户、产品、金额、成本、约定收款日", kw: "开单 接单 记账 应收 加工费 报价单" },
@@ -85,7 +89,7 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
-    role: 'owner', staff_enabled: false, cf: null, mw: null, md: null, sad: null, help_open: false,
+    role: 'owner', staff_enabled: false, cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
     prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
     month_amort: 0, month_accrue_int: 0, month_dep: 0, month_expense_cash: 0,
@@ -354,6 +358,7 @@ Page({
     this.loadHealth()
     this.loadMyWork()
     this.loadMyDay()
+    this.loadFunding()
     this.loadTermDefault()
     // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
     this.enterTab(this.data.tab)
@@ -2825,6 +2830,18 @@ Page({
       url: API_BASE + '/my-work',
       success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ mw: d }) }
     })
+  },
+  // 钱的三条线（预收款 / 预付供应商 / 员工借支 / 借款）
+  loadFunding() {
+    this.req({
+      url: API_BASE + '/funding',
+      success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ fund: d }) }
+    })
+  },
+  jumpFund(e) {
+    const t = e.currentTarget.dataset.t || 'me'
+    this.enterTab(t)
+    wx.pageScrollTo({ scrollTop: 0, duration: 200 })
   },
   loadMyDay() {
     this.req({
