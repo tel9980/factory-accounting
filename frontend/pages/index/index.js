@@ -26,7 +26,9 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
-    role: 'owner', staff_enabled: false, cf: null, issue_count: 0, issue_at: '',
+    role: 'owner', staff_enabled: false, cf: null,
+    debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
+    debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
     import_type: 0, import_text: '',
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -168,6 +170,8 @@ Page({
     this.loadContacts()
     this.loadMe()
     this.loadCashflow()
+    this.loadDebts()
+    this.loadLimits()
     this.loadFixed()
     this.loadMonthLocks()
     this.loadAuditLogs()
@@ -875,7 +879,17 @@ Page({
     this.req({
       url: API_BASE + '/orders', method: 'POST',
       data: { customer: o_customer, item_name: o_item, price: Number(o_price), due_date: o_due, operator: o_operator, date: o_date },
-      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', o_date: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
+      success: (res) => {
+        this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', o_date: '', last_tip: '' })
+        this.refresh(); this.loadSuggest()
+        const w = res.data && res.data.warn
+        if (w) {
+          wx.showModal({
+            title: '超过信用额度了', content: `${w.party}\n已欠 ¥${w.unpaid}\n额度 ¥${w.limit_amount}\n超出 ¥${w.over}\n\n这单已记上，记得早点催款。`,
+            showCancel: false, confirmText: '知道了'
+          })
+        }
+      }
     })
   },
   addPayable() {
@@ -1842,6 +1856,115 @@ Page({
         })
       }
     })
+  },
+  // ===== 借款台账 =====
+  loadDebts() {
+    this.req({
+      url: API_BASE + '/debts',
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ debts: d.debts || [], debt_sum: { total_principal: d.total_principal, month_interest: d.month_interest, overdue_count: d.overdue_count, soon: d.soon || [], count: d.count } })
+      }
+    })
+  },
+  onDLender(e) { this.setData({ d_lender: e.detail.value }) },
+  onDPrincipal(e) { this.setData({ d_principal: e.detail.value }) },
+  onDRate(e) { this.setData({ d_rate: e.detail.value }) },
+  onDTerm(e) { this.setData({ d_term: e.detail.value }) },
+  onDRemark(e) { this.setData({ d_remark: e.detail.value }) },
+  onDKind(e) { this.setData({ d_kind: Number(e.detail.value) }) },
+  onDPayKind(e) { this.setData({ d_paykind: Number(e.detail.value) }) },
+  onDStart(e) { this.setData({ d_start: e.detail.value }) },
+  addDebt() {
+    const d = this.data
+    if (!d.d_lender) return wx.showToast({ title: '写一下跟谁借的', icon: 'none' })
+    if (!(Number(d.d_principal) > 0)) return wx.showToast({ title: '本金要大于 0', icon: 'none' })
+    const kinds = ['bank', 'person', 'other']
+    const pays = ['interest', 'equal', 'end']
+    this.req({
+      url: API_BASE + '/debts', method: 'POST',
+      data: { lender: d.d_lender, kind: kinds[d.d_kind], principal: Number(d.d_principal), rate: Number(d.d_rate || 0), start_date: d.d_start || '', term_months: Number(d.d_term || 0), pay_kind: pays[d.d_paykind], remark: d.d_remark },
+      success: () => {
+        wx.showToast({ title: '已记上，钱已入账户', icon: 'none' })
+        this.setData({ d_lender: '', d_principal: '', d_remark: '', d_start: '' })
+        this.loadDebts(); this.refresh()
+      }
+    })
+  },
+  repayDebt(e) {
+    const id = e.currentTarget.dataset.id
+    const it = this.data.debts.find((x) => x.id === id) || {}
+    wx.showActionSheet({
+      itemList: ['付利息 / 还款（记支出）', '看还款计划'],
+      success: (r) => {
+        if (r.tapIndex === 1) return this.debtSchedule(id, it)
+        wx.showModal({
+          title: '还款（' + (it.lender || '') + '）', editable: true,
+          placeholderText: '金额,利息还是本金(默认利息)',
+          content: String(it.next_amount || ''),
+          success: (rr) => {
+            if (!rr.confirm || !rr.content) return
+            const parts = rr.content.split(/[,，\s]+/)
+            const amt = Number(parts[0])
+            const kind = (parts[1] || '').indexOf('本') >= 0 ? 'principal' : 'interest'
+            if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
+            this.req({
+              url: API_BASE + '/debts/' + id + '/repay', method: 'POST',
+              data: { amount: amt, kind,
+                account_id: this.data.acc_id || undefined },
+              success: (res) => {
+                const d = res.data || {}
+                wx.showToast({ title: d.closed ? '这笔借款已还清' : '已记还款，余 ' + d.remain, icon: 'none' })
+                this.loadDebts(); this.refresh()
+              }
+            })
+          }
+        })
+      }
+    })
+  },
+  debtSchedule(id, it) {
+    this.req({
+      url: API_BASE + '/debts/' + id + '/schedule',
+      success: (res) => {
+        const d = res.data || {}
+        const head = `${d.lender || ''}　本金 ¥${d.principal}　年利率 ${d.rate}%　${d.term_months} 期\n总利息约 ¥${d.total_interest}，连本带息 ¥${d.total_pay}\n已付息 ¥${d.paid_interest}，已还本 ¥${d.paid_principal}\n（下面是计划，点还款记实际付出）`
+        const rows = (d.rows || []).slice(0, 12).map((r) => `${r.n}. ${r.due.slice(2)} 利息 ${r.interest} 本金 ${r.principal} 合计 ${r.pay}`).join('\n')
+        wx.showModal({ title: '还款计划', content: (head + '\n' + rows).slice(0, 900), showCancel: false })
+      }
+    })
+  },
+  delDebt(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删掉这笔借款？', content: '会连带删掉它的还款记录和资金流水',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/debts/' + id, method: 'DELETE', success: () => { this.loadDebts(); this.refresh() } })
+      }
+    })
+  },
+  // ===== 客户信用额度 =====
+  setCreditLimit(e) {
+    const name = e.currentTarget.dataset.name
+    const cur = (this.data.credit_limits || []).find((x) => x.party === name) || {}
+    wx.showModal({
+      title: '给「' + name + '」设欠款上限', editable: true,
+      placeholderText: '比如 5000（填 0 等于取消）',
+      content: cur.limit_amount ? String(cur.limit_amount) : '',
+      success: (r) => {
+        if (!r.confirm || !r.content) return
+        const lim = Number(String(r.content).trim())
+        if (!(lim >= 0)) return wx.showToast({ title: '填个数字', icon: 'none' })
+        this.req({
+          url: API_BASE + '/credit-limits', method: 'POST', data: { party: name, limit_amount: lim },
+          success: () => { wx.showToast({ title: lim ? '额度已设' : '额度已取消', icon: 'none' }); this.loadLimits() }
+        })
+      }
+    })
+  },
+  loadLimits() {
+    this.req({ url: API_BASE + '/credit-limits', success: (res) => this.setData({ credit_limits: (res.data && res.data.limits) || [] }) })
   },
   // 现金流预测（未来 45 天会不会缺钱）
   loadCashflow() {

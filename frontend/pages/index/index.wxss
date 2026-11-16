@@ -193,3 +193,10 @@
 
 /* 数据自检红条 */
 .issuebar { margin: 12rpx 0; padding: 16rpx 22rpx; background: #fdecea; color: #b3261e; border-radius: 12rpx; font-size: 25rpx; border-left: 8rpx solid #d93025; }
+
+/* 借款台账 */
+.debt-add { padding: 8rpx 0; }
+.inp.half { flex: 1; width: auto; }
+.rrow { display: flex; gap: 12rpx; }
+.frow { display: flex; gap: 10rpx; margin: 10rpx 0; }
+.frow .picker { flex: 1; background: #f5f6f8; border-radius: 8rpx; padding: 12rpx; font-size: 26rpx; color: #333; }

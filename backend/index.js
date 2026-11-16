@@ -95,6 +95,45 @@ const sigOf = async (key, party, type) => {
 }
 
 // 生成 A4 打印版对账单链接（小程序里点「打印版」调用）
+app.use('*', async (c, next) => {
+  const path = new URL(c.req.url).pathname
+  // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print') return next()
+  // 口令只存主账套，所有账套共用一个口令
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
+  const given = String(c.req.header('x-access-key') || '')
+  let role = ''
+  if (given && given === saved) role = 'owner'
+  else {
+    const staff = await getStaffKey(mainDb)
+    if (staff && given === staff) role = 'staff'
+  }
+  if (!role) return c.json({ error: '访问口令错误', code: 'bad_key' }, 401)
+  // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
+  if (role === 'staff') {
+    const m = c.req.method
+    const denyStaff = m === 'PATCH' || m === 'DELETE' ||
+      (/^\/(profit-compare|aging|weekly-text|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
+      (/^\/auth\/(change|staff)$/.test(path)) ||
+      (/^\/(report-head|book-name|wx-config)$/.test(path)) ||
+      (/^\/month-lock/.test(path)) ||
+      (/^\/accounts/.test(path) && m !== 'GET') ||
+      (/^\/categories/.test(path) && m !== 'GET') ||
+      (/^\/budgets/.test(path) && m !== 'GET') ||
+      (/^\/fixed/.test(path) && m !== 'GET' && path !== '/run-fixed') ||
+      ((/^\/debts/.test(path) || /^\/credit-limits/.test(path)) && m !== 'OPTIONS') ||
+      (/^\/transfers/.test(path) && m !== 'GET') ||
+      (/^\/writeoffs/.test(path) && m !== 'GET') ||
+      (/^\/assets/.test(path) && m !== 'GET') ||
+      (/^\/trash/.test(path) && m !== 'GET')
+    if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
+  }
+  c.set('role', role)
+  await next()
+})
+
 app.get('/statement-link', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -213,6 +252,191 @@ ${t.note ? '<div style="font-size:12.5px;color:#555;margin-top:10px">备注：' 
   return c.html(html)
 })
 
+// ==================== 借款台账（银行/亲友借款 + 利息 + 还款计划） ====================
+const DEBT_KIND = { bank: '银行贷款', person: '个人借款', other: '其他' }
+const PAY_KIND = { interest: '按月付息到期还本', equal: '等额本息', end: '到期一次还本付息' }
+const monthAdd = (iso, k) => {
+  const d = new Date(iso + 'T00:00:00Z')
+  const day = d.getUTCDate()
+  d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() + k)
+  const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate()
+  d.setUTCDate(Math.min(day, last))
+  return d.toISOString().slice(0, 10)
+}
+const equalPay = (p, rate, n) => {
+  const i = num(rate) / 1200
+  if (!n) return 0
+  if (i <= 0) return p / n
+  return (p * i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1)
+}
+const debtView = (d, repays) => {
+  const p = num(d.principal)
+  const n = num(d.term_months)
+  const rate = num(d.rate)
+  const paidP = repays.filter((r) => r.kind === 'principal').reduce((a, r) => a + num(r.amount), 0)
+  const paidI = repays.filter((r) => r.kind !== 'principal').reduce((a, r) => a + num(r.amount), 0)
+  const remain = Math.max(0, round2(p - paidP))
+  const monthly = round2(remain * rate / 1200)
+  const start = (d.start_date || d.created_at || now()).slice(0, 10)
+  const today = now().slice(0, 10)
+  let nextDue = ''
+  let nextAmount = round2(monthly)
+  const endDate = n ? monthAdd(start, n) : ''
+  if (d.pay_kind === 'equal') nextAmount = round2(equalPay(p, rate, n))
+  if (d.pay_kind === 'end') { nextDue = endDate; nextAmount = round2(p * (1 + rate / 100 * n / 12)) - paidP - paidI }
+  if (d.pay_kind !== 'end') {
+    // 下一次还款日：从起借日开始逐月，找到第一个还没付息且不早于上月的日期
+    let k = 1
+    let due = monthAdd(start, 1)
+    while (due <= today && k < 600) { k += 1; due = monthAdd(start, k) }
+    nextDue = due
+  }
+  const closed = d.status === 'closed' || remain <= 0
+  const overdue = !closed && nextDue && nextDue < today
+  return {
+    id: d.id, lender: d.lender || '', kind: d.kind || 'bank', kind_name: DEBT_KIND[d.kind] || d.kind,
+    pay_kind: d.pay_kind || 'interest', pay_kind_name: PAY_KIND[d.pay_kind] || d.pay_kind,
+    principal: p, rate, term_months: n, start_date: start, end_date: endDate,
+    account_id: num(d.account_id), remark: d.remark || '', status: closed ? 'closed' : 'open',
+    remain, monthly_interest: monthly, paid_principal: round2(paidP), paid_interest: round2(paidI),
+    next_due: nextDue, next_amount: nextAmount, overdue, days_to_due: nextDue ? Math.round((new Date(nextDue) - new Date(today)) / 86400000) : null
+  }
+}
+
+app.get('/debts', async (c) => {
+  const db = c.env.DB
+  const rows = (await db.prepare('SELECT * FROM debts ORDER BY id DESC').all()).results
+  const reps = (await db.prepare('SELECT * FROM debt_repays ORDER BY id').all()).results
+  const list = rows.map((d) => debtView(d, reps.filter((r) => r.debt_id === d.id)))
+  const open = list.filter((x) => x.status === 'open')
+  return c.json({
+    debts: list,
+    count: list.length,
+    total_principal: round2(open.reduce((a, x) => a + x.remain, 0)),
+    month_interest: round2(open.reduce((a, x) => a + x.monthly_interest, 0)),
+    overdue_count: open.filter((x) => x.overdue).length,
+    soon: open.filter((x) => !x.overdue && x.days_to_due !== null && x.days_to_due >= 0 && x.days_to_due <= 7)
+  })
+})
+
+app.post('/debts', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const acc = num(b.account_id) || (await defaultAccountId(db))
+  const r = await db.prepare('INSERT INTO debts (lender, kind, principal, rate, start_date, term_months, pay_kind, account_id, remark, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+    .bind(String(b.lender || ''), String(b.kind || 'bank'), num(b.principal), num(b.rate), String(b.start_date || now()).slice(0, 10), num(b.term_months), String(b.pay_kind || 'interest'), acc, String(b.remark || ''), 'open', now()).run()
+  const id = r.meta && r.meta.last_row_id
+  // 借进来的钱记一笔现金流入（不算经营收入）
+  await db.prepare('INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at, operator) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .bind('in', num(b.principal), '借款', (DEBT_KIND[b.kind] || '借款') + '：' + String(b.lender || ''), 'debt', id, acc, 1, String(b.start_date || now()).slice(0, 10), String(b.operator || '')).run()
+  return c.json({ ok: true, id })
+})
+
+app.patch('/debts/:id', async (c) => {
+  const id = c.req.param('id')
+  const b = await c.req.json()
+  const db = c.env.DB
+  const d = await db.prepare('SELECT * FROM debts WHERE id=?').bind(id).first()
+  if (!d) return c.json({ error: '没有这笔借款' }, 404)
+  await db.prepare('UPDATE debts SET lender=?, kind=?, principal=?, rate=?, start_date=?, term_months=?, pay_kind=?, remark=?, status=? WHERE id=?')
+    .bind(b.lender !== undefined ? String(b.lender) : d.lender, b.kind || d.kind, b.principal !== undefined ? num(b.principal) : num(d.principal), b.rate !== undefined ? num(b.rate) : num(d.rate), b.start_date || d.start_date, b.term_months !== undefined ? num(b.term_months) : num(d.term_months), b.pay_kind || d.pay_kind, b.remark !== undefined ? String(b.remark) : d.remark, b.status || d.status, id).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/debts/:id', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  await db.prepare('DELETE FROM debts WHERE id=?').bind(id).run()
+  await db.prepare('DELETE FROM debt_repays WHERE debt_id=?').bind(id).run()
+  await db.prepare("DELETE FROM ledger WHERE ref_type='debt' AND ref_id=?").bind(id).run()
+  return c.json({ ok: true })
+})
+
+app.post('/debts/:id/repay', async (c) => {
+  const id = c.req.param('id')
+  const b = await c.req.json()
+  const db = c.env.DB
+  const d = await db.prepare('SELECT * FROM debts WHERE id=?').bind(id).first()
+  if (!d) return c.json({ error: '没有这笔借款' }, 404)
+  const amount = num(b.amount)
+  if (!(amount > 0)) return c.json({ error: '还款金额要大于 0' }, 400)
+  const date = String(b.date || now()).slice(0, 10)
+  const acc = num(b.account_id) || num(d.account_id) || (await defaultAccountId(db))
+  const kind = b.kind === 'principal' ? 'principal' : 'interest'
+  await db.prepare('INSERT INTO debt_repays (debt_id, rdate, amount, kind, account_id, remark, created_at) VALUES (?,?,?,?,?,?,?)')
+    .bind(id, date, amount, kind, acc, String(b.remark || ''), now()).run()
+  await db.prepare('INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at, operator) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .bind('out', amount, '还款', (kind === 'principal' ? '还本金' : '付利息') + '：' + (d.lender || ''), 'debt', id, acc, 1, date, String(b.operator || '')).run()
+  const reps = (await db.prepare('SELECT * FROM debt_repays WHERE debt_id=?').bind(id).all()).results
+  const v = debtView(d, reps)
+  if (v.remain <= 0) await db.prepare("UPDATE debts SET status='closed' WHERE id=?").bind(id).run()
+  return c.json({ ok: true, remain: v.remain, monthly_interest: v.monthly_interest, closed: v.remain <= 0 })
+})
+
+app.get('/debts/:id/schedule', async (c) => {
+  const id = c.req.param('id')
+  const db = c.env.DB
+  const d = await db.prepare('SELECT * FROM debts WHERE id=?').bind(id).first()
+  if (!d) return c.json({ error: '没有这笔借款' }, 404)
+  const reps = (await db.prepare('SELECT * FROM debt_repays WHERE debt_id=? ORDER BY id').bind(id).all()).results
+  const p = num(d.principal)
+  const n = num(d.term_months) || 12
+  const rate = num(d.rate)
+  const start = (d.start_date || d.created_at || now()).slice(0, 10)
+  const paidI = reps.filter((r) => r.kind !== 'principal').reduce((a, r) => a + num(r.amount), 0)
+  const paidP = reps.filter((r) => r.kind === 'principal').reduce((a, r) => a + num(r.amount), 0)
+  const rows = []
+  let bal = p
+  const A = round2(equalPay(p, rate, n))
+  for (let k = 1; k <= n; k += 1) {
+    const due = monthAdd(start, k)
+    let interest = round2(bal * rate / 1200)
+    let principal = 0
+    if (d.pay_kind === 'equal') { principal = Math.min(bal, round2(A - interest)); interest = round2(A - principal) }
+    else if (d.pay_kind === 'end') { principal = k === n ? bal : 0; interest = round2(p * rate / 1200) }
+    else { principal = k === n ? bal : 0 }
+    const pay = round2(principal + interest)
+    bal = round2(bal - principal)
+    rows.push({ n: k, due, interest, principal, pay, balance: bal })
+  }
+  const totalInterest = round2(rows.reduce((a, x) => a + x.interest, 0))
+  return c.json({ ok: true, lender: d.lender, principal: p, rate, term_months: n, pay_kind: d.pay_kind, rows, total_interest: totalInterest, total_pay: round2(p + totalInterest), paid_interest: round2(paidI), paid_principal: round2(paidP) })
+})
+
+// ==================== 客户信用额度 ====================
+app.get('/credit-limits', async (c) => {
+  const db = c.env.DB
+  const lims = (await db.prepare('SELECT * FROM credit_limits ORDER BY id').all()).results
+  const rows = (await db.prepare('SELECT customer, SUM(MAX(0, price - paid - COALESCE(written_off,0))) AS unpaid, COUNT(*) AS cnt FROM orders GROUP BY customer').all()).results
+  const m = {}
+  for (const r of rows) m[r.customer] = r
+  const list = lims.map((l) => {
+    const r = m[l.party] || { unpaid: 0, cnt: 0 }
+    const unpaid = round2(num(r.unpaid))
+    const lim = num(l.limit_amount)
+    return { id: l.id, party: l.party, limit_amount: lim, note: l.note || '', unpaid, cnt: num(r.cnt), over: lim > 0 && unpaid > lim, pct: lim > 0 ? Math.round(unpaid / lim * 100) : null, remain: round2(lim - unpaid) }
+  })
+  return c.json({ limits: list, count: list.length, over_count: list.filter((x) => x.over).length, total_limit: round2(list.reduce((a, x) => a + x.limit_amount, 0)) })
+})
+
+app.post('/credit-limits', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const party = String(b.party || '').trim()
+  if (!party) return c.json({ error: '要写单位名称' }, 400)
+  const lim = num(b.limit_amount)
+  const old = await db.prepare('SELECT * FROM credit_limits WHERE party=?').bind(party).first()
+  if (old) await db.prepare('UPDATE credit_limits SET limit_amount=?, note=? WHERE id=?').bind(lim, String(b.note || old.note || ''), old.id).run()
+  else await db.prepare('INSERT INTO credit_limits (party, limit_amount, note, created_at) VALUES (?,?,?,?)').bind(party, lim, String(b.note || ''), now()).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/credit-limits/:id', async (c) => {
+  const db = c.env.DB
+  await db.prepare('DELETE FROM credit_limits WHERE id=?').bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
 app.get('/', (c) => c.html(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -226,43 +450,7 @@ app.get('/', (c) => c.html(`<!doctype html>
 </body></html>`))
 
 // 除 /auth/* 外全部需要口令
-app.use('*', async (c, next) => {
-  const path = new URL(c.req.url).pathname
-  // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path.startsWith('/auth/') || path === '/statement-print') return next()
-  // 口令只存主账套，所有账套共用一个口令
-  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
-  const saved = await getKey(mainDb)
-  if (!saved) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
-  const given = String(c.req.header('x-access-key') || '')
-  let role = ''
-  if (given && given === saved) role = 'owner'
-  else {
-    const staff = await getStaffKey(mainDb)
-    if (staff && given === staff) role = 'staff'
-  }
-  if (!role) return c.json({ error: '访问口令错误', code: 'bad_key' }, 401)
-  // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
-  if (role === 'staff') {
-    const m = c.req.method
-    const denyStaff = m === 'PATCH' || m === 'DELETE' ||
-      (/^\/(profit-compare|aging|weekly-text|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
-      (/^\/auth\/(change|staff)$/.test(path)) ||
-      (/^\/(report-head|book-name|wx-config)$/.test(path)) ||
-      (/^\/month-lock/.test(path)) ||
-      (/^\/accounts/.test(path) && m !== 'GET') ||
-      (/^\/categories/.test(path) && m !== 'GET') ||
-      (/^\/budgets/.test(path) && m !== 'GET') ||
-      (/^\/fixed/.test(path) && m !== 'GET' && path !== '/run-fixed') ||
-      (/^\/transfers/.test(path) && m !== 'GET') ||
-      (/^\/writeoffs/.test(path) && m !== 'GET') ||
-      (/^\/assets/.test(path) && m !== 'GET') ||
-      (/^\/trash/.test(path) && m !== 'GET')
-    if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
-  }
-  c.set('role', role)
-  await next()
-})
+
 
 // 我是谁（老板/员工）
 app.get('/me', async (c) => {
@@ -1220,6 +1408,14 @@ app.get('/dashboard', async (c) => {
   const todayS = new Date().toISOString().slice(0, 10)
   const soonS = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
   const dueSoon = await db.prepare("SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
+  const debtRows = (await db.prepare('SELECT * FROM debts').all()).results
+  const debtReps = (await db.prepare('SELECT * FROM debt_repays').all()).results
+  const debts = (() => {
+    const list = debtRows.map((d) => debtView(d, debtReps.filter((r) => r.debt_id === d.id))).filter((x) => x.status === 'open')
+    return { total_principal: round2(list.reduce((a, x) => a + x.remain, 0)), month_interest: round2(list.reduce((a, x) => a + x.monthly_interest, 0)), overdue_count: list.filter((x) => x.overdue).length, soon: list.filter((x) => !x.overdue && x.days_to_due !== null && x.days_to_due >= 0 && x.days_to_due <= 7) }
+  })()
+  const overLimitRow = await db.prepare("SELECT COUNT(*) AS n FROM (SELECT o.customer, SUM(MAX(0, o.price - o.paid - COALESCE(o.written_off,0))) AS unpaid FROM orders o GROUP BY o.customer) t JOIN credit_limits l ON l.party=t.customer WHERE l.limit_amount>0 AND t.unpaid>l.limit_amount").first()
+  const overLimit = { n: num(overLimitRow && overLimitRow.n) }
   const paySoon = await db.prepare("SELECT * FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all()
   const todayIn = await db.prepare("SELECT COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,10)=?").bind(todayS).first()
   const topCust = await db.prepare('SELECT customer AS nm, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 1').first()
@@ -1233,6 +1429,8 @@ app.get('/dashboard', async (c) => {
     const pct = limit > 0 ? Math.round((spent / limit) * 100) : 0
     if (pct >= 90) budgetOver.push({ category: b.category, limit, spent, pct, over: spent > limit, over_amt: spent > limit ? round2(spent - limit) : 0 })
   }
+  const accList = await accountBalances(db)
+  const cashBal = round2(accList.reduce((s2, a) => s2 + a.balance, 0))
   const role = c.get('role') || 'owner'
   const hideProfit = role === 'staff'
   const scRow = await db.prepare("SELECT value FROM settings WHERE key='selfcheck_count'").first()
@@ -1259,12 +1457,18 @@ app.get('/dashboard', async (c) => {
     overdue: overdue.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid) })),
     due_soon_count: dueSoon.results.length,
     due_soon: dueSoon.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
+    debt_total: hideProfit ? null : debts.total_principal,
+    net_worth: hideProfit ? null : round2(cashBal - debts.total_principal),
+    debt_month_interest: hideProfit ? null : debts.month_interest,
+    debt_overdue_count: hideProfit ? 0 : debts.overdue_count,
+    debt_soon_count: hideProfit ? 0 : debts.soon.length,
+    over_limit_count: hideProfit ? 0 : overLimit.n,
     pay_soon_count: paySoon.results.length,
     pay_soon: paySoon.results.map((r) => ({ ...r, unpaid: round2(r.amount - r.paid), due_short: (r.due_date || '').slice(0, 10) })),
     recent: recent.results,
     budget_over: budgetOver,
     budget_alert_count: budgetOver.length,
-    cash_balance: round2((await accountBalances(db)).reduce((s2, a) => s2 + a.balance, 0)),
+    cash_balance: cashBal,
     loan_open: round2(num((await db.prepare('SELECT COALESCE(SUM(amount-used-returned),0) t FROM loans').first()).t))
   })
 })
@@ -1800,7 +2004,16 @@ app.post('/orders', async (c) => {
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, created_at) VALUES (?,?,?,0,0,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, created).run()
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`)
-  return c.json({ ok: true })
+  // 超信用额度提醒（不拦，只提醒）
+  let warn = null
+  const lim = await db.prepare('SELECT * FROM credit_limits WHERE party=?').bind(customer).first()
+  if (lim && num(lim.limit_amount) > 0) {
+    const agg = await db.prepare('SELECT SUM(MAX(0, price - paid - COALESCE(written_off,0))) AS unpaid FROM orders WHERE customer=?').bind(customer).first()
+    const unpaid = round2(num(agg && agg.unpaid))
+    const over = round2(unpaid - num(lim.limit_amount))
+    if (over > 0) warn = { over_limit: true, party: customer, limit_amount: num(lim.limit_amount), unpaid, over, error: `提醒：${customer} 已欠 ¥${unpaid}，超信用额度 ¥${num(lim.limit_amount)}（多出 ¥${over}）` }
+  }
+  return c.json(Object.assign({ ok: true }, warn ? { warn } : {}))
 })
 
 // 收客户款（可带日期补录）
@@ -2555,7 +2768,15 @@ app.get('/credits', async (c) => {
     avg_days: g.pay_days.length ? Math.round(g.pay_days.reduce((a, b) => a + b, 0) / g.pay_days.length) : null,
     last_order: g.last_order
   })).sort((a, b) => b.unpaid - a.unpaid || b.total - a.total)
-  return c.json(list)
+  // 附加信用额度
+  const lims = (await db.prepare('SELECT * FROM credit_limits').all()).results
+  const lm = {}
+  for (const l of lims) lm[l.party] = num(l.limit_amount)
+  const out = list.map((x) => {
+    const lim = lm[x.name] || 0
+    return Object.assign({}, x, { limit_amount: lim, over: lim > 0 && x.unpaid > lim, over_amount: lim > 0 ? round2(x.unpaid - lim) : 0 })
+  })
+  return c.json(out)
 })
 
 // 同比环比（本月 vs 上月 / 去年同月）
@@ -3127,12 +3348,21 @@ const apAtEnd = async (db, m) => {
 app.get('/networth', async (c) => {
   const db = c.env.DB
   const n = Math.min(Math.max(num(c.req.query('months'), 12) || 12, 3), 36)
+  const debts = (await db.prepare('SELECT * FROM debts').all()).results
+  const reps = (await db.prepare('SELECT * FROM debt_repays').all()).results
+  const debtAtEnd = (m) => {
+    const end = m + '-31'
+    const borrowed = debts.filter((d) => (d.start_date || d.created_at || '').slice(0, 10) <= end).reduce((a, d) => a + num(d.principal), 0)
+    const repaid = reps.filter((r) => r.kind === 'principal' && (r.rdate || r.created_at || '').slice(0, 10) <= end).reduce((a, r) => a + num(r.amount), 0)
+    return round2(Math.max(0, borrowed - repaid))
+  }
   const out = []
   for (const m of monthList(n)) {
     const cash = await cashAtEnd(db, m)
     const ar = await arAtEnd(db, m)
     const ap = await apAtEnd(db, m)
-    out.push({ m, cash, ar, ap, net: round2(cash + ar - ap) })
+    const debt = debtAtEnd(m)
+    out.push({ m, cash, ar, ap, debt, net: round2(cash + ar - ap - debt) })
   }
   return c.json(out)
 })

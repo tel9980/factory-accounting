@@ -621,7 +621,7 @@
     <view class="cards" wx:if="{{nw_latest}}">
       <view class="card">
         <view class="num">{{nw_latest.net}}</view>
-        <view class="label">家底（现金+别人欠我−我欠别人）</view>
+        <view class="label">家底（现金+别人欠我−我欠别人−借款）</view>
       </view>
       <view class="card">
         <view class="num">{{nw_latest.cash}}</view>
@@ -633,6 +633,43 @@
     </view>
     <view class="biz" wx:if="{{nw_latest}}">
       <text>我欠别人</text><text class="amt out">{{nw_latest.ap}}</text>
+    </view>
+
+    <view class="form">
+      <view class="tip">🏦 借款台账（银行 / 亲友）{{debt_sum.count ? '：共 ' + debt_sum.count + ' 笔，还欠 ' + debt_sum.total_principal + ' 元，每月利息约 ' + debt_sum.month_interest + ' 元' : ''}}</view>
+      <view class="debt-add" wx:if="{{role!='staff'}}">
+        <input class="inp" placeholder="出借方（如 XX 银行 / 张三）" value="{{d_lender}}" bindinput="onDLender"/>
+        <view class="frow">
+          <picker range="{{debt_kinds}}" value="{{d_kind}}" bindchange="onDKind"><view class="picker">类型：{{debt_kinds[d_kind]}} ▾</view></picker>
+          <input class="inp half" placeholder="本金" type="digit" value="{{d_principal}}" bindinput="onDPrincipal"/>
+        </view>
+        <view class="frow">
+          <input class="inp half" placeholder="年利率 %" type="digit" value="{{d_rate}}" bindinput="onDRate"/>
+          <input class="inp half" placeholder="几期(月)" type="number" value="{{d_term}}" bindinput="onDTerm"/>
+        </view>
+        <view class="frow">
+          <picker range="{{debt_paykinds}}" value="{{d_paykind}}" bindchange="onDPayKind"><view class="picker">还款方式：{{debt_paykinds[d_paykind]}} ▾</view></picker>
+        </view>
+        <view class="frow">
+          <picker mode="date" value="{{d_start}}" bindchange="onDStart"><view class="picker">起借日：{{d_start || '今天'}} ▾</view></picker>
+        </view>
+        <input class="inp" placeholder="备注（可不填）" value="{{d_remark}}" bindinput="onDRemark"/>
+        <button class="btn" size="mini" bindtap="addDebt">记一笔借款（钱进账户）</button>
+      </view>
+      <view class="list" wx:if="{{debts.length}}">
+        <view class="item" wx:for="{{debts}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.lender}}</text><text class="amt out">还欠 {{item.remain}}</text></view>
+          <view class="row2">{{item.kind_name}} · 年息 {{item.rate}}% · 月息 {{item.monthly_interest}} 元 · {{item.pay_kind_name}}</view>
+          <view class="row2" wx:if="{{item.status=='open'}}">下次还款 {{item.next_due}} 约 {{item.next_amount}} 元<text class="red" wx:if="{{item.overdue}}"> · 已逾期，快处理</text></view>
+          <view class="row2" wx:else>已还清</view>
+          <view class="btns">
+            <button size="mini" wx:if="{{item.status=='open'}}" bindtap="repayDebt" data-id="{{item.id}}">还款</button>
+            <button size="mini" bindtap="repayDebt" data-id="{{item.id}}">计划</button>
+            <button size="mini" wx:if="{{role!='staff'}}" bindtap="delDebt" data-id="{{item.id}}">删</button>
+          </view>
+        </view>
+      </view>
+      <view class="tip" wx:else>还没有借款记录。有银行贷款或亲友借款就记一笔，每月利息会自动算，到期前提醒你。</view>
     </view>
 
     <view class="chart" wx:if="{{nw.length}}">
@@ -891,6 +928,7 @@
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ar" data-name="{{item.name}}">打印版</button>
+            <button size="mini" wx:if="{{role!='staff'}}" bindtap="setCreditLimit" data-name="{{item.name}}">设额度</button>
           </view>
         </view>
         <view class="empty" wx:if="{{!contacts_ar.length}}">暂无客户记录</view>
