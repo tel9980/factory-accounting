@@ -1575,6 +1575,25 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyYearCust">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeYearCust">收起</button></view>
       </block>
+      <view class="tip">📤 批量发对账单（月底一次列出「谁还欠我 / 我还欠谁」，每家一段现成话术 + 打印页链接）</view>
+      <view class="frow">
+        <button class="btn" size="mini" bindtap="openStBatchAr">应收（客户欠我）</button>
+        <button class="btn half" size="mini" bindtap="openStBatchAp">应付（我欠供应商）</button>
+      </view>
+      <block wx:if="{{sb}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{sb.month}} · {{sb.count}} 家</text><text class="amt">合计 {{sb.total}} 元</text></view>
+          <view class="row2" wx:for="{{sb.rows}}" wx:key="party">
+            <text>{{item.party}}　{{item.left}} 元（{{item.cnt}} 笔{{item.overdue_days ? '，最早超 ' + item.overdue_days + ' 天' : ''}}）</text>
+            <button class="btn mini" size="mini" data-i="{{index}}" catchtap="copyStOne">话术</button>
+            <button class="btn mini" size="mini" data-i="{{index}}" catchtap="openStUrl">打印页</button>
+          </view>
+        </view>
+        <view class="frow">
+          <button class="btn half" size="mini" bindtap="copyStAll">📋 复制总清单</button>
+          <button class="btn half" size="mini" bindtap="closeStBatch">收起</button>
+        </view>
+      </block>
       <view class="tip">📄 本月一页纸（三句话说清这个月怎么样，可以直接发家人或合伙人）</view>
       <view class="frow">
         <input class="inp" placeholder="月份 YYYY-MM（留空本月）" value="{{mb_month}}" bindinput="onMbMonth" bindconfirm="loadMonthBrief"/>

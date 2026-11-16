@@ -224,6 +224,60 @@ app.use('*', async (c, next) => {
   await next()
 })
 
+// 批量发对账单：一次列出「谁还欠我 / 我还欠谁」，每家一段现成话术 + 打印页链接
+app.get('/statement-batch', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const db = c.env.DB
+  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  const month = /^\d{4}-\d{2}$/.test(String(c.req.query('month') || '')) ? String(c.req.query('month')) : now().slice(0, 7)
+  const saved = await getKey(mainDb)
+  const base = new URL(c.req.url).origin
+  const isAr = type === 'ar'
+  const sql = isAr
+    ? "SELECT customer AS party, COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) left_amt, MIN(due_date) first_due, MIN(created_at) first_day, MIN(substr(created_at,1,10)) oldest FROM orders WHERE price > paid + COALESCE(written_off,0) GROUP BY customer"
+    : "SELECT supplier AS party, COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) left_amt, MIN(due_date) first_due, MIN(created_at) first_day, MIN(substr(created_at,1,10)) oldest FROM payables WHERE amount > paid + COALESCE(written_off,0) GROUP BY supplier"
+  const [aggR, mNewR] = await Promise.all([
+    db.prepare(sql).all().catch((e) => { noteFail(e, '批量对账单'); return { results: [] } }),
+    (isAr
+      ? db.prepare("SELECT customer AS party, COALESCE(SUM(price),0) t FROM orders WHERE substr(created_at,1,7)=? GROUP BY customer")
+      : db.prepare("SELECT supplier AS party, COALESCE(SUM(amount),0) t FROM payables WHERE substr(created_at,1,7)=? GROUP BY supplier")
+    ).bind(month).all().catch(() => ({ results: [] }))
+  ])
+  const newMap = {}
+  for (const r of ((mNewR && mNewR.results) || [])) newMap[r.party] = num(r.t)
+  const today = now().slice(0, 10)
+  const rows = []
+  for (const r of ((aggR && aggR.results) || [])) {
+    const left = round2(num(r.left_amt))
+    if (left <= 0.005) continue
+    const due = r.first_due ? String(r.first_due).slice(0, 10) : ''
+    const over = due && due < today ? daysSince(due) : 0
+    const t = saved ? await sigOf(saved, r.party, type) : ''
+    const url = t ? base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(r.party || '') + '&t=' + t : ''
+    const newAmt = round2(num(newMap[r.party]))
+    const lines = isAr
+      ? [`${r.party}，对一下账：`,
+         `到 ${today}，还有 ${num(r.n)} 笔加工费没结，共 ${left} 元。`,
+         newAmt > 0 ? `其中 ${month} 月新做 ${newAmt} 元。` : '',
+         over > 0 ? `最早一笔已超期 ${over} 天，麻烦安排一下。` : '',
+         '明细我发你对账单，有对不上的地方跟我说，我改。']
+      : [`${r.party}，对一下账：`,
+         `到 ${today}，还有 ${num(r.n)} 笔货款没付，共 ${left} 元。`,
+         newAmt > 0 ? `其中 ${month} 月新增 ${newAmt} 元。` : '',
+         over > 0 ? `最早一笔已到期 ${over} 天。` : '',
+         '麻烦确认一下金额，有出入我这边改。']
+    rows.push({ party: r.party, left, cnt: num(r.n), month_new: newAmt, due, overdue_days: over,
+      url, text: lines.filter(Boolean).join('\n') })
+  }
+  rows.sort((a, b) => b.left - a.left)
+  const total = round2(rows.reduce((s, x) => s + x.left, 0))
+  const allText = rows.length
+    ? (isAr ? `【对账提醒】到 ${today}，共 ${rows.length} 家还欠加工费，合计 ${total} 元：\n` : `【对账提醒】到 ${today}，共 ${rows.length} 家还欠货款，合计 ${total} 元：\n`)
+      + rows.map((x) => `${x.party}：${x.left} 元（${x.cnt} 笔${x.overdue_days ? `，最早超 ${x.overdue_days} 天` : ''}）`).join('\n')
+    : (isAr ? '没有欠加工费的客户，账是清的。' : '没有欠货款的供应商，账是清的。')
+  return c.json({ ok: true, type, month, count: rows.length, total, rows, all_text: allText })
+})
+
 app.get('/statement-link', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)

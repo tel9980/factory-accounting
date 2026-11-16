@@ -125,7 +125,7 @@ Page({
       ] }
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', lb: null, lb_month: '', mbr: null, mb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
+    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', lb: null, lb_month: '', mbr: null, mb_month: '', sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -2713,6 +2713,40 @@ Page({
         this.setData({ cb: d })
       }
     })
+  },
+  openStBatchAr() { this.loadStBatch('ar') },
+  openStBatchAp() { this.loadStBatch('ap') },
+  loadStBatch(t) {
+    this.req({
+      url: API_BASE + '/statement-batch?type=' + t + '&month=' + encodeURIComponent(this.data.sb_month || this.data.today_month || ''),
+      once: 'stbatch',
+      success: (r) => {
+        if (!r.data || !r.data.ok) return wx.showToast({ title: '取不出来，稍后再试', icon: 'none' })
+        this.setData({ sb: r.data })
+      }
+    })
+  },
+  closeStBatch() { this.setData({ sb: null }) },
+  copyStOne(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const row = (this.data.sb && this.data.sb.rows && this.data.sb.rows[i]) || null
+    if (!row) return
+    wx.setClipboardData({ data: row.text })
+  },
+  openStUrl(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const row = (this.data.sb && this.data.sb.rows && this.data.sb.rows[i]) || null
+    if (!row) return
+    if (!row.url) return wx.showToast({ title: '先设访问口令才能生成打印页', icon: 'none' })
+    wx.setClipboardData({
+      data: row.url,
+      success: () => wx.showModal({ title: '打印页链接已复制', content: '发到对方微信，他用浏览器打开就能看明细、打印或存 PDF。', showCancel: false })
+    })
+  },
+  copyStAll() {
+    const d = this.data.sb
+    if (!d) return
+    wx.setClipboardData({ data: d.all_text })
   },
   onMbMonth(e) { this.setData({ mb_month: e.detail.value }) },
   loadMonthBrief() {
