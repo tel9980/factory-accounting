@@ -21,6 +21,8 @@ Page({
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
     cur_loan: 0, cur_loan_name: '', rl_amount: '', rl_category: 0, rl_remark: '',
     cash_balance: 0, accounts: [], acc_names: [], acc_idx: 0, acc_id: 0, acc_name: '',
+    tr_from: -1, tr_to: -1, tr_amount: '', tr_remark: '', tr_rows: [],
+    wf_rows: [], wf_bad: 0, wf_waived: 0,
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
@@ -526,7 +528,8 @@ Page({
     const t = e.currentTarget.dataset.t
     this.setData({ tab: t })
     if (t === 'report') { this.loadFixed(); this.loadMonthLocks(); this.loadProfitCompare() }
-    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows() }
+    if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
+    if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
@@ -1751,6 +1754,139 @@ Page({
           success: (res) => {
             if (res.data && res.data.ok) { this.loadBankFlows(); this.refresh(); wx.showToast({ title: '已记成支出', icon: 'success' }) }
             else wx.showToast({ title: (res.data && res.data.error) || '认领失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+
+  // ── 坏账核销 ──
+  loadWriteoffs() {
+    const m = this.data.inv_month ? '?month=' + this.data.inv_month : ''
+    this.req({
+      url: API_BASE + '/writeoffs' + m,
+      fail: () => {},
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return
+        this.setData({ wf_rows: d.rows || [], wf_bad: d.bad_debt || 0, wf_waived: d.payable_waived || 0 })
+      }
+    })
+  },
+  writeoffOrder(e) {
+    const id = e.currentTarget.dataset.id
+    const unpaid = Number(e.currentTarget.dataset.unpaid) || 0
+    wx.showModal({
+      title: '核销这笔应收',
+      content: '要不回来的金额，默认全部 ' + unpaid + ' 元（也可以只填一部分）',
+      editable: true,
+      placeholderText: String(unpaid),
+      success: (r) => {
+        if (!r.confirm) return
+        const v = (r.content || '').trim()
+        const amount = v ? Number(v) : unpaid
+        if (!(amount > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
+        this.req({
+          url: API_BASE + '/orders/' + id + '/writeoff', method: 'POST',
+          data: { amount: amount, reason: '联系不上客户/要不回来了' },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) {
+              wx.showToast({ title: '已核销 ' + d.amount, icon: 'success' })
+              this.loadAr(); this.loadDashboard(); this.loadWriteoffs()
+            } else wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  writeoffPayable(e) {
+    const id = e.currentTarget.dataset.id
+    const unpaid = Number(e.currentTarget.dataset.unpaid) || 0
+    wx.showModal({
+      title: '核销这笔应付',
+      content: '供应商不用再付的金额，默认全部 ' + unpaid + ' 元',
+      editable: true,
+      placeholderText: String(unpaid),
+      success: (r) => {
+        if (!r.confirm) return
+        const v = (r.content || '').trim()
+        const amount = v ? Number(v) : unpaid
+        if (!(amount > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
+        this.req({
+          url: API_BASE + '/payables/' + id + '/writeoff', method: 'POST',
+          data: { amount: amount, reason: '供应商免了/不用付了' },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) {
+              wx.showToast({ title: '已核销 ' + d.amount, icon: 'success' })
+              this.loadAp(); this.loadDashboard(); this.loadWriteoffs()
+            } else wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  undoWriteoff(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '撤销核销',
+      content: '撤销后这笔欠款会重新回到应收/应付里。确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/writeoffs/' + id, method: 'DELETE',
+          success: () => {
+            wx.showToast({ title: '已撤销', icon: 'success' })
+            this.loadWriteoffs(); this.loadAr(); this.loadAp(); this.loadDashboard()
+          }
+        })
+      }
+    })
+  },
+  // ── 账户内部转账 ──
+  loadTransfers() {
+    this.req({
+      url: API_BASE + '/transfers',
+      fail: () => {},
+      success: (res) => { this.setData({ tr_rows: res.data || [] }) }
+    })
+  },
+  onTrFrom(e) { this.setData({ tr_from: Number(e.detail.value) }) },
+  onTrTo(e) { this.setData({ tr_to: Number(e.detail.value) }) },
+  onTrAmount(e) { this.setData({ tr_amount: e.detail.value }) },
+  onTrRemark(e) { this.setData({ tr_remark: e.detail.value }) },
+  addTransfer() {
+    const { accounts, tr_from, tr_to, tr_amount, tr_remark } = this.data
+    if (tr_from < 0 || tr_to < 0) return wx.showToast({ title: '先选转出和转入账户', icon: 'none' })
+    if (tr_from === tr_to) return wx.showToast({ title: '两边不能是同一个账户', icon: 'none' })
+    const a = Number(tr_amount) || 0
+    if (!(a > 0)) return wx.showToast({ title: '转账金额不对', icon: 'none' })
+    this.req({
+      url: API_BASE + '/transfer', method: 'POST',
+      data: { from: accounts[tr_from].id, to: accounts[tr_to].id, amount: a, remark: tr_remark },
+      success: (res) => {
+        const d = res.data || {}
+        if (d.ok) {
+          wx.showToast({ title: '已转账', icon: 'success' })
+          this.setData({ tr_amount: '', tr_remark: '' })
+          this.loadAccounts(); this.loadTransfers(); this.loadDashboard()
+        } else wx.showToast({ title: d.error || '转账失败', icon: 'none' })
+      }
+    })
+  },
+  delTransfer(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除这笔转账',
+      content: '删掉后两边账户余额都会回滚。确定吗？',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/transfers/' + id, method: 'DELETE',
+          success: () => {
+            wx.showToast({ title: '已删除', icon: 'success' })
+            this.loadAccounts(); this.loadTransfers(); this.loadDashboard()
           }
         })
       }

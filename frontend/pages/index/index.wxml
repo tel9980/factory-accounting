@@ -118,12 +118,13 @@
     <view class="list">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.price}} · 已收{{item.paid}} · 状态{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.price}} · 已收{{item.paid}}{{item.written_off>0?' · 已核销'+item.written_off:''}} · 状态{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
           <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
           <button size="mini" bindtap="editProgress" data-id="{{item.id}}">进度</button>
           <button size="mini" bindtap="applyAdvanceOrder" data-id="{{item.id}}">预收抵</button>
+          <button size="mini" bindtap="writeoffOrder" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
           <button size="mini" bindtap="editOrder" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.customer}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ar" data-name="{{item.customer}}">月结</button>
@@ -166,10 +167,11 @@
     <view class="list">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 已核销'+item.written_off:''}}{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="applyAdvancePayable" data-id="{{item.id}}">预付抵</button>
+          <button size="mini" bindtap="writeoffPayable" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
           <button size="mini" bindtap="editPayable" data-id="{{item.id}}">改</button>
           <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.supplier}}">对账</button>
           <button size="mini" bindtap="monthStatement" data-type="ap" data-name="{{item.supplier}}">月结</button>
@@ -546,6 +548,17 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">坏账核销记录（本月要不回来的 {{wf_bad}} 元 · 供应商免掉的 {{wf_waived}} 元）</view>
+      <view class="tip">核销只是把这笔往来抹掉，不动现金、不算收支；核销错了可以撤销。</view>
+    </view>
+    <view class="list" wx:if="{{wf_rows.length}}">
+      <view class="item" wx:for="{{wf_rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.ref_type=='order' ? '应收核销' : '应付核销'}} · {{item.party}}</text><text class="amt red">¥{{item.amount}}</text></view>
+        <view class="row2">{{item.reason}} · {{item.created_at}}</view>
+        <view class="btns"><button size="mini" bindtap="undoWriteoff" data-id="{{item.id}}">撤销</button></view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">报表抬头（写厂名，图片更像正式对账单）</view>
       <input class="inp" placeholder="厂名，如 兴旺五金加工厂" value="{{head_title}}" bindinput="onHeadTitle"/>
       <input class="inp" placeholder="备注，如 账期：当月 1 日至月底" value="{{head_note}}" bindinput="onHeadNote"/>
@@ -595,6 +608,21 @@
       <input class="inp" placeholder="这个账户期初有多少钱(可不填)" type="digit" value="{{new_acc_opening}}" bindinput="onNewAccOpening"/>
       <button class="btn" size="mini" bindtap="addAccount">加一个账户</button>
       <view class="tip">期初余额 = 你开始用这个软件时，这个账户里本来有多少钱</view>
+    </view>
+    <view class="form">
+      <view class="tip">账户内部转账（现金存银行、微信提现，不算收入也不算支出）</view>
+      <picker range="{{acc_names}}" bindchange="onTrFrom"><view class="picker">从：{{tr_from>=0 ? acc_names[tr_from] : '选转出账户'}} ▾</view></picker>
+      <picker range="{{acc_names}}" bindchange="onTrTo"><view class="picker">到：{{tr_to>=0 ? acc_names[tr_to] : '选转入账户'}} ▾</view></picker>
+      <input class="inp" placeholder="转账金额" type="digit" value="{{tr_amount}}" bindinput="onTrAmount"/>
+      <input class="inp" placeholder="备注，如 现金存银行（可不填）" value="{{tr_remark}}" bindinput="onTrRemark"/>
+      <button class="btn" size="mini" bindtap="addTransfer">转一笔</button>
+    </view>
+    <view class="list" wx:if="{{tr_rows.length}}">
+      <view class="item" wx:for="{{tr_rows}}" wx:key="id">
+        <view class="row1"><text class="nm">{{item.from_name}} → {{item.to_name}}</text><text class="amt">¥{{item.amount}}</text></view>
+        <view class="row2">{{item.created_at}}{{item.remark ? ' · ' + item.remark : ''}}</view>
+        <view class="btns"><button size="mini" bindtap="delTransfer" data-id="{{item.id}}">删</button></view>
+      </view>
     </view>
     <view class="form">
       <view class="tip">支出 / 收入分类（可自己加，报表和预算按分类统计）</view>
