@@ -14,3 +14,14 @@ crons = ["0 16 * * *"]
 NOTES_BASE = "https://md.1211.cc.cd"
 NOTES_SLUG = "factory-ledger-backup"
 # NOTES_PASS 用 secret 存：npx wrangler secret put NOTES_PASS
+
+# 多账套：每个账套一个独立 D1 数据库（表结构完全一致）
+[[d1_databases]]
+binding = "DB2"
+database_name = "factory-db2"
+database_id = "ace7317a-e855-461a-84c5-8f15a7a9ed05"
+
+[[d1_databases]]
+binding = "DB3"
+database_name = "factory-db3"
+database_id = "9b20177a-de3d-46f0-a69f-e787336c09b6"

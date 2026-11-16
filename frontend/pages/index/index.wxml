@@ -1,4 +1,5 @@
 <view class="page">
+  <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
   <view class="form">
     <input class="inp" placeholder="全局搜索：输入客户名/产品/备注，查全部账" value="{{search_kw}}" bindinput="onSearchKw"/>
     <button class="btn" size="mini" bindtap="clearSearch" wx:if="{{search_kw}}">清空</button>
@@ -350,6 +351,20 @@
   </block>
 
   <block wx:if="{{tab=='contact'}}">
+    <view class="form">
+      <view class="tip">账套（两厂/两车间分开核算，数据互不影响）</view>
+      <view class="list">
+        <view class="item" wx:for="{{books}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.name}}{{item.id==book?'（当前）':''}}</text><text class="amt">欠{{item.ar}}</text></view>
+          <view class="row2">应收单 {{item.orders}} 张</view>
+          <view class="btns">
+            <button size="mini" wx:if="{{item.id!=book}}" bindtap="switchBook" data-id="{{item.id}}">切换到这套</button>
+          </view>
+        </view>
+      </view>
+      <input class="inp" placeholder="给当前账套改名，如 一车间" value="{{rename_text}}" bindinput="onRenameText"/>
+      <button class="btn" size="mini" bindtap="renameBook">改当前账套名</button>
+    </view>
     <view class="form">
       <view class="seg {{contact_type=='ar'?'on':''}}" bindtap="setContactType" data-t="ar">客户</view>
       <view class="seg {{contact_type=='ap'?'on':''}}" bindtap="setContactType" data-t="ap">供应商</view>

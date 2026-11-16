@@ -86,3 +86,6 @@
 .budgetbar { background: #fff7e6; border-left: 6rpx solid #e6a23c; border-radius: 10rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 24rpx; color: #8a5a00; line-height: 1.5; }
 /* 常用短语 */
 .btn-ghost { background: #f2f4f8; color: #3d7bf5; }
+
+/* 账套条 */
+.bookbar { background: #eef3ff; color: #2b5ecb; font-size: 24rpx; padding: 12rpx 16rpx; border-radius: 12rpx; margin-bottom: 12rpx; }

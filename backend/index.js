@@ -5,7 +5,7 @@ const app = new Hono()
 app.use('*', async (c, next) => {
   c.header('Access-Control-Allow-Origin', '*')
   c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS')
-  c.header('Access-Control-Allow-Headers', 'Content-Type,X-Access-Key')
+  c.header('Access-Control-Allow-Headers', 'Content-Type,X-Access-Key,X-Book')
   await next()
 })
 app.options('*', (c) => c.text('', 204))
@@ -45,7 +45,7 @@ app.post('/auth/setup', async (c) => {
   const { key } = await c.req.json()
   const k = String(key || '').trim()
   if (k.length < 4) return c.json({ error: '口令至少 4 位' }, 400)
-  const db = c.env.DB
+  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const existing = await getKey(db)
   if (existing) return c.json({ error: '口令已存在，请用修改功能' }, 400)
   await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(k).run()
@@ -54,7 +54,7 @@ app.post('/auth/setup', async (c) => {
 
 app.post('/auth/change', async (c) => {
   const { old_key, new_key } = await c.req.json()
-  const db = c.env.DB
+  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(db)
   if (!saved) return c.json({ error: '尚未设置口令' }, 400)
   if (String(old_key || '') !== saved) return c.json({ error: '旧口令不对' }, 403)
@@ -80,8 +80,9 @@ app.get('/', (c) => c.html(`<!doctype html>
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   if (path.startsWith('/auth/')) return next()
-  const db = c.env.DB
-  const saved = await getKey(db)
+  // 口令只存主账套，所有账套共用一个口令
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
   if (!saved) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
   if (c.req.header('x-access-key') !== saved) return c.json({ error: '访问口令错误', code: 'bad_key' }, 401)
   await next()
@@ -110,6 +111,37 @@ const normDate = (s) => {
 }
 
 // 首页汇总
+// ── 多账套 ──
+app.get('/books', async (c) => {
+  const all = c.env.ENV_ALL || c.env
+  const list = []
+  const defs = [[1, all.DB, '主账套'], [2, all.DB2, '账套二'], [3, all.DB3, '账套三']]
+  for (const [id, db, def] of defs) {
+    if (!db) continue
+    let name = def, orders = 0, ar = 0
+    try {
+      const n = await db.prepare("SELECT value FROM settings WHERE key='book_name'").first()
+      if (n && n.value) name = String(n.value)
+      const o = await db.prepare('SELECT COUNT(*) AS c FROM orders').first()
+      orders = o ? num(o.c) : 0
+      const a = await db.prepare('SELECT COALESCE(SUM(price-paid),0) AS t FROM orders WHERE paid < price').first()
+      ar = a ? round2(num(a.t)) : 0
+    } catch (e) { }
+    list.push({ id, name, orders, ar })
+  }
+  return c.json({ current: c.env.BOOK || 1, books: list })
+})
+
+app.post('/book-name', async (c) => {
+  const { name } = await c.req.json()
+  const nm = String(name || '').trim()
+  if (!nm) return c.json({ error: '账套名称不能为空' }, 400)
+  if (nm.length > 20) return c.json({ error: '名称最多 20 个字' }, 400)
+  const db = c.env.DB
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('book_name', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(nm).run()
+  return c.json({ ok: true })
+})
+
 app.get('/dashboard', async (c) => {
   const db = c.env.DB
   const m = month()
@@ -1353,30 +1385,49 @@ app.post('/restore', async (c) => {
 })
 
 export default {
-  fetch: (req, env, ctx) => app.fetch(req, env, ctx),
+  fetch: (req, env, ctx) => {
+    // 多账套：根据请求头 X-Book（1/2/3）选择对应的 D1 库
+    let book = 1
+    try {
+      const hb = Number(req.headers.get('X-Book') || 1)
+      if (hb === 2 || hb === 3) book = hb
+      else {
+        const u = new URL(req.url)
+        const qb = Number(u.searchParams.get('book') || 0)
+        if (qb === 2 || qb === 3) book = qb
+      }
+    } catch (e) { book = 1 }
+    const db = book === 3 ? env.DB3 : book === 2 ? env.DB2 : env.DB
+    return app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx)
+  },
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站
   scheduled: async (event, env, ctx) => {
-    try {
-      await runFixed(env.DB)
-    } catch (e) {
-      console.error('scheduled fixed failed', e)
+    const books = [['1', env.DB], ['2', env.DB2], ['3', env.DB3]]
+    for (const [bid, db] of books) {
+      if (!db) continue
+      try {
+        await runFixed(db)
+      } catch (e) {
+        console.error('scheduled fixed failed book' + bid, e)
+      }
+      try {
+        await saveBackup(db)
+      } catch (e) {
+        console.error('scheduled backup failed book' + bid, e)
+      }
+      try {
+        // 回收站超过 30 天自动彻底清除
+        const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+        await db.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cutoff).run()
+      } catch (e) {
+        console.error('scheduled trash-clean failed book' + bid, e)
+      }
     }
-    try {
-      await saveBackup(env.DB)
-    } catch (e) {
-      console.error('scheduled backup failed', e)
-    }
+    // 笔记站只同步主账套
     try {
       await pushToNotes(env.DB, env)
     } catch (e) {
       console.error('scheduled push-to-notes failed', e)
-    }
-    try {
-      // 回收站超过 30 天自动彻底清除
-      const cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
-      await env.DB.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cutoff).run()
-    } catch (e) {
-      console.error('scheduled trash-clean failed', e)
     }
   }
 }

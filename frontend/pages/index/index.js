@@ -36,13 +36,15 @@ Page({
     search_kw: '', search_res: null,
     phrases: [], phrase_kind: 0,
     budget_over: [], budget_alert_count: 0,
-    budgets: [], b_category: 0, b_amount: ''
+    budgets: [], b_category: 0, b_amount: '',
+    book: 1, book_name: '主账套', books: [], rename_text: ''
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
+    const bk = String(wx.getStorageSync('book') || 1)
     const doReq = (key) => {
       wx.request(Object.assign({}, opts, {
-        header: Object.assign({ 'X-Access-Key': key }, opts.header),
+        header: Object.assign({ 'X-Access-Key': key, 'X-Book': bk }, opts.header),
         success: (res) => {
           if (res.statusCode === 401) {
             if (this._askingKey) return
@@ -105,6 +107,7 @@ Page({
     this.loadTrash()
     this.loadPhrases()
     this.loadBudgets()
+    this.loadBooks()
   },
   loadCloudBackup() {
     this.req({
@@ -910,6 +913,51 @@ Page({
       content: '删除后不再每月自动记这笔；已经记过的流水不会删。确定吗？',
       success: (r) => {
         if (r.confirm) this.req({ url: API_BASE + '/fixed/' + id, method: 'DELETE', success: () => this.loadFixed() })
+      }
+    })
+  },
+  loadBooks() {
+    const bk = Number(wx.getStorageSync('book') || 1)
+    this.req({
+      url: API_BASE + '/books',
+      success: (res) => {
+        if (res.data && res.data.books) {
+          const cur = (res.data.books.find((b) => b.id === bk) || res.data.books[0] || {})
+          this.setData({ books: res.data.books, book: bk, book_name: cur.name || '主账套' })
+          if (cur.name) wx.setStorageSync('book_name', cur.name)
+        }
+      }
+    })
+  },
+  switchBook(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    if (id === this.data.book) return
+    wx.showModal({
+      title: '切换账套',
+      content: '切换到「' + (this.data.books.find((b) => b.id === id) || {}).name + '」？各账套数据完全分开。',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.setStorageSync('book', id)
+        this.setData({ book: id })
+        this.refresh()
+        wx.showToast({ title: '已切换', icon: 'success' })
+      }
+    })
+  },
+  onRenameText(e) { this.setData({ rename_text: e.detail.value }) },
+  renameBook() {
+    const nm = (this.data.rename_text || '').trim()
+    if (!nm) return wx.showToast({ title: '先填名称', icon: 'none' })
+    this.req({
+      url: API_BASE + '/book-name', method: 'POST',
+      data: { name: nm },
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          wx.setStorageSync('book_name', nm)
+          this.setData({ rename_text: '', book_name: nm })
+          this.loadBooks()
+          wx.showToast({ title: '已改名', icon: 'success' })
+        } else wx.showToast({ title: (res.data && res.data.error) || '改名失败', icon: 'none' })
       }
     })
   },
