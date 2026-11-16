@@ -75,7 +75,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '',
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '',
   },
   req(opts) {
     const ak = wx.getStorageSync('ak') || ''
@@ -2081,6 +2081,24 @@ Page({
         else wx.setClipboardData({ data: phone })
       }
     })
+  },
+  loadDunMonth() {
+    this.req({
+      url: API_BASE + '/dunning-month',
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: '读取失败', icon: 'none' })
+        this.setData({ dsum: d, dsum_text: d.text || '' })
+      }
+    })
+  },
+  copyDunMonth() {
+    if (!this.data.dsum_text) return
+    wx.setClipboardData({ data: this.data.dsum_text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+  },
+  makeDunMonthImage() {
+    if (!this.data.dsum_text) return
+    this.drawStatementImage({ text: this.data.dsum_text }, true)
   },
   loadDunEffect() {
     this.req({

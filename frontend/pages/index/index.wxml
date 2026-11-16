@@ -833,6 +833,22 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">月度催款小结：这个月催了几家、催回多少、谁还欠着（可复制发微信 / 存图）</view>
+      <button class="btn" size="mini" bindtap="loadDunMonth">📣 出本月催款小结</button>
+      <view wx:if="{{dsum}}">
+        <view class="prev-h">{{dsum.month}} · 催 {{dsum.times}} 次 / {{dsum.count}} 家 · 催后收回 ¥{{dsum.recovered}} · 还欠 ¥{{dsum.left_total}}</view>
+        <view class="prev-row" wx:for="{{dsum.still}}" wx:key="party">
+          <text class="prev-t">{{item.party}}</text>
+          <text class="prev-n">欠 {{item.left}} · 催 {{item.times}} 次{{item.broken ? ' · 失约 ' + item.broken + ' 次' : ''}}</text>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyDunMonth">📋 复制文字</button>
+          <button class="btn ghost" size="mini" bindtap="makeDunMonthImage">🖼 存成图片</button>
+        </view>
+        <view class="tip">{{dsum_text}}</view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">年度总账：12 个月拼一张看全年</view>
       <input class="inp" placeholder="年份，如 2026（不填=今年）" value="{{ys_year}}" bindinput="onYsYear"/>
       <button class="btn" size="mini" bindtap="loadYearSummary">📅 出年度总账</button>

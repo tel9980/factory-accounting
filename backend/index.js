@@ -3688,6 +3688,13 @@ app.delete('/dunning-log/:id', async (c) => {
   await db.prepare('DELETE FROM dunning_log WHERE id=?').bind(num(c.req.param('id'))).run()
   return c.json({ ok: true })
 })
+// 月度催款小结（可复制发微信 / 存图）
+app.get('/dunning-month', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  const r = await dunningMonthText(db, m)
+  return c.json({ ok: true, ...r.stat, text: r.text })
+})
 // 对账单送达记录：哪天把对账单发给谁了（对方赖「没收到」时有据可查）
 app.get('/statement-log', async (c) => {
   const db = c.env.DB
@@ -5732,6 +5739,15 @@ app.get('/reminders', async (c) => {
       push('yellow', `${soonRows.length} 家答应明天付（共 ¥${sum2}），今天提一句`, 'ar', soonRows.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(lmap[norm(x.party)])), note: '答应 ' + String(x.promise_date).slice(5, 10) + ' 付' })))
     }
   } catch (e) {}
+  // 这个月还没发过对账单的欠款家（欠得久又没发单，最容易扯皮）
+  try {
+    const ns = await db.prepare("SELECT o.customer AS party, COUNT(*) n, COALESCE(SUM(o.price-o.paid-COALESCE(o.written_off,0)),0) t FROM orders o WHERE o.price-o.paid-COALESCE(o.written_off,0) > 0 AND substr(o.created_at,1,10) <= date(?, '-30 day') AND NOT EXISTS (SELECT 1 FROM statement_log s WHERE s.party=o.customer AND substr(s.created_at,1,7)=?) GROUP BY o.customer ORDER BY t DESC").bind(today, now().slice(0, 7)).all()
+    const nr = (ns.results || [])
+    if (nr.length) {
+      const tt = round2(nr.reduce((a, x) => a + num(x.t), 0))
+      push('yellow', `${nr.length} 家这个月还没发过对账单（欠 ¥${tt}）`, 'ar', nr.slice(0, 3).map((x) => ({ party: x.party || '', amount: round2(num(x.t)), note: '欠了 30 天以上' })))
+    }
+  } catch (e) {}
   // 欠了很久又一直没催过的家
   try {
     const mc = await db.prepare("SELECT value FROM settings WHERE key='collect_min_days'").first()
@@ -5914,7 +5930,7 @@ export default {
           // 每月最后一天：推一条「这个月目标收了多少」
           const t0 = new Date()
           const lastDay = new Date(Date.UTC(t0.getUTCFullYear(), t0.getUTCMonth() + 1, 0)).getUTCDate()
-          if (t0.getUTCDate() === lastDay) await pushTargetSummary(db)
+          if (t0.getUTCDate() === lastDay) { await pushTargetSummary(db); await pushDunningSummary(db) }
         }
       } catch (e) {
         console.error('scheduled fixed failed book' + bid, e)
@@ -6078,6 +6094,76 @@ app.get('/target-history', async (c) => {
 })
 
 // 月底最后一天推一条：这个月目标收了多少 / 差多少
+// 月度催款小结：这个月催了几家、催回多少、谁还欠着、发了几份对账单
+async function dunningStat(db, m) {
+  const mm = String(m || now().slice(0, 7)).slice(0, 7)
+  const pre = mm + '%'
+  const dun = (await db.prepare('SELECT * FROM dunning_log WHERE substr(created_at,1,7)=? ORDER BY id').bind(mm).all()).results || []
+  const arIn = (await db.prepare("SELECT o.customer party, l.created_at d, l.amount a FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,7)=?").bind(mm).all()).results || []
+  const apOut = (await db.prepare("SELECT p.supplier party, l.created_at d, l.amount a FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND substr(l.created_at,1,7)=?").bind(mm).all()).results || []
+  const arLeft = (await db.prepare('SELECT customer party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer').all()).results || []
+  const apLeft = (await db.prepare('SELECT supplier party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier').all()).results || []
+  const leftOf = (party) => {
+    const a = arLeft.find((x) => norm(x.party) === norm(party))
+    const b = apLeft.find((x) => norm(x.party) === norm(party))
+    return round2(num(a && a.t) + num(b && b.t))
+  }
+  const byParty = {}
+  for (const d of dun) {
+    const k = norm(d.party)
+    const o = byParty[k] || (byParty[k] = { party: d.party, times: 0, first: String(d.created_at).slice(0, 10), promises: [], broken: 0 })
+    o.times++
+    if (d.promise_date) {
+      const pd = String(d.promise_date).slice(0, 10)
+      o.promises.push(pd)
+      if (pd < now().slice(0, 10) && leftOf(d.party) > 0.005) o.broken++
+    }
+  }
+  const rows = Object.keys(byParty).map((k) => {
+    const o = byParty[k]
+    const flows = arIn.concat(apOut)
+    const paid = round2(flows.filter((x) => norm(x.party) === k && String(x.d).slice(0, 10) >= o.first).reduce((a, x) => a + num(x.a), 0))
+    return { party: o.party, times: o.times, first: o.first, paid_after: paid, left: leftOf(o.party), broken: o.broken, promises: o.promises }
+  }).sort((a, b) => (b.left - a.left) || (b.times - a.times))
+  const stl = (await db.prepare('SELECT * FROM statement_log WHERE substr(created_at,1,7)=? ORDER BY id').bind(mm).all()).results || []
+  const recovered = round2(rows.reduce((a, r) => a + r.paid_after, 0))
+  const cnt = rows.reduce((a, r) => a + r.times, 0)
+  const leftTotal = round2(rows.reduce((a, r) => a + r.left, 0))
+  const broken = rows.reduce((a, r) => a + r.broken, 0)
+  return {
+    month: mm, count: rows.length, times: cnt, recovered, left_total: leftTotal, broken,
+    avg_per_dun: cnt ? round2(recovered / cnt) : 0,
+    still: rows.filter((r) => r.left > 0.005),
+    rows, statements: stl.length, statement_parties: [...new Set(stl.map((x) => x.party))]
+  }
+}
+async function dunningMonthText(db, m) {
+  const d = await dunningStat(db, m)
+  const L = []
+  L.push('【催款小结 ' + d.month + '】')
+  L.push('催款 ' + d.times + ' 次 / ' + d.count + ' 家；催后收回 ¥' + d.recovered + '（平均一次 ¥' + d.avg_per_dun + '）')
+  if (d.statements) L.push('发对账单 ' + d.statements + ' 份（' + d.statement_parties.slice(0, 5).join('、') + (d.statement_parties.length > 5 ? ' 等' : '') + '）')
+  if (d.still.length) {
+    L.push('还欠着的：')
+    d.still.slice(0, 8).forEach((r, i) => L.push('  ' + (i + 1) + '. ' + r.party + ' 欠 ' + r.left + '，催了 ' + r.times + ' 次'))
+    if (d.still.length > 8) L.push('  …还有 ' + (d.still.length - 8) + ' 家')
+    L.push('共欠 ¥' + d.left_total)
+  } else if (d.count) L.push('催过的家都结清了')
+  if (d.broken) L.push('失约 ' + d.broken + ' 次（答应的日子过了没付）')
+  if (!d.count) L.push('这个月还没记过催款（催完记得点「记一笔催款」）')
+  else if (d.broken >= 2) L.push('提示：失约偏多，下次让他先付一部分再发货')
+  else if (d.recovered > 0) L.push('提示：这个月催款是有效的，继续保持每周固定催一次')
+  return { text: L.join('\n'), stat: d }
+}
+// 月底自动推一条催款小结
+async function pushDunningSummary(db) {
+  try {
+    const m = now().slice(0, 7)
+    const r = await dunningMonthText(db, m)
+    if (!r.stat.count && !r.stat.statements) return
+    await wxPush(db, { title: '这个月催款小结：收回 ¥' + r.stat.recovered, time: m, note: '催 ' + r.stat.times + ' 次、' + r.stat.count + ' 家；还欠 ¥' + r.stat.left_total + (r.stat.broken ? '；失约 ' + r.stat.broken + ' 次' : '') })
+  } catch (e) { /* 没配微信就跳过 */ }
+}
 async function pushTargetSummary(db) {
   try {
     const m = now().slice(0, 7)
