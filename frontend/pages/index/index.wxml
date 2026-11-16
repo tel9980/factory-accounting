@@ -42,6 +42,13 @@
       <view class="ab-t">今天要盯的款：{{due_brief}}</view>
       <view class="ab-a">去看 ›</view>
     </view>
+    <view class="nscard" wx:if="{{ns && ns.item}}" bindtap="goNext">
+      <view class="ns-k">👉 现在先做这一件</view>
+      <view class="ns-t">{{ns.item.title}}</view>
+      <view class="ns-w">{{ns.item.why}}</view>
+      <view class="ns-r">去做 ›<text class="ns-more" wx:if="{{ns.rest>0}}">　还有 {{ns.rest}} 件</text></view>
+    </view>
+    <view class="nsnone" wx:if="{{ns && !ns.item}}">{{ns.text}}</view>
     <view class="hstrip {{hc.score>=90?'good':hc.score>=75?'mid':'bad'}}" wx:if="{{hc}}" bindtap="openHealth">
       <view class="hs-l">
         <text class="hs-score">{{hc.score}}</text>

@@ -304,3 +304,13 @@
 
 /* 断网时存到手机上的记录，提醒条 */
 .pendbar { margin: 8rpx 20rpx; padding: 14rpx 18rpx; background: #fff4e5; color: #a35b00; border: 1rpx solid #ffd699; border-radius: 12rpx; font-size: 25rpx; }
+
+/* 现在先做这一件 */
+.nscard { margin:16rpx 24rpx; padding:24rpx 28rpx; border-radius:18rpx;
+  background:linear-gradient(135deg,#2f6fed,#4f9bff); color:#fff; box-shadow:0 6rpx 18rpx rgba(47,111,237,.25); }
+.ns-k { font-size:24rpx; opacity:.9; }
+.ns-t { font-size:38rpx; font-weight:700; margin:8rpx 0 6rpx; }
+.ns-w { font-size:26rpx; line-height:1.5; opacity:.95; }
+.ns-r { margin-top:14rpx; font-size:28rpx; font-weight:600; text-align:right; }
+.ns-more { font-size:24rpx; font-weight:400; opacity:.85; }
+.nsnone { margin:16rpx 24rpx; padding:20rpx 24rpx; border-radius:14rpx; background:#eef7ee; color:#2f7d32; font-size:26rpx; }

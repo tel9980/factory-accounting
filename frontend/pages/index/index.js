@@ -77,7 +77,7 @@ Page({
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
     o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_operator: '', o_date: '',
-    mb_type: 'customer', mb_month: '', mb: null,
+    mb_type: 'customer', mb_month: '', mb: null, ns: null,
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
@@ -255,7 +255,7 @@ Page({
             opts.queued && opts.queued()
             return
           }
-          wx.showToast({ title: '网络不好，稍后再试', icon: 'none' })
+          if (!opts.silent) wx.showToast({ title: '网络不好，稍后再试', icon: 'none' })
           opts.fail && opts.fail(err)
         },
         header: Object.assign({ 'X-Access-Key': key, 'X-Book': bk }, opts.header),
@@ -360,6 +360,7 @@ Page({
     this.loadMyWork()
     this.loadMyDay()
     this.loadFunding()
+    this.loadNextStep()
     this.loadTermDefault()
     // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
     this.enterTab(this.data.tab)
@@ -2891,6 +2892,21 @@ Page({
   },
   onPbKw(e) { this.setData({ pb_kw: e.detail.value }) },
 
+  loadNextStep() {
+    this.req({
+      url: API_BASE + '/next-step',
+      silent: true,
+      success: (r) => {
+        if (r.data && r.data.ok) this.setData({ ns: r.data })
+      }
+    })
+  },
+  goNext() {
+    const it = this.data.ns && this.data.ns.item
+    if (!it) return
+    this.jumpMap({ currentTarget: { dataset: { go: it.tab } } })
+    if (it.k === 'chase' || it.k === 'soon') wx.showToast({ title: '点那一行「收钱」就行', icon: 'none' })
+  },
   loadMyWork() {
     this.req({
       url: API_BASE + '/my-work',
