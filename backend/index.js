@@ -527,22 +527,51 @@ app.get('/handover-print', async (c) => {
   const d = await handoverData(db, c.env)
   const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const body = d.sections.map((s) => `<h2>${esc(s.title)}</h2><ul>${s.lines.map((l) => '<li>' + esc(l) + '</li>').join('')}</ul>`).join('')
-  return c.html(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>账本交接包 ${esc(d.today)}</title><style>
-@page{size:A4;margin:16mm}
-body{font:14px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#222;margin:0;padding:16px;background:#fff}
-h1{font-size:20px;margin:0 0 4px} .sub{color:#666;font-size:12px;margin-bottom:14px}
-h2{font-size:15px;margin:16px 0 6px;padding-bottom:4px;border-bottom:1px solid #e5e5e5;color:#0a4b8c}
-ul{margin:0;padding-left:20px} li{margin:3px 0}
-.sign{margin-top:26px;color:#666;font-size:12px;display:flex;justify-content:space-between}
-.btn{position:fixed;right:16px;top:16px;background:#0a4b8c;color:#fff;border:0;padding:10px 16px;border-radius:8px;font-size:14px}
-@media print{.btn{display:none} body{padding:0}}
-</style></head><body><button class="btn" onclick="window.print()">🖨 打印 / 存成 PDF</button>
-<h1>【${esc(d.title)}】账本交接包</h1><div class="sub">生成日期 ${esc(d.today)}　·　换人管账时把这页交给接手的人</div>
-${body}
-<div class="sign"><span>交出人签字：____________</span><span>接手人签字：____________</span><span>日期：__________</span></div>
-</body></html>`)
+  return c.html(a4Page({
+    title: `账本交接包 ${d.today}`,
+    body: `<h1>账本交接包</h1><div class="sub">生成于 ${esc(d.today)}　单位：${esc(d.title || '')}</div>${body}<div class="sub" style="margin-top:18px">这份说明是这本账的全部交接信息，接手的人照着第七段做就能上手。</div>`,
+    extraCss: `h2{color:#0a4b8c;border-bottom:1px solid #e5e5e5;border-left:0;padding-left:0;padding-bottom:4px}
+ul{margin:0 0 6px;padding-left:20px} li{margin:3px 0}`,
+    sign: `<span>交出人：____________</span><span>接手人：____________</span><span>日期：____________</span>`,
+    btn: '🖨 打印 / 存为 PDF',
+  }))
 })
+
+
+// ===== 统一打印版式（对账单 / 月报 / 交接包 / 以后的任何 A4 页共用一套样式）=====
+const escHtml = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]))
+const A4_CSS = `
+@page { size: A4; margin: 14mm 12mm; }
+* { box-sizing: border-box; }
+body { font-family: "Microsoft YaHei","PingFang SC","Hiragino Sans GB",-apple-system,sans-serif; color:#111; margin:0; padding:18px; background:#f4f5f7; font-size:13px; line-height:1.6; }
+.sheet { background:#fff; max-width:210mm; margin:0 auto; padding:14mm 12mm; box-shadow:0 2px 14px rgba(0,0,0,.12); }
+h1 { font-size:22px; text-align:center; margin:0 0 4px; letter-spacing:2px; }
+h2 { font-size:14px; margin:18px 0 6px; border-left:4px solid #1f6feb; padding-left:8px; }
+.sub { text-align:center; color:#666; font-size:12px; margin-bottom:10px; }
+.who { text-align:center; font-size:12.5px; color:#444; margin-bottom:10px; }
+table { width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:8px; }
+th, td { border:1px solid #bbb; padding:6px 8px; }
+th { background:#f0f2f5; font-weight:600; text-align:left; }
+.n { text-align:right; font-variant-numeric: tabular-nums; }
+.b { font-weight:700; }
+.total td { font-weight:700; border-top:2px solid #333; border-bottom:2px solid #333; background:#fafafa; }
+.red { color:#b3261e; } .green { color:#0a7d32; }
+.btn { display:block; width:200px; margin:16px auto 0; padding:12px; text-align:center; background:#1f6feb; color:#fff; border:0; border-radius:8px; font-size:15px; }
+.sign { margin-top:26px; display:flex; justify-content:space-between; font-size:12.5px; color:#333; }
+.sign span { flex:1; margin-right:18px; }
+.tip { text-align:center; font-size:12px; color:#888; margin-top:18px; }
+@media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; padding:0; margin:0; } .btn, .tip { display:none; } }
+`
+const a4Page = ({ title, body, extraCss, sign, tip, btn }) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escHtml(title)}</title>
+<style>${A4_CSS}${extraCss || ''}</style></head><body>
+<button class="btn" onclick="window.print()">${btn || '🖨 打印 / 存为 PDF'}</button>
+<div class="sheet">
+${body}
+${sign ? '<div class="sign">' + sign + '</div>' : ''}
+${tip ? '<div class="tip">' + tip + '</div>' : ''}
+</div></body></html>`
 
 app.get('/statement-print', async (c) => {
   const db = c.env.DB
@@ -601,35 +630,7 @@ app.get('/statement-print', async (c) => {
   const body = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.date)}</td><td>${esc(r.item || '—')}</td><td class="n">${money(r.total)}</td><td class="n">${money(r.rec)}</td><td class="n">${money(r.wo)}</td><td class="n b">${money(r.left)}</td></tr>`).join('')
   const label = type === 'ar' ? '应收账款对账单' : '应付账款对账单'
   const who = type === 'ar' ? '客户' : '供应商'
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(party)} ${label} ${esc(from)}~${esc(to)}</title>
-<style>
-@page { size: A4; margin: 14mm 12mm; }
-* { box-sizing: border-box; }
-body { font-family: "Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif; color:#111; margin:0; padding:18px; background:#f4f5f7; }
-.sheet { background:#fff; max-width:210mm; margin:0 auto; padding:14mm 12mm; box-shadow:0 2px 14px rgba(0,0,0,.12); }
-h1 { font-size: 22px; text-align:center; margin:0 0 4px; letter-spacing:2px; }
-.sub { text-align:center; font-size:12px; color:#666; margin-bottom:8px; }
-.who { text-align:center; font-size:12.5px; color:#444; margin-bottom:10px; }
-.meta2 { font-size:12px; color:#555; margin:-4px 0 8px; }
-.meta { display:flex; justify-content:space-between; font-size:13px; margin:10px 0; border-bottom:1px solid #ddd; padding-bottom:8px; }
-table { width:100%; border-collapse:collapse; font-size:12.5px; }
-th,td { border:1px solid #bbb; padding:6px 8px; }
-th { background:#f0f2f5; font-weight:600; }
-td.n { text-align:right; font-variant-numeric: tabular-nums; }
-td.b { font-weight:700; }
-.sum { margin-top:12px; font-size:13px; }
-.sum table { width:auto; min-width:60%; margin-left:auto; }
-.sum td { border:none; padding:4px 10px; }
-.sum .big { font-size:15px; font-weight:700; color:#b3261e; }
-.foot { margin-top:26px; display:flex; justify-content:space-between; font-size:12.5px; color:#333; }
-.sign { border-top:1px solid #999; padding-top:6px; width:42%; }
-.tip { text-align:center; font-size:12px; color:#888; margin-top:18px; }
-.btn { display:block; width:200px; margin:16px auto 0; padding:12px; text-align:center; background:#1f6feb; color:#fff; border-radius:8px; text-decoration:none; font-size:15px; }
-@media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; padding:0; margin:0; } .btn,.tip { display:none; } }
-</style></head><body>
-<div class="sheet">
+  const pageBody = `
 <h1>${esc(t.title || '对账单')}</h1>
 <div class="sub">${label}（打印版 · A4）</div>
 <div class="who">${esc(t.title)}${t.phone ? '　电话 ' + esc(t.phone) : ''}${t.addr ? '　' + esc(t.addr) : ''}</div>
@@ -648,11 +649,21 @@ ${prof && (prof.phone || prof.addr || prof.note) ? `<div class="meta2">${prof.ph
 </table></div>
 ${t.note ? '<div style="font-size:12.5px;color:#555;margin-top:10px">备注：' + esc(t.note) + '</div>' : ''}
 ${t.bank ? '<div style="font-size:12.5px;color:#333;margin-top:6px">收款信息：' + esc(t.bank) + '</div>' : ''}
-<div class="foot"><div class="sign">对账单位签章：</div><div class="sign">制表：${esc(t.title || '')}　${esc(today)}</div></div>
-<a class="btn" href="javascript:window.print()">🖨 打印 / 存为 PDF</a>
-<div class="tip">手机上：右上角「…」→ 发送给朋友或用浏览器打开 → 打印</div>
-</div></body></html>`
-  return c.html(html)
+` 
+  const extraCss = `.meta{display:flex;justify-content:space-between;font-size:13px;margin:10px 0;border-bottom:1px solid #ddd;padding-bottom:8px}
+.meta2{font-size:12px;color:#555;margin:-4px 0 8px}
+.sum{margin-top:12px;font-size:13px}
+.sum table{width:auto;min-width:60%;margin-left:auto}
+.sum td{border:none;padding:4px 10px}
+.sum .big{font-size:15px;font-weight:700;color:#b3261e}
+.sign span{border-top:1px solid #999;padding-top:6px}`
+  return c.html(a4Page({
+    title: `${party} ${label} ${from}~${to}`,
+    body: pageBody,
+    extraCss,
+    sign: `<span>对账单位签章：</span><span>制表：${esc(t.title || '')}　${esc(today)}</span>`,
+    tip: '手机上：右上角「…」→ 发送给朋友或用浏览器打开 → 打印',
+  }))
 })
 
 // ==================== 借款台账（银行/亲友借款 + 利息 + 还款计划） ====================
@@ -1282,26 +1293,7 @@ app.get('/report-print', async (c) => {
   const rows = (arr) => arr.map((r) => `<tr><td>${r[0]}</td><td class="n">${r[1]}</td></tr>`).join('')
   const catRows = cats.map((x) => `<tr><td>　${x.category || '其他'}</td><td class="n">${money(x.t)}</td></tr>`).join('')
   const accRows = (bal.accounts || []).map((a) => `<tr><td>　${a.name}</td><td class="n">${money(a.balance)}</td></tr>`).join('')
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${(head && head.value) || '经营报表'} ${mm}</title>
-<style>
-@page{size:A4;margin:14mm}
-body{font-family:-apple-system,"Microsoft YaHei",sans-serif;color:#222;font-size:13px;line-height:1.6}
-h1{font-size:18px;text-align:center;margin:0 0 2px}
-h2{font-size:14px;margin:18px 0 6px;border-left:4px solid #333;padding-left:8px}
-.sub{text-align:center;color:#666;font-size:12px;margin-bottom:10px}
-table{width:100%;border-collapse:collapse;margin-bottom:8px}
-td,th{border-bottom:1px solid #ddd;padding:4px 6px}
-th{background:#f5f5f5;text-align:left;font-weight:600}
-.n{text-align:right;font-variant-numeric:tabular-nums}
-.total td{font-weight:700;border-top:2px solid #333;border-bottom:2px solid #333}
-.red{color:#c00}.green{color:#080}
-.btn{display:block;margin:16px auto;padding:10px 22px;background:#07c;color:#fff;border:0;border-radius:6px;font-size:15px}
-.sign{display:flex;justify-content:space-between;margin-top:28px;font-size:12px;color:#555}
-@media print{.btn{display:none}body{font-size:12px}}
-</style></head><body>
-<button class="btn" onclick="window.print()">🖨 打印 / 存 PDF</button>
+  const pageBody = `
 <h1>${(head && head.value) || '经营报表'}</h1>
 <div class="sub">报表期间：${mm}（截至 ${snap.period_end}）　单位：元${snap.archived ? '　<b>· 按 ' + mm + ' 月结快照出表</b>' : ''}</div>
 
@@ -1346,10 +1338,16 @@ ${accRows}
 </table>
 <div class="sub">本月单据：应收 ${snap.order_count} 张 · 应付 ${snap.payable_count} 张 · 流水 ${snap.ledger_count} 条</div>
 
-<div class="sign"><span>制表：____________</span><span>复核：____________</span><span>日期：${now().slice(0, 10)}</span></div>
 <div class="sub" style="margin-top:18px">本表按「现金支出 + 摊销 + 折旧 + 预提利息」口径计算成本，与小程序内数据一致。</div>
-</body></html>`
-  return c.html(html)
+`
+  const extraCss = `h2{border-left-color:#1f6feb}`
+  return c.html(a4Page({
+    title: `${(head && head.value) || '经营报表'} ${mm}`,
+    body: pageBody,
+    extraCss,
+    sign: `<span>制表：____________</span><span>复核：____________</span><span>日期：${now().slice(0, 10)}</span>`,
+    btn: '🖨 打印 / 存 PDF',
+  }))
 })
 
 // ==================== 智能粘贴解析（对账/导入前先看预览） ====================
