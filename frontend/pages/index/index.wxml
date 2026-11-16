@@ -1439,6 +1439,26 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyCashbook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashbook">收起</button></view>
       </block>
+      <view class="tip">🧭 利润去哪了（净利对不对得上现金变化：钱压在应收、还是还了借款）</view>
+      <view class="frow">
+        <input class="inp" placeholder="月份 YYYY-MM（留空本月）" value="{{cb2_month}}" bindinput="onCb2Month" bindconfirm="loadCashBridge"/>
+        <button class="btn half" size="mini" bindtap="loadCashBridge">算一算</button>
+      </view>
+      <block wx:if="{{cb2}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{cb2.month}} 净利 → 现金</text><text class="amt {{cb2.actual<0?'red':''}}">现金变化 {{cb2.actual}}</text></view>
+          <view class="row2">净利 {{cb2.profit}} · 解释合计 {{cb2.explained}} · 还差 {{cb2.residual}}</view>
+          <view class="item" wx:for="{{cb2.rows}}" wx:key="k">
+            <view class="row1"><text class="nm">{{item.label}}</text><text class="amt {{item.amount<0?'red':''}}">{{item.amount}}</text></view>
+            <view class="row2" wx:if="{{item.note}}">{{item.note}}</view>
+          </view>
+        </view>
+        <view class="box" wx:if="{{cb2.advice.length}}">
+          <view class="tip">怎么看</view>
+          <view class="aline" wx:for="{{cb2.advice}}" wx:key="*this">· {{item}}</view>
+        </view>
+        <view class="frow"><button class="btn" size="mini" bindtap="copyCashBridge">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeCashBridge">收起</button></view>
+      </block>
       <view class="tip">🏷 价格表（从历史单据自动提炼「客户 × 产品」的成交价，录单时会自动带出来）</view>
       <view class="frow">
         <input class="inp half" placeholder="客户或产品（可选）" value="{{pb_kw}}" bindinput="onPbKw" bindconfirm="loadPriceBook"/>

@@ -170,7 +170,7 @@ app.use('*', async (c, next) => {
   if (role === 'staff') {
     const m = c.req.method
     const denyStaff = m === 'PATCH' || m === 'DELETE' ||
-      (/^\/(profit-compare|aging|weekly-text|dunning-effect|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
+      (/^\/(profit-compare|cash-bridge|aging|weekly-text|dunning-effect|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
       (/^\/auth\/(change|staff)$/.test(path)) ||
       (/^\/(report-head|book-name|wx-config)$/.test(path)) ||
       (/^\/month-lock/.test(path)) ||
@@ -3874,6 +3874,72 @@ app.get('/audit-logs', async (c) => {
 // 对账单（按单位）
 // 一句话对账：某家到底欠我多少（截至今天，含未结清单、争议、对账进度）
 // 现金流水账：这个月钱怎么变的（按账户列期初/进/出/期末 + 大额 + 对不上检查）
+// 利润 → 现金 桥接：赚的钱为什么没变成现金
+app.get('/cash-bridge', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const start = m + '-01'
+  const end = addDaysIso(start, new Date(Date.UTC(num(m.slice(0, 4)), num(m.slice(5, 7)), 0)).getUTCDate() - 1)
+  const pl = await monthPL(db, m)
+  const q1 = async (sql, ...b) => num(((await db.prepare(sql).bind(...b).first()) || {}).v)
+  const [arBegin, arEnd, apBegin, apEnd, debtIn, debtRepay, advIn, advUsed, loanOut, loanBack, woAr, woAp, cashIn, cashOut] = await Promise.all([
+    q1("SELECT COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) AS v FROM orders WHERE substr(created_at,1,10) < ?", start),
+    q1("SELECT COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) AS v FROM orders WHERE substr(created_at,1,10) <= ?", end),
+    q1("SELECT COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) AS v FROM payables WHERE substr(created_at,1,10) < ?", start),
+    q1("SELECT COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) AS v FROM payables WHERE substr(created_at,1,10) <= ?", end),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='debt' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='debt' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount - used),0) AS v FROM advances WHERE type='in' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE cash=0 AND ref_type='order' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='loan' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='loan' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='payable' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", m)
+  ])
+  const dAR = round2(arEnd - arBegin)
+  const dAP = round2(apEnd - apBegin)
+  const adj = round2(pl.amort + pl.dep + pl.accrue)
+  const netDebt = round2(debtIn - debtRepay)
+  const actual = round2(cashIn - cashOut)
+  const rows = [
+    { k: 'profit', label: '本月净利（权责口径）', amount: pl.profit, note: '收入减材料、现金费用、折旧摊销' },
+    { k: 'adj', label: '加回 折旧 / 摊销 / 预提利息', amount: adj, note: '这些进了利润表，但没花现金' },
+    { k: 'ar', label: '应收变动（变多=钱压在客户那，记账为负）', amount: round2(-dAR), note: `月初别人欠 ¥${arBegin} → 月底 ¥${arEnd}` },
+    { k: 'ap', label: '应付变动（变多=赊来的钱）', amount: dAP, note: `月初我欠 ¥${apBegin} → 月底 ¥${apEnd}` },
+    { k: 'mat_gap', label: '材料成本 与 本月赊购的差', amount: round2(pl.mat - pl.payable_add), note: `这月单子上用了料 ¥${pl.mat}，赊购了 ¥${pl.payable_add}（差额是现钱买的料，或料没用完）` },
+    { k: 'debt', label: '借款净增（还本记负）', amount: netDebt, note: `借入 ¥${debtIn}、还 ¥${debtRepay}` },
+    { k: 'adv', label: '本月收到预收款', amount: advIn, note: advIn > 0 ? `本月收预收 ¥${advIn}（还没干活的活钱）` : '' },
+    { k: 'loan', label: '员工借支净变化（借出记负）', amount: round2(loanBack - loanOut), note: `借出 ¥${loanOut}、退回 ¥${loanBack}` },
+    { k: 'wo', label: '核销（不走现金）', amount: round2(-(woAr - woAp)), note: `核销应收 ¥${woAr}、豁免应付 ¥${woAp}` }
+  ]
+  const explained = round2(rows.reduce((a, x) => a + num(x.amount), 0))
+  const residual = round2(actual - explained)
+  const out = {
+    ok: true, month: m,
+    profit: pl.profit, adj, d_ar: dAR, d_ap: dAP, net_debt: netDebt,
+    cash_in: cashIn, cash_out: cashOut, actual, explained, residual,
+    rows: rows.map((x) => Object.assign({}, x, { abs: Math.abs(num(x.amount)) })),
+    huge: Math.abs(residual) >= 1,
+    advice: []
+  }
+  if (Math.abs(residual) < 1) out.advice.push('对得上：净利加减这些项目，正好等于本月现金变化 ✓')
+  else {
+    out.advice.push(`还有 ¥${residual} 没解释，常见原因：预收款用了没算现金、内部转账漏记、直接把钱花在别的地方没记账。`)
+    if (advUsed > 0) out.advice.push(`其中本月用预收抵扣了 ¥${advUsed}（不动现金，所以会让「现金变化」比账面少）。`)
+  }
+  if (Math.abs(pl.profit) > 0 && Math.abs(actual) < Math.abs(pl.profit) * 0.3 && pl.profit > 0)
+    out.advice.push('利润有，现金没跟上——钱多半压在应收里，看一下「账龄」和「催款清单」。')
+  out.text = [
+    `【${(await getTitle(db)).title}】${m} 利润去哪了`,
+    `本月净利 ¥${pl.profit}，实际现金变化 ¥${actual}`,
+    ...rows.filter((x) => Math.abs(num(x.amount)) >= 1).map((x) => `${x.label} ¥${x.amount}`),
+    `合计解释 ¥${explained}${Math.abs(residual) < 1 ? '，与现金变化一致 ✓' : `，还差 ¥${residual} 没解释`}`,
+    ...out.advice.map((x) => '· ' + x)
+  ].join('\n')
+  return c.json(out)
+})
 app.get('/cashbook', async (c) => {
   const db = c.env.DB
   const m = (c.req.query('month') || now().slice(0, 7)).slice(0, 7)
