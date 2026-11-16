@@ -109,7 +109,12 @@
 
   <block wx:if="{{tab=='ar'}}">
     <view class="form">
-      <input class="inp" placeholder="客户名" value="{{o_customer}}" bindinput="onOCustomer"/>
+      <input class="inp" placeholder="客户名" value="{{o_customer}}" bindinput="onOCustomer" bindblur="blurOCustomer"/>
+      <view class="chips" wx:if="{{sug_ar.length}}">
+        <text class="chip-label">常记：</text>
+        <text class="chip" wx:for="{{sug_ar}}" wx:key="index" bindtap="fillSug" data-t="ar" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
+      </view>
+      <view class="tip" wx:if="{{last_tip}}">{{last_tip}}（已自动填好，改金额直接记）</view>
       <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem"/>
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
@@ -219,7 +224,12 @@
 
   <block wx:if="{{tab=='ap'}}">
     <view class="form">
-      <input class="inp" placeholder="供应商/收款人" value="{{p_supplier}}" bindinput="onPSupplier"/>
+      <input class="inp" placeholder="供应商/收款人" value="{{p_supplier}}" bindinput="onPSupplier" bindblur="blurPSupplier"/>
+      <view class="chips" wx:if="{{sug_ap.length}}">
+        <text class="chip-label">常记：</text>
+        <text class="chip" wx:for="{{sug_ap}}" wx:key="index" bindtap="fillSug" data-t="ap" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
+      </view>
+      <view class="tip" wx:if="{{last_tip}}">{{last_tip}}</view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount"/>
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
@@ -315,6 +325,10 @@
     <view class="form">
       <picker range="{{categories}}" bindchange="onECategory"><view class="picker">分类：{{categories[e_category]}} ▾</view></picker>
       <picker range="{{acc_names}}" bindchange="onEAcc"><view class="picker">付自：{{acc_names[e_acc] || '现金'}} ▾</view></picker>
+      <view class="chips" wx:if="{{sug_ex.length}}">
+        <text class="chip-label">常记：</text>
+        <text class="chip" wx:for="{{sug_ex}}" wx:key="index" bindtap="fillSug" data-t="ex" data-i="{{index}}">{{item.party}} {{item.amount}}</text>
+      </view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>

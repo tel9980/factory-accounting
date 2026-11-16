@@ -34,6 +34,7 @@ Page({
     q_text: '',
     history_type: 'ar', history_ar_list: [], history_ap_list: [],
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
+    sug_ar: [], sug_ap: [], sug_ex: [], last_tip: '',
     contact_show: false, contact_title: '', contact_text: '',
     trash_list: [],
     ar_filter: 'open', ar_sort: 'new', ar_sum: {}, ap_filter: 'open', ap_sort: 'new', ap_sum: {},
@@ -612,6 +613,7 @@ Page({
     if (t === 'asset') { this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows(); this.loadWriteoffs(); this.loadTransfers() }
     if (t === 'contact') { this.loadAccounts(); this.loadTransfers() }
     if (t === 'expense') this.loadLoans()
+    if (t === 'ar' || t === 'ap' || t === 'expense') this.loadSuggest()
   },
   // 工作台待办点击跳转（reminders 里的 tab: ar/ap/expense/nw/home）
   goRem(e) {
@@ -639,17 +641,80 @@ Page({
     if (t === 'expense') this.loadLoans()
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
+  // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
+  blurOCustomer() {
+    const n = (this.data.o_customer || '').trim()
+    if (!n) return
+    this.applyLastDeal('ar', n)
+  },
+  blurPSupplier() {
+    const n = (this.data.p_supplier || '').trim()
+    if (!n) return
+    this.applyLastDeal('ap', n)
+  },
+  applyLastDeal(type, party) {
+    this.req({
+      url: API_BASE + '/last-deal?type=' + type + '&party=' + encodeURIComponent(party),
+      success: (r) => {
+        const d = r.data || {}
+        if (!d.found) return this.setData({ last_tip: '' })
+        if (type === 'ar') {
+          const up = {}
+          if (!this.data.o_item && d.item) up.o_item = d.item
+          if (!this.data.o_price && d.amount) up.o_price = String(d.amount)
+          if (!this.data.o_operator && d.operator) up.o_operator = d.operator
+          up.last_tip = '上次给' + party + '记的是 ' + (d.item || '加工') + ' ¥' + d.amount + (d.last_date ? '（' + d.last_date + '）' : '')
+          this.setData(up)
+        } else {
+          const up = {}
+          if (!this.data.p_remark && d.item) up.p_remark = d.item
+          if (!this.data.p_amount && d.amount) up.p_amount = String(d.amount)
+          if (!this.data.p_operator && d.operator) up.p_operator = d.operator
+          up.last_tip = '上次跟' + party + '记的是 ' + (d.item || '货款') + ' ¥' + d.amount
+          this.setData(up)
+        }
+      }
+    })
+  },
+  loadSuggest() {
+    ['ar', 'ap', 'expense'].forEach((t) => {
+      this.req({
+        url: API_BASE + '/suggest?type=' + t,
+        success: (r) => {
+          const list = (r.data || []).slice(0, 6)
+          if (t === 'ar') this.setData({ sug_ar: list })
+          else if (t === 'ap') this.setData({ sug_ap: list })
+          else this.setData({ sug_ex: list })
+        }
+      })
+    })
+  },
+  // 点常用组合，一键填好整张单
+  fillSug(e) {
+    const t = e.currentTarget.dataset.t
+    const i = Number(e.currentTarget.dataset.i)
+    const arr = t === 'ar' ? this.data.sug_ar : t === 'ap' ? this.data.sug_ap : this.data.sug_ex
+    const it = arr[i]
+    if (!it) return
+    if (t === 'ar') this.setData({ o_customer: it.party, o_item: it.item || '', o_price: String(it.amount || '') })
+    else if (t === 'ap') this.setData({ p_supplier: it.party, p_remark: it.item || '', p_amount: String(it.amount || '') })
+    else {
+      const idx = Math.max(0, this.data.categories.indexOf(it.party))
+      this.setData({ e_category: idx, e_amount: String(it.amount || ''), e_remark: it.item || '' })
+    }
+    wx.showToast({ title: '已填好，核对金额即可', icon: 'none' })
+  },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
   onOPrice(e) { this.setData({ o_price: e.detail.value }) },
   onODue(e) { this.setData({ o_due: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
-  pickCustomer(e) { this.setData({ o_customer: e.currentTarget.dataset.n }) },
+  pickCustomer(e) { const n = e.currentTarget.dataset.n; this.setData({ o_customer: n }); this.applyLastDeal('ar', n) },
   onPSupplier(e) { this.setData({ p_supplier: e.detail.value }) },
   onPAmount(e) { this.setData({ p_amount: e.detail.value }) },
   onPRemark(e) { this.setData({ p_remark: e.detail.value }) },
   onPDue(e) { this.setData({ p_due: e.detail.value }) },
   onPOperator(e) { this.setData({ p_operator: e.detail.value }) },
-  pickSupplier(e) { this.setData({ p_supplier: e.currentTarget.dataset.n }) },
+  pickSupplier(e) { const n = e.currentTarget.dataset.n; this.setData({ p_supplier: n }); this.applyLastDeal('ap', n) },
   onECategory(e) { this.setData({ e_category: Number(e.detail.value) }) },
   onEAmount(e) { this.setData({ e_amount: e.detail.value }) },
   onERemark(e) { this.setData({ e_remark: e.detail.value }) },
@@ -662,7 +727,7 @@ Page({
     this.req({
       url: API_BASE + '/orders', method: 'POST',
       data: { customer: o_customer, item_name: o_item, price: Number(o_price), due_date: o_due, operator: o_operator },
-      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', o_operator: '' }); this.refresh() }
+      success: () => { this.setData({ o_customer: '', o_item: '', o_price: '', o_due: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   addPayable() {
@@ -671,7 +736,7 @@ Page({
     this.req({
       url: API_BASE + '/payables', method: 'POST',
       data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due }, dupRetry: true,
-      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '' }); this.refresh() }
+      success: () => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', last_tip: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   addExpense() {
@@ -680,7 +745,7 @@ Page({
     this.req({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true,
       data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id },
-      success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '' }); this.refresh() }
+      success: () => { this.setData({ e_amount: '', e_remark: '', e_operator: '' }); this.refresh(); this.loadSuggest() }
     })
   },
   payOrder(e) {

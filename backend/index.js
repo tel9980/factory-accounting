@@ -689,6 +689,37 @@ app.get('/ar', async (c) => {
 })
 
 // 应收 / 应付 页内汇总
+// 上次跟这个客户/供应商做过什么（录入时自动带出，少打字）
+app.get('/last-deal', async (c) => {
+  const db = c.env.DB
+  const u = new URL(c.req.url)
+  const party = (u.searchParams.get('party') || '').trim()
+  const type = u.searchParams.get('type') === 'ap' ? 'ap' : 'ar'
+  if (!party) return c.json({})
+  if (type === 'ap') {
+    const r = await db.prepare("SELECT supplier, COALESCE(remark,'') item, amount, COALESCE(operator,'') operator FROM payables WHERE supplier=? ORDER BY id DESC LIMIT 1").bind(party).first()
+    return c.json(r ? { found: true, item: r.item, amount: round2(num(r.amount)), operator: r.operator, last_date: '' } : { found: false })
+  }
+  const r = await db.prepare("SELECT customer, COALESCE(item_name,'') item, price, COALESCE(operator,'') operator, created_at FROM orders WHERE customer=? ORDER BY id DESC LIMIT 1").bind(party).first()
+  return c.json(r ? { found: true, item: r.item, amount: round2(num(r.price)), operator: r.operator, last_date: (r.created_at || '').slice(0, 10) } : { found: false })
+})
+
+// 智能建议：最近 90 天最常记的几组（客户+产品+金额 / 分类+金额），点一下就填好
+app.get('/suggest', async (c) => {
+  const db = c.env.DB
+  const type = new URL(c.req.url).searchParams.get('type') || 'ar'
+  if (type === 'ap') {
+    const r = await db.prepare("SELECT supplier party, COALESCE(remark,'') item, ROUND(AVG(amount),2) amount, COUNT(*) cnt FROM payables WHERE created_at >= date('now','-90 day') GROUP BY supplier, COALESCE(remark,'') ORDER BY cnt DESC, MAX(id) DESC LIMIT 6").all()
+    return c.json(r.results)
+  }
+  if (type === 'expense') {
+    const r = await db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') party, COALESCE(remark,'') item, ROUND(AVG(amount),2) amount, COUNT(*) cnt FROM ledger WHERE direction='out' AND ref_type='expense' AND created_at >= date('now','-90 day') GROUP BY COALESCE(NULLIF(category,''),'其他'), COALESCE(remark,'') ORDER BY cnt DESC, MAX(id) DESC LIMIT 6").all()
+    return c.json(r.results)
+  }
+  const r = await db.prepare("SELECT customer party, COALESCE(item_name,'') item, ROUND(AVG(price),2) amount, COUNT(*) cnt FROM orders WHERE created_at >= date('now','-90 day') GROUP BY customer, COALESCE(item_name,'') ORDER BY cnt DESC, MAX(id) DESC LIMIT 6").all()
+  return c.json(r.results)
+})
+
 app.get('/ar-summary', async (c) => {
   const db = c.env.DB
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
