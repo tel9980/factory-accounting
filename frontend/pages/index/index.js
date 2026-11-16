@@ -33,7 +33,7 @@ Page({
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
     amts: [50, 100, 200, 500, 1000, 2000],
-    import_type: 0, import_text: '',
+    import_type: 0, import_text: '', import_preview: null, recon: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
     cmp_month: '', analysis_text: '', ex_month: '', ex_from: '', ex_to: '',
@@ -1374,18 +1374,60 @@ Page({
       })
   },
   doImport() {
-    const { import_type, import_text, import_types } = this.data
+    const { import_type, import_text } = this.data
     const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
+    wx.showLoading({ title: '看一遍…' })
     this.req({
-      url: API_BASE + '/import', method: 'POST',
+      url: API_BASE + '/parse-import', method: 'POST',
       data: { type: types[import_type], text: import_text },
       success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.count) return wx.showToast({ title: '一行都没看懂，检查下格式', icon: 'none' })
+        d.new_text = (d.new_parties || []).join('、')
+        this.setData({ import_preview: d, recon: null })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  confirmImport() {
+    const { import_type, import_text, import_preview } = this.data
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const good = ((import_preview && import_preview.rows) || []).filter((r) => r.ok)
+    this.req({
+      url: API_BASE + '/import-rows', method: 'POST',
+      data: { type: types[import_type], rows: good },
+      success: (res) => {
         const n = (res.data && res.data.imported) || 0
-        wx.showToast({ title: '已导入 ' + n + ' 条', icon: 'none' })
-        this.setData({ import_text: '' })
+        wx.showToast({ title: '已入账 ' + n + ' 条', icon: 'none' })
+        this.setData({ import_text: '', import_preview: null })
         this.refresh()
       }
+    })
+  },
+  cancelPreview() { this.setData({ import_preview: null }) },
+  doReconcile() {
+    const { import_type, import_text } = this.data
+    if (!import_text.trim()) return wx.showToast({ title: '先把对账单粘到上面的框', icon: 'none' })
+    const type = (import_type === 1 || import_type === 6 || import_type === 3) ? 'ap' : 'ar'
+    wx.showLoading({ title: '核对中…' })
+    this.req({
+      url: API_BASE + '/reconcile', method: 'POST', data: { type, text: import_text },
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.count) return wx.showToast({ title: '没看懂，检查下格式', icon: 'none' })
+        const rows = (d.rows || []).map((r) => {
+          let st = '一致'
+          if (r.state === 'more') st = '我少记 ' + r.diff
+          else if (r.state === 'less') st = '我多记 ' + Math.abs(r.diff)
+          else if (r.state === 'new') st = '系统里没这家'
+          return Object.assign({}, r, { state_text: st, bad: r.state !== 'match' })
+        })
+        this.setData({ recon: Object.assign({}, d, { rows }), import_preview: null })
+      },
+      fail: () => wx.hideLoading()
     })
   },
   onReportYear(e) { this.setData({ report_year: e.detail.value }) },

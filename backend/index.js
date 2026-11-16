@@ -801,6 +801,178 @@ ${accRows}
   return c.html(html)
 })
 
+// ==================== 智能粘贴解析（对账/导入前先看预览） ====================
+const toHalf = (t) => String(t || '')
+  .replace(/[\uff10-\uff19]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+  .replace(/[\uff0c\u3001;\uff1b|]/g, ',')
+  .replace(/[\uff08]/g, '(').replace(/[\uff09]/g, ')')
+  .replace(/[¥￥$]/g, ' ')
+  .replace(/\u5143|\u5757|\u5143\u6574/g, ' ')
+  .replace(/(\d+(?:\.\d+)?)\s*\u4e07/g, (m, d) => String(Number(d) * 10000))
+  .replace(/\t/g, ',')
+  .replace(/\u3000/g, ' ')
+const DATE_RE = /(20\d{2})[-\/.](\d{1,2})[-\/.](\d{1,2})|(\d{1,2})[-.\/](\d{1,2})(?!\d)/
+const looksDate = (t) => DATE_RE.test(t)
+const parseLines = (text) => String(text || '').split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !/^(客户|供应商|产品|金额|名称|日期|备注)/.test(x))
+
+// 把一行拆成 {names[], nums[], date}
+const splitLoose = (line) => {
+  const t = toHalf(line)
+  let date = ''
+  const dm = t.match(DATE_RE)
+  if (dm) {
+    date = dm[1] ? `${dm[1]}-${String(dm[2]).padStart(2, '0')}-${String(dm[3]).padStart(2, '0')}` : `${String(dm[4]).padStart(2, '0')}-${String(dm[5]).padStart(2, '0')}`
+  }
+  const cleaned = t.replace(DATE_RE, ' ').replace(/[,\s]+/g, ' ').trim()
+  const names = []
+  const nums = []
+  for (const tok of cleaned.split(' ')) {
+    if (!tok) continue
+    const isNum = /^-?\d+(\.\d+)?$/.test(tok)
+    if (isNum) nums.push(Number(tok))
+    else if (/\d/.test(tok)) {
+      // 如 5000.00元 或 3.5万 已处理；混合词里抽数字，剩下的当名字
+      const n = tok.match(/-?\d+(\.\d+)?/g)
+      if (n) nums.push(Number(n.join('')))
+      const rest = tok.replace(/-?\d+(\.\d+)?/g, '').trim()
+      if (rest) names.push(rest)
+    } else names.push(tok)
+  }
+  return { names, nums, date }
+}
+
+// 解析成结构化行（按导入类型）
+const parseImportRows = (type, text) => {
+  const out = []
+  for (const line of parseLines(text)) {
+    const { names, nums, date } = splitLoose(line)
+    const row = { line, ok: false, error: '', party: '', item: '', amount: 0, cost: 0, category: '', date }
+    if (!names.length) { row.error = '没看懂这行（缺名字）'; out.push(row); continue }
+    row.party = names[0]
+    if (type === 'ar' || type === 'ar_init') {
+      row.item = names[1] || (type === 'ar' ? '对账导入' : '期初欠款')
+      row.amount = nums[0] || 0
+      row.cost = nums[1] || 0
+      if (type === 'ar' && nums.length > 1 && names.length > 1) row.cost = nums[1]
+    } else if (type === 'ap' || type === 'ap_init') {
+      row.amount = nums[0] || 0
+      row.item = names[1] || (type === 'ap' ? '' : '期初欠款')
+    } else if (type === 'expense') {
+      row.amount = nums[0] || 0
+      row.category = names[0] || '其他'
+      row.item = names[1] || ''
+    } else if (type === 'loan') {
+      row.amount = nums[0] || 0
+      row.item = names[1] || ''
+    } else if (type === 'reimb') {
+      row.amount = nums[0] || 0
+      row.category = names[1] || '其他'
+      row.item = names[2] || ''
+    }
+    if (!(row.amount > 0)) { row.error = row.error || '没认出金额'; out.push(row); continue }
+    row.ok = true
+    out.push(row)
+  }
+  return out
+}
+
+app.post('/parse-import', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const type = String(b.type || 'ar')
+  const rows = parseImportRows(type, b.text)
+  const good = rows.filter((r) => r.ok)
+  const bad = rows.filter((r) => !r.ok)
+  // 已知往来单位（用于标出"新客户"与拼写相近的名字）
+  const known = type === 'ap' || type === 'ap_init'
+    ? (await db.prepare("SELECT DISTINCT supplier AS p FROM payables WHERE supplier<>''").all()).results.map((x) => x.p)
+    : (await db.prepare("SELECT DISTINCT customer AS p FROM orders WHERE customer<>''").all()).results.map((x) => x.p)
+  const near = (a, b2) => {
+    if (!a || !b2) return false
+    if (a === b2) return true
+    const A = a.replace(/[（(].*?[)）]|有限公司|公司|厂|店|\s/g, '')
+    const B = b2.replace(/[（(].*?[)）]|有限公司|公司|厂|店|\s/g, '')
+    return A === B || (A.length >= 2 && B.length >= 2 && (A.includes(B) || B.includes(A)))
+  }
+  const seen = new Set(known)
+  const parties = []
+  for (const r of good) {
+    const hit = known.find((k) => near(k, r.party)) || ''
+    if (!parties.some((x) => x.name === r.party)) parties.push({ name: r.party, known: hit, is_new: !hit })
+    if (hit) seen.add(hit)
+  }
+  const total = round2(good.reduce((a, r) => a + num(r.amount), 0))
+  const costTotal = round2(good.reduce((a, r) => a + num(r.cost), 0))
+  return c.json({
+    type, count: good.length, bad_count: bad.length, total, cost_total: costTotal,
+    profit: round2(total - costTotal),
+    rows: rows.slice(0, 200), parties, new_parties: parties.filter((x) => x.is_new).map((x) => x.name)
+  })
+})
+
+// 把「预览确认过」的结构化行直接入账（宽松粘贴后走这里）
+app.post('/import-rows', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const type = String(b.type || 'ar')
+  const rows = Array.isArray(b.rows) ? b.rows.filter((r) => r && r.ok !== false && num(r.amount) > 0) : []
+  if (!rows.length) return c.json({ error: '没有可入账的行' }, 400)
+  const arr = rows.map((r) => {
+    const date = r.date || ''
+    if (type === 'ar') return [r.party, r.item || '批量导入', num(r.amount), num(r.cost) || '', date].filter((x, i) => !(i === 3 && (x === '' || x === 0)))
+    if (type === 'ar_init') return [r.party, num(r.amount), date]
+    if (type === 'ap') return [r.party, num(r.amount), r.item || '', date]
+    if (type === 'ap_init') return [r.party, num(r.amount)]
+    if (type === 'expense') return [num(r.amount), r.category || '', r.item || '', date]
+    if (type === 'loan') return [r.party, num(r.amount), r.item || '', date]
+    if (type === 'reimb') return [r.party, num(r.amount), r.category || '', r.item || '', date]
+    return [r.party, num(r.amount), date]
+  })
+  const r = await importRows(db, type, arr)
+  const n = (r && typeof r === 'object') ? num(r.imported) : num(r)
+  const locked = (r && typeof r === 'object') ? num(r.skipped_locked) : 0
+  return c.json({ ok: true, imported: n, skipped_locked: locked, count: rows.length })
+})
+
+// 对账核对：粘贴「客户 金额」，和系统里当前未结金额比
+app.post('/reconcile', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  const type = String(b.type || 'ar')
+  const rows = parseImportRows(type === 'ap' ? 'ap' : 'ar', b.text).filter((r) => r.ok)
+  const sys = type === 'ap'
+    ? (await db.prepare("SELECT supplier AS party, COALESCE(SUM(CASE WHEN amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0 THEN amount - COALESCE(paid,0) - COALESCE(written_off,0) ELSE 0 END),0) AS left FROM payables GROUP BY supplier").all()).results
+    : (await db.prepare("SELECT customer AS party, COALESCE(SUM(CASE WHEN price - COALESCE(paid,0) - COALESCE(written_off,0) > 0 THEN price - COALESCE(paid,0) - COALESCE(written_off,0) ELSE 0 END),0) AS left FROM orders GROUP BY customer").all()).results
+  const norm = (t) => String(t || '').replace(/[（(].*?[)）]|有限公司|公司|厂|店|\s/g, '')
+  const hit = (name) => {
+    const n = norm(name)
+    const exact = sys.find((x) => x.party === name)
+    if (exact) return exact
+    return sys.find((x) => { const m = norm(x.party); return m && n && (m === n || (m.length >= 2 && n.length >= 2 && (m.includes(n) || n.includes(m)))) }) || null
+  }
+  const out = []
+  let matchN = 0; let diffN = 0
+  for (const r of rows) {
+    const s = hit(r.party)
+    const system = s ? round2(num(s.left)) : 0
+    const imported = round2(num(r.amount))
+    const diff = round2(imported - system)
+    let state = 'match'
+    if (!s) state = 'new'
+    else if (Math.abs(diff) < 0.01) state = 'match'
+    else state = diff > 0 ? 'more' : 'less'
+    if (state === 'match') matchN += 1
+    if (state === 'more' || state === 'less') diffN += 1
+    out.push({ party: r.party, matched: s ? s.party : '', imported, system, diff, state })
+  }
+  return c.json({
+    type, count: out.length, match_count: matchN, diff_count: diffN,
+    imported_total: round2(out.reduce((a, x) => a + x.imported, 0)),
+    system_total: round2(out.reduce((a, x) => a + x.system, 0)),
+    rows: out
+  })
+})
+
 // 浏览器直接打开根路径时给个友好提示（不需要口令）
 app.get('/', (c) => c.html(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -3016,7 +3188,8 @@ app.post('/import', async (c) => {
   const lines = String(text || '').split(/\n+/).map((s) => s.trim()).filter(Boolean)
   if (!lines.length) return c.json({ error: '没有可导入的内容' }, 400)
   const rows = lines.map((row) => row.split(/[,，\t]/).map((s) => s.trim()))
-  return c.json(await importRows(c.env.DB, type, rows))
+  const rr = await importRows(c.env.DB, type, rows)
+  return c.json({ ok: true, imported: num(rr && rr.imported), skipped_locked: num(rr && rr.skipped_locked) })
 })
 
 // 年度流水报表

@@ -457,7 +457,35 @@
       <button class="btn btn-ghost" size="mini" bindtap="chooseImportFile">📄 选 CSV/TXT 文件导入</button>
       <view class="tip" wx:if="{{import_file_name}}">已读入：{{import_file_name}}</view>
       <textarea class="ta" placeholder="{{import_hint}}" value="{{import_text}}" bindinput="onImportText"></textarea>
-      <button class="btn" size="mini" bindtap="doImport">开始导入</button>
+      <button class="btn" size="mini" bindtap="doImport">① 先看预览（确认后再入账）</button>
+      <button class="btn ghost" size="mini" bindtap="doReconcile">🔍 对账核对（和系统里的数比一比）</button>
+
+      <view class="prev" wx:if="{{import_preview}}">
+        <view class="prev-h">看清了再导：{{import_preview.count}} 条，合计 {{import_preview.total}} 元</view>
+        <view class="tip" wx:if="{{import_preview.cost_total>0}}">其中成本 {{import_preview.cost_total}} 元，预计毛利 {{import_preview.profit}} 元</view>
+        <view class="prev-row" wx:for="{{import_preview.rows}}" wx:key="line">
+          <text class="prev-ok {{item.ok?'ok':'red'}}">{{item.ok ? '✓' : '✗'}}</text>
+          <text class="prev-t">{{item.party}}{{item.item ? ' · ' + item.item : ''}}{{item.date ? ' · ' + item.date : ''}}</text>
+          <text class="prev-n">{{item.ok ? item.amount : item.error}}</text>
+        </view>
+        <view class="tip" wx:if="{{import_preview.new_text}}">新单位（系统里还没有）：{{import_preview.new_text}}</view>
+        <view class="tip" wx:if="{{import_preview.bad_count}}">有 {{import_preview.bad_count}} 行没看懂，这些不会导入</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="confirmImport">确认入账 {{import_preview.count}} 条</button>
+          <button class="btn ghost" size="mini" bindtap="cancelPreview">取消</button>
+        </view>
+      </view>
+
+      <view class="prev" wx:if="{{recon}}">
+        <view class="prev-h">对账结果：{{recon.count}} 家　一致 {{recon.match_count}}　有差异 {{recon.diff_count}}</view>
+        <view class="prev-row" wx:for="{{recon.rows}}" wx:key="party">
+          <text class="prev-t">{{item.party}}</text>
+          <text class="prev-n">单上 {{item.imported}} / 我这 {{item.system}}</text>
+          <text class="{{item.bad?'red':'ok'}}">{{item.state_text}}</text>
+        </view>
+        <view class="tip">「我少记」= 客户的数比系统里大，可能漏单或漏记收款；「我多记」= 系统里偏大，可能记重了或对方已付没记。</view>
+        <view class="tip">核对完可以直接改单，不用重复导入。</view>
+      </view>
       <view class="tip">最省事的两步：① 点「下载 Excel 模板」→ 转发到电脑，用 Excel/WPS 填几行（表头别删，日期可留空）→ 微信发回给自己；② 回到这里点「选 Excel 文件直接导入」。Excel 存什么编码都能读，不用另存 CSV。也可以直接从 Excel 复制多行粘到上面的框里。</view>
     </view>
   </block>

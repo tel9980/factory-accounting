@@ -200,3 +200,13 @@
 .rrow { display: flex; gap: 12rpx; }
 .frow { display: flex; gap: 10rpx; margin: 10rpx 0; }
 .frow .picker { flex: 1; background: #f5f6f8; border-radius: 8rpx; padding: 12rpx; font-size: 26rpx; color: #333; }
+
+/* 导入预览 / 对账核对 */
+.prev { margin-top: 16rpx; padding: 20rpx; background: #fff; border: 2rpx solid #e6e6e6; border-radius: 12rpx; }
+.prev-h { font-size: 30rpx; font-weight: 600; margin-bottom: 12rpx; }
+.prev-row { display: flex; align-items: center; padding: 10rpx 0; border-bottom: 1rpx solid #f2f2f2; font-size: 26rpx; }
+.prev-ok { width: 36rpx; }
+.prev-t { flex: 1; margin-right: 12rpx; }
+.prev-n { color: #666; }
+.prev-row .ok { color: #12a150; }
+.prev-row .red { color: #d93026; }
