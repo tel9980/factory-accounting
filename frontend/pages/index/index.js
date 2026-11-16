@@ -1396,8 +1396,8 @@ Page({
     const id = e.currentTarget.dataset.id
     const it = this.data.ar_all.find((x) => x.id === id) || {}
     wx.showModal({
-      title: '改应收单', editable: true,
-      placeholderText: '客户,产品,金额,成本(可空)',
+      title: '改应收单（客户,产品,金额,成本）', editable: true,
+      placeholderText: '金额不能低于已收 ' + (it.paid || 0) + ' 元',
       content: [it.customer, it.item_name, it.price, it.cost || ''].join(','),
       success: (r) => {
         if (r.confirm && r.content) {
@@ -1459,8 +1459,8 @@ Page({
     const id = e.currentTarget.dataset.id
     const it = this.data.ap_all.find((x) => x.id === id) || {}
     wx.showModal({
-      title: '改应付单', editable: true,
-      placeholderText: '供应商,金额,备注',
+      title: '改应付单（供应商,金额,备注）', editable: true,
+      placeholderText: '金额不能低于已付 ' + (it.paid || 0) + ' 元',
       content: [it.supplier, it.amount, it.remark || ''].join(','),
       success: (r) => {
         if (r.confirm && r.content) {
@@ -4344,6 +4344,7 @@ Page({
         v: x.cash === 0 ? '¥' + x.amount + '（抵扣）' : (x.remark || '')
       }))
       const wos = (d.writeoffs || []).map((x) => ({ k: x.date + '  核销', v: '¥' + x.amount + (x.reason ? '  ' + x.reason : '') }))
+      const eds = (d.edits || []).map((x) => ({ k: '✎ ' + x.date, v: x.action + '：' + (x.detail || '') }))
       const head = type === 'ar'
         ? d.customer + ' · ' + d.item_name + ' · 总 ' + d.price + ' · 已收 ' + d.paid + (d.written_off > 0 ? ' · 已核销 ' + d.written_off : '') + ' · 还欠 ' + d.unpaid
         : d.supplier + ' · 总 ' + d.amount + ' · 已付 ' + d.paid + (d.written_off > 0 ? ' · 已核销 ' + d.written_off : '') + ' · 还欠 ' + d.unpaid
@@ -4354,8 +4355,9 @@ Page({
         else oline = '导入来源：' + oi.at + ' · ' + (oi.src === 'excel' ? 'Excel 文件' : oi.src === 'preview' ? '粘贴预览后入账' : '粘贴导入') + ' · 这批共 ' + oi.cnt + ' 笔 ' + oi.total + ' 元' + (oi.undone ? '（已撤回）' : '')
         rows.push({ k: '来源', v: oline })
       }
-      const text = head + '\n' + (rows.concat(wos).map((x) => x.k + '  ' + x.v).join('\n') || '还没有' + (type === 'ar' ? '收款' : '付款') + '记录')
-      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: rows.concat(wos), detail_text: text })
+      const all = rows.concat(wos).concat(eds)
+      const text = head + '\n' + (all.map((x) => x.k + '  ' + x.v).join('\n') || '还没有' + (type === 'ar' ? '收款' : '付款') + '记录')
+      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: all, detail_text: text })
     } })
   },
   noop() {},

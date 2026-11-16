@@ -76,14 +76,19 @@ const intoTrash = async (db, type, refId, obj, batch) => {
   await db.prepare('INSERT INTO trash (type, ref_id, data, batch, deleted_at) VALUES (?,?,?,?,?)')
     .bind(type, refId, JSON.stringify(obj), batch, now()).run()
 }
-const logAudit = async (db, action, target, detail) => {
+const logAudit = async (db, action, target, detail, ref) => {
   try {
-    await db.prepare('INSERT INTO audit_log (action, target, detail, created_at) VALUES (?,?,?,?)')
-      .bind(action, target, detail || '', now()).run()
+    const [rt, rid] = String(ref || '').split(':')
+    await db.prepare('INSERT INTO audit_log (action, target, detail, ref_type, ref_id, created_at) VALUES (?,?,?,?,?,?)')
+      .bind(action, target, detail || '', rt || null, rid || null, now()).run()
   } catch (e) {
     console.error('audit log failed', e)
   }
 }
+// 把「改了什么」拼成人话：金额 3000→3200；客户 张三→李四
+const diffText = (pairs) => pairs
+  .filter(([, a, b]) => String(a == null ? '' : a) !== String(b == null ? '' : b))
+  .map(([k, a, b]) => `${k} ${a || '空'} → ${b || '空'}`).join('；')
 
 const getKey = async (db) => {
   const r = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first()
@@ -3073,6 +3078,15 @@ async function importOrigin(db, batch) {
   return { batch: String(batch), log_id: r.id, type: r.type, src: r.src || '', cnt: num(r.cnt), total: round2(num(r.total)), at: String(r.created_at || '').replace('T', ' ').slice(0, 16), undone: num(r.undone) }
 }
 
+// 某张单的修改痕迹（谁在什么时候把什么改成了什么）
+const editHistory = async (db, type, id) => {
+  try {
+    const { results } = await db.prepare("SELECT action, detail, created_at FROM audit_log WHERE ref_type=? AND ref_id=? ORDER BY id DESC LIMIT 10")
+      .bind(type, String(id)).all()
+    return (results || []).map((x) => ({ date: (x.created_at || '').slice(0, 16).replace('T', ' '), action: x.action, detail: x.detail || '' }))
+  } catch (e) { return [] }
+}
+
 app.get('/orders/:id/detail', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
@@ -3090,6 +3104,7 @@ app.get('/orders/:id/detail', async (c) => {
       cash: num(x.cash), remark: x.remark || ''
     })),
     import_origin: await importOrigin(db, o.import_batch),
+    edits: await editHistory(db, 'order', id),
     writeoffs: wos.map((x) => ({ id: x.id, amount: round2(num(x.amount)), reason: x.reason || '', date: (x.created_at || '').slice(0, 10) }))
   })
 })
@@ -3106,6 +3121,7 @@ app.get('/payables/:id/detail', async (c) => {
   return c.json({
     ...fmtPayable(p),
     import_origin: await importOrigin(db, p.import_batch),
+    edits: await editHistory(db, 'payable', id),
     payments: pays.map((x) => ({
       id: x.id, date: (x.created_at || '').slice(0, 10), amount: round2(num(x.amount)),
       account: x.cash === 0 ? '预付抵扣' : accName(x.account_id),
@@ -5523,15 +5539,25 @@ app.patch('/orders/:id', async (c) => {
     return c.json({ error: '这张单刚被别人改过（或被收过款），请下拉刷新后再改', code: 'conflict' }, 409)
   }
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
-  const p = num(price, o.price)
-  if (p < num(o.paid)) return c.json({ error: '金额不能小于已收款' }, 400)
+  const p = round2(num(price, o.price))
+  const floor = round2(num(o.paid) + num(o.written_off))
+  if (p < floor) {
+    return c.json({ error: `这张单已经收了 ${round2(num(o.paid))} 元${num(o.written_off) ? `、核销 ${round2(num(o.written_off))} 元` : ''}，金额不能改成比 ${floor} 少` }, 400)
+  }
   const nd = due_date !== undefined ? (toIsoDate(due_date) || null) : (o.due_date || null)
   const op = operator !== undefined ? (String(operator).trim() || null) : (o.operator || null)
   const nc = cost !== undefined ? round2(num(cost)) : round2(num(o.cost))
+  const ncust = customer || o.customer
+  const nitem = item_name || o.item_name
   await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(customer || o.customer, item_name || o.item_name, p, nd, op, nc, id).run()
-  await logAudit(db, '编辑应收', customer || o.customer, `${customer || o.customer} ${item_name || o.item_name} ¥${p}`)
-  return c.json({ ok: true })
+    .bind(ncust, nitem, p, nd, op, nc, id).run()
+  const d = diffText([
+    ['客户', o.customer, ncust], ['产品', o.item_name, nitem],
+    ['金额', round2(num(o.price)), p], ['成本', round2(num(o.cost)), nc],
+    ['经手人', o.operator, op], ['到期日', (o.due_date || '').slice(0, 10), (nd || '').slice(0, 10)]
+  ])
+  await logAudit(db, '编辑应收', ncust, d || '（没改动）', `order:${id}`)
+  return c.json({ ok: true, changed: d })
 })
 
 // 更新订单工序进度（生产环节基础版）
@@ -5560,7 +5586,7 @@ app.get('/orders/:id/processes', async (c) => {
 // 编辑应付单
 app.patch('/payables/:id', async (c) => {
   const id = c.req.param('id')
-  const { supplier, amount, remark, due_date, rev } = await c.req.json()
+  const { supplier, amount, remark, due_date, operator, rev } = await c.req.json()
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
@@ -5568,13 +5594,24 @@ app.patch('/payables/:id', async (c) => {
     return c.json({ error: '这笔刚被别人改过（或被付过款），请下拉刷新后再改', code: 'conflict' }, 409)
   }
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
-  const a = num(amount, p.amount)
-  if (a < num(p.paid)) return c.json({ error: '金额不能小于已付款' }, 400)
+  const a = round2(num(amount, p.amount))
+  const floor = round2(num(p.paid) + num(p.written_off))
+  if (a < floor) {
+    return c.json({ error: `这笔已经付了 ${round2(num(p.paid))} 元${num(p.written_off) ? `、豁免 ${round2(num(p.written_off))} 元` : ''}，金额不能改成比 ${floor} 少` }, 400)
+  }
   const nd = due_date !== undefined ? (toIsoDate(due_date) || null) : (p.due_date || null)
-  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=?, due_date=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(supplier || p.supplier, a, remark !== undefined ? remark : p.remark, nd, id).run()
-  await logAudit(db, '编辑应付', supplier || p.supplier, `${supplier || p.supplier} ¥${a}`)
-  return c.json({ ok: true })
+  const nsup = supplier || p.supplier
+  const nremark = remark !== undefined ? remark : p.remark
+  const nop = operator !== undefined ? (String(operator).trim() || null) : (p.operator || null)
+  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=?, due_date=?, operator=?, rev=COALESCE(rev,0)+1 WHERE id=?')
+    .bind(nsup, a, nremark, nd, nop, id).run()
+  const d = diffText([
+    ['供应商', p.supplier, nsup], ['金额', round2(num(p.amount)), a],
+    ['备注', p.remark, nremark], ['经手人', p.operator, nop],
+    ['到期日', (p.due_date || '').slice(0, 10), (nd || '').slice(0, 10)]
+  ])
+  await logAudit(db, '编辑应付', nsup, d || '（没改动）', `payable:${id}`)
+  return c.json({ ok: true, changed: d })
 })
 
 // 编辑现付支出流水
