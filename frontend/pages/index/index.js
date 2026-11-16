@@ -244,8 +244,26 @@ Page({
       })
     }
     const ak = wx.getStorageSync('ak') || ''
+    // 一屏里的 GET 攒到一起发（弱网下 10 次往返 → 1 次），失败自动退回逐个发
+    const method = (opts.method || 'GET').toUpperCase()
+    const rel = opts.url && opts.url.indexOf(API_BASE) === 0 ? opts.url.slice(API_BASE.length) : ''
+    const canBatch = method === 'GET' && rel && opts.batch !== false && !/^\/(batch|auth|track|statement-print|report-print|export|import-template|backup|restore)/.test(rel)
+    if (canBatch) {
+      this._bq = this._bq || []
+      this._bq.push({ path: rel, opts })
+      if (!this._bt) this._bt = setTimeout(() => this._batchFlush(), 0)
+      return
+    }
+    this._send(opts, ak)
+  },
+  // 真正发请求（含 401 索赔口令、断网入队等处理）
+  _send(opts, key) {
+    this.__doReq(opts, key)
+  },
+  __doReq(opts, key) {
     const bk = String(wx.getStorageSync('book') || 1)
-    const doReq = (key) => {
+    const ak = key
+    const doReq = (k) => {
       wx.request(Object.assign({}, opts, {
         // 断网时不丢单：标了 queue 的动作先存到手机上，联网后自动补发（后端按 client_id 去重，不会记两遍）
         fail: (err) => {
@@ -331,6 +349,32 @@ Page({
       }))
     }
     doReq(ak)
+  },
+  _batchFlush() {
+    this._bt = null
+    const q = this._bq || []
+    this._bq = []
+    if (!q.length) return
+    const ak = wx.getStorageSync('ak') || ''
+    const bk = String(wx.getStorageSync('book') || 1)
+    const fallback = () => q.forEach((it) => this._send(it.opts, ak))
+    wx.request({
+      url: API_BASE + '/batch',
+      method: 'POST',
+      header: { 'X-Access-Key': ak, 'X-Book': bk, 'Content-Type': 'application/json' },
+      data: { qs: q.map((it) => it.path) },
+      success: (res) => {
+        const d = res.data || {}
+        if (res.statusCode !== 200 || !d.ok || !Array.isArray(d.results) || d.results.length !== q.length) return fallback()
+        // 口令不对时退回逐个发，好让原来的「输口令」弹窗照旧出现
+        if (d.results.some((x) => x && (x.code === 'no_key' || x.code === 'bad_key'))) return fallback()
+        d.results.forEach((val, i) => {
+          const o = q[i].opts
+          o.success && o.success({ data: val, statusCode: 200 })
+        })
+      },
+      fail: () => fallback()
+    })
   },
 
   onShow() {

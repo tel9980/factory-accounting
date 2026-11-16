@@ -4978,6 +4978,34 @@ app.get('/statement-month', async (c) => {
 })
 
 // 一句话记账：收/付/分类 自动识别
+// 一屏多发 → 一次发完：前端把同一屏要的 GET 攒起来一起送来，省掉弱网下十几次往返
+app.post('/batch', async (c) => {
+  let body = {}
+  try { body = await c.req.json() } catch (e) { body = {} }
+  const qs = Array.isArray(body.qs) ? body.qs.slice(0, 16) : []
+  if (!qs.length) return c.json({ ok: false, error: '没说要取什么' })
+  const hdrs = {}
+  for (const [k, v] of c.req.raw.headers.entries()) {
+    const kk = k.toLowerCase()
+    if (kk === 'content-length' || kk === 'content-type' || kk === 'host') continue
+    hdrs[k] = v
+  }
+  const origin = new URL(c.req.url).origin
+  const one = async (q) => {
+    const path = String(q || '')
+    if (!path.startsWith('/') || path.startsWith('/batch') || path.startsWith('/auth')) return { ok: false, error: '这个不能批量取' }
+    try {
+      const r = await app.fetch(new Request(origin + path, { method: 'GET', headers: hdrs }), c.env, c.executionCtx)
+      const t = await r.text()
+      try { return JSON.parse(t) } catch (e) { return { ok: false, error: '返回不是 JSON' } }
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e).slice(0, 120) }
+    }
+  }
+  const results = await Promise.all(qs.map(one))
+  return c.json({ ok: true, count: results.length, results })
+})
+
 app.post('/quick', async (c) => {
   const { text, account_id } = await c.req.json()
   const s = String(text || '').trim()
