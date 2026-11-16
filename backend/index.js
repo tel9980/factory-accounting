@@ -9166,6 +9166,35 @@ app.get('/my-day', async (c) => {
   return c.json({ ok: true, day, role, ar: a, ap: b, exp: e, income: i, month_unpaid: mu, nodue: { n: nodue.n ? num(nodue.n) : 0 }, text, tips })
 })
 
+// ── 收工小结：给别人看的白话（发家人/合伙人）──
+app.get('/day-close', async (c) => {
+  const db = c.env.DB
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(c.req.query('date') || '')) ? String(c.req.query('date')) : todayIso()
+  const one = (sql, ...b) => db.prepare(sql).bind(...b).first().catch(() => ({ n: 0, s: 0 }))
+  const [ar, rc, pd, ex, mUnpaid, mAr] = await Promise.all([
+    one('SELECT COUNT(*) n, COALESCE(SUM(price),0) s FROM orders WHERE substr(created_at,1,10)=?', day),
+    one("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM ledger WHERE substr(created_at,1,10)=? AND direction='in' AND cash=1 AND ref_type<>'transfer'", day),
+    one("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM ledger WHERE substr(created_at,1,10)=? AND direction='out' AND cash=1 AND ref_type<>'transfer'", day),
+    one("SELECT COUNT(*) n, COALESCE(SUM(amount),0) s FROM ledger WHERE substr(created_at,1,10)=? AND direction='out' AND cash=1 AND ref_type IN ('expense','fixed')", day),
+    one("SELECT COUNT(*) n, COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) s FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005"),
+    one("SELECT COUNT(*) n, COALESCE(SUM(price),0) s FROM orders WHERE substr(created_at,1,7)=?", day.slice(0, 7))
+  ])
+  const R = (x) => ({ n: num(x && x.n), s: round2(num(x && x.s)) })
+  const a = R(ar), r = R(rc), p = R(pd), e = R(ex), mu = R(mUnpaid), ma = R(mAr)
+  const L = []
+  L.push(`【收工小结 · ${day.slice(5).replace('-', '/')}】`)
+  const bits = []
+  if (a.n) bits.push(`接了 ${a.n} 单活（共 ¥${a.s}）`)
+  if (r.n) bits.push(`收到 ${r.n} 笔钱（¥${r.s}）`)
+  else bits.push('今天没收到钱')
+  if (p.n) bits.push(`付出去 ${p.n} 笔（¥${p.s}）`)
+  L.push(bits.join('，') + '。')
+  if (mu.n && mu.s > 0) L.push(`这个月还有 ${mu.n} 张单没收回来，共 ¥${mu.s}。`)
+  if (!a.n && !r.n && !p.n) { L.length = 0; L.push(`【收工小结 · ${day.slice(5).replace('-', '/')}】`, '今天还没记单子，收工前顺手记一笔。') }
+  const text = L.join('\n')
+  return c.json({ ok: true, day, text, ar: a, received: r, paid: p, exp: e, month_unpaid: mu, month_ar: ma })
+})
+
 // 老板看：员工这几天记了什么（按操作日志里的「员工」标记）
 app.get('/staff-activity', async (c) => {
   const db = c.env.DB

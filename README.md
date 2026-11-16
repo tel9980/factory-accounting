@@ -567,11 +567,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 下面每张单一行：谁、什么活、金额、已收(付)、还欠、到期日，以及它对应的每笔流水（日期、金额、进了哪个账户）；
    - 自动标出四种对不上的地方：**这单记了已收(付)却找不到流水**（直接改的金额或流水被删）、**流水比单上记的已收(付)多**、**流水没记账户**、**还欠且已过期**；
    - 底部单独列「没挂到单据上的收付款」（手动记的钱、预收款，或者记错了），整段可复制发微信。
+203. ✅ **收工小结（一句话告诉家里人/合伙人）**：首页工作台新增「📣 收工小结」，点一下「看一下」——
+   - 生成一段能直接发微信的白话：`【收工小结 · 11/17】接了 2 单活（共 ¥5000），收到 1 笔钱（¥3000），付出去 1 笔（¥800）。这个月还有 1 张单没收回来，共 ¥2000。`；
+   - 与「我今天干了啥」区分：那个是给自己看的流水账（记了应收 X 张、支出 X 笔），这个是给别人看的收工汇报；
+   - 没记任何东西时提示「今天还没记单子，收工前顺手记一笔」；
+   - 支持指定日期（`?date=`），默认今天，可复制。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 283 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 284 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -823,7 +828,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（150）
+**其它（单个接口）**（151）
 
 - `GET /`
 - `GET /access-guide`
@@ -859,6 +864,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /credits`
 - `GET /customer-card`
 - `GET /dashboard`
+- `GET /day-close`
 - `POST /db-clean`
 - `GET /db-stats`
 - `POST /detect-import`

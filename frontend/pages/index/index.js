@@ -106,7 +106,7 @@ Page({
     gl: null, gl_kw: '', gl_open: '', gl_cat: '',
     rec: null,
     rec_show: false, rec_code: '', rec_pw: '', rec_busy: false,
-    ag: null, ag_tab: 'newphone', cc: null, ro: null, ro_month: '', ar2: null,
+    ag: null, ag_tab: 'newphone', cc: null, ro: null, ro_month: '', dc: null, ar2: null,
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -3451,6 +3451,19 @@ Page({
     const t = e.currentTarget.dataset.t || 'me'
     this.enterTab(t)
     wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+  },
+  openDayClose() { this.loadDayClose() },
+  closeDayClose() { this.setData({ dc: null }) },
+  loadDayClose() {
+    this.req({
+      url: '/day-close',
+      success: (res) => { if (res.data && res.data.ok) this.setData({ dc: res.data }) },
+    })
+  },
+  copyDayClose() {
+    const dc = this.data.dc
+    if (!dc) return
+    wx.setClipboardData({ data: dc.text, success: () => wx.showToast({ title: '已复制，可以发出去' }) })
   },
   loadMyDay() {
     this.req({

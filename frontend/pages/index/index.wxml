@@ -216,6 +216,14 @@
       <view class="tip">{{md.text}}</view>
       <view class="aline warn" wx:for="{{md.tips}}" wx:key="*this">{{item}}</view>
     </view>
+    <view class="card" wx:if="{{dc}}">
+      <view class="card-h">📣 收工小结<text class="card-n" bindtap="copyDayClose">复制</text><text class="card-n" bindtap="closeDayClose">收起</text></view>
+      <view class="tip">{{dc.text}}</view>
+    </view>
+    <view class="card" wx:if="{{!dc}}">
+      <view class="card-h">📣 收工小结<text class="card-n" bindtap="openDayClose">看一下 ›</text></view>
+      <view class="tip">一句话告诉家里人/合伙人：今天接了几单、收了几笔、还剩多少没收回来。</view>
+    </view>
     <view class="card" wx:if="{{fund && fund.count}}">
       <view class="card-h">💼 钱的三条线<text class="card-n" bindtap="jumpFund" data-t="me">去处理 ›</text></view>
       <view class="item" wx:for="{{fund.rows}}" wx:key="k" bindtap="jumpFund" data-t="{{item.tab}}">
