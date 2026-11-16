@@ -102,6 +102,7 @@ Page({
     gl: null, gl_kw: '', gl_open: '', gl_cat: '',
     rec: null,
     rec_show: false, rec_code: '', rec_pw: '', rec_busy: false,
+    ag: null, ag_tab: 'newphone',
     map_groups: [
       { title: '每天都用（1~3 分钟）', items: [
         { name: '记一笔应收', desc: '客户又给活了，顺手记上', go: 'bill:ar' },
@@ -1394,6 +1395,60 @@ Page({
         }
       },
       fail: () => { this.setData({ rec_busy: false }); wx.showToast({ title: '网络不好', icon: 'none' }) }
+    })
+  },
+  // ── 换手机 / 停用员工向导 ──
+  loadAccessGuide() {
+    this.req({
+      url: '/access-guide',
+      success: (res) => {
+        if (res.data && res.data.ok) {
+          const t = res.data.topics || []
+          const keep = this.data.ag_tab
+          const has = t.some((x) => x.k === keep)
+          this.setData({ ag: res.data, ag_tab: has ? keep : ((t[0] && t[0].k) || 'newphone') })
+        }
+      },
+    })
+  },
+  switchAgTab(e) { this.setData({ ag_tab: e.currentTarget.dataset.k }) },
+  closeAccessGuide() { this.setData({ ag: null }) },
+  copyAccessGuide() {
+    const ag = this.data.ag
+    if (!ag) return
+    const t = (ag.topics || []).find((x) => x.k === this.data.ag_tab) || (ag.topics || [])[0]
+    if (!t) return
+    const txt = '【' + t.title + '】\n' + t.steps.map((s, i) => (i + 1) + '. ' + s).join('\n')
+    wx.setClipboardData({ data: txt, success: () => wx.showToast({ title: '已复制，可以发给别人' }) })
+  },
+  // 一键停用员工口令
+  staffOff() {
+    wx.showModal({
+      title: '停用员工口令？',
+      content: '停用后，员工手机上那个口令立刻进不去（数据都还在）。以后要再用，重新设一个就行。',
+      confirmText: '停用',
+      confirmColor: '#b3261e',
+      success: (r) => {
+        if (!r.confirm) return
+        const key = wx.getStorageSync('ak')
+        wx.request({
+          url: API_BASE + '/auth/staff-off',
+          method: 'POST',
+          header: { 'content-type': 'application/json', 'X-Access-Key': key, 'X-Book': this.data.book || '1' },
+          data: { key, note: '小程序里一键停用' },
+          success: (res) => {
+            if (res.statusCode === 200 && res.data && res.data.ok) {
+              this.setData({ staff_enabled: false })
+              wx.showToast({ title: '已停用', icon: 'success' })
+              this.loadAccessGuide()
+              this.loadHealthDetail && this.loadHealthDetail()
+            } else {
+              wx.showToast({ title: (res.data && res.data.error) || '停用失败', icon: 'none' })
+            }
+          },
+          fail: () => wx.showToast({ title: '网络不好，稍后再试', icon: 'none' }),
+        })
+      },
     })
   },
   loadRecoverInfo() {

@@ -273,6 +273,71 @@ app.post('/auth/staff', async (c) => {
   return c.json({ ok: true, enabled: !!pw })
 })
 
+// 一键停用员工口令（离职/换人时立刻止损，不用先「改成空」）
+app.post('/auth/staff-off', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '尚未设置老板口令' }, 400)
+  if (String(b.key || '') !== saved) return c.json({ error: '只有老板口令能停用员工口令' }, 403)
+  const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
+  if (!old || !old.value) return c.json({ ok: true, enabled: false, note: '本来就没开员工口令' })
+  await mainDb.prepare("DELETE FROM settings WHERE key='staff_key'").run()
+  await logAudit(mainDb, '停用员工口令', '员工口令', (b.note || '离职/换人'), '', '老板')
+  return c.json({ ok: true, enabled: false, note: '已停用：他手机上那个口令现在进不去了' })
+})
+
+// 「换手机 / 停用员工」向导 + 离职交接自查
+app.get('/access-guide', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const g = (sql) => db.prepare(sql).first().catch(() => null)
+  const [staff, recInfo, bkName, lastBak, staffAct, noDue, openAr, openAp] = await Promise.all([
+    getStaffKey(mainDb).catch(() => ''),
+    mainDb.prepare("SELECT value FROM settings WHERE key='recover_hash'").first().catch(() => null),
+    g("SELECT value FROM settings WHERE key='book_name'"),
+    g("SELECT MAX(created_at) t FROM backups"),
+    g("SELECT COUNT(*) n FROM audit_log WHERE by='员工'"),
+    g("SELECT COUNT(*) n FROM orders WHERE (due_date IS NULL OR due_date='') AND price > paid + COALESCE(written_off,0)"),
+    g("SELECT COUNT(*) n, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) amt FROM orders WHERE price > paid + COALESCE(written_off,0)"),
+    g("SELECT COUNT(*) n, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) amt FROM payables WHERE amount > paid + COALESCE(written_off,0)"),
+  ])
+  const staffOn = !!(staff && String(staff).length >= 4)
+  const recOn = !!(recInfo && recInfo.value)
+  const bakDays = lastBak && lastBak.t ? Math.max(0, daysSince(lastBak.t)) : null
+  const topics = [
+    { k: 'newphone', title: '我换手机了', icon: '📱', steps: [
+      '新手机装微信开发者工具，或用「小司记账」小程序的体验版二维码/正式版打开（不用重新装什么）',
+      '登录时输老板口令（就是这台手机上原来那个）；口令不知道了就用恢复码重设（设置 → 🔑 找回口令）',
+      '数据在云上，自动就在：不用导出、不用导入、不用扫码迁移',
+      '第一件事：打开首页看一眼「手头现金」和「客户欠我」对不对，再点「设置 → 备份到笔记站」留一份',
+      recOn ? '恢复码已经设过了（' + (recInfo.value ? '有' : '无') + '），纸上的那张还能用' : '还没设恢复码——现在就在设置里生成一个，抄纸上',
+      '手里这台旧手机不用注销；想让它失效，就在旧手机上清掉小程序缓存（发现 → 长按删除 → 重新进入要口令）',
+    ] },
+    { k: 'staff', title: '我要给员工用 / 停用员工', icon: '👷', steps: [
+      staffOn ? '员工口令已开启：告诉员工这个口令，他只能记账、收款、看自己的单，看不到利润、不能删改单' : '还没开员工口令：设置里「设员工口令」，给他 4 位以上、别和老板口令一样',
+      '员工记的每一笔都带「员工」标记，老板在设置页「看看员工最近记了什么」能查（近 7 天）',
+      '员工要改单只能「申请改」，老板在小程序里点同意/驳回，改了会留痕',
+      '离职或换人：点下面「一键停用员工口令」，他手机上那个口令立刻进不去',
+      staffAct && num(staffAct.n) > 0 ? '离职前建议先看一眼他记的 ' + num(staffAct.n) + ' 笔操作，核对有没有错单' : '暂时没有员工记过的记录',
+    ] },
+    { k: 'leave', title: '员工离职交接（照着做不会漏）', icon: '🧾', steps: [
+      '① 一键停用他的口令（下面按钮），别等「以后再说」',
+      '② 看他最近记了什么，把可疑的核对一遍（设置 → 查看员工最近记了什么）',
+      num(noDue && noDue.n) > 0 ? '③ 有 ' + num(noDue.n) + ' 张单没写到期日：点「单位 → 账期」补上，不然不会提醒你收钱' : '③ 单据到期日都齐了（没有漏填的）',
+      '④ 如果他见过老板口令：改一次老板口令（设置 → 改口令），并把恢复码重设（旧纸作废）',
+      '⑤ 应交待：未收 ' + round2(num(openAr && openAr.amt)) + ' 元（' + num(openAr && openAr.n) + ' 单）、应付 ' + round2(num(openAp && openAp.amt)) + ' 元（' + num(openAp && openAp.n) + ' 单）；点「账本交接包」把现状打成一张纸',
+      '⑥ 最后备份一次并结掉这个月的账（报表 → 月底收尾）',
+    ] },
+  ]
+  const tips = []
+  if (!recOn) tips.push('没设恢复码：口令忘了就进不来了，现在去设')
+  if (staffOn) tips.push('员工口令开着：人不干了记得一键停用')
+  if (bakDays === null) tips.push('还没做过备份：设置 → 备份一次')
+  else if (bakDays > 7) tips.push('上次备份是 ' + bakDays + ' 天前，建议现在备份一次')
+  return c.json({ ok: true, staff_enabled: staffOn, recover_set: recOn, book_name: (bkName && bkName.value) || '账本1', backup_days: bakDays, topics, tips, text: tips.length ? tips.join('\n') : '口令、恢复码、备份都齐了，换手机或换人都照向导做就行。' })
+})
+
 // 打印链接签名（不暴露访问口令）
 const sigOf = async (key, party, type) => {
   const data = new TextEncoder().encode(String(key) + '|' + String(party) + '|' + String(type))
@@ -319,7 +384,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check)/.test(path)
+      || /^\/(schema-check|books-check)/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)

@@ -1236,6 +1236,25 @@
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
+      <button class="btn warn" size="mini" wx:if="{{role!='staff' && staff_enabled}}" bindtap="staffOff">🚫 一键停用员工口令</button>
+      <view class="hobtns" wx:if="{{role!='staff'}}">
+        <button class="btn gray" size="mini" bindtap="loadAccessGuide">🔄 换手机 / 停用员工向导</button>
+      </view>
+      <view class="ag-panel" wx:if="{{ag}}">
+        <view class="ag-tip" wx:for="{{ag.tips}}" wx:key="*this">· {{item}}</view>
+        <view class="ag-tabs">
+          <text class="ag-tab {{ag_tab==item.k?'on':''}}" wx:for="{{ag.topics}}" wx:key="k" data-k="{{item.k}}" bindtap="switchAgTab">{{item.icon}} {{item.title}}</text>
+        </view>
+        <block wx:for="{{ag.topics}}" wx:key="k" wx:for-item="t">
+          <view wx:if="{{ag_tab==t.k}}">
+            <view class="ag-step" wx:for="{{t.steps}}" wx:key="*this" wx:for-item="st">{{index+1}}. {{st}}</view>
+          </view>
+        </block>
+        <view class="hobtns">
+          <button class="btn" size="mini" bindtap="copyAccessGuide">复制这份向导</button>
+          <button class="btn gray" size="mini" bindtap="closeAccessGuide">收起</button>
+        </view>
+      </view>
       <view class="tip" wx:if="{{role!='staff'}}">🔑 恢复码：忘了口令时的唯一自救办法，抄在纸上放着（只显示一次，我们也不存）。</view>
       <view class="hobtns" wx:if="{{role!='staff'}}">
         <button class="btn" size="mini" bindtap="openRecoverPanel">🔑 找回口令 / 看恢复码</button>
