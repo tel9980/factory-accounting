@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 325 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 326 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -937,7 +937,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（179）
+**其它（单个接口）**（180）
 
 - `GET /`
 - `GET /access-guide`
@@ -1054,6 +1054,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /quick`
 - `GET /receipt-text`
 - `POST /receive-batch`
+- `GET /recon-board`
 - `GET /recon-calendar`
 - `GET /recon-conclusion`
 - `GET /recon-diff-text`
@@ -1175,6 +1176,14 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 建议四条：催款效率（占比 + 每催一次多少钱）、白催名单（「再催也是白费劲，改成打电话或上门，或者先停掉账期」）、失约家数、不用花力气的名单，再加一句和上月的次数对比；
    - 前端报表页「📣 催款月报」：月份输入 + 每家一行（催几次、本月回款、催后回款、还欠、信用档）+ 「📋 复制月报」；denyStaff 加 `/^\/dunning-report/`；
    - 实测：甲客户（5000，催 3 次、承诺 3 次全过期、一分没回）→ `useless`「催了 3 次，一分没回（答应过 3 次也没付）」；乙客户（催 1 次后付清 4000）→ `paid`；丙客户（没催自己付 3000）→ 进「不用花力气」；汇总「催了 2 家共 4 次，催后收回 ¥4000（本月总回款 ¥7000，占 57%），平均每催一次 ¥1000」；空月份「2026-08 没催过款、也没有回款记录」；员工口令 403。
+
+226. ✅ **月度对账完成度（这个月账到底核清没有）**：对账记录散在四个地方（发对账单 `statement_log`、对方回执 `statement_log.ack`、差异处理 `recon_log`、签字确认 `recon_confirm`），月底没人说得清「核完没核完」。新增 `GET /recon-board?type=ar|ap&month=&months=6`（**原 `/recon-progress` 已存在且前端在用，新接口另起名 `/recon-board`，否则会被先定义的路由遮住**）：
+   - **应核对家数** = 本月开过单的家 ∪ 还有未结欠款的家（老账也要对，不能只看本月）；
+   - 每家给一个状态，按严重程度排：`disputed` 对方说对不上（红）→ `diff` 有差异没处理完（红）→ `none` 这个月没发过对账单 → `sent` 发过没回话 → `done` 核对清楚（对方确认 / 签了确认单 / 差异已处理）；
+   - 每行带 `sent`（哪天下的对账单）、`ack`、`diff`、`left`（还欠多少）、`cnt`（本月几单）；
+   - 返回 `total`/`rate`/`cnt{done,disputed,diff,sent,none}`/`rows`/`curve`（近 N 个月逐月 `total/done/rate/bar`，每月应核对 = 当月开过单的家）/`advice`（分五种情况给下一步）/人话结论「2026-11 该核对 4 家，核对清楚 1 家（25%）：1 家对方说对不上、1 家没发过对账单、1 家等回话。」；
+   - 前端报表页「📊 对账完成度」：月份可填（留空=本月），逐家一行显示状态与还欠，下面「近 6 个月对账完成度」逐月一行，可一键复制；
+   - denyStaff 加 `/^\/recon-board/`（员工 403，实测）；实测：4 家（甲只发对账单 / 乙确认对得上 / 丙说对不上 / 丁没发过）→ 25%，四种状态全对，advice 三条分别指向核数、批量发对账单、过两天再问。
 
 222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
    - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；

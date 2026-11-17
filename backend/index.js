@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/recon-board/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -6911,6 +6911,102 @@ app.get('/collect-plan', async (c) => {
     ok: true, type, span, per_day: perDay, total, count: items.length,
     plan, plan_n: planN, plan_amt: planAmt, rest, rows: items.slice(0, 40), text
   })
+})
+
+// ── 月度对账完成度：这个月该对几家、对上几家、卡在哪 ──
+const monthsEnding = (mm, n) => {
+  const y = Number(String(mm).slice(0, 4))
+  const mo = Number(String(mm).slice(5, 7))
+  const out = []
+  for (let i = n - 1; i >= 0; i--) out.push(new Date(Date.UTC(y, mo - 1 - i, 1)).toISOString().slice(0, 7))
+  return out
+}
+
+app.get('/recon-board', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const isAr = type !== 'ap'
+  const qm = String(c.req.query('month') || '')
+  const mm = /^\d{4}-\d{2}$/.test(qm) ? qm : now().slice(0, 7)
+  const span = Math.min(12, Math.max(1, Math.round(num(c.req.query('months')) || 6)))
+  const tbl = isAr ? 'orders' : 'payables'
+  const col = isAr ? 'customer' : 'supplier'
+  const amt = isAr ? 'price' : 'amount'
+  const OPEN = `${amt}-COALESCE(paid,0)-COALESCE(written_off,0)`
+  const mons = monthsEnding(mm, span)
+  const from = mons[0]
+  const [act, stmt, rlog, rconf, open] = await Promise.all([
+    db.prepare(`SELECT substr(created_at,1,7) m, ${col} AS party, COUNT(*) c, COALESCE(SUM(${amt}),0) t FROM ${tbl} WHERE substr(created_at,1,7)>=? AND substr(created_at,1,7)<=? GROUP BY m, ${col}`).bind(from, mm).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT party, month, ack, ack_at, resolved_at, created_at FROM statement_log WHERE type=? AND substr(COALESCE(month,''),1,7)>=? ORDER BY id DESC LIMIT 800").bind(type, from).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT party, month, done, state, diff, note, created_at FROM recon_log WHERE type=? AND substr(COALESCE(month,''),1,7)>=? ORDER BY id DESC LIMIT 800").bind(type, from).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT party, month FROM recon_confirm WHERE type=? AND substr(COALESCE(month,''),1,7)>=? ORDER BY id DESC LIMIT 800").bind(type, from).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT ${col} AS party, COALESCE(SUM(${OPEN}),0) left_amt, COUNT(*) c FROM ${tbl} WHERE ${OPEN}>0.005 GROUP BY ${col}`).all().catch(() => ({ results: [] }))
+  ])
+  const smap = {}, lmap = {}, cmap = {}
+  for (const r of (stmt.results || [])) { const k = String(r.month || '').slice(0, 7) + '|' + norm(r.party); if (!smap[k]) smap[k] = r }
+  for (const r of (rlog.results || [])) { const k = String(r.month || '').slice(0, 7) + '|' + norm(r.party); if (!lmap[k]) lmap[k] = r }
+  for (const r of (rconf.results || [])) { cmap[String(r.month || '').slice(0, 7) + '|' + norm(r.party)] = 1 }
+  const leftMap = {}
+  for (const r of (open.results || [])) leftMap[norm(r.party)] = round2(num(r.left_amt))
+  const actMap = {}
+  for (const r of (act.results || [])) {
+    const m = String(r.m || '').slice(0, 7)
+    ;(actMap[m] || (actMap[m] = {}))[norm(r.party)] = { party: r.party || '', cnt: num(r.c), total: round2(num(r.t)) }
+  }
+  const stateOf = (party, m) => {
+    const k = m + '|' + norm(party)
+    const s = smap[k], r = lmap[k]
+    const sentDate = s ? String(s.created_at || '').slice(0, 10) : ''
+    const ackDate = s && s.ack ? String(s.ack_at || s.created_at || '').slice(0, 10) : ''
+    if (s && s.ack === 'doubt' && !String(s.resolved_at || '')) {
+      return { st: 'disputed', st_text: '对方说对不上', sent: sentDate, ack: ackDate, diff: r ? round2(num(r.diff)) : 0 }
+    }
+    if (cmap[k] || (s && s.ack === 'ok') || (r && num(r.done) === 1)) {
+      return { st: 'done', st_text: cmap[k] ? '签了对账确认单' : (s && s.ack === 'ok' ? '对方确认对得上' : '核对过了，没差异'), sent: sentDate, ack: ackDate, diff: 0 }
+    }
+    if (r && num(r.diff) > 0.005) return { st: 'diff', st_text: '有差异没处理完', sent: sentDate, ack: ackDate, diff: round2(num(r.diff)) }
+    if (s) return { st: 'sent', st_text: '发过对账单，还没回话', sent: sentDate, ack: '', diff: 0 }
+    return { st: 'none', st_text: '这个月没发过对账单', sent: '', ack: '', diff: 0 }
+  }
+  // 本月应核对 = 本月开过单的家 + 还有未结欠款的家
+  const cur = Object.assign({}, actMap[mm] || {})
+  for (const k of Object.keys(leftMap)) {
+    if (leftMap[k] > 0.005 && !cur[k]) cur[k] = { party: '', cnt: 0, total: 0 }
+  }
+  const rows = Object.keys(cur).map((k) => {
+    const e = cur[k]
+    const st = stateOf(e.party || k, mm)
+    const party = e.party || ((open.results || []).find((x) => norm(x.party) === k) || {}).party || ''
+    return Object.assign({ party, cnt: e.cnt, total: e.total, left: round2(num(leftMap[k])) }, st)
+  }).filter((r) => r.party)
+  const ORD = { disputed: 0, diff: 1, none: 2, sent: 3, done: 4 }
+  rows.sort((a, b) => (ORD[a.st] - ORD[b.st]) || (b.left - a.left))
+  const cntBy = { done: 0, disputed: 0, diff: 0, sent: 0, none: 0 }
+  rows.forEach((r) => { cntBy[r.st] = (cntBy[r.st] || 0) + 1 })
+  const total = rows.length
+  const rate = total ? Math.round((cntBy.done / total) * 100) : 100
+  // 近 N 个月完成度曲线（每月应核对 = 当月开过单的家）
+  const curve = mons.map((m) => {
+    const parties = Object.keys(actMap[m] || {})
+    let d = 0
+    parties.forEach((k) => { if (stateOf((actMap[m][k] || {}).party || k, m).st === 'done') d++ })
+    const n = parties.length
+    return { month: m, total: n, done: d, rate: n ? Math.round((d / n) * 100) : null, bar: n ? Math.max(3, Math.round((d / n) * 100)) : 0 }
+  })
+  const advice = []
+  if (cntBy.disputed) advice.push({ tone: 'warn', text: `${cntBy.disputed} 家对方说对不上：先核数，核完补记或核销，别急着催钱。` })
+  if (cntBy.diff) advice.push({ tone: 'warn', text: `${cntBy.diff} 家有差异没处理完：去「对账」里补记或核销掉。` })
+  if (cntBy.none) advice.push({ tone: 'info', text: `${cntBy.none} 家这个月还没发过对账单：报表 → 📤 批量发对账单，一次发完。` })
+  if (cntBy.sent) advice.push({ tone: 'info', text: `${cntBy.sent} 家发过对账单但没回话：过两天再问一句，或者打电话。` })
+  if (total && !cntBy.disputed && !cntBy.diff && !cntBy.none) advice.push({ tone: 'ok', text: '这个月的账都核对清楚了，可以安心结账。' })
+  const text = !total
+    ? `${mm} 没有需要核对的${isAr ? '客户' : '供应商'}（这个月没开单、也没有未结欠款）。`
+    : `${mm} 该核对 ${total} 家，核对清楚 ${cntBy.done} 家（${rate}%）` +
+      (cntBy.disputed ? `：${cntBy.disputed} 家对方说对不上` : '') +
+      (cntBy.diff ? `、${cntBy.diff} 家有差异没处理完` : '') +
+      (cntBy.none ? `、${cntBy.none} 家没发过对账单` : '') +
+      (cntBy.sent ? `、${cntBy.sent} 家等回话` : '') + '。'
+  return c.json({ ok: true, type, month: mm, months: mons, total, rate, cnt: cntBy, rows, curve, advice, text })
 })
 
 // ── 没设账期的单位：主动列出来 + 一键补上（到期提醒靠账期）──

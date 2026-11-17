@@ -1982,6 +1982,29 @@
         <view class="tip">{{sacks.advice}}</view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStatementAcks">收起</button></view>
       </block>
+      <view class="tip">📊 对账完成度（这个月该对几家、对上几家、卡在哪一步）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空=本月）" value="{{rb_month}}" bindinput="onRbMonth"/>
+        <button class="btn half" size="mini" bindtap="loadReconBoard">看完成度</button>
+      </view>
+      <view class="prev" wx:if="{{rb}}">
+        <view class="prev-h">{{rb.text}}</view>
+        <view class="aline {{item.tone}}" wx:for="{{rb.advice}}" wx:key="text">· {{item.text}}</view>
+        <view class="prev-row" wx:for="{{rb.rows}}" wx:key="party">
+          <text class="prev-t">{{item.party}}</text>
+          <text class="prev-n {{item.st==='disputed'||item.st==='diff'?'red':(item.st==='done'?'ok':'')}}">{{item.st_text}}{{item.sent ? ' · ' + item.sent + ' 发的' : ''}}</text>
+          <text class="prev-n">还欠 ¥{{item.left}}{{item.cnt ? ' · 本月 ' + item.cnt + ' 单' : ''}}</text>
+        </view>
+        <view class="cp-day">近 {{rb.months.length}} 个月对账完成度</view>
+        <view class="prev-row" wx:for="{{rb.curve}}" wx:key="month">
+          <text class="prev-t">{{item.month}}</text>
+          <text class="prev-n">{{item.total ? item.done + '/' + item.total + ' 家（' + item.rate + '%）' : '这个月没单子'}}</text>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyReconBoard">📋 复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeReconBoard">收起</button>
+        </view>
+      </view>
       <view class="tip">🤝 付款承诺（答应哪天付、到底付没付——失约过的，催款话术会自动点一句）</view>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadPromiseBook">看看谁说话算数</button>
