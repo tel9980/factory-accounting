@@ -1056,6 +1056,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **实测**：不给条件（6003 单）按客户 135→**98ms**、按产品 61→**30ms**；给月份 12→**14ms**（本来就小）；给起止 31→**12ms**、46→**25ms**；只给截止 26→**20ms**。
    - 顺带全库搜了一遍这个写法，只剩 `/quote-ref` 里那 4 个相关子查询还是 `(?='' OR item_name=?)`（一次只查一行，先留着，真觉得慢再改）。
 
+278. ✅ **CI 那个红叉的真相：仓库根本没配 `CF_API_TOKEN`**：`.github/workflows/deploy.yml` 从加上那天起，`check`/`smoke` 都是绿的，只有最后「部署到 Cloudflare」这一步每次秒红。
+   - 查了 GitHub 的 secrets 列表：`total_count: 0` —— 一个 secret 都没有，`wrangler deploy` 拿不到 token，自然每次都认证失败；历史 171 次运行里**成功 0 次**。
+   - 后果不是「部署偶尔失败」，而是「线上从来没被 CI 更新过」——线上的 Worker 一直是人手 `wrangler deploy` 上去的。红叉挂在那里，谁也不会点开看，所以这事一直没人发现。
+   - 改法：先加一步「有没有 Cloudflare token」，用 `${{ secrets.CF_API_TOKEN }}` 走 env 传进去（不写进脚本里，避免脚本注入），空的就 `::warning title=部署这一步跳过了::…` 并跳过部署，配了才照常 `wrangler deploy`。这样绿勾表示「自检+冒烟过了」，线上有没有更新看那条 warning。
+   - `DEPLOYMENT.md` 1.4 节补了「怎么建 token」和「没配会怎样」，并写明看到绿勾不等于线上更新了。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）

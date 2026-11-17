@@ -82,7 +82,22 @@ jobs:
       - name: 安装依赖
         run: npm ci
         working-directory: backend
+      # 这个仓库一直没配 CF_API_TOKEN（2026-11 查过：GitHub 里 0 个 secret），
+      # 所以「部署」这步从加上 CI 那天起就没成功过，每次 push 都是一个红叉 —— 红在那里没人会去点开看。
+      # 改成：没配 token 就跳过 + 在运行摘要上挂一条 warning，写明怎么配；配了 token 就照常部署。
+      - name: 有没有 Cloudflare token
+        id: token
+        env:
+          CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          if [ -z "$CF_TOKEN" ]; then
+            echo "::warning title=部署这一步跳过了::仓库没配 CF_API_TOKEN，所以只有自检和冒烟跑了，线上代码没更新。配法见 DEPLOYMENT.md 1.4 节（Settings → Secrets and variables → Actions → New repository secret）。"
+            echo "can=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "can=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: 部署到 Cloudflare
+        if: steps.token.outputs.can == 'true'
         run: npx wrangler deploy
         working-directory: backend
         env:

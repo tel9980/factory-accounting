@@ -70,8 +70,19 @@ cd backend
 npx wrangler deploy
 ```
 
-推 `main` 分支也会自动部署（GitHub Actions，需要仓库 secret `CF_API_TOKEN`），
-但**只有自检通过才会部署**。
+推 `main` 分支也会自动部署（GitHub Actions），但**只有自检 + 全接口冒烟都通过才会部署**。
+
+前提是这个仓库配了 `CF_API_TOKEN`：
+
+```
+仓库 → Settings → Secrets and variables → Actions → New repository secret
+名字：CF_API_TOKEN
+值：  Cloudflare → My Profile → API Tokens → Create Token → Edit Cloudflare Workers 模板
+```
+
+没配会怎样：自检和冒烟照跑，「部署」那步会跳过，并在运行摘要上挂一条 warning。
+**2026-11 查过，这个仓库当时一个 secret 都没有**，所以线上的 Worker 一直是手工
+`wrangler deploy` 上去的，不是 CI 推的——看到绿勾不等于线上更新了，去看 warning。
 
 > 早期文档写的是「把 index.js 粘进 Cloudflare 编辑器」，那是 2025 年的做法，
 > 现在只有一个 1.5 万行的单文件，别再粘贴了——用 `wrangler deploy`。
