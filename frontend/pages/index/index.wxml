@@ -347,6 +347,7 @@
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
       <view class="tip" wx:if="{{!o_due}}">{{term_default>0 ? '收款日留空：按账期自动算（默认 ' + term_default + ' 天）' : '收款日留空：这单就不会提醒你收钱，去「设置 → 单位」设个默认账期更省事'}}</view>
+      <input class="inp" placeholder="约定交货日(可选，排产用)" value="{{o_deliver}}" bindinput="onODeliver"/>
       <input class="inp" placeholder="经手人(可选)" value="{{o_operator}}" bindinput="onOOperator"/>
       <view class="dateRow">
         <picker mode="date" data-f="o_date" bindchange="onDatePick" class="datePick">
@@ -2114,6 +2115,36 @@
           <view class="aline {{item.tone}}" wx:for="{{lb.advice}}" wx:key="text">· {{item.text}}</view>
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyLossBook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeLossBook">收起</button></view>
+      </block>
+      <view class="tip">📦 本周排产 / 交期（哪单要赶、哪单已经晚了）</view>
+      <view class="frow">
+        <input class="inp half" type="number" placeholder="往后看几天（默认 7）" value="{{dp_days}}" bindinput="onDpDays" bindconfirm="loadDeliveryPlan"/>
+        <button class="btn half" size="mini" bindtap="loadDeliveryPlan">看看这周</button>
+      </view>
+      <block wx:if="{{dp}}">
+        <view class="box">
+          <view class="row1"><text class="nm">这周要交 {{dp.count}} 张</text><text class="amt">¥{{dp.amount}}</text></view>
+          <view class="row2">{{dp.overdue>0?'已过期 '+dp.overdue+' 张 · ':''}}{{dp.high>0?'要赶 '+dp.high+' 张 · ':''}}{{dp.no_date>0?'另有 '+dp.no_date+' 张没写交货日':'都写了交货日'}}</view>
+          <view class="aline {{item.tone}}" wx:for="{{dp.advice}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="box" wx:for="{{dp.by_day}}" wx:key="date">
+          <view class="row1"><text class="nm">{{item.date}}</text><text class="amt">{{item.cnt}} 张 · ¥{{item.amount}}</text></view>
+          <view class="row2" wx:if="{{item.high>0}}">⚠ 其中 {{item.high}} 张要赶</view>
+        </view>
+        <view class="item" wx:for="{{dp.rows}}" wx:key="id" bindtap="goOrderFromDp" data-id="{{item.id}}">
+          <view class="row1">
+            <text class="nm">{{item.customer}}{{item.item?' · '+item.item:''}}</text>
+            <text class="amt {{item.risk=='overdue'?'red':''}}">¥{{item.price}}</text>
+          </view>
+          <view class="row2">
+            <text class="{{item.risk=='overdue'?'red':''}}">{{item.risk=='overdue'?'❌':(item.risk=='high'?'⚠':(item.risk=='warn'?'·':'✓'))}} {{item.why}}</text>
+          </view>
+          <view class="row2">{{item.status_text}}{{item.progress?' · '+item.progress:''}} · 交货日 {{item.deliver_date}}</view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyDeliveryPlan">📋 复制这段</button>
+          <button class="btn ghost half" size="mini" bindtap="closeDeliveryPlan">收起</button>
+        </view>
       </block>
       <view class="tip">🔧 返工 / 报废 / 客诉（钱是怎么被悄悄吃掉的）</view>
       <view class="frow">

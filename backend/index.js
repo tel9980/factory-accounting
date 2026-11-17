@@ -714,6 +714,69 @@ app.delete('/attachment/:id', async (c) => {
 })
 
 // 工序停着没动：未交付的单多久没更新过工序
+// 本周排产 / 交期风险：约定交货日 + 工序进度，倒排「这周该交哪些、哪单要赶」
+app.get('/delivery-plan', async (c) => {
+  const db = c.env.DB
+  const today = now().slice(0, 10)
+  const days = Math.max(1, Math.min(60, num(c.req.query('days')) || 7))
+  const until = addDaysIso(today, days)
+  const ST = ['待加工', '加工中', '已交付']
+  const rowsQ = await db.prepare(
+    `SELECT o.id, o.customer, o.item_name, o.price, o.status, o.progress, o.created_at,
+            substr(o.deliver_date,1,10) dd,
+            (SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=o.id) last_log
+       FROM orders o
+      WHERE COALESCE(o.status,0) < 2 AND COALESCE(o.deliver_date,'') <> ''
+        AND substr(o.deliver_date,1,10) <= ?
+      ORDER BY substr(o.deliver_date,1,10) ASC LIMIT 300`
+  ).bind(until).all().catch((e) => { noteFail(e, '排产'); return { results: [] } })
+  const rows = ((rowsQ && rowsQ.results) || []).map((o) => {
+    const dd = o.dd || ''
+    const left = dd ? Math.round((dateNum(dd) - dateNum(today)) / 86400000) : null   // 正=还有几天，负=已过
+    const idle = daysSince(String(o.last_log || o.created_at || '').slice(0, 10))
+    const st = num(o.status)
+    // 风险：已过交货日还没交 > 剩 2 天内还没开工 > 剩 3 天内还停着
+    let risk = 'ok', why = ''
+    if (left < 0) { risk = 'overdue'; why = `交货日过了 ${Math.abs(left)} 天还没交` }
+    else if (left <= 2 && st === 0) { risk = 'high'; why = `还有 ${left} 天，还没开工` }
+    else if (left <= 3 && idle >= 3) { risk = 'high'; why = `还有 ${left} 天，已经 ${idle} 天没动` }
+    else if (left <= 5) { risk = 'warn'; why = `还有 ${left} 天` }
+    return {
+      id: o.id, customer: o.customer || '', item: o.item_name || '', price: round2(num(o.price)),
+      status: st, status_text: ST[st] || '待加工', progress: o.progress || '',
+      deliver_date: dd, left_days: left, idle_days: idle, risk, why
+    }
+  })
+  const byDay = {}
+  for (const r of rows) {
+    const k = r.deliver_date || '没写交货日'
+    const d = byDay[k] || (byDay[k] = { date: k, cnt: 0, amount: 0, high: 0 })
+    d.cnt += 1
+    d.amount = round2(d.amount + r.price)
+    if (r.risk === 'high' || r.risk === 'overdue') d.high += 1
+  }
+  const overdue = rows.filter((r) => r.risk === 'overdue').length
+  const high = rows.filter((r) => r.risk === 'high').length
+  const noDate = await db.prepare("SELECT COUNT(*) n FROM orders WHERE COALESCE(status,0) < 2 AND COALESCE(deliver_date,'') = ''").first().catch(() => ({ n: 0 }))
+  const amount = round2(rows.reduce((t, r) => t + r.price, 0))
+  const advice = []
+  if (rows.length === 0) advice.push({ tone: 'ok', text: `${days} 天内没有要交的活${num(noDate && noDate.n) > 0 ? `（还有 ${num(noDate.n)} 张单没写交货日，写上才好排产）` : ''}` })
+  if (overdue) advice.push({ tone: 'bad', text: `有 ${overdue} 张单交货日已经过了还没交，先给客户打个电话说明` })
+  if (high) advice.push({ tone: 'warn', text: `${high} 张要赶：盯着车间今天先做这几张` })
+  if (num(noDate && noDate.n) > 0) advice.push({ tone: 'info', text: `另有 ${num(noDate && noDate.n)} 张在做的单没写交货日，写上了才会进这个表` })
+  if (rows.length && !overdue && !high) advice.push({ tone: 'ok', text: '这周的活排得开，按顺序做就行' })
+  const text = rows.length === 0
+    ? `${days} 天内没有要交的活。`
+    : `【这周要交的活 · 到 ${until}】共 ${rows.length} 张，合计 ¥${amount}。${overdue ? `已过期 ${overdue} 张，` : ''}${high ? `要赶 ${high} 张。` : '暂无要赶的。'}`
+  return c.json({
+    ok: true, today, days, until, count: rows.length, amount,
+    overdue, high, warn: rows.filter((r) => r.risk === 'warn').length,
+    no_date: num(noDate && noDate.n),
+    by_day: Object.values(byDay).sort((a, b) => String(a.date).localeCompare(String(b.date))),
+    rows: rows.slice(0, 60), advice, text, degraded: failBucket.slice()
+  })
+})
+
 app.get('/process-stale', async (c) => {
   const db = c.env.DB
   const days = Math.min(120, Math.max(1, Math.round(num(c.req.query('days'), 7))))
@@ -6362,7 +6425,7 @@ app.post('/quotes/:id/to-order', async (c) => {
 
 app.post('/orders', async (c) => {
   const body = await c.req.json()
-  const { customer, item_name, price, due_date, operator, date, cost } = body
+  const { customer, item_name, price, due_date, operator, date, cost, deliver_date } = body
   if (!customer || num(price) <= 0) return c.json({ error: '客户和金额必填' }, 400)
   const db = c.env.DB
   const cid = String(body.client_id || '')
@@ -6377,8 +6440,8 @@ app.post('/orders', async (c) => {
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date) || (await termDue(db, customer, created, 'ar'))
   const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
-  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by) VALUES (?,?,?,0,0,?,?,?,?,?)')
-    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c)).run()
+  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by, deliver_date) VALUES (?,?,?,0,0,?,?,?,?,?,?)')
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c), toIsoDate(deliver_date) || null).run()
   await opMark(db, cid, 'order', 0)
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`, '', act(c))
   // 超信用额度提醒（不拦，只提醒）
@@ -11207,7 +11270,7 @@ app.post('/edit-requests/:id/cancel', async (c) => {
 
 app.patch('/orders/:id', async (c) => {
   const id = c.req.param('id')
-  const { customer, item_name, price, due_date, operator, rev, cost } = await c.req.json()
+  const { customer, item_name, price, due_date, operator, rev, cost, deliver_date } = await c.req.json()
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
@@ -11225,12 +11288,14 @@ app.patch('/orders/:id', async (c) => {
   const nc = cost !== undefined ? round2(num(cost)) : round2(num(o.cost))
   const ncust = customer || o.customer
   const nitem = item_name || o.item_name
-  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(ncust, nitem, p, nd, op, nc, id).run()
+  const ndd = deliver_date !== undefined ? (toIsoDate(deliver_date) || null) : (o.deliver_date || null)
+  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, deliver_date=?, rev=COALESCE(rev,0)+1 WHERE id=?')
+    .bind(ncust, nitem, p, nd, op, nc, ndd, id).run()
   const d = diffText([
     ['客户', o.customer, ncust], ['产品', o.item_name, nitem],
     ['金额', round2(num(o.price)), p], ['成本', round2(num(o.cost)), nc],
-    ['经手人', o.operator, op], ['到期日', (o.due_date || '').slice(0, 10), (nd || '').slice(0, 10)]
+    ['经手人', o.operator, op], ['到期日', (o.due_date || '').slice(0, 10), (nd || '').slice(0, 10)],
+    ['交货日', (o.deliver_date || '').slice(0, 10), (ndd || '').slice(0, 10)]
   ])
   await logAudit(db, '编辑应收', ncust, d || '（没改动）', `order:${id}`)
   return c.json({ ok: true, changed: d })

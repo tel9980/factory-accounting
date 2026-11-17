@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS orders (
   price REAL NOT NULL DEFAULT 0,
   status INTEGER NOT NULL DEFAULT 0,   -- 0待加工 1加工中 2已交付
   paid REAL NOT NULL DEFAULT 0,
-  due_date TEXT,                        -- 约定收款日（可选，用于到期提醒）
+  due_date TEXT,
+  deliver_date TEXT,                        -- 约定收款日（可选，用于到期提醒）
   operator TEXT,                        -- 经手人
   progress TEXT DEFAULT '',             -- 当前工序（如 备料/加工/喷涂/包装）
   created_at TEXT NOT NULL,
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_month ON orders(month);
+CREATE INDEX IF NOT EXISTS idx_orders_deliver ON orders(deliver_date);
 CREATE INDEX IF NOT EXISTS idx_orders_by ON orders(created_by);
 CREATE TRIGGER IF NOT EXISTS trg_orders_month AFTER INSERT ON orders WHEN NEW.month IS NULL
 BEGIN UPDATE orders SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;

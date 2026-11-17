@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    dp: null, dp_days: 7,
     rw_faults: ['自己做坏了', '材料有问题', '客户改了要求', '图纸 / 尺寸给错', '别的原因'],
     rwk: null, rwk_month: '', rw_kind: 'rework', rw_party: '', rw_item: '', rw_qty: '', rw_cost: '', rw_reason: '', rw_fix: '', rw_fault_idx: 0,
     pw: null, pw_month: '', pw_recs: [], pw_rates: null, pw_worker: '', pw_date: '', pw_item: '', pw_process: '', pw_qty: '', pw_rate: '',
@@ -93,7 +94,7 @@ Page({
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
-    o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_operator: '', o_date: '',
+    o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_operator: '', o_date: '',
     mb_type: 'customer', mb_month: '', mb: null, ns: null,
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
@@ -2113,6 +2114,7 @@ Page({
   onOPrice(e) { this.setData({ o_price: e.detail.value }); this.priceWarn(e.detail.value) },
   onOCost(e) { this.setData({ o_cost: e.detail.value }) },
   onODue(e) { this.setData({ o_due: e.detail.value }) },
+  onODeliver(e) { this.setData({ o_deliver: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
   pickCustomer(e) { const n = e.currentTarget.dataset.n; this.setData({ o_customer: n }); this.applyLastDeal('ar', n) },
   onPSupplier(e) { this.setData({ p_supplier: e.detail.value }) },
@@ -2131,12 +2133,12 @@ Page({
   onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
   onImportText(e) { this.setData({ import_text: e.detail.value }) },
   addOrder() {
-    const { o_customer, o_item, o_price, o_cost, o_due, o_operator, o_date } = this.data
+    const { o_customer, o_item, o_price, o_cost, o_due, o_deliver, o_operator, o_date } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
-      queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' }),
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, operator: o_operator, date: o_date, client_id: this.newCid() },
+      queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }),
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid() },
       success: (res) => {
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' })
         this.refresh(); this.loadSuggest()
@@ -6660,6 +6662,30 @@ Page({
     this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
   },
   closeSupplyBook() { this.setData({ spb: null }) },
+  // ===== 本周排产 / 交期 =====
+  loadDeliveryPlan() {
+    const d = Math.max(1, Number(this.data.dp_days) || 7)
+    this.req({ url: API_BASE + '/delivery-plan?days=' + d, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showToast({ title: x.error || '没取到', icon: 'none' })
+      this.setData({ dp: x })
+    } })
+  },
+  closeDeliveryPlan() { this.setData({ dp: null }) },
+  onDpDays(e) { this.setData({ dp_days: e.detail.value }) },
+  copyDeliveryPlan() {
+    const d = this.data.dp
+    if (!d) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制' }) })
+  },
+  goOrderFromDp(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({ url: API_BASE + '/orders/' + id + '/detail', success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return
+      this.setData({ detail: x, detail_show: true })
+    } })
+  },
   // ===== 返工 / 报废 / 客诉 =====
   loadReworkBook() {
     const mm = String(this.data.rwk_month || '').trim() || dayOf().slice(0, 7)

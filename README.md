@@ -875,11 +875,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 支付实现细节：`/next-step` 的 counts 查询有 9 个占位符，顺序是 `today,soon / today,soon / m / today,soon / today,soon`（第三组是「本月对过账没」，用月份串），写错顺序会让 `ap_soon_amt` 恒为 0、现金缺口永远不提示——已在代码里加了注释。
    - 实测：一台喷涂机（每 3 个月保养、上次 2026-08）、一笔 5000 应付 11-20 到期、一张 11-07 的单没交付 → `/next-step` 首条变「这周的钱可能不够付（差 ¥5000）」，其后依次是卡单、保养、7 天内到期、该对账；`/reminders` 五条齐全。
 
+252. ✅ **本周排产 / 交期风险（哪单要赶、哪单已经晚了）**：以前单据只有一个「约定收款日」，管钱不管活——车间今天该做哪张、哪张再拖就要被客户催，全靠老板记在脑子里。现在单据多一个 `deliver_date`（约定交货日，应收表单里填），报表页多一块排产面板：
+   - `GET /delivery-plan?days=7`：把「还没交付（`status<2`）且写了交货日、交货日在 N 天内（含已经过期的）」的单捞出来，逐张算**还剩几天**（负数是已过期）、**多少天没动过**（最后一次工序记录 `process_log`，没有就用开单日），并判风险四档：`overdue` 交货日过了还没交、`high` 只剩 ≤2 天还没开工 / 只剩 ≤3 天却停着、`warn` 还剩 ≤5 天、`ok` 正常。
+   - 按交货日分组（每天几张、合计多少钱、其中几张要赶）+ 三条建议（过期了先给客户打电话 / 盯着车间今天先做哪几张 / 还有几张没写交货日）+ 一句可复制的话术。
+   - `POST /orders`、`PATCH /orders/:id` 都收 `deliver_date`（改单会留痕「交货日 2026-11-15 → 2026-11-18」）；`orders` 表加列 + `idx_orders_deliver`，schema.sql 同步。
+   - 前端：应收表单「约定交货日(可选，排产用)」；报表页「📦 本周排产 / 交期」面板（天数可改、按天分组、每张单点开看明细、复制一段发群里）。
+   - 实测：三张单（交货日 11-15 已过 / 11-18 只剩 1 天 / 没写）→ 面板出「共 2 张 ¥11000，已过期 1 张、要赶 1 张」，两份建议分别为「交货日过了 2 天还没交」「还有 1 天，还没开工」，并提示「另有 1 张在做的单没写交货日」。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 375 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 376 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1217,7 +1224,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（201）
+**其它（单个接口）**（202）
 
 - `GET /`
 - `GET /access-guide`
@@ -1264,6 +1271,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /day-close`
 - `POST /db-clean`
 - `GET /db-stats`
+- `GET /delivery-plan`
 - `POST /detect-import`
 - `GET /dispute-book`
 - `GET /disputes`
