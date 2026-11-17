@@ -459,6 +459,7 @@ app.use('*', async (c, next) => {
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
+      || (/^\/tax-pack/.test(path))
       || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
       || (/^\/bank-flows\/\d+\/match$/.test(path))
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
