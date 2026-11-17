@@ -515,6 +515,7 @@ app.use('*', async (c, next) => {
       ((/^\/debts/.test(path) || /^\/credit-limits/.test(path)) && m !== 'OPTIONS') ||
       (/^\/prepaids/.test(path) && m !== 'GET') ||
       (/^\/(payroll|wage-)/.test(path) && m !== 'OPTIONS') ||
+      (/^\/rework-book$/.test(path) && m !== 'OPTIONS') ||
       (/^\/run-(amort|accrual)$/.test(path)) ||
       (/^\/transfers/.test(path) && m !== 'GET') ||
       (/^\/writeoffs/.test(path) && m !== 'GET') ||
@@ -782,6 +783,142 @@ app.post('/assets/:id/maint', async (c) => {
   await db.prepare('UPDATE assets SET maint_last=?, maint_months=? WHERE id=?').bind(day, months, id).run()
   await logAudit(db, '设备保养', '设备', a.name + ' 保养了（' + day + '），下次 ' + (months ? months + ' 个月后' : '不提醒'), '', act(c))
   return c.json({ ok: true, name: a.name, date: day, months })
+})
+
+// ===== 返工 / 报废 / 客诉：钱是怎么被悄悄吃掉的 =====
+// 小厂最容易被吃掉利润的不是水电，是返工：同样的活干两遍，料多花一份，工钱照付。
+// 这里只记「损失多少钱 + 为什么」，账上的钱不用再记一遍（返工不额外进出款）。
+const RW_KIND = { rework: '返工', scrap: '报废', complaint: '客诉' }
+const RW_FAULT = { self: '自己做坏了', material: '材料有问题', customer: '客户改了要求', design: '图纸 / 尺寸给错', other: '别的原因' }
+
+async function reworkTable(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS reworks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL DEFAULT 'rework',
+    date TEXT NOT NULL,
+    month TEXT,
+    party TEXT DEFAULT '',
+    order_id INTEGER DEFAULT 0,
+    item TEXT DEFAULT '',
+    qty REAL DEFAULT 0,
+    cost REAL NOT NULL DEFAULT 0,
+    reason TEXT DEFAULT '',
+    fault TEXT DEFAULT '',
+    fix TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    by TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_rw_month ON reworks(month)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_rw_party ON reworks(party)').run()
+}
+
+app.get('/rework-book', async (c) => {
+  const db = c.env.DB
+  await reworkTable(db)
+  const mon = String(c.req.query('month') || '').slice(0, 7)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const kind = String(c.req.query('kind') || '')
+  const w = mon ? 'month=?' : 'substr(date,1,4)=?'
+  const conds = [w]
+  const b = [mon || y]
+  if (kind && RW_KIND[kind]) { conds.push('kind=?'); b.push(kind) }
+  const { results } = await db.prepare(`SELECT * FROM reworks WHERE ${conds.join(' AND ')} ORDER BY date DESC, id DESC LIMIT 500`).bind(...b).all()
+  const rows = (results || []).map((r) => ({
+    id: r.id, kind: r.kind, kind_label: RW_KIND[r.kind] || '返工',
+    date: String(r.date || '').slice(0, 10), party: r.party || '', order_id: num(r.order_id),
+    item: r.item || '', qty: num(r.qty), cost: round2(num(r.cost)),
+    reason: r.reason || '', fault: r.fault || '', fault_label: RW_FAULT[r.fault] || '',
+    fix: r.fix || '', note: r.note || '', by: r.by || ''
+  }))
+  const sum = (list) => round2(list.reduce((a, x) => a + x.cost, 0))
+  const byKind = {}
+  for (const k of Object.keys(RW_KIND)) byKind[k] = { k, label: RW_KIND[k], count: 0, amount: 0 }
+  const byFault = {}
+  const byParty = {}
+  const byReason = {}
+  for (const r of rows) {
+    byKind[r.kind] = byKind[r.kind] || { k: r.kind, label: r.kind_label, count: 0, amount: 0 }
+    byKind[r.kind].count += 1; byKind[r.kind].amount = round2(byKind[r.kind].amount + r.cost)
+    if (r.fault) {
+      byFault[r.fault] = byFault[r.fault] || { k: r.fault, label: r.fault_label, count: 0, amount: 0 }
+      byFault[r.fault].count += 1; byFault[r.fault].amount = round2(byFault[r.fault].amount + r.cost)
+    }
+    if (r.party) {
+      byParty[r.party] = byParty[r.party] || { party: r.party, count: 0, amount: 0 }
+      byParty[r.party].count += 1; byParty[r.party].amount = round2(byParty[r.party].amount + r.cost)
+    }
+    if (r.reason) {
+      byReason[r.reason] = byReason[r.reason] || { reason: r.reason, count: 0, amount: 0 }
+      byReason[r.reason].count += 1; byReason[r.reason].amount = round2(byReason[r.reason].amount + r.cost)
+    }
+  }
+  const total = sum(rows)
+  const period = mon || y + ' 年'
+  // 占接单额多少：返工最怕「看着忙，其实白干」
+  let income = 0
+  try {
+    const oq = mon ? ['month=?', mon] : ["substr(created_at,1,4)=?", y]
+    const o = await db.prepare(`SELECT COALESCE(SUM(price),0) s FROM orders WHERE ${oq[0]}`).bind(oq[1]).first()
+    income = round2(num(o && o.s))
+  } catch (e) { income = 0 }
+  const pct = income > 0 ? round2(total / income * 100) : 0
+  const topParty = Object.values(byParty).sort((a, b) => b.amount - a.amount)[0]
+  const topReason = Object.values(byReason).sort((a, b) => b.amount - a.amount)[0]
+  const faultSelf = Object.values(byFault).filter((f) => f.k === 'self').reduce((a, f) => a + f.amount, 0)
+  const advice = []
+  if (!rows.length) advice.push({ tone: 'ok', text: `${period}没有记过返工、报废或客诉 👏 如果真没出过问题，说明活做得稳。` })
+  else {
+    advice.push({ tone: total > 0 ? 'bad' : 'warn', text: `${period}返工/报废/客诉 ${rows.length} 笔，损失 ¥${total}` + (income > 0 ? `，相当于接单额 ¥${income} 的 ${pct}%` : '') + '。' })
+    if (topReason) advice.push({ tone: 'warn', text: `最常出的问题是「${topReason.reason}」：${topReason.count} 次，¥${topReason.amount}。这个环节开工前多看一眼，比返工省钱。` })
+    if (faultSelf > 0) advice.push({ tone: 'warn', text: `其中自己做坏占 ¥${faultSelf}——要么是赶工，要么是没看清图纸；同一道工序反复出问题，就该换做法或者换人带一下。` })
+    if (topParty) advice.push({ tone: 'info', text: `亏得最多的是 ${topParty.party}：${topParty.count} 次 ¥${topParty.amount}。这家要求是不是特别细？下次报价把返工风险算进去。` })
+  }
+  const text = [
+    `【${(await getTitle(db)).title}】${period} 返工/报废/客诉`,
+    `共 ${rows.length} 笔，损失 ¥${total}` + (income > 0 ? `（占接单额 ${pct}%）` : ''),
+    ...Object.values(byKind).filter((k) => k.count).map((k) => `· ${k.label}：${k.count} 笔 ¥${k.amount}`),
+    ...Object.values(byFault).filter((f) => f.count).map((f) => `· ${f.label}：${f.count} 笔 ¥${f.amount}`),
+    ...advice.map((a) => '· ' + a.text)
+  ].join('\n')
+  return c.json({
+    ok: true, month: mon || '', year: y, period, total, count: rows.length, income, pct,
+    by_kind: Object.values(byKind), by_fault: Object.values(byFault).sort((a, b) => b.amount - a.amount),
+    by_party: Object.values(byParty).sort((a, b) => b.amount - a.amount).slice(0, 8),
+    by_reason: Object.values(byReason).sort((a, b) => b.count - a.count).slice(0, 8),
+    rows: rows.slice(0, 100), advice, text
+  })
+})
+
+app.post('/rework', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await reworkTable(db)
+  const kind = RW_KIND[body.kind] ? body.kind : 'rework'
+  const day = String(body.date || todayIso()).slice(0, 10)
+  const mm = day.slice(0, 7)
+  if (await isMonthLocked(db, mm)) return c.json({ error: `${mm} 已结账锁定，先解锁再记` }, 403)
+  const cost = round2(num(body.cost))
+  if (cost < 0) return c.json({ error: '损失金额不能是负数（没损失就填 0）' }, 400)
+  const party = String(body.party || '').trim()
+  if (!party && !String(body.reason || '').trim()) return c.json({ error: '至少填一个客户/供应商，或者写一句出了什么问题' }, 400)
+  await db.prepare('INSERT INTO reworks (kind, date, month, party, order_id, item, qty, cost, reason, fault, fix, note, by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .bind(kind, day, mm, party, num(body.order_id), String(body.item || ''), num(body.qty), cost,
+      String(body.reason || ''), RW_FAULT[body.fault] ? body.fault : '', String(body.fix || ''), String(body.note || ''), act(c), now()).run()
+  await logAudit(db, '记' + RW_KIND[kind], party || '—', `${RW_KIND[kind]} ¥${cost} ${body.reason || ''}`, '', act(c))
+  return c.json({ ok: true })
+})
+
+app.delete('/rework/:id', async (c) => {
+  const db = c.env.DB
+  await reworkTable(db)
+  const id = num(c.req.param('id'))
+  const row = await db.prepare('SELECT * FROM reworks WHERE id=?').bind(id).first()
+  if (!row) return c.json({ error: '这条记录找不到了' }, 404)
+  if (await isMonthLocked(db, String(row.month || ''))) return c.json({ error: '该月份已结账锁定，先解锁再改' }, 403)
+  await db.prepare('DELETE FROM reworks WHERE id=?').bind(id).run()
+  await logAudit(db, '删返工记录', row.party || '—', `${row.date} ${RW_KIND[row.kind] || ''}`, '', act(c))
+  return c.json({ ok: true })
 })
 
 // ===== 计件工资：先记工，月底算钱，发工资，打工资单 =====
@@ -6757,6 +6894,13 @@ app.get('/loss-book', async (c) => {
   for (const x of cut) {
     items.push({ kind: 'price_cut', kind_label: '少赚·被压价', date: x.date, party: x.party, what: `${x.item} 做 ¥${x.price}（这家这个产品平时 ¥${x.avg}）`, amount: x.amount, note: '按平时价 85 折算少收的部分', ref: '' })
   }
+  // 返工 / 报废 / 客诉：这是真金白银的损失，也算进台账
+  try {
+    const rw = await db.prepare('SELECT * FROM reworks WHERE ' + (mon ? 'month=?' : 'substr(date,1,4)=?') + ' ORDER BY date').bind(bindv).all()
+    for (const x of rw.results || []) {
+      items.push({ kind: 'rework', kind_label: '实亏·' + (RW_KIND[x.kind] || '返工'), date: String(x.date || '').slice(0, 10), party: x.party || '', what: [x.item || '加工', x.qty ? x.qty + (x.qty > 1 ? '件' : '件') : '', x.reason || ''].filter(Boolean).join(' '), amount: round2(num(x.cost)), note: RW_FAULT[x.fault] || '', ref: num(x.order_id) ? 'order:' + x.order_id : '' })
+    }
+  } catch (e) {}
   items.sort((a, b) => num(b.amount) - num(a.amount))
   const byKind = {}
   for (const x of items) {
@@ -6764,7 +6908,7 @@ app.get('/loss-book', async (c) => {
     k.amount = round2(k.amount + num(x.amount)); k.count += 1
   }
   const total = round2(items.reduce((a, x) => a + num(x.amount), 0))
-  const real = round2(items.filter((x) => x.kind === 'bad_debt').reduce((a, x) => a + num(x.amount), 0))
+  const real = round2(items.filter((x) => x.kind === 'bad_debt' || x.kind === 'rework').reduce((a, x) => a + num(x.amount), 0))
   const missed = round2(total - real)
   const advice = []
   if (!items.length) advice.push({ tone: 'ok', text: `${mon || y + ' 年'}没有发现亏钱或明显少赚的单子 👍` })

@@ -72,6 +72,8 @@ const FEATS = [
 
 Page({
   data: {
+    rw_faults: ['自己做坏了', '材料有问题', '客户改了要求', '图纸 / 尺寸给错', '别的原因'],
+    rwk: null, rwk_month: '', rw_kind: 'rework', rw_party: '', rw_item: '', rw_qty: '', rw_cost: '', rw_reason: '', rw_fix: '', rw_fault_idx: 0,
     pw: null, pw_month: '', pw_recs: [], pw_rates: null, pw_worker: '', pw_date: '', pw_item: '', pw_process: '', pw_qty: '', pw_rate: '',
     wr_worker: '', wr_item: '', wr_rate: '', wr_unit: '件',
     bank_layout: '', bank_skip: 0,
@@ -6658,6 +6660,55 @@ Page({
     this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
   },
   closeSupplyBook() { this.setData({ spb: null }) },
+  // ===== 返工 / 报废 / 客诉 =====
+  loadReworkBook() {
+    const mm = String(this.data.rwk_month || '').trim() || dayOf().slice(0, 7)
+    this.req({ url: API_BASE + '/rework-book?month=' + mm, success: (r) => {
+      const d = r.data || {}
+      if (!d.ok) return wx.showToast({ title: d.error || '没取到', icon: 'none' })
+      this.setData({ rwk: d, rwk_month: d.month })
+    } })
+  },
+  closeReworkBook() { this.setData({ rwk: null }) },
+  onRwkMonth(e) { this.setData({ rwk_month: e.detail.value }) },
+  onRwField(e) { this.setData({ [e.currentTarget.dataset.k]: e.detail.value }) },
+  onRwKind(e) { this.setData({ rw_kind: e.currentTarget.dataset.k }) },
+  onRwFault(e) { this.setData({ rw_fault_idx: Number(e.detail.value) }) },
+  addRework() {
+    const d = this.data
+    const faults = ['self', 'material', 'customer', 'design', 'other']
+    const body = {
+      kind: d.rw_kind || 'rework',
+      party: String(d.rw_party || '').trim(),
+      item: String(d.rw_item || '').trim(),
+      qty: Number(d.rw_qty) || 0,
+      cost: Number(d.rw_cost) || 0,
+      reason: String(d.rw_reason || '').trim(),
+      fault: faults[Number(d.rw_fault_idx) || 0],
+      fix: String(d.rw_fix || '').trim(),
+      date: dayOf()
+    }
+    if (!body.party && !body.reason) return wx.showToast({ title: '填客户或写一句问题', icon: 'none' })
+    this.req({ url: API_BASE + '/rework', method: 'POST', data: body, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showModal({ title: '没记上', content: x.error || '', showCancel: false })
+      wx.showToast({ title: '记上了' })
+      this.setData({ rw_party: '', rw_item: '', rw_qty: '', rw_cost: '', rw_reason: '', rw_fix: '' })
+      this.loadReworkBook()
+    } })
+  },
+  delRework(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({ title: '删掉这条？', content: '删了损失台账会跟着变。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/rework/' + id, method: 'DELETE', success: () => this.loadReworkBook() })
+    } })
+  },
+  copyReworkBook() {
+    const d = this.data.rwk
+    if (!d) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制' }) })
+  },
   // ===== 计件工资：记工 → 工资表 → 发工资 → 工资单 =====
   loadPayroll() {
     const mm = String(this.data.pw_month || '').trim() || dayOf().slice(0, 7)

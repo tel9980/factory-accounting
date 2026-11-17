@@ -860,11 +860,19 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 员工口令看不到工资（`denyStaff` 已加 `/^\/(payroll|wage-)/`）。
    - 实测：单价 小王·切割 2.5 元/件、通用 1 元/件 → 小王 40 件 = 100 元、小李 30 件 = 30 元（自动走通用价）→ 工资表 130；「全部发完」后写两条工资支出，工资表变成「已发 130，都发完了 ✓」；再点发工资 400「都已经发过了」；接着记一单 10000/成本 4000，`/month-report`、`/kpi`、`/dashboard` 的净利全部 = 5900（=10000−4000−100 工资），证明工资真的进了成本口径。
 
+250. ✅ **返工 / 报废 / 客诉台账（钱是怎么被悄悄吃掉的）**：小厂最容易被吃掉的利润不是水电，是返工——同样的活干两遍，料多花一份、工钱照付，但账上只看见「哦今天发了一笔工资」。现在多一张台账（`reworks`：kind 返工/报废/客诉、客户、单据、产品、件数、**损失金额（料+工）**、出了什么问题、责任、怎么处理）：
+   - `POST /rework` 记一笔、`GET /rework-book?month=|year=` 出汇总、`DELETE /rework/:id` 删（受月结锁定）。
+   - 汇总除了总额，还按**类型 / 责任 / 客户 / 问题原因**分组，并算出**占接单额的比例**——「这个月返工损失 ¥1300，相当于接单额 ¥28000 的 4.64%」这种话，比单纯说「损失 1300」有用得多。
+   - 人话建议按数据走：最常出的问题是哪个环节、自己做坏占多少（要赶工还是要换人带）、亏得最多的客户是不是要求特别细（下次报价把返工风险算进去）。
+   - **并进损失台账**：`/loss-book` 的「实亏」口径从「坏账核销」扩成「坏账核销 + 返工报废」，返工损失会出现在损失台账里（第一版只看坏账，返工的钱完全看不见）。
+   - 员工可以记（车间当场记），但看不到汇总（`denyStaff` 已加 `/^\/rework-book$/`，汇总里有毛利信息）。
+   - 实测：造 2 单共 28000 → 记返工 ¥800（尺寸做小了·自己做坏）、报废 ¥500（砂料有砂眼·材料问题）、客诉 ¥0（颜色不对·客户改要求）→ 台账 total 1300 / pct 4.64%，三类分组与三条建议都对；`/loss-book` 的 real_loss 同步变成 1300。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 372 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 375 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1050,6 +1058,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /recon-log`
 - `PATCH /recon-log/:id`
 
+**rework**（2）
+
+- `DELETE /rework/:id`
+- `POST /rework`
+
 **staff-users**（4）
 
 - `DELETE /staff-users/:id`
@@ -1197,7 +1210,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（200）
+**其它（单个接口）**（201）
 
 - `GET /`
 - `GET /access-guide`
@@ -1351,6 +1364,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /report-print`
 - `GET /report-view`
 - `POST /restore`
+- `GET /rework-book`
 - `GET /risk-list`
 - `POST /run-accrual`
 - `POST /run-amort`

@@ -2115,6 +2115,55 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyLossBook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeLossBook">收起</button></view>
       </block>
+      <view class="tip">🔧 返工 / 报废 / 客诉（钱是怎么被悄悄吃掉的）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空本月）" value="{{rwk_month}}" bindinput="onRwkMonth" bindconfirm="loadReworkBook"/>
+        <button class="btn half" size="mini" bindtap="loadReworkBook">看损失</button>
+      </view>
+      <block wx:if="{{rwk}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{rwk.period}} 返工损失</text><text class="amt {{rwk.total>0?'red':''}}">¥{{rwk.total}}</text></view>
+          <view class="row2">{{rwk.count}} 笔{{rwk.income>0?' · 占接单额 '+rwk.pct+'%':''}}</view>
+          <view class="aline {{item.tone}}" wx:for="{{rwk.advice}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="box" wx:if="{{rwk.by_kind.length}}">
+          <view class="row2" wx:for="{{rwk.by_kind}}" wx:key="k">{{item.label}}：{{item.count}} 笔 ¥{{item.amount}}</view>
+          <view class="row2" wx:for="{{rwk.by_fault}}" wx:key="k">· {{item.label}}：{{item.count}} 笔 ¥{{item.amount}}</view>
+        </view>
+        <view class="item" wx:for="{{rwk.rows}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.kind_label}} · {{item.party||'—'}}{{item.item?' · '+item.item:''}}</text><text class="amt {{item.cost>0?'red':''}}">¥{{item.cost}}</text></view>
+          <view class="row2">{{item.date}}{{item.qty>0?' · '+item.qty+' 件':''}}{{item.reason?' · '+item.reason:''}}{{item.fault_label?' · '+item.fault_label:''}}</view>
+          <view class="btns"><button size="mini" class="ghost" bindtap="delRework" data-id="{{item.id}}">删</button></view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyReworkBook">📋 复制这段</button>
+          <button class="btn ghost half" size="mini" bindtap="closeReworkBook">收起</button>
+        </view>
+        <view class="box">
+          <view class="row1"><text class="nm">记一笔</text><text class="amt">损失多少钱</text></view>
+          <view class="frow">
+            <button class="btn half {{rw_kind=='rework'?'':'ghost'}}" size="mini" bindtap="onRwKind" data-k="rework">返工</button>
+            <button class="btn half {{rw_kind=='scrap'?'':'ghost'}}" size="mini" bindtap="onRwKind" data-k="scrap">报废</button>
+            <button class="btn half {{rw_kind=='complaint'?'':'ghost'}}" size="mini" bindtap="onRwKind" data-k="complaint">客诉</button>
+          </view>
+          <view class="frow">
+            <input class="inp half" placeholder="客户（可空）" value="{{rw_party}}" bindinput="onRwField" data-k="rw_party"/>
+            <input class="inp half" placeholder="产品 / 什么活" value="{{rw_item}}" bindinput="onRwField" data-k="rw_item"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" type="digit" placeholder="多少件" value="{{rw_qty}}" bindinput="onRwField" data-k="rw_qty"/>
+            <input class="inp half" type="digit" placeholder="损失多少钱（料+工）" value="{{rw_cost}}" bindinput="onRwField" data-k="rw_cost"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" placeholder="出了什么问题（尺寸小了…）" value="{{rw_reason}}" bindinput="onRwField" data-k="rw_reason"/>
+            <input class="inp half" placeholder="怎么处理的（重做/退料）" value="{{rw_fix}}" bindinput="onRwField" data-k="rw_fix"/>
+          </view>
+          <picker bindchange="onRwFault" value="{{rw_fault_idx}}" range="{{rw_faults}}">
+            <view class="inp">责任：{{rw_faults[rw_fault_idx]}} ›</view>
+          </picker>
+          <view class="frow"><button class="btn" size="mini" bindtap="addRework">＋ 记上</button></view>
+        </view>
+      </block>
       <view class="tip">🕰 老客户是不是跑了（按这家自己多久下一单来比，不是一刀切）</view>
       <view class="frow">
         <button class="btn half" size="mini" bindtap="loadChurnRisk">看看谁很久没来了</button>

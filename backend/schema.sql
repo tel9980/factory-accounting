@@ -468,3 +468,24 @@ CREATE TABLE IF NOT EXISTS wage_pays (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);
+
+-- 返工 / 报废 / 客诉台账（只记损失金额与原因，不重复进出款）
+CREATE TABLE IF NOT EXISTS reworks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL DEFAULT 'rework',
+  date TEXT NOT NULL,
+  month TEXT,
+  party TEXT DEFAULT '',
+  order_id INTEGER DEFAULT 0,
+  item TEXT DEFAULT '',
+  qty REAL DEFAULT 0,
+  cost REAL NOT NULL DEFAULT 0,
+  reason TEXT DEFAULT '',
+  fault TEXT DEFAULT '',
+  fix TEXT DEFAULT '',
+  note TEXT DEFAULT '',
+  by TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rw_month ON reworks(month);
+CREATE INDEX IF NOT EXISTS idx_rw_party ON reworks(party);
