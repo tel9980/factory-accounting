@@ -13553,8 +13553,16 @@ app.get('/margin-by', async (c) => {
   let to = String(c.req.query('to') || '').slice(0, 10)
   const m = String(c.req.query('month') || '').slice(0, 7)
   if (/^\d{4}-\d{2}$/.test(m)) { from = m + '-01'; to = m + '-31' }
-  const rows = (await db.prepare("SELECT * FROM orders WHERE (?='' OR substr(created_at,1,10)>=?) AND (?='' OR substr(created_at,1,10)<=?)").bind(from, from, to, to).all()).results
-  const key = type === 'customer' ? 'customer' : 'item_name'
+  // 只取算毛利要用的几列（以前是 SELECT *，6000 单要拖十几列回来）；
+  // 条件按「有就加」拼，别写成 (?='' OR ...) —— 参数挡在前面，索引就用不上了（详见 README 277）。
+  const conds = []
+  const binds = []
+  if (from) { conds.push('substr(created_at,1,10)>=?'); binds.push(from) }
+  if (to) { conds.push('substr(created_at,1,10)<=?'); binds.push(to) }
+  const keyCol = type === 'customer' ? 'customer' : 'item_name'
+  const sql = `SELECT ${keyCol} AS k, price, paid, written_off, cost FROM orders${conds.length ? ' WHERE ' + conds.join(' AND ') : ''}`
+  const rows = (await db.prepare(sql).bind(...binds).all()).results
+  const key = 'k'
   const map = new Map()
   let missing = 0
   for (const r of rows) {

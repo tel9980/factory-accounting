@@ -1049,6 +1049,13 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **新工具 `scripts/prof.mjs`**：把 224 个 GET 路由挨个打 3 次、记录耗时和返回体积，按「最慢」和「最大」两个榜排序。就是靠它才发现 `/recon-conclusion` 是头号慢接口（之前一直盯着 `/aging` 的 88ms）。跑法：先 `cd backend && npx wrangler dev --local --port 8794 --ip 127.0.0.1`，再 `node scripts/prof.mjs --base http://127.0.0.1:8794 --key 8888`。
    - 现在剩下的「慢」主要都是导出类，天然大：`/backup` 9.6MB/369ms、`/export-all` 5.5MB/308ms、`/month-pack` 509KB/321ms、`/statement-pack` 204KB、`/tax-pack` 194KB。
 
+277. ✅ **毛利分析（按客户/按产品）快了一半：条件写成 `(?='' OR …)` 等于把索引废掉**：`/margin-by` 原来是 `SELECT * FROM orders WHERE (?='' OR substr(created_at,1,10)>=?) AND (?='' OR substr(created_at,1,10)<=?)`。
+   - **两个毛病**：①参数挡在 `OR` 前面，SQLite 在准备阶段没法折掉，`EXPLAIN QUERY PLAN` 是 `SCAN orders`（全表扫），刚加的按天索引完全用不上；②`SELECT *` 把 6000 单的十几列全拖回来，其实只算 5 列（客户/产品、金额、已收、核销、成本）。
+   - **改法**：条件按「有就加」拼（`conds.push(...)` + `bind(...)`），列只取要用的 5 列。改完 `EXPLAIN QUERY PLAN` 变成 `SEARCH orders USING INDEX idx_orders_day (<expr>>? AND <expr><? )`。
+   - **等价性**：9 种参数组合（按客户/按产品 × 不给条件 / 给月份 / 给起止 / 只给起始 / 只给截止 / 同一天）改前改后返回 JSON **逐字节一致**。
+   - **实测**：不给条件（6003 单）按客户 135→**98ms**、按产品 61→**30ms**；给月份 12→**14ms**（本来就小）；给起止 31→**12ms**、46→**25ms**；只给截止 26→**20ms**。
+   - 顺带全库搜了一遍这个写法，只剩 `/quote-ref` 里那 4 个相关子查询还是 `(?='' OR item_name=?)`（一次只查一行，先留着，真觉得慢再改）。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
