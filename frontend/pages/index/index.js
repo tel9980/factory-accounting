@@ -874,12 +874,26 @@ Page({
     const t = (e && e.currentTarget && e.currentTarget.dataset.type) || 'ar'
     wx.showLoading({ title: '算到期…' })
     this.req({
-      url: API_BASE + '/due-schedule?type=' + t + '&months=6',
+      url: API_BASE + '/due-schedule?type=' + t + '&months=6&limit=60&offset=0',
       success: (res) => {
         wx.hideLoading()
         const d = res.data || {}
-        const rows = (d.rows || []).slice(0, 15)
-        this.setData({ due: { type: t, total: d.total, overdue_total: d.overdue_total, soon_total: d.soon_total, no_due_total: d.no_due_total, count: d.count, rows, more: Math.max(0, (d.rows || []).length - rows.length) } })
+        this.setData({ due: { type: t, total: d.total, overdue_total: d.overdue_total, soon_total: d.soon_total, no_due_total: d.no_due_total, count: d.count, rows: d.rows || [], has_more: !!d.has_more, next_offset: d.next_offset || 0, rows_total: d.rows_total || 0, more: 0 } })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  loadDueMore() {
+    const d = this.data.due
+    if (!d || !d.has_more) return
+    wx.showLoading({ title: '再取 60 张…' })
+    this.req({
+      url: API_BASE + '/due-schedule?type=' + d.type + '&months=6&limit=60&offset=' + (d.next_offset || 0),
+      success: (res) => {
+        wx.hideLoading()
+        const x = res.data || {}
+        const rows = (d.rows || []).concat(x.rows || [])
+        this.setData({ due: Object.assign({}, d, { rows, has_more: !!x.has_more, next_offset: x.next_offset || 0, rows_total: x.rows_total || d.rows_total }) })
       },
       fail: () => wx.hideLoading()
     })
@@ -2037,6 +2051,24 @@ Page({
         })
       }
     })
+  },
+  loadSlowLog() {
+    this.req({
+      url: API_BASE + '/slow-log?days=7',
+      success: (res) => {
+        const r = res.data || {}
+        this.setData({ slow: r, slow_shown: true })
+      }
+    })
+  },
+  closeSlowLog() { this.setData({ slow_shown: false }) },
+  copySlowLog() {
+    const r = this.data.slow
+    if (!r) return
+    const lines = [r.text]
+    ;(r.rows || []).slice(0, 20).forEach((x) => lines.push(`${x.method} ${x.path}  最慢 ${x.max}ms  平均 ${x.avg}ms  ${x.cnt} 次  最近 ${x.last}`))
+    ;(r.advice || []).forEach((t) => lines.push('· ' + t))
+    wx.setClipboardData({ data: lines.join('\n'), success: () => wx.showToast({ title: '已复制' }) })
   },
   explainProfit() {
     const d = this.data
@@ -5566,10 +5598,27 @@ Page({
   },
   loadHistory() {
     const d = this.data
-    const q = '?type=' + d.history_type + (d.st_month ? '&month=' + d.st_month : '') + (d.st_kw ? '&kw=' + encodeURIComponent(d.st_kw) : '')
+    const q = '?type=' + d.history_type + (d.st_month ? '&month=' + d.st_month : '') + (d.st_kw ? '&kw=' + encodeURIComponent(d.st_kw) : '') + '&limit=100&offset=0'
     this.req({
       url: API_BASE + '/settled' + q,
       success: (res) => { const x = res.data || {}; if (x.ok) this.setData({ st: x }) }
+    })
+  },
+  loadStMore() {
+    const d = this.data
+    const st = d.st
+    if (!st || !st.has_more) return
+    const q = '?type=' + d.history_type + (d.st_month ? '&month=' + d.st_month : '') + (d.st_kw ? '&kw=' + encodeURIComponent(d.st_kw) : '') + '&limit=100&offset=' + (st.next_offset || 0)
+    wx.showLoading({ title: '再取 100 单…' })
+    this.req({
+      url: API_BASE + '/settled' + q,
+      success: (res) => {
+        wx.hideLoading()
+        const x = res.data || {}
+        if (!x.ok) return
+        this.setData({ st: Object.assign({}, st, { rows: (st.rows || []).concat(x.rows || []), has_more: !!x.has_more, next_offset: x.next_offset || 0 }) })
+      },
+      fail: () => wx.hideLoading()
     })
   },
   setHistoryType(e) {

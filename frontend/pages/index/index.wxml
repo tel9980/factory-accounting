@@ -575,8 +575,9 @@
           <text class="prev-n">{{item.due || '没到期日'}}{{item.guess ? '(按账期)' : ''}}</text>
           <text class="{{item.days>0?'red':'ok'}}">{{item.state}}</text>
         </view>
-        <view class="tip" wx:if="{{due.more}}">后面还有 {{due.more}} 张，导出 Excel 能看全。</view>
+        <view class="tip" wx:if="{{due.has_more}}">已经列了 {{due.shown || due.rows.length}} / 共 {{due.rows_total}} 张，点下面按钮接着看。</view>
         <view class="frow">
+          <button class="btn ghost" size="mini" wx:if="{{due.has_more}}" bindtap="loadDueMore">＋ 再看 60 张</button>
           <button class="btn" size="mini" bindtap="downloadDueXlsx">⬇ 导出 Excel（发客户对账）</button>
           <button class="btn ghost" size="mini" bindtap="closeDue">收起</button>
         </view>
@@ -762,8 +763,9 @@
           <text class="prev-n">{{item.due || '没到期日'}}{{item.guess ? '(按账期)' : ''}}</text>
           <text class="{{item.days>0?'red':'ok'}}">{{item.state}}</text>
         </view>
-        <view class="tip" wx:if="{{due.more}}">后面还有 {{due.more}} 张，导出 Excel 能看全。</view>
+        <view class="tip" wx:if="{{due.has_more}}">已经列了 {{due.shown || due.rows.length}} / 共 {{due.rows_total}} 张，点下面按钮接着看。</view>
         <view class="frow">
+          <button class="btn ghost" size="mini" wx:if="{{due.has_more}}" bindtap="loadDueMore">＋ 再看 60 张</button>
           <button class="btn" size="mini" bindtap="downloadDueXlsx">⬇ 导出 Excel（发客户对账）</button>
           <button class="btn ghost" size="mini" bindtap="closeDue">收起</button>
         </view>
@@ -1512,6 +1514,7 @@
       <button class="btn" size="mini" bindtap="loadHealthDetail">🩺 体检一下{{health.score ? '（' + health.score + ' 分）' : ''}}</button>
       <button class="btn" size="mini" bindtap="loadHealthReport">📋 体检报告单（看账本在变好还是变差）</button>
       <button class="btn" size="mini" bindtap="loadErrorLog">🐞 运行日志（看有没有报错）</button>
+      <button class="btn" size="mini" bindtap="loadSlowLog">🐌 慢不慢（最近 7 天超过 0.8 秒的）</button>
     </view>
     <view class="list" wx:if="{{health_done}}">
       <view class="item">
@@ -1554,6 +1557,14 @@
         <view class="row1"><text class="nm">近 {{err_days}} 天报错 {{err_count}} 次</text><text class="amt" bindtap="clearErrorLog">清空</text></view>
         <view class="row2 pre" wx:for="{{err_groups}}" wx:key="path">{{item.path}} × {{item.count}}</view>
         <view class="row2 pre" wx:for="{{err_rows}}" wx:key="id">{{item.when}} {{item.path}} [{{item.status}}] {{item.msg}}</view>
+      </view>
+    </view>
+    <view class="list" wx:if="{{slow_shown}}">
+      <view class="item">
+        <view class="row1"><text class="nm">{{slow.text}}</text><text class="amt" bindtap="copySlowLog">复制</text></view>
+        <view class="row2 pre" wx:for="{{slow.rows}}" wx:key="path">{{item.method}} {{item.path}}　最慢 {{item.max}}ms · 平均 {{item.avg}}ms · {{item.cnt}} 次 · 最近 {{item.last}}</view>
+        <view class="row2 pre" wx:for="{{slow.advice}}" wx:key="*this">· {{item}}</view>
+        <view class="row2"><text class="amt" bindtap="closeSlowLog">收起</text></view>
       </view>
     </view>
     <view class="form">
@@ -2897,6 +2908,7 @@
         <view class="row2">{{item.settle_date}} 结清 · {{item.days_text}}{{item.accs ? ' · ' + item.accs : ''}}{{item.wo > 0 ? ' · 含核销 ¥' + item.wo : ''}}{{item.operator ? ' · ' + item.operator : ''}}</view>
       </view>
       <view class="empty" wx:if="{{!st.rows.length}}">{{history_type=='ar' ? '这个范围里没有已结清的应收' : '这个范围里没有已结清的应付'}}</view>
+      <view class="row2" wx:if="{{st.has_more}}" bindtap="loadStMore" style="text-align:center;color:#1f6feb;padding:16rpx">已列 {{st.shown}} / 共 {{st.count}} 单 · 点这里再看 100 单 ›</view>
     </view>
   </block>
 

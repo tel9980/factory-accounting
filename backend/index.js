@@ -21,6 +21,21 @@ async function logError(c, status, msg, ms) {
       .bind(num(c.env.BOOK || 1), c.req.method, u.pathname, status, String(msg || '').slice(0, 300), ms, now()).run()
   } catch (e) { /* 留痕失败不影响主流程 */ }
 }
+// 慢接口留痕：超过 800ms 记一条（同一接口每小时最多一条），用来回答"最近是不是越用越慢"
+const SLOW_MS = 800
+async function logSlow(c, ms) {
+  try {
+    const db = c.env.DB
+    const u = new URL(c.req.url)
+    if (!/^\/(dashboard|ar|ap|ar-summary|report-view|kpi|year-summary|year-book|cash-bridge|month-brief|health-check|next-step|reminders|collect-list|payroll|settled|due-schedule|tax-pack|export|statement-pack|party-groups|materials|rework-book|outsource-book|customer-card|year-review|month-end|funding|merch)/.test(u.pathname)) return
+    const hour = now().slice(0, 13)
+    const hit = await db.prepare('SELECT id FROM slow_log WHERE path = ? AND substr(created_at,1,13) = ?').bind(u.pathname, hour).first().catch(() => null)
+    if (hit) return
+    await db.prepare('INSERT INTO slow_log (path,method,dur,book,created_at) VALUES (?,?,?,?,?)')
+      .bind(u.pathname, c.req.method, ms, num(c.env.BOOK || 1), now()).run()
+  } catch (e) { /* 留痕失败不影响主流程 */ }
+}
+
 app.use('*', async (c, next) => {
   const t0 = Date.now()
   try {
@@ -36,6 +51,9 @@ app.use('*', async (c, next) => {
   if (st >= 500) await logError(c, st, failBucket.join(' | '), dur)
   // 服务器自己在这次请求里花了多少毫秒（不含网络）：排查"到底慢在服务器还是慢在网上"时看这个头
   try { c.header('Server-Timing', 'app;dur=' + dur) } catch (e) {}
+  if (dur >= SLOW_MS) {
+    try { c.executionCtx.waitUntil(logSlow(c, dur)) } catch (e) { await logSlow(c, dur) }
+  }
 })
 
 // 兜底：真正的 500 也要把错误原文记下来，并给前端一句人话（不然只看到「加载失败」）
@@ -527,7 +545,7 @@ app.use('*', async (c, next) => {
       (/^\/recon-save/.test(path) && m !== 'OPTIONS') ||
       (/^\/assets/.test(path) && m !== 'GET') ||
       (/^\/trash/.test(path) && m !== 'GET')
-      || /^\/(staff-activity|staff-perms|staff-users|backup-verify)/.test(path)
+      || /^\/(slow-log|staff-activity|staff-perms|staff-users|backup-verify)/.test(path)
       || /^\/party-merge/.test(path)
       || (/^\/party-staff$/.test(path) && m !== 'GET')
       || /^\/(schema-check|books-check|merge-summary|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/recon-board/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
@@ -9819,7 +9837,7 @@ app.post('/collect-config', async (c) => {
 })
 
 // ===== 到期表：按账期排出「哪张单哪天到期」，能导 Excel 发客户 =====
-async function dueRows(db, type, months, party) {
+async function dueRows(db, type, months, party, limit, offset) {
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
@@ -9830,7 +9848,7 @@ async function dueRows(db, type, months, party) {
   let sql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0`
   const binds = []
   if (party) { sql += ` AND ${col} = ?`; binds.push(String(party)) }
-  sql += ' ORDER BY created_at ASC LIMIT 800'
+  sql += ' ORDER BY created_at ASC LIMIT 3000'
   const st = binds.length ? db.prepare(sql).bind(...binds) : db.prepare(sql)
   const raw = (await st.all()).results || []
   const horizon = dayAfter(num(months) > 0 ? num(months) * 31 : 186)
@@ -9859,8 +9877,13 @@ async function dueRows(db, type, months, party) {
   const soon = out.filter((x) => x.days !== null && x.days <= 7)
   const overdue = out.filter((x) => x.days !== null && x.days > 0)
   const future = out.filter((x) => x.days !== null && x.days < 0 && x.due <= horizon)
+  const size = Math.max(10, Math.min(300, num(limit) || 60))
+  const off = Math.max(0, num(offset) || 0)
+  const page = out.slice(off, off + size)
   return {
-    rows: out, total: round2(out.reduce((a, x) => a + x.left, 0)),
+    rows: page, page_size: size, offset: off, shown: page.length, rows_total: out.length,
+    has_more: off + page.length < out.length, next_offset: off + page.length,
+    total: round2(out.reduce((a, x) => a + x.left, 0)),
     overdue_total: round2(overdue.reduce((a, x) => a + x.left, 0)),
     soon_total: round2(soon.reduce((a, x) => a + x.left, 0)),
     future_total: round2(future.reduce((a, x) => a + x.left, 0)),
@@ -9871,7 +9894,7 @@ async function dueRows(db, type, months, party) {
 
 app.get('/due-schedule', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
-  const r = await dueRows(c.env.DB, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim())
+  const r = await dueRows(c.env.DB, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim(), c.req.query('limit'), c.req.query('offset'))
   return c.json(Object.assign({ ok: true, type }, r))
 })
 
@@ -11839,6 +11862,39 @@ app.get('/error-log', async (c) => {
     rows: rows.slice(0, 30).map((r) => ({ id: r.id, when: r.created_at, path: (r.method || '') + ' ' + (r.path || ''), status: r.status, ms: r.ms, msg: (r.msg || '').slice(0, 160) }))
   })
 })
+app.get('/slow-log', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(60, Math.max(1, num(c.req.query('days'), 7)))
+  const since = new Date(Date.now() + TZ_MS - days * 86400000).toISOString()
+  const raw = (await db.prepare('SELECT id,path,method,dur,book,created_at FROM slow_log WHERE created_at >= ? ORDER BY id DESC LIMIT 400').bind(since).all().catch(() => ({ results: [] }))).results || []
+  const map = {}
+  for (const r of raw) {
+    const k = (r.method || 'GET') + ' ' + r.path
+    const e = map[k] || (map[k] = { path: r.path, method: r.method || 'GET', cnt: 0, sum: 0, max: 0, last: '', book: num(r.book) })
+    e.cnt++; e.sum += num(r.dur); e.max = Math.max(e.max, num(r.dur))
+    if (!e.last || String(r.created_at) > e.last) e.last = r.created_at
+    if (num(r.book) !== 1) e.book = num(r.book)
+  }
+  const rows = Object.values(map)
+    .map((x) => ({ path: x.path, method: x.method, cnt: x.cnt, avg: Math.round(x.sum / x.cnt), max: x.max, last: String(x.last).slice(0, 16).replace('T', ' '), book: x.book }))
+    .sort((a, b) => b.max - a.max)
+    .slice(0, 30)
+  const count = raw.length
+  const worst = rows[0]
+  const advice = []
+  if (worst && worst.max >= 2000) advice.push(`${worst.path} 最慢到 ${worst.max}ms（${worst.cnt} 次）。先看是不是数据量大了（设置 → 数据体检 → 三个账本），再考虑只取近几个月。`)
+  else if (worst) advice.push(`最慢的是 ${worst.path}（${worst.max}ms），还在可接受范围，暂时不用管。`)
+  if (!count) advice.push('最近没有慢接口记录，速度正常。')
+  const text = count
+    ? `最近 ${days} 天有 ${count} 次慢请求（超过 ${SLOW_MS}ms），涉及 ${rows.length} 个接口；最慢 ${worst.path} ${worst.max}ms。`
+    : `最近 ${days} 天没有超过 ${SLOW_MS}ms 的请求，速度正常。`
+  return c.json({ ok: true, days, slow_ms: SLOW_MS, count, rows, advice, text })
+})
+app.delete('/slow-log', async (c) => {
+  await c.env.DB.prepare('DELETE FROM slow_log').run()
+  return c.json({ ok: true })
+})
+
 app.delete('/error-log', async (c) => {
   await c.env.DB.prepare('DELETE FROM error_log').run()
   return c.json({ ok: true })
@@ -12288,8 +12344,12 @@ app.get('/settled', async (c) => {
       ? `${scope}结清 ${cnt} 单，共 ¥${total}；都是当天结清的。`
       : `${scope}结清 ${cnt} 单，共 ¥${total}；平均 ${avg} 天${isAr ? '收回' : '付出'}（最快 ${fast} 天、最慢 ${slow} 天）。`)
     : (month ? `${scope}还没有结清的单。` : `还没有结清的单。`)
+  const size = Math.max(10, Math.min(300, num(sp.get('limit')) || 100))
+  const off = Math.max(0, num(sp.get('offset')) || 0)
+  const page = rows.slice(off, off + size)
   return c.json({ ok: true, type, month, kw, count: cnt, total, avg_days: avg, fast, slow, no_flow_cnt: noFlow,
-    rows: rows.slice(0, 300), months, text,
+    page_size: size, offset: off, shown: page.length, has_more: off + page.length < cnt, next_offset: off + page.length,
+    rows: page, months, text,
     tip: noFlow ? `有 ${noFlow} 单是核销/豁免结清的，没有对应的收款记录。` : '' })
 })
 

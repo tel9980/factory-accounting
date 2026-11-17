@@ -313,6 +313,13 @@ CREATE TABLE IF NOT EXISTS error_log (
 );
 CREATE INDEX IF NOT EXISTS idx_error_created ON error_log(created_at);
 
+-- 慢接口留痕（超过 800ms 记一条，同一接口每小时最多一条）
+CREATE TABLE IF NOT EXISTS slow_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT, method TEXT, dur INTEGER, book INTEGER, created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_slow_created ON slow_log(created_at);
+
 -- 客户进度页查看留痕
 CREATE TABLE IF NOT EXISTS track_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

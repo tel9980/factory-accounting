@@ -957,11 +957,17 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **数据自洽抽查**：12 个月接单额累加 6,025,015 = 年度总账 6,025,015 ✓；11 月净利 KPI / 首页 / 利润→现金桥接三处都是 133,031.06 ✓；应收未收 1,687,307.84 与首页 ar_total 一致 ✓；对账单批量 11 月 70 家期末 1,720,890.96 ✓。**桥接 residual −56,681.6 不是 bug**：模拟数据里我故意让一部分"已收/已付"没有对应流水（11 月差 33,583 + 4,025），桥接把这种"记账和现金对不上"如实报出来；干净数据上 residual 是 0（前面几轮验过）。
    - **模拟数据暴露的真实体验问题**（不是代码 bug，是真账会遇到的）：体检 61 分，扣分项依次是「32 家往来单位没设账期」「32 家没电话」「上月没结账」「最近没备份」「微信提醒没开」；应收里 454 张已逾期、逾期金额 1,563,918（占了未收的 93%）——正好是这套系统存在的理由。
 
+263. ✅ **收款计划/结算台账分页 + 慢接口自动留痕**（跑分暴露的两个尾巴）：1271 单的账本上，"到期表"要一次吐出 498 张、"结算台账"最多 773 单，手机端 65–77KB 一次拉完。
+   - **分页**：`GET /due-schedule` 与 `GET /settled` 都支持 `limit` / `offset`，返回体新增 `page_size / offset / shown / rows_total / has_more / next_offset`；**合计、逾期额、平均天数这些仍然按全部数据算**（不会因为只取第一页就变小），只有明细分批给。到期表默认 60 张/页、结算台账 100 单/页，前端各加一个「＋ 再看 60 张」「已列 50 / 共 773 单 · 点这里再看 100 单 ›」。实测：到期表 498 张分 25 页，第 2 页首单（德昌铸造）与第 1 页（新宇包装）不重复；结算台账 773 单，合计 3,667,831 与平均 23.33 天翻页后不变。
+   - **慢接口自动留痕**：全局中间件本来就有 `Server-Timing: app;dur=…`，现在再加一条——**服务器自己超过 800ms 就写进新表 `slow_log`**（`path/method/dur/book/created_at`，**同一个接口每小时最多记一条**，避免刷表；只记那 30 来个重接口，静态页和写操作不记）。新接口 `GET /slow-log?days=7` 按接口聚合（最多次数、最慢、平均、最近时间 + 建议），设置 → 数据体检里加「🐌 慢不慢（最近 7 天超过 0.8 秒的）」。员工口令看不到（涉及系统内部）。
+   - **实测**：并发打 `/tax-pack /month-brief /health-check /collect-list /ar-summary /year-book` 制造拥塞 → `/tax-pack` 记到一条 1376ms；`/slow-log` 回报「最近 7 天有 1 次慢请求，涉及 1 个接口；最慢 /tax-pack 1376ms」；同一接口再慢也不重复记（每小时一条）。空账本回报「最近 7 天没有超过 800ms 的请求，速度正常」。
+   - 顺带把 `slow_log` 加进清库脚本；三库 + `backend/schema.sql` 都已建表（附 `idx_slow_created`）。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 394 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
+共 396 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
 
 **accounts**（4）
 
@@ -1175,6 +1181,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 - `DELETE /rework/:id`
 - `POST /rework`
+
+**slow-log**（2）
+
+- `DELETE /slow-log`
+- `GET /slow-log`
 
 **staff-users**（4）
 
