@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 312 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 316 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -902,6 +902,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /seal`
 - `POST /seal`
 
+**statement-ack**（2）
+
+- `GET /statement-ack`
+- `POST /statement-ack`
+
 **target**（2）
 
 - `GET /target`
@@ -922,7 +927,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（172）
+**其它（单个接口）**（174）
 
 - `GET /`
 - `GET /access-guide`
@@ -1064,6 +1069,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /settled`
 - `GET /staff-activity`
 - `GET /statement`
+- `GET /statement-ack-link`
+- `GET /statement-acks`
 - `GET /statement-batch`
 - `GET /statement-link`
 - `GET /statement-month`
@@ -1110,3 +1117,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - `POST /migrate-apply`：仍有坏行返回 400 并点名「第 3 行：金额要大于 0」；跨月先查 `isMonthLocked` → 403；重复行默认跳过（`confirm_dup` 才真重复记）；插入 `orders(item_name='期初搬入', operator='期初搬入')` / `payables(remark='期初搬入')`，**到期日按账期算，没设账期按 30 天**；写审计「老账搬入」；
    - 前端「导入」页顶部「📥 老账搬家」：客户欠我 / 我欠供应商 切换、多行文本框、统一日期、成本不填或按毛利率估、「先看看（不写入）」逐行 ✓/✗、「确认搬进来（N 笔）」；有重复先弹「默认跳过」；
    - 员工口令访问 `/migrate-*` 一律 403。
+219. ✅ **对账单自助确认（对方点一下就行，不用再打电话问「你看了吗」）**：发对账单时多带一条「确认链接」——
+   - `GET /statement-ack-link?type=ar|ap&party=&month=` 生成签名链接（`sigOf(saved, party, 'ack:'+type)`，只绑这一家，改一个字符就失效）；
+   - `GET /statement-ack?type=&party=&t=&month=` 手机只读页：页头厂名 + 这家到今天的账（月初欠 / 本月新增 / 本月已付 / 我这边记还欠多少）+ 还没结清的单子（最早 12 笔，含已收/还欠）+ 两个按钮「✓ 对得上，没问题」「✗ 有几笔对不上」（填差额 + 说明）；
+   - `POST /statement-ack {type,party,month,t,ack,amount,note}` 校验签名后写 `statement_log`（`channel='自助确认'`、`ack='ok'|'doubt'`、`ack_at`、note 记「对方说对不上，差 ¥800（6月那笔少了）」）并写审计；**异议直接进「争议台账」**（`/dispute-book` 以 `statement_log.ack='doubt'` 为起点，实测 count 1）；
+   - `GET /statement-acks?days=30` 回执台账：`ok_count`/`doubt_count`/`pending`（本月发了还没回音的家数）+ `rows[{party,ack_text,note,at,days}]` + 人话结论（「最近 30 天有 2 家回了：1 家说对得上，1 家说对不上」）与建议；
+   - 前端：单位页对账日历每行「让对方确认」→ 复制「甲客户，这是我这边到今天的对账明细，您点开核一下…+链接」；报表页「✅ 对账回执」面板逐条显示谁确认了、谁说对不上、差多少；
+   - 公开页 `/statement-ack` 已加进免口令放行名单（页面自己验签名），其它接口仍需口令。

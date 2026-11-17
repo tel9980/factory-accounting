@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -6740,6 +6740,129 @@ app.post('/statement-log/:id/resolve', async (c) => {
   await logAudit(db, 'statement', row.party, '争议已处理：' + row.party + '（' + (b.note ? String(b.note).slice(0, 30) : '核对完') + '）')
   return c.json({ ok: true })
 })
+// ===== 对账单自助确认：对方点开链接就能说「对得上」或「有几笔不对」=====
+const ACK_CSS = 'body{margin:0;background:#f5f6f8;font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#222}'
+  + '.wrap{max-width:640px;margin:0 auto;padding:14px 14px 40px}'
+  + '.hd{background:#1f6feb;color:#fff;border-radius:12px;padding:14px 16px}'
+  + '.hd b{font-size:19px;display:block}.hd span{font-size:13px;opacity:.9}'
+  + '.card{background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px;box-shadow:0 1px 3px rgba(0,0,0,.06)}'
+  + '.card h3{margin:0 0 8px;font-size:15px;color:#0a4b8c}'
+  + '.kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px dashed #eceef1}'
+  + '.kv:last-child{border:0}.kv b{font-variant-numeric:tabular-nums}'
+  + '.big{font-size:20px;color:#1f6feb}'
+  + '.doc{font-size:13px;color:#444;padding:5px 0;border-bottom:1px dashed #f0f1f3}'
+  + '.doc i{color:#888;font-style:normal}'
+  + '.btn{display:block;width:100%;box-sizing:border-box;text-align:center;border:0;border-radius:10px;padding:13px;font-size:16px;margin-top:10px;color:#fff;background:#1f6feb}'
+  + '.btn.gray{background:#8a94a6}.btn.red{background:#d9534f}'
+  + '.inp{width:100%;box-sizing:border-box;border:1px solid #dcdfe6;border-radius:8px;padding:11px;font-size:15px;margin-top:8px}'
+  + '.tip{font-size:12.5px;color:#8a94a6;margin-top:10px;line-height:1.6}'
+  + '.ok{background:#eaf7ee;color:#1a7f37;border-radius:10px;padding:12px;font-size:15px;margin-top:10px}'
+
+const ackPage = (inner, script) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">`
+  + `<meta name="viewport" content="width=device-width,initial-scale=1"><title>对账确认</title><style>${ACK_CSS}</style></head>`
+  + `<body><div class="wrap">${inner}</div>${script ? `<script>${script}</script>` : ''}</body></html>`
+
+app.get('/statement-ack-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '还没设访问口令' }, 400)
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const party = String(c.req.query('party') || '').trim()
+  if (!party) return c.json({ error: '要指定是哪一家' }, 400)
+  const t = await sigOf(saved, party, 'ack:' + type)
+  const base = new URL(c.req.url).origin
+  const m = String(c.req.query('month') || '').slice(0, 7)
+  return c.json({ ok: true, url: base + '/statement-ack?type=' + type + '&party=' + encodeURIComponent(party) + (m ? '&month=' + m : '') + '&t=' + t })
+})
+
+app.get('/statement-ack', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const party = String(c.req.query('party') || '').trim()
+  const want = String(c.req.query('t') || '')
+  const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const good = saved && party ? await sigOf(saved, party, 'ack:' + type) : ''
+  if (!good || want !== good) return c.html(ackPage('<div class="card"><h3>链接已失效</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
+  const t = await getTitle(db)
+  const d = await conclusionOf(db, type, party, month)
+  const docs = ((await db.prepare(type === 'ar'
+    ? 'SELECT id, created_at, item_name AS item, price AS amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo FROM orders WHERE customer=? AND price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 ORDER BY created_at ASC LIMIT 12'
+    : 'SELECT id, created_at, remark AS item, amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo FROM payables WHERE supplier=? AND amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 ORDER BY created_at ASC LIMIT 12').bind(party).all()).results || [])
+  const docRows = docs.map((r) => `<div class="doc">${escHtml(String(r.created_at || '').slice(0, 10))} ${escHtml(r.item || (type === 'ar' ? '加工费' : '货款'))} <b>¥${round2(num(r.amount))}</b> <i>已${type === 'ar' ? '收' : '付'} ${round2(num(r.paid))}，还欠 ${round2(num(r.amount) - num(r.paid) - num(r.wo))}</i></div>`).join('')
+  const openAmt = round2(num(d.end))
+  const inner = `<div class="hd"><b>${escHtml(t.title || '对账确认')}</b><span>${type === 'ar' ? '给您对一下加工费的账' : '和您对一下货款的账'} · ${escHtml(month)}</span></div>`
+    + `<div class="card"><h3>${escHtml(party)}，到 ${now().slice(0, 10)}</h3>`
+    + `<div class="kv"><span>月初欠</span><b>¥${round2(num(d.open))}</b></div>`
+    + `<div class="kv"><span>本月新增</span><b>¥${round2(num(d.add))}</b></div>`
+    + `<div class="kv"><span>本月已${type === 'ar' ? '付' : '收'}</span><b>¥${round2(num(d.paid))}</b></div>`
+    + `<div class="kv"><span>${type === 'ar' ? '我这边记您还欠' : '我这边记还欠您'}</span><b class="big">¥${openAmt}</b></div>`
+    + (d.lines && d.lines.length ? `<div class="tip">${escHtml(d.lines.join('；'))}</div>` : '')
+    + `</div>`
+    + (docRows ? `<div class="card"><h3>还没结清的单子（${docs.length} 笔${openAmt > 0 && docs.length >= 12 ? '，只列最早 12 笔' : ''}）</h3>${docRows}</div>` : '')
+    + `<div class="card"><h3>请您核一下</h3><div class="tip">金额对得上就点下面第一个按钮；有对不上的，点第二个并写一下差多少。</div>`
+    + `<button class="btn" onclick="ack('ok')">✓ 对得上，没问题</button>`
+    + `<button class="btn gray" onclick="showDoubt()">✗ 有几笔对不上</button>`
+    + `<div id="doubt" style="display:none"><input class="inp" id="amt" type="number" placeholder="差多少钱（比如 800，多了写 -800）"/>`
+    + `<input class="inp" id="note" placeholder="哪一笔不对（选填，比如 6 月那笔 3000 应是 3800）"/>`
+    + `<button class="btn red" onclick="ack('doubt')">提交</button></div>`
+    + `<div id="res"></div><div class="tip">这是只读页面，只能看您自己这一家。点完老板那边就能看到结果。</div></div>`
+  const script = `var P=${JSON.stringify({ type, party, month, t: want })};`
+    + `function showDoubt(){document.getElementById('doubt').style.display='block'}`
+    + `function ack(kind){var amt=0,note='';if(kind==='doubt'){amt=Number(document.getElementById('amt').value||0);note=String(document.getElementById('note').value||'')}`
+    + `if(kind==='doubt'&&!amt&&!note){alert('写一下差多少，或者说明哪一笔不对');return}`
+    + `fetch('/statement-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:P.type,party:P.party,month:P.month,t:P.t,ack:kind,amount:amt,note:note})})`
+    + `.then(function(r){return r.json()}).then(function(d){document.getElementById('res').innerHTML='<div class="ok">'+(d.text||'收到了，谢谢！')+'</div>';document.getElementById('doubt').style.display='none'})`
+    + `.catch(function(){alert('没提交成功，请检查网络再点一次')})}`
+  return c.html(ackPage(inner, script))
+})
+
+app.post('/statement-ack', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const b = await c.req.json().catch(() => ({}))
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  const party = String(b.party || '').trim()
+  const month = String(b.month || '').slice(0, 7) || now().slice(0, 7)
+  const good = saved && party ? await sigOf(saved, party, 'ack:' + type) : ''
+  if (!good || String(b.t || '') !== good) return c.json({ error: '链接已失效，请让老板重新发一次' }, 403)
+  const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
+  const amt = round2(num(b.amount))
+  const note = String(b.note || '').slice(0, 120)
+  const memo = ack === 'ok' ? '对方确认：对得上' : ('对方说对不上' + (amt ? '，差 ¥' + amt : '') + (note ? '（' + note + '）' : ''))
+  await db.prepare('INSERT INTO statement_log (party,type,month,channel,note,ack,ack_at,created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .bind(party, type, month, '自助确认', memo.slice(0, 200), ack, now(), now()).run()
+  await logAudit(db, 'statement_ack', party, memo)
+  return c.json({
+    ok: true, ack,
+    text: ack === 'ok'
+      ? '收到，谢谢！老板那边已经看到「对得上」，后面按这个数结。'
+      : '收到，已经把「对不上' + (amt ? '（差 ¥' + amt + '）' : '') + '」告诉老板了，会尽快跟您核。'
+  })
+})
+
+app.get('/statement-acks', async (c) => {
+  const db = c.env.DB
+  const days = Math.max(1, Math.min(365, Math.round(Number(c.req.query('days')) || 30)))
+  const since = new Date(new Date(now()).getTime() - days * 86400000).toISOString().slice(0, 10)
+  const rows = ((await db.prepare("SELECT * FROM statement_log WHERE ack IN ('ok','doubt') AND substr(COALESCE(ack_at,created_at),1,10)>=? ORDER BY id DESC LIMIT 200").bind(since).all()).results || []).map((r) => ({
+    id: r.id, party: r.party, type: r.type, month: r.month, ack: r.ack,
+    ack_text: r.ack === 'ok' ? '✓ 对得上' : '✗ 对不上',
+    note: r.note || '', at: String(r.ack_at || r.created_at || '').slice(0, 16).replace('T', ' '),
+    days: daysSince(r.ack_at || r.created_at)
+  }))
+  const okN = rows.filter((r) => r.ack === 'ok').length
+  const doubtN = rows.filter((r) => r.ack === 'doubt').length
+  const pending = ((await db.prepare("SELECT COUNT(DISTINCT party) n FROM statement_log WHERE (ack IS NULL OR ack='') AND substr(created_at,1,7)=?").bind(now().slice(0, 7)).first()) || {}).n || 0
+  const text = rows.length === 0
+    ? (pending ? `这个月发了 ${pending} 家对账单，还没有一家回音。发的时候带上「让对方确认」的链接，对方点一下你这边就能看到。` : '最近还没有对方确认过的对账单。发对账单时带上确认链接，对方点一下就行。')
+    : `最近 ${days} 天有 ${rows.length} 家回了：${okN} 家说对得上${doubtN ? `，${doubtN} 家说对不上（去「争议」里看）` : ''}${pending ? `；这个月还有 ${pending} 家没回音` : ''}。`
+  const advice = doubtN ? '有异议的先把差额核清楚再补记/核销，别直接改单据' : (pending ? '没回音的发个确认链接过去，比打电话省事' : '对账节奏不错，保持每月发一次')
+  return c.json({ ok: true, days, count: rows.length, ok_count: okN, doubt_count: doubtN, pending, rows, text, advice })
+})
+
 // 月度催款小结（可复制发微信 / 存图）
 app.get('/dunning-month', async (c) => {
   const db = c.env.DB

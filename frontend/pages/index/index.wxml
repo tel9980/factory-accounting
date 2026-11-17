@@ -1928,6 +1928,19 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyYearCust">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeYearCust">收起</button></view>
       </block>
+      <view class="tip">✅ 对账回执（对方点开确认链接后，说「对得上」还是「对不上」，都记在这）</view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadStatementAcks">看看对方怎么说</button>
+      </view>
+      <block wx:if="{{sacks}}">
+        <view class="aline {{sacks.doubt_count ? 'warn' : 'ok'}}">{{sacks.text}}</view>
+        <view class="item" wx:for="{{sacks.rows}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.ack==='doubt'?'red':'ok'}}">{{item.ack_text}}</text></view>
+          <view class="row2">{{item.at}} · {{item.type==='ap'?'应付':'应收'}} {{item.month}}{{item.note ? ' · ' + item.note : ''}}</view>
+        </view>
+        <view class="tip">{{sacks.advice}}</view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStatementAcks">收起</button></view>
+      </block>
       <view class="tip">📤 批量发对账单（月底一次列出「谁还欠我 / 我还欠谁」，每家一段现成话术 + 打印页链接）</view>
       <view class="frow">
         <button class="btn" size="mini" bindtap="openStBatchAr">应收（客户欠我）</button>
@@ -2325,6 +2338,7 @@
           <view class="btns">
             <button size="mini" bindtap="copyRcText" data-t="{{item.send_text}}">复制话术</button>
             <button size="mini" class="ghost" bindtap="openRcUrl" data-u="{{item.url}}">打印页</button>
+            <button size="mini" class="ghost" bindtap="copyAckLink" data-p="{{item.party}}" data-k="{{item.kind}}">让对方确认</button>
             <button size="mini" wx:if="{{item.state!=='sent'}}" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 发好了，记一笔</button>
           </view>
         </view>

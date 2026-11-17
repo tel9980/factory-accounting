@@ -2453,6 +2453,37 @@ Page({
       })
     })
   },
+  // 让对方在手机上点一下确认（只读、带签名）
+  copyAckLink(e) {
+    const party = e.currentTarget.dataset.p
+    const type = e.currentTarget.dataset.k === 'ap' ? 'ap' : 'ar'
+    if (!party) return
+    this.req({
+      url: API_BASE + '/statement-ack-link?type=' + type + '&party=' + encodeURIComponent(party),
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '生成不了链接', icon: 'none' })
+        wx.setClipboardData({
+          data: party + '，这是我这边到今天的对账明细，您点开核一下，对得上点一下就行：\n' + u,
+          success: () => wx.showModal({
+            title: '确认链接已复制',
+            content: '发给对方，他点开能看到自己的账，按一下「对得上」或「有几笔对不上」，你这边自动记下来（报表 → ✅ 对账回执）。',
+            showCancel: false
+          })
+        })
+      }
+    })
+  },
+  loadStatementAcks() {
+    this.req({
+      url: API_BASE + '/statement-acks?days=30',
+      success: (res) => {
+        const d = res.data || {}
+        if (d.ok) this.setData({ sacks: d })
+      }
+    })
+  },
+  closeStatementAcks() { this.setData({ sacks: null }) },
   rcAll() {
     const rc = this.data.rc || {}
     const list = (rc.overdue_list || []).concat(rc.today_list || [])
