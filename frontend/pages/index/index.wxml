@@ -81,7 +81,7 @@
     </view>
     <view class="card ob" wx:if="{{onboard && onboard.show && !onboard.all_done}}">
       <view class="card-h">开账引导（照着填几步就能用）<text class="card-n">{{onboard.done}}/{{onboard.total}}</text></view>
-      <view class="ob-tip">先把底数填上，欠款合计、毛利、手头现金才准。三步做完一次就行。</view>
+      <view class="ob-tip">先把底数填上，欠款合计、毛利、手头现金才准。照着填完，一次就行。</view>
       <view class="ob-item {{item.done?'done':''}}" wx:for="{{onboard.steps}}" wx:key="k" bindtap="onbGo" data-k="{{item.k}}">
         <text class="ob-dot">{{item.done?'✓':'○'}}</text>
         <view class="ob-body">

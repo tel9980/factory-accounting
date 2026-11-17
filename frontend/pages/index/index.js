@@ -1866,7 +1866,9 @@ Page({
   loadHealth() {
     this.req({
       url: API_BASE + '/health-check',
-      success: (r) => {
+      success: (res) => {
+        const r = res.data || {}
+        if (r.score == null) return
         const items = (r.items || []).map((x) => ({
           ...x,
           fix: x.count > 0 ? (x.go || x.tip || '') : ''
