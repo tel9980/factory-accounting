@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 316 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 317 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -927,7 +927,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（174）
+**其它（单个接口）**（175）
 
 - `GET /`
 - `GET /access-guide`
@@ -1036,6 +1036,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /price-book`
 - `GET /price-lookup`
 - `GET /profit-compare`
+- `GET /promise-book`
 - `POST /quick`
 - `GET /receipt-text`
 - `POST /receive-batch`
@@ -1133,3 +1134,9 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 返回新增 `ok_n`/`hold_n`/`hold_amt`/`advice`：`hold_n>0` 时给「有 N 家（共 ¥X）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催」，`ok_n>0` 时给「这几家话术里写明了『您确认过』，催起来更硬气」；
    - 前端催款清单每行多一行回执标记：`✓ 对方 N 天前确认过对得上` / `⚠ 先别催钱 · 对方 N 天前说对不上（…）`，顶部把 `advice` 逐条渲染成提示条；
    - 实测：甲客户 ack=ok → 话术带「您确认过对得上」；乙客户 ack=doubt（差 ¥800，备注「6月那笔少了」）→ `hold=true`、话术转核对口径、`hold_amt=3000`、两条 advice 都对；伪造签名 POST → 403。
+221. ✅ **付款承诺台账（答应哪天付、到底付没付）**：`dunning_log.promise_date` 以前只存不用——
+   - `GET /promise-book?days=365&type=ar|ap`：每次承诺判三种结果——`kept`（承诺窗口 `[催款日, 承诺日+1]` 内有进账）、`broken`（日子过了、一分没付、还欠着）、`pending`（还没到日子）；每家汇总 `promises/kept/broken/pending/rate/last_promise/last_broken/broken_amt`，返回 `rows/parties/count/kept_n/broken_n/pending_n/rate/broken_amt/advice/text`；
+   - 提醒规则：失约 ≥1 次 → 「别只听日子，让他先付一部分」；兑现率 ≥80% 且 ≥2 次 → 「这家说话算数，可以适当宽限」；
+   - `/collect-list` 每行多 `promise_text`（「上回答应 11-07 付，又没付（10 天前）」）、`promise_broken`、`promise_rate`，**催款话术自动把这句放在最前面**（「甲客户 你好，上回答应 11-07 付，又没付（10 天前）。加工厂账上你这边还有 5000 元没结…」），并多一条 advice 点名失约家数；
+   - `/customer-card` 增 `promise{promises,kept,broken,pending,rate,last_broken}`，画像文本多一行「答应付款 2 次：兑现 0 次、失约 1 次（兑现率 0%）」；
+   - 前端报表页「🤝 付款承诺」面板（`loadPromiseBook`/`closePromiseBook`，data `pbook`），催款清单行显示红字「⏰ 上回答应 11-07 付，又没付」。

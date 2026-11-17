@@ -5744,6 +5744,9 @@ app.get('/customer-card', async (c) => {
   L.push(avgDays === null ? '付款速度：还没有结清的单' : `付款速度：平均 ${avgDays} 天付清（最快 ${ds[0]} 天，最慢 ${ds[ds.length - 1]} 天，共 ${ds.length} 单）`)
   L.push(`现在欠 ¥${unpaid}${oldest ? `，最老一笔 ${oldest} 天` : ''}${overdueCnt ? `，${overdueCnt} 笔已过期` : ''}`)
   if (dunTimes || stN) L.push(`催过 ${dunTimes} 次，发过 ${stN} 份对账单${disputes ? `，${disputes} 份有争议` : ''}`)
+  const pbAll = await promiseBook(db, 1095, type).catch(() => null)
+  const pbk = pbAll ? (pbAll.parties || []).find((x) => norm(x.party) === norm(party)) : null
+  if (pbk && pbk.promises) L.push(`答应付款 ${pbk.promises} 次：兑现 ${pbk.kept} 次、失约 ${pbk.broken} 次${pbk.rate !== null ? `（兑现率 ${pbk.rate}%）` : ''}`)
   advice.forEach((x) => L.push('· ' + x))
   return c.json({
     ok: true, party, type, verdict, tone, advice, text: L.join('\n'),
@@ -5755,6 +5758,7 @@ app.get('/customer-card', async (c) => {
     pay: { avg_days: avgDays, fastest: ds.length ? ds[0] : null, slowest: ds.length ? ds[ds.length - 1] : null, settled_cnt: ds.length },
     unpaid, overdue_cnt: overdueCnt, oldest_days: oldest,
     dun_times: dunTimes, statements: stN, disputes,
+    promise: pbk ? { promises: pbk.promises, kept: pbk.kept, broken: pbk.broken, pending: pbk.pending, rate: pbk.rate, last_broken: pbk.last_broken } : null,
     price_up_pct: priceUpPct, margin_target: TGT
   })
 })
@@ -6379,6 +6383,81 @@ app.post('/party-terms/apply', async (c) => {
 })
 
 // 催款清单：按「欠得久 × 欠得多」排，话术现成
+// ── 付款承诺：答应哪天付、到底付没付（失约记账）──
+async function promiseBook(db, days, type) {
+  const since = dayAgo(days)
+  const prows = (await db.prepare("SELECT id, party, type, note, promise_date, created_at FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,10)>=? ORDER BY id DESC LIMIT 500").bind(since).all().catch(() => ({ results: [] }))).results || []
+  const flows = type === 'ap'
+    ? (await db.prepare("SELECT p.supplier AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN payables p ON l.ref_type='payable' AND l.ref_id=p.id WHERE l.direction='out'").all().catch(() => ({ results: [] }))).results || []
+    : (await db.prepare("SELECT o.customer AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN orders o ON l.ref_type='order' AND l.ref_id=o.id WHERE l.direction='in'").all().catch(() => ({ results: [] }))).results || []
+  const unpaid = {}
+  try {
+    const q = type === 'ap'
+      ? 'SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier'
+      : 'SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer'
+    for (const r of (await db.prepare(q).all()).results || []) unpaid[norm(r.party)] = round2(num(unpaid[norm(r.party)]) + num(r.t))
+  } catch (e) {}
+  const today = todayIso()
+  const fmap = {}
+  for (const f of flows) {
+    const k = norm(f.party)
+    ;(fmap[k] || (fmap[k] = [])).push({ d: String(f.d || '').slice(0, 10), a: num(f.a) })
+  }
+  const rows = prows.map((r) => {
+    const made = String(r.created_at || '').slice(0, 10)
+    const pd = String(r.promise_date || '').slice(0, 10)
+    const left = round2(num(unpaid[norm(r.party)]))
+    const paidIn = round2((fmap[norm(r.party)] || []).filter((f) => f.d >= made && f.d <= addDaysIso(pd, 1)).reduce((a, f) => a + f.a, 0))
+    let outcome = 'pending'
+    if (paidIn > 0.005) outcome = 'kept'
+    else if (pd < today) outcome = left > 0.005 ? 'broken' : 'kept'
+    return { id: num(r.id), party: r.party || '', promise_made: made, promise_date: pd, days_late: pd < today ? daysSince(pd) : 0, paid_since: paidIn, left, outcome, note: String(r.note || '').slice(0, 60) }
+  })
+  const pmap = {}
+  for (const r of rows) {
+    const k = norm(r.party)
+    const p = pmap[k] || (pmap[k] = { party: r.party, promises: 0, kept: 0, broken: 0, pending: 0, left: r.left, last_promise: '', last_broken: '', broken_amt: 0 })
+    p.promises++
+    p[r.outcome]++
+    if (r.promise_date > p.last_promise) p.last_promise = r.promise_date
+    if (r.outcome === 'broken' && r.promise_date > p.last_broken) { p.last_broken = r.promise_date; p.broken_amt = r.left }
+  }
+  const parties = Object.keys(pmap).map((k) => {
+    const p = pmap[k]
+    const done = p.kept + p.broken
+    const rate = done ? Math.round((p.kept / done) * 100) : null
+    const text = p.broken
+      ? `${p.party}：答应过 ${p.promises} 次，兑现 ${p.kept} 次、失约 ${p.broken} 次${p.last_broken ? `，最近一次说 ${p.last_broken.slice(5)} 付` : ''}`
+      : `${p.party}：答应 ${p.promises} 次${p.kept ? `，兑现 ${p.kept} 次` : ''}${p.pending ? `，还有 ${p.pending} 次没到日子` : ''}`
+    return { ...p, rate, text }
+  }).sort((a, b) => b.broken - a.broken || b.promises - a.promises)
+  const keptN = rows.filter((r) => r.outcome === 'kept').length
+  const brokenN = rows.filter((r) => r.outcome === 'broken').length
+  const pendingN = rows.filter((r) => r.outcome === 'pending').length
+  const doneN = keptN + brokenN
+  const rate = doneN ? Math.round((keptN / doneN) * 100) : null
+  const brokenAmt = round2(rows.filter((r) => r.outcome === 'broken').reduce((a, r) => a + r.left, 0))
+  const advice = []
+  if (brokenN) advice.push({ tone: 'warn', text: `有 ${brokenN} 次答应付款没兑现（涉及 ${parties.filter((p) => p.broken).length} 家、还欠 ¥${brokenAmt}）：下次别只听日子，让他先付一部分。` })
+  if (rate !== null && rate >= 80 && doneN >= 2) advice.push({ tone: 'ok', text: `答应过的 ${doneN} 次里兑现 ${keptN} 次（${rate}%），这家说话算数，可以适当宽限。` })
+  if (pendingN) advice.push({ tone: 'info', text: `还有 ${pendingN} 次承诺没到日子，到那天没付会提醒你。` })
+  if (!rows.length) advice.push({ tone: 'info', text: '还没有记过「答应哪天付」。催款时填一下承诺日，到日子没付这里会红字提醒你。' })
+  return {
+    ok: true, days, type, rows, parties,
+    count: rows.length, kept_n: keptN, broken_n: brokenN, pending_n: pendingN, rate, broken_amt: brokenAmt,
+    advice,
+    text: rows.length
+      ? `最近 ${days} 天记过 ${rows.length} 次付款承诺：兑现 ${keptN} 次、失约 ${brokenN} 次${pendingN ? `、还有 ${pendingN} 次没到日子` : ''}${rate !== null ? `（兑现率 ${rate}%）` : ''}。`
+      : '还没有记过付款承诺。催款时顺手填一句「答应哪天付」，到日子没付这里会提醒你，也能看出哪家说话算数。'
+  }
+}
+app.get('/promise-book', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(1095, Math.max(30, Math.round(Number(c.req.query('days')) || 365)))
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  return c.json(await promiseBook(db, days, type))
+})
+
 app.get('/collect-list', async (c) => {
   const db = c.env.DB
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
@@ -6433,6 +6512,10 @@ app.get('/collect-list', async (c) => {
     const arows = (await db.prepare("SELECT party, ack, ack_at, note, month, resolved_at, created_at FROM statement_log WHERE type=? AND ack IN ('ok','doubt') ORDER BY id DESC LIMIT 400").bind(type).all()).results || []
     for (const a of arows) { const k = norm(a.party); if (!amap[k]) amap[k] = a }
   } catch (e) {}
+  // 付款承诺：答应过哪天付、有没有失约（话术里点一句，比空催管用）
+  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
+  const pbmap = {}
+  for (const p of (pb.parties || [])) pbmap[norm(p.party)] = p
   const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, (() => {
     const dm = dmap[norm(x.party)]
     const last = dm && dm.last ? dm.last.slice(0, 10) : ''
@@ -6449,19 +6532,23 @@ app.get('/collect-list', async (c) => {
     const ackText = kind === 'ok' ? `对方 ${ackDays} 天前确认过对得上`
       : kind === 'doubt' ? `对方 ${ackDays} 天前说对不上${ackNote ? '（' + ackNote + '）' : ''}`
       : kind === 'fixed' ? '对方提的差异已核清' : ''
+    const pk = pbmap[norm(x.party)]
+    const promiseText = pk && pk.broken ? `上回答应 ${String(pk.last_broken).slice(5, 10)} 付，又没付（${daysSince(pk.last_broken)} 天前）` : ''
+    const lead = promiseText ? promiseText + '。' : ''
     let text
     if (type === 'ap') {
       text = `${x.party} 你好，我这边欠你 ${x.left} 元（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${title}，这两天安排一下，方便的话把对账单发我对一下。`
     } else if (kind === 'ok' && ackDays !== null && ackDays <= 120) {
-      text = `${x.party} 你好，${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）。${ackMonth ? ackMonth + ' ' : ''}我们对过账，您那边确认过对得上，这笔数没疑问，麻烦这两天安排一下，谢谢。`
+      text = `${x.party} 你好，${lead}${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）。${ackMonth ? ackMonth + ' ' : ''}我们对过账，您那边确认过对得上，这笔数没疑问，麻烦这两天安排一下，谢谢。`
     } else if (kind === 'doubt') {
       text = `${x.party} 你好，上次对账您说有一笔对不上${ackNote ? '（' + ackNote + '）' : ''}，我这边先把数核清楚，核完把明细发您。数对上了咱再谈结款，不着急。`
     } else if (kind === 'fixed') {
       text = `${x.party} 你好，上次对账您提的差异已经核清补记了。${title}账上现在还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前），方便的话这两天结一下。`
     } else {
-      text = `${x.party} 你好，${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${x.due ? `，约定 ${String(x.due).slice(5, 10)} 到期` : ''}。方便的话这两天结一下，或者把对账单发我核一核。`
+      text = `${x.party} 你好，${lead}${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${x.due ? `，约定 ${String(x.due).slice(5, 10)} 到期` : ''}。方便的话这两天结一下，或者把对账单发我核一核。`
     }
-    return { ack_kind: kind, ack_days: ackDays, ack_note: ackNote, ack_text: ackText, hold: kind === 'doubt', text }
+    return { ack_kind: kind, ack_days: ackDays, ack_note: ackNote, ack_text: ackText, hold: kind === 'doubt', text,
+      promise_text: promiseText, promise_broken: pk ? pk.broken : 0, promise_rate: pk ? pk.rate : null }
   })()))
   const total = round2(list.reduce((a, x) => a + x.left, 0))
   const okN = out.filter((x) => x.ack_kind === 'ok').length
@@ -6470,7 +6557,9 @@ app.get('/collect-list', async (c) => {
   const advice = []
   if (holdN) advice.push({ tone: 'warn', text: `有 ${holdN} 家（共 ¥${holdAmt}）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催。` })
   if (okN) advice.push({ tone: 'ok', text: `${okN} 家确认过对得上：这几家话术里写明了「您确认过」，催起来更硬气。` })
-  return c.json({ ok: true, type, total, count: list.length, list: out, ok_n: okN, hold_n: holdN, hold_amt: holdAmt, advice })
+  const brk = out.filter((x) => x.promise_broken > 0)
+  if (brk.length) advice.push({ tone: 'warn', text: `${brk.length} 家答应过付款没兑现（${brk.map((x) => x.party + ' ' + x.promise_broken + ' 次').slice(0, 3).join('、')}）：别只听日子，让他先付一部分。` })
+  return c.json({ ok: true, type, total, count: list.length, list: out, ok_n: okN, hold_n: holdN, hold_amt: holdAmt, broken_n: brk.length, advice })
 })
 
 // ── 没设账期的单位：主动列出来 + 一键补上（到期提醒靠账期）──

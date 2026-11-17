@@ -2474,6 +2474,17 @@ Page({
       }
     })
   },
+  loadPromiseBook() {
+    this.req({
+      url: API_BASE + '/promise-book',
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ pbook: d })
+      }
+    })
+  },
+  closePromiseBook() { this.setData({ pbook: null }) },
   loadStatementAcks() {
     this.req({
       url: API_BASE + '/statement-acks?days=30',

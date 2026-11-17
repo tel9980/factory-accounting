@@ -401,6 +401,7 @@
           <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
           <text class="prev-n {{item.told_days!==null && item.told_days<=3 ? 'red':''}}">{{item.told_text}}</text>
           <text class="prev-n {{item.hold?'red':'ok'}}" wx:if="{{item.ack_text}}">{{item.hold?'⚠ 先别催钱 · ':'✓ '}}{{item.ack_text}}</text>
+          <text class="prev-n red" wx:if="{{item.promise_text}}">⏰ {{item.promise_text}}</text>
           <text class="red" catchtap="recordDunning" data-party="{{item.party}}" data-type="{{collect.type}}">记一笔催款</text>
         </view>
         <view class="frow">
@@ -1944,6 +1945,19 @@
         </view>
         <view class="tip">{{sacks.advice}}</view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStatementAcks">收起</button></view>
+      </block>
+      <view class="tip">🤝 付款承诺（答应哪天付、到底付没付——失约过的，催款话术会自动点一句）</view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadPromiseBook">看看谁说话算数</button>
+      </view>
+      <block wx:if="{{pbook}}">
+        <view class="aline {{pbook.broken_n ? 'warn' : 'ok'}}">{{pbook.text}}</view>
+        <view class="item" wx:for="{{pbook.parties}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.broken?'red':'ok'}}">{{item.broken ? '失约 ' + item.broken + ' 次' : (item.rate !== null ? '兑现 ' + item.rate + '%' : '还没到日子')}}</text></view>
+          <view class="row2">{{item.text}}</view>
+        </view>
+        <view class="aline {{item.tone}}" wx:for="{{pbook.advice}}" wx:key="text">· {{item.text}}</view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closePromiseBook">收起</button></view>
       </block>
       <view class="tip">📤 批量发对账单（月底一次列出「谁还欠我 / 我还欠谁」，每家一段现成话术 + 打印页链接）</view>
       <view class="frow">
