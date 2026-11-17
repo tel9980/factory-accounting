@@ -7467,9 +7467,12 @@ app.get('/year-close-check', async (c) => {
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
   const s = await yearCloseScan(db, y)
   const bad = s.months.filter((x) => x.recon_open > 0)
-  const text = s.todo_count === 0 && bad.length === 0
-    ? `${y} 年有账的月份都结完了${s.empty_count ? `（${s.empty_count} 个月没记账）` : ''}，可以直接打年度封账单。`
-    : `${y} 年还有 ${s.todo_count} 个月没结账${bad.length ? `、${bad.length} 个月有对账差异没处理` : ''}。结账会把每个月锁住，之后要改得先解锁。`
+  const hasAny = s.months.some((x) => x.has_data)
+  const text = !hasAny
+    ? `${y} 年还没记过账，没有要结的月份。等有账了再来结。`
+    : (s.todo_count === 0 && bad.length === 0
+      ? `${y} 年有账的月份都结完了${s.empty_count ? `（${s.empty_count} 个月没记账）` : ''}，可以直接打年度封账单。`
+      : `${y} 年还有 ${s.todo_count} 个月没结账${bad.length ? `、${bad.length} 个月有对账差异没处理` : ''}。结账会把每个月锁住，之后要改得先解锁。`)
   return c.json({
     ok: true, year: y, months: s.months, todo_count: s.todo_count, empty_count: s.empty_count,
     closed_count: s.closed_count, can_close: s.todo_count > 0, recon_bad: bad.map((x) => x.m), text,
