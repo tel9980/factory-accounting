@@ -7459,6 +7459,126 @@ app.get('/year-print', async (c) => {
   }))
 })
 
+// ===== 给会计的资料包：一年要交的东西打成一个 Excel =====
+app.get('/tax-pack', async (c) => {
+  const db = c.env.DB
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const y0 = y + '-01-01', y1 = y + '-12-31'
+  const yb = await yearBook(db, y)
+  const t = await getTitle(db)
+  const [adjR, accR, ledR, invR, asR, debtR, repR, loanR] = await Promise.all([
+    // 摊销/折旧/预提分开
+    db.prepare(`SELECT COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) am,
+      COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) dp,
+      COALESCE(SUM(CASE WHEN ref_type='accrual' THEN amount ELSE 0 END),0) ac
+      FROM ledger WHERE cash=1 AND substr(created_at,1,4)=?`).bind(y).all(),
+    // 各账户年底余额 = 期初 + 截至年底流水
+    db.prepare(`SELECT a.id, a.name, COALESCE(a.opening,0) op,
+      COALESCE((SELECT SUM(CASE WHEN l.direction='in' THEN l.amount ELSE -l.amount END) FROM ledger l WHERE l.cash=1 AND (l.account_id=a.id) AND substr(l.created_at,1,10)<=?),0) flow
+      FROM accounts a ORDER BY a.id`).bind(y1).all(),
+    db.prepare(`SELECT l.*, COALESCE(a.name,'') acc FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id
+      WHERE l.cash=1 AND substr(l.created_at,1,4)=? ORDER BY l.id`).bind(y).all(),
+    db.prepare("SELECT * FROM invoices WHERE substr(date,1,4)=? ORDER BY date, id").bind(y).all(),
+    db.prepare('SELECT * FROM assets ORDER BY id').all(),
+    db.prepare("SELECT * FROM debts WHERE substr(start_date,1,10)<=? ORDER BY id").bind(y1).all(),
+    db.prepare("SELECT * FROM debt_repays WHERE substr(rdate,1,4)=? ORDER BY rdate, id").bind(y).all(),
+    db.prepare('SELECT * FROM loans ORDER BY id').all()
+  ])
+  const adj = ((adjR && adjR.results) || [])[0] || {}
+  const amort = round2(num(adj.am)), dep = round2(num(adj.dp)), accrue = round2(num(adj.ac))
+  const accs = ((accR && accR.results) || []).map((a) => ({ name: a.name, balance: round2(num(a.op) + num(a.flow)) }))
+  const cashEnd = round2(accs.reduce((s2, a) => s2 + a.balance, 0))
+  const sheets = []
+  const T = yb.totals
+  sheets.push({ name: '总览', rows: [
+    ['单位', t.title || ''], ['年度', y], ['导出日期', now().slice(0, 10)], [],
+    ['接单额（加工费）', T.income], ['材料·外协成本', T.mat], ['现金费用', T.exp], ['折旧', dep], ['摊销', amort], ['预提利息', accrue],
+    ['净利（权责口径）', T.profit], ['净利率%', T.margin], [],
+    ['实收现金', T.recv], ['实付现金', T.pay], [],
+    ['年初现金', yb.cash.start], ['年底现金', cashEnd],
+    ['年底应收', yb.ar_end], ['年底应付', yb.ap_end], ['年底借款', yb.debt_end], ['年底家底', yb.net_worth]
+  ] })
+  sheets.push({ name: '月度汇总', rows: [['月份', '单数', '接单额', '材料外协', '现金费用', '摊销折旧预提', '净利', '实收', '实付']].concat(
+    yb.months.map((m) => [m.label, m.cnt, m.income, m.mat, m.exp, m.adj, m.profit, m.recv, m.pay])
+  ).concat([['全年', T.cnt, T.income, T.mat, T.exp, T.adj, T.profit, T.recv, T.pay]]) })
+  sheets.push({ name: '利润表', rows: [
+    ['项目', '金额', '说明'], ['一、接单额（加工费）', T.income, '这一年开的单'],
+    ['减：材料·外协成本', T.mat, '单据上填的成本'], ['二、毛利', round2(T.income - T.mat), '接单 − 成本'],
+    ['减：现金费用', T.exp, '工资/水电/房租/采购/辅料/运费等'], ['减：折旧', dep, '设备按月计提'],
+    ['减：摊销', amort, '长期费用按月摊'], ['减：预提利息', accrue, '借款利息按月计提'],
+    ['三、净利（权责口径）', T.profit, '毛利 − 各项费用'], [],
+    ['备查：现金口径收 − 付', round2(T.recv - T.pay), '只看到账的钱，不等于净利']
+  ] })
+  const bs = [['资产', '金额'], ['货币资金', cashEnd]]
+  accs.forEach((a) => bs.push(['　' + a.name, a.balance]))
+  bs.push(['应收未收', yb.ar_end], ['资产合计', round2(cashEnd + yb.ar_end)], [])
+  bs.push(['负债', '金额'], ['应付未付', yb.ap_end], ['借款余额', yb.debt_end], ['负债合计', round2(yb.ap_end + yb.debt_end)], [])
+  bs.push(['所有者权益（资产 − 负债）', round2(cashEnd + yb.ar_end - yb.ap_end - yb.debt_end)], ['负债 + 权益', round2(yb.ap_end + yb.debt_end + (cashEnd + yb.ar_end - yb.ap_end - yb.debt_end))])
+  sheets.push({ name: '资产负债表', rows: bs })
+  const ords = (await db.prepare("SELECT * FROM orders WHERE substr(created_at,1,4)=? ORDER BY id").bind(y).all()).results || []
+  sheets.push({ name: '应收明细', rows: [['单号', '客户', '产品', '金额', '成本', '毛利', '已收', '核销', '未收', '开单日', '到期日', '经手人']].concat(
+    ords.map((o) => [o.id, o.customer, o.item_name || '', num(o.price), num(o.cost), round2(num(o.price) - num(o.cost)), num(o.paid), num(o.written_off),
+      round2(num(o.price) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || '', o.operator || ''])
+  ) })
+  const pays = (await db.prepare("SELECT * FROM payables WHERE substr(created_at,1,4)=? ORDER BY id").bind(y).all()).results || []
+  sheets.push({ name: '应付明细', rows: [['单号', '供应商', '说明', '金额', '已付', '核销', '未付', '开单日', '到期日', '经手人']].concat(
+    pays.map((o) => [o.id, o.supplier, o.remark || '', num(o.amount), num(o.paid), num(o.written_off),
+      round2(num(o.amount) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || '', o.operator || ''])
+  ) })
+  const led = (ledR && ledR.results) || []
+  sheets.push({ name: '收支流水', rows: [['日期', '方向', '金额', '分类', '账户', '摘要', '类型']].concat(
+    led.map((l) => [String(l.created_at).slice(0, 10), l.direction === 'in' ? '收' : '付', num(l.amount), l.category || '', l.acc || '', l.remark || '', l.ref_type || ''])
+  ) })
+  const invs = (invR && invR.results) || []
+  sheets.push({ name: '发票台账', rows: [['日期', '类型', '发票号', '单位', '金额（含税）', '其中税额', '不含税', '备注']].concat(
+    invs.map((i) => [String(i.date || '').slice(0, 10), i.type === 'in' ? '进项（收到）' : '销项（开出）', i.no || '', i.party || '', num(i.amount), num(i.tax), round2(num(i.amount) - num(i.tax)), i.remark || ''])
+  ) })
+  const assets = (asR && asR.results) || []
+  const asRows = [['设备', '原值', '购入日', '年限', '残值率', '每月折旧', '截至年底已提', '年底净值', '状态']]
+  for (const a of assets) {
+    const life = Math.max(1, num(a.life_years) || 5)
+    const rr = num(a.residual_rate)
+    const monthly = round2(num(a.cost) * (1 - rr) / (life * 12))
+    const buyM = String(a.buy_date || '').slice(0, 7)
+    const endM = y1.slice(0, 7)
+    let months = 0
+    if (buyM) {
+      const [by2, bm] = buyM.split('-').map(Number)
+      const [ey, em] = endM.split('-').map(Number)
+      months = Math.max(0, (ey - by2) * 12 + (em - bm) + 1)
+    }
+    const acc = Math.min(round2(num(a.cost) * (1 - rr)), round2(monthly * months))
+    asRows.push([a.name, num(a.cost), a.buy_date || '', life, rr, monthly, acc, round2(num(a.cost) - acc), num(a.sold) ? '已处置' : '在用'])
+  }
+  sheets.push({ name: '固定资产', rows: asRows })
+  const debts = (debtR && debtR.results) || []
+  const reps = (repR && repR.results) || []
+  const dRows = [['借款人', '类型', '本金', '年利率%', '起借日', '期限(月)', '还款方式', '本年还息', '本年还本', '截至年底还欠']]
+  for (const d of debts) {
+    const mine = reps.filter((r) => num(r.debt_id) === num(d.id))
+    const intY = round2(mine.filter((r) => r.kind !== 'principal').reduce((a2, r) => a2 + num(r.amount), 0))
+    const priY = round2(mine.filter((r) => r.kind === 'principal').reduce((a2, r) => a2 + num(r.amount), 0))
+    const priAll = round2(((await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM debt_repays WHERE debt_id=? AND kind='principal'").bind(d.id).first()) || {}).a)
+    dRows.push([d.lender, d.kind || '', num(d.principal), num(d.rate), d.start_date || '', num(d.term_months), d.pay_kind || '', intY, priY, round2(num(d.principal) - priAll)])
+  }
+  sheets.push({ name: '借款利息', rows: dRows })
+  const loans = (loanR && loanR.results) || []
+  sheets.push({ name: '员工借支', rows: [['员工', '借出', '已报销', '已退回', '还欠', '备注', '日期']].concat(
+    loans.map((l) => [l.employee, num(l.amount), num(l.used), num(l.returned), round2(num(l.amount) - num(l.used) - num(l.returned)), l.remark || '', String(l.created_at || '').slice(0, 10)])
+  ) })
+  const xlsx = await makeXlsxSheets(sheets)
+  const b64 = toB64(xlsx)
+  const size = xlsx.length
+  await logAudit(db, '导出资料包', t.title || '', `${y} 年资料包 ${sheets.length} 个表`)
+  return c.json({
+    ok: true, year: y, name: `报税资料包_${y}.xlsx`, b64, size,
+    sheets: sheets.map((s2) => s2.name),
+    summary: { income: T.income, profit: T.profit, cash: cashEnd, ar: yb.ar_end, ap: yb.ap_end, debt: yb.debt_end, invoices: invs.length, assets: assets.length },
+    text: `${y} 年资料包：${sheets.length} 个表（总览/月度汇总/利润表/资产负债表/应收/应付/流水/发票/固定资产/借款/借支），${Math.round(size / 1024)} KB。`
+  })
+})
+
 app.get('/year-summary', async (c) => {
   const db = c.env.DB
   const y = String(c.req.query('year') || now().slice(0, 4))

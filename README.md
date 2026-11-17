@@ -631,11 +631,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 自动和去年比（接单/成本/费用推净利），给 4 条提示（比去年多赚少赚、最好最差月、年底还有多少没收回来、净利率过低）；
    - `GET /year-print-link?year=` → `/year-print?t=` 签名的 A4 年度总账（12 行月度表 + 全年合计 + 年底结存 + 口径说明 + 签字栏），改字符即「链接已失效」；
    - 前端报表页「📊 完整年度总账」：可看 12 个月利润条、年底结存、去年对比、复制、打印。
+214. ✅ **给会计的资料包（全年一个 Excel，11 个表）**：`GET /tax-pack?year=` 一次打出一年要交的东西——
+   - 表：总览 / 月度汇总 / 利润表 / 资产负债表 / 应收明细 / 应付明细 / 收支流水 / 发票台账 / 固定资产（含每月折旧与年底净值）/ 借款利息（本年还息还本、年底还欠）/ 员工借支；
+   - 口径与页面完全一致（净利 = 接单 − 材料外协 − 现金费用 − 摊销 − 折旧 − 预提利息；资产负债表「资产 = 负债 + 权益」自己平）；
+   - 应收/应付只取该年开单，流水只取该年现金流水，发票按开票日期归属，固定资产按购入月份起算折旧；
+   - 导出一律留痕（审计「导出资料包」）；前端报表页年度总账面板「📦 给会计的资料包」，生成后直接转发给会计或存到手机。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 300 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 301 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -897,7 +902,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（163）
+**其它（单个接口）**（164）
 
 - `GET /`
 - `GET /access-guide`
@@ -1046,6 +1051,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /target-forecast`
 - `GET /target-history`
 - `GET /target-weeks`
+- `GET /tax-pack`
 - `GET /track`
 - `GET /track-link`
 - `GET /track-log`

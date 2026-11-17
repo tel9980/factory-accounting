@@ -3852,6 +3852,26 @@ Page({
     if (!d.text) return
     wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
   },
+  // 给会计的资料包：一年的总览/月度汇总/利润表/资产负债表/明细/流水/发票/固定资产/借款 打成 Excel
+  exportTaxPack() {
+    const y = (this.data.yb || {}).year || ''
+    wx.showLoading({ title: '打包中…' })
+    this.req({
+      url: API_BASE + '/tax-pack' + (y ? '?year=' + encodeURIComponent(y) : ''),
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.b64) return wx.showToast({ title: d.error || '没生成出来', icon: 'none' })
+        wx.showModal({
+          title: '资料包好了',
+          content: d.text || '',
+          showCancel: false,
+          success: () => this.saveXlsxFile(d)
+        })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
   openYearPrint() {
     const y = (this.data.yb || {}).year
     if (!y) return wx.showToast({ title: '先看这一年', icon: 'none' })
