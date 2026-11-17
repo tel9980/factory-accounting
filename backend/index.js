@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/recon-board/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|merge-summary|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/recon-board/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -4045,6 +4045,52 @@ app.get('/help', (c) => {
     ? (items.length ? `「${kw}」找到 ${items.length} 条解释` : `没有「${kw}」这个词。换个说法（比如「核销」「账期」「口令不对」），或者直接问我`)
     : (cat ? `这一类一共 ${items.length} 条` : `一共收录 ${all.length} 条，点任意一条看解释`)
   return c.json({ ok: true, kw, cat, count: items.length, total: all.length, cats, items, text })
+})
+
+// 三本账合起来看：分厂/分项目各记一本，老板要一个总数
+app.get('/merge-summary', async (c) => {
+  const all = c.env.ENV_ALL || c.env
+  const qm = String(c.req.query('month') || '')
+  const mm = /^\d{4}-\d{2}$/.test(qm) ? qm : now().slice(0, 7)
+  const defs = [['1', all.DB, '主账本'], ['2', all.DB2, '第二本'], ['3', all.DB3, '第三本']]
+  const books = []
+  for (const [id, db, def] of defs) {
+    if (!db) continue
+    const g = (sql, ...b) => db.prepare(sql).bind(...b).first().catch(() => null)
+    const nm = await g("SELECT value FROM settings WHERE key='book_name'")
+    const name = (nm && nm.value) || def
+    const pl = await monthPL(db, mm).catch(() => null)
+    const nw = await netNow(db).catch(() => null)
+    const cnt = await g('SELECT COUNT(*) n FROM orders WHERE substr(created_at,1,7)=?', mm)
+    const last = await g('SELECT MAX(created_at) t FROM ledger')
+    books.push({
+      id, name,
+      orders: num(cnt && cnt.n),
+      income: round2(num(pl && pl.income)), mat: round2(num(pl && pl.mat)), exp: round2(num(pl && pl.cash_exp)),
+      adj: round2(num(pl && pl.adj)), profit: round2(num(pl && pl.profit)), margin: round2(num(pl && pl.margin)),
+      cash: round2(num(nw && nw.cash)), ar: round2(num(nw && nw.ar)), ap: round2(num(nw && nw.ap)),
+      debt: round2(num(nw && nw.debt)), net: round2(num(nw && nw.net)),
+      last: last && last.t ? String(last.t).slice(0, 10) : '',
+      empty: !num(cnt && cnt.n) && !num(pl && pl.income) && !num(pl && pl.cash_exp) && !num(nw && nw.cash) && !num(nw && nw.ar)
+    })
+  }
+  const used = books.filter((b) => !b.empty)
+  const T = (k) => round2(books.reduce((a, b) => a + num(b[k]), 0))
+  const totals = { orders: books.reduce((a, b) => a + num(b.orders), 0), income: T('income'), mat: T('mat'), exp: T('exp'), adj: T('adj'),
+    profit: T('profit'), cash: T('cash'), ar: T('ar'), ap: T('ap'), debt: T('debt'), net: T('net') }
+  totals.margin = totals.income > 0 ? round2(totals.profit / totals.income * 100) : 0
+  books.forEach((b) => {
+    b.share = totals.income > 0 ? round2(b.income / totals.income * 100) : 0
+    b.profit_share = totals.profit > 0 ? round2(b.profit / totals.profit * 100) : 0
+  })
+  const best = books.slice().sort((a, b) => b.profit - a.profit)[0]
+  const text = !used.length
+    ? `${mm} 三本账都还是空的，没什么可合并的。`
+    : used.length === 1
+      ? `${mm} 只有「${used[0].name}」有账：接单 ${used[0].income} 元、净利 ${used[0].profit} 元、家底 ${used[0].net} 元。另外 ${books.length - used.length} 本还空着。`
+      : `${mm} ${used.length} 本合计：接单 ${totals.income} 元、净利 ${totals.profit} 元（净利率 ${totals.margin}%）、手头现金 ${totals.cash} 元、家底 ${totals.net} 元。` +
+        `赚得最多的是「${best.name}」（净利 ${best.profit} 元，占 ${best.profit_share}%）。`
+  return c.json({ ok: true, month: mm, books, totals, used_count: used.length, empty_count: books.length - used.length, best: best ? { id: best.id, name: best.name, profit: best.profit } : null, text })
 })
 
 app.get('/books-check', async (c) => {

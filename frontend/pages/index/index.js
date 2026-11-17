@@ -69,6 +69,7 @@ const FEATS = [
 
 Page({
   data: {
+    mg: null, mg_month: '',
     qt: null, qt_n: 0, qh: null, qt_party: '', qt_item: '', qt_cost: '', qt_margin: '', qt_qty: '', qt_price: '', qt_days: '',
     yrv: null, yrv_year: '',
     mg: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
@@ -5753,6 +5754,34 @@ Page({
         })
       }
     })
+  },
+  onMgMonth(e) { this.setData({ mg_month: e.detail.value }) },
+  // 三本账合起来看：分厂/分项目各记一本，老板要一个总数
+  loadMergeSummary() {
+    const m = String(this.data.mg_month || '').trim()
+    if (m && !/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '月份写成 2026-11 这样', icon: 'none' })
+    wx.showLoading({ title: '汇总中…' })
+    this.req({
+      url: API_BASE + '/merge-summary' + (m ? '?month=' + encodeURIComponent(m) : ''),
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ mg: d })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeMergeSummary() { this.setData({ mg: null }) },
+  copyMergeSummary() {
+    const d = this.data.mg || {}
+    if (!d.text) return
+    const lines = [d.text, '']
+    ;(d.books || []).forEach((b) => {
+      if (b.empty) return
+      lines.push(b.name + '：接单 ' + b.income + '，净利 ' + b.profit + '，现金 ' + b.cash + '，应收 ' + b.ar + '，应付 ' + b.ap + '，家底 ' + b.net)
+    })
+    wx.setClipboardData({ data: lines.join('\n'), success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
   },
   loadBooksCheck() {
     this.req({

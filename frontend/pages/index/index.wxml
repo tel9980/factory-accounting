@@ -2746,6 +2746,23 @@
       <input class="inp" placeholder="给当前账套改名，如 一车间" value="{{rename_text}}" bindinput="onRenameText"/>
       <button class="btn" size="mini" bindtap="renameBook">改当前账套名</button>
       <button class="btn" size="mini" bindtap="loadBooksCheck">🧾 看看三个账本都在干嘛</button>
+      <view class="frow">
+        <input class="inp half" placeholder="月份，如 2026-11（不填=本月）" value="{{mg_month}}" bindinput="onMgMonth"/>
+        <button class="btn half" size="mini" bindtap="loadMergeSummary">🧮 三本合起来看</button>
+      </view>
+      <view wx:if="{{mg}}">
+        <view class="prev-h">{{mg.text}}</view>
+        <view class="item" wx:for="{{mg.books}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.profit<0?'red':''}}">{{item.profit}}</text></view>
+          <view class="row2">接单 {{item.income}} · 净利 {{item.profit}}（{{item.margin}}%）· 占 {{item.share}}% · {{item.orders}} 单</view>
+          <view class="row2">现金 {{item.cash}} · 应收 {{item.ar}} · 应付 {{item.ap}} · 家底 {{item.net}}{{item.empty?' · 这本还空着':''}}</view>
+        </view>
+        <view class="row2"><text class="b">合计：接单 {{mg.totals.income}} · 净利 {{mg.totals.profit}}（{{mg.totals.margin}}%）· 家底 {{mg.totals.net}}</text></view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="copyMergeSummary">复制这段</button>
+          <button class="btn ghost" size="mini" bindtap="closeMergeSummary">收起</button>
+        </view>
+      </view>
       <view class="tip">🔒 账本封存：老账本对完账就封起来，整本只能看、不能增删改（要改先解封，解封会留痕）。三本账各自单独封。</view>
       <view class="row2" wx:if="{{sealed}}">这本账从 {{sealed_at}} 起已封存{{seal_note ? '（' + seal_note + '）' : ''}}</view>
       <view class="row2" wx:else>这本账现在是可改的</view>
