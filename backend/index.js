@@ -456,6 +456,8 @@ app.use('*', async (c, next) => {
       || (/^\/handover-note$/.test(path))
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
+      || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
+      || (/^\/bank-flows\/\d+\/match$/.test(path))
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
   }
   c.set('role', role)
@@ -9228,21 +9230,16 @@ app.get('/bank-flows', async (c) => {
   return c.json({ rows, unmatched: { count: num(un.n), amount: round2(num(un.t)) } })
 })
 
-// 认领：把一笔流水登记成「某张应收的收款 / 某笔应付的付款 / 一笔支出」
-app.post('/bank-flows/:id/match', async (c) => {
-  const id = c.req.param('id')
-  const { target_type, target_id, category, account_id } = await c.req.json()
-  const db = c.env.DB
-  const bf = await db.prepare('SELECT * FROM bank_flows WHERE id=?').bind(id).first()
-  if (!bf) return c.json({ error: '流水不存在' }, 404)
-  if (bf.matched_type) return c.json({ error: '这笔已经认领过了' }, 400)
+// 认领一笔流水到单据（供单笔认领和自动认领共用）
+async function bankMatch(db, bf, target_type, target_id, category, account_id) {
+  if (bf.matched_type) return { error: '这笔已经认领过了' }
   const acc = num(account_id) || (await defaultAccountId(db))
   const amt = num(bf.amount)
-  if (target_type === 'order' && bf.direction !== 'in') return c.json({ error: '这笔流水是付款，不能抵应收（收款的才能抵）' }, 400)
-  if (target_type === 'payable' && bf.direction !== 'out') return c.json({ error: '这笔流水是收款，不能抵应付（付款的才能抵）' }, 400)
+  if (target_type === 'order' && bf.direction !== 'in') return { error: '这笔流水是付款，不能抵应收（收款的才能抵）' }
+  if (target_type === 'payable' && bf.direction !== 'out') return { error: '这笔流水是收款，不能抵应付（付款的才能抵）' }
   if (target_type === 'order') {
     const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(target_id).first()
-    if (!o) return c.json({ error: '应收单不存在' }, 404)
+    if (!o) return { error: '应收单不存在' }
     await db.batch([
       db.prepare('UPDATE orders SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(amt, o.id),
       db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
@@ -9250,7 +9247,7 @@ app.post('/bank-flows/:id/match', async (c) => {
     ])
   } else if (target_type === 'payable') {
     const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(target_id).first()
-    if (!p) return c.json({ error: '应付单不存在' }, 404)
+    if (!p) return { error: '应付单不存在' }
     await db.batch([
       db.prepare('UPDATE payables SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(amt, p.id),
       db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,?,1,?)")
@@ -9262,9 +9259,84 @@ app.post('/bank-flows/:id/match', async (c) => {
       .bind(dir, amt, category || (dir === 'in' ? '其他收入' : '其他'), `银行对账 ${bf.memo || ''}`, acc, bf.date + 'T00:00:00.000Z').run()
   }
   await db.prepare('UPDATE bank_flows SET matched_type=?, matched_id=? WHERE id=?')
-    .bind(target_type === 'order' ? 'order' : target_type === 'payable' ? 'payable' : 'expense', num(target_id) || 0, id).run()
+    .bind(target_type === 'order' ? 'order' : target_type === 'payable' ? 'payable' : 'expense', num(target_id) || 0, bf.id).run()
   await logAudit(db, '银行流水认领', bf.memo || '', `¥${amt} → ${target_type}`)
+  return { ok: true }
+}
+
+// 认领：把一笔流水登记成「某张应收的收款 / 某笔应付的付款 / 一笔支出」
+app.post('/bank-flows/:id/match', async (c) => {
+  const id = c.req.param('id')
+  const { target_type, target_id, category, account_id } = await c.req.json()
+  const db = c.env.DB
+  const bf = await db.prepare('SELECT * FROM bank_flows WHERE id=?').bind(id).first()
+  if (!bf) return c.json({ error: '流水不存在' }, 404)
+  const r = await bankMatch(db, bf, target_type, target_id, category, account_id)
+  if (r.error) return c.json({ error: r.error }, 400)
   return c.json({ ok: true })
+})
+
+// ── 自动认领：先按「金额对得上 + 摘要里有单位名」自动配一遍，剩下的才人工点 ──
+app.post('/bank-auto-match', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const apply = b.apply === true
+  const flows = (await db.prepare('SELECT * FROM bank_flows WHERE matched_type IS NULL ORDER BY date DESC, id DESC LIMIT 200').all()).results || []
+  if (!flows.length) {
+    const all = await db.prepare('SELECT COUNT(*) n FROM bank_flows').first().catch(() => ({ n: 0 }))
+    return c.json({ ok: true, total: 0, high: 0, mid: 0, none: 0, rows: [], applied: 0,
+      text: num(all && all.n) ? '没有待认领的流水，都处理完了。' : '还没导入过银行流水。导入后可以一键自动认领。' })
+  }
+  const [ords, pays] = await Promise.all([
+    db.prepare("SELECT id, customer party, item_name item, price amount, COALESCE(paid,0) paid, COALESCE(written_off,0) wo, created_at FROM orders WHERE price - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT id, supplier party, COALESCE(remark,'') item, amount, COALESCE(paid,0) paid, COALESCE(written_off,0) wo, created_at FROM payables WHERE amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005").all().catch(() => ({ results: [] }))
+  ])
+  const outs = (ords.results || []).map((x) => ({ ...x, kind: 'order' }))
+  const pays2 = (pays.results || []).map((x) => ({ ...x, kind: 'payable' }))
+  const rows = []
+  let applied = 0
+  for (const f of flows) {
+    const amt = num(f.amount)
+    const memoN = norm(f.memo || '')
+    const pool = f.direction === 'in' ? outs : pays2
+    const scored = []
+    for (const d of pool) {
+      const left = round2(num(d.amount) - num(d.paid) - num(d.wo))
+      let sc = 0
+      const why = []
+      if (Math.abs(left - amt) < 0.011) { sc += 60; why.push('金额正好等于还欠的 ¥' + left) }
+      else if (Math.abs(num(d.amount) - amt) < 0.011) { sc += 25; why.push('金额等于单据总额 ¥' + num(d.amount)) }
+      if (memoN && norm(d.party) && memoN.indexOf(norm(d.party)) >= 0) { sc += 50; why.push('摘要里有「' + d.party + '」') }
+      if (amt > left + 0.011) { sc -= 45; why.push('这笔比还欠的多 ¥' + round2(amt - left)) }
+      if (sc > 0) scored.push({ d, sc, why })
+    }
+    scored.sort((a, b2) => b2.sc - a.sc)
+    const best = scored[0]
+    const second = scored[1]
+    const conf = !best ? 'none' : (best.sc >= 90 && (!second || second.sc < best.sc - 20) ? 'high' : (best.sc >= 50 ? 'mid' : 'none'))
+    const item = {
+      id: num(f.id), date: f.date, direction: f.direction, amount: amt, memo: f.memo || '',
+      conf, why: best ? best.why.join('；') : '',
+      target: best ? { kind: best.d.kind, id: num(best.d.id), party: best.d.party, item: best.d.item || '', left: round2(num(best.d.amount) - num(best.d.paid) - num(best.d.wo)) } : null,
+      alts: scored.slice(1, 4).map((x) => ({ kind: x.d.kind, id: num(x.d.id), party: x.d.party, left: round2(num(x.d.amount) - num(x.d.paid) - num(x.d.wo)), sc: x.sc }))
+    }
+    if (apply && conf === 'high' && item.target) {
+      const r = await bankMatch(db, f, item.target.kind, item.target.id, '', b.account_id)
+      if (r.ok) { applied++; item.done = true }
+      else item.err = r.error
+    }
+    rows.push(item)
+  }
+  const high = rows.filter((x) => x.conf === 'high').length
+  const mid = rows.filter((x) => x.conf === 'mid').length
+  const none = rows.filter((x) => x.conf === 'none').length
+  const hiAmt = round2(rows.filter((x) => x.conf === 'high').reduce((a, x) => a + x.amount, 0))
+  let text
+  if (apply) text = applied ? `自动认领了 ${applied} 笔（共 ¥${hiAmt}），剩下 ${mid + none} 笔要你自己看一眼。` : '这次没有能自动认领的，都列在下面了。'
+  else if (high) text = `${high} 笔能自动认领（共 ¥${hiAmt}），另外 ${mid} 笔有点像、${none} 笔没找到对应的单。`
+  else if (mid) text = `没有能百分百确定的，${mid} 笔有相近的单，你挑一下。`
+  else text = `${rows.length} 笔流水都没找到对应的单，可能要手工记成支出或收入。`
+  return c.json({ ok: true, total: rows.length, high, mid, none, applied, rows, text })
 })
 
 app.delete('/bank-flows/:id', async (c) => {

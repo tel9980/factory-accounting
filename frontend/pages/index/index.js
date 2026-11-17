@@ -5602,6 +5602,73 @@ Page({
       }
     })
   },
+  autoMatchBank() {
+    wx.showLoading({ title: '正在对…' })
+    this.req({
+      url: API_BASE + '/bank-auto-match', method: 'POST', data: {},
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没算出来', icon: 'none' })
+        this.setData({ ba: d })
+        if (!d.rows.length) wx.showToast({ title: d.text, icon: 'none' })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeBankAuto() { this.setData({ ba: null }) },
+  applyBankAuto() {
+    const ba = this.data.ba
+    if (!ba || !ba.high) return
+    wx.showModal({
+      title: '自动认领 ' + ba.high + ' 笔',
+      content: '按「金额正好等于还欠的 + 摘要里有单位名」自动认领，认完会生成收款/付款流水。认错了可以在单据明细里删掉那笔流水。',
+      confirmText: '认领',
+      success: (m) => {
+        if (!m.confirm) return
+        wx.showLoading({ title: '认领中…' })
+        this.req({
+          url: API_BASE + '/bank-auto-match', method: 'POST', data: { apply: true },
+          success: (res) => {
+            wx.hideLoading()
+            const d = res.data || {}
+            if (d.ok) {
+              wx.showToast({ title: '认领了 ' + (d.applied || 0) + ' 笔', icon: 'success' })
+              this.loadBankFlows(); this.refresh(); this.loadAr(); this.loadAp()
+            } else wx.showToast({ title: d.error || '失败', icon: 'none' })
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
+  },
+  confirmBankAuto(e) {
+    const i = e.currentTarget.dataset.i
+    const row = (this.data.ba.rows || [])[i]
+    if (!row || !row.target) return
+    this._doBankMatch(row.id, row.target.kind, row.target.id, i)
+  },
+  pickBankAlt(e) {
+    const { i, a } = e.currentTarget.dataset
+    const row = (this.data.ba.rows || [])[i]
+    const alt = row && (row.alts || [])[a]
+    if (!alt) return
+    this._doBankMatch(row.id, alt.kind, alt.id, i)
+  },
+  _doBankMatch(flowId, kind, targetId, idx) {
+    this.req({
+      url: API_BASE + '/bank-flows/' + flowId + '/match', method: 'POST', data: { target_type: kind, target_id: targetId },
+      success: (res) => {
+        const d = res.data || {}
+        if (d.ok) {
+          const ba = this.data.ba
+          if (ba && ba.rows && ba.rows[idx]) { ba.rows[idx].done = true; this.setData({ ba }) }
+          this.loadBankFlows(); this.refresh(); this.loadAr(); this.loadAp()
+          wx.showToast({ title: kind === 'order' ? '已抵应收' : '已抵应付', icon: 'success' })
+        } else wx.showToast({ title: d.error || '认领失败', icon: 'none' })
+      }
+    })
+  },
   delBankFlow(e) {
     const id = e.currentTarget.dataset.id
     this.req({ url: API_BASE + '/bank-flows/' + id, method: 'DELETE', success: () => this.loadBankFlows() })

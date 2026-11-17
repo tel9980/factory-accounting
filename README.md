@@ -586,11 +586,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 汇总：单数、总金额、平均回款天数、最快/最慢，以及按月分组（最近 12 个月，各多少单多少钱），点月份即可切换；
    - 白话说一句：`2026 年 11 月结清 2 单，共 ¥5000；平均 13.33 天收回（最快 0 天、最慢 40 天）`，全当天结清时说「都是当天结清的」；
    - 支持搜单位/产品/经手人、一键复制整页；核销结清（没有收款流水）的单会单独提示「有 N 单是核销/豁免结清的」。
+207. ✅ **银行流水自动认领**：导入的流水不再一条条手点，系统先自动配一遍：
+   - `POST /bank-auto-match`（不带 apply＝只看建议，`apply:true`＝真认领）：对每笔未认领流水，在「未结清的应收/应付」里按三条打分——**金额正好等于还欠的**（+60）、**摘要里有单位名**（+50）、金额等于单据总额（+25）；超过还欠的扣 45 分；
+   - 分三档：`high`（能确定，可一键全认）、`mid`（有点像，让人挑）、`none`（没找到对应单，建议记成支出/收入）；每笔都给出「为什么这么配」（如「金额正好等于还欠的 ¥1500；摘要里有「丙料商」」）和 2–3 个备选；
+   - 认领走同一套逻辑（`bankMatch()` 抽成公共函数，单笔认领和自动认领共用），会生成收款/付款流水并推进单据已收已付；
+   - 员工口令不能做银行对账（`denyStaff` 加了 `/bank-import`、`/bank-auto-match`、`/bank-flows/:id/match`）。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 287 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 288 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -847,7 +852,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（152）
+**其它（单个接口）**（153）
 
 - `GET /`
 - `GET /access-guide`
@@ -865,6 +870,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /backup-restore`
 - `GET /backup-timeline`
 - `POST /backup-to-notes`
+- `POST /bank-auto-match`
 - `POST /bank-import`
 - `POST /batch`
 - `POST /book-name`

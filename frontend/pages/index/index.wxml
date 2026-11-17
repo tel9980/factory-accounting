@@ -2008,7 +2008,27 @@
       <textarea class="restore-ta" placeholder="{{bank_hint}}" value="{{bank_text}}" bindinput="onBankText"></textarea>
       <button class="btn" size="mini" bindtap="importBank">导入流水</button>
       <view class="duesoon" wx:if="{{bank_unmatched.count>0}}">{{bank_unmatched.count}} 笔还没认领，合计 ¥{{bank_unmatched.amount}}</view>
+      <view class="frow" wx:if="{{bank_unmatched.count>0}}">
+        <button class="btn" size="mini" bindtap="autoMatchBank">🤖 自动认领</button>
+        <button class="btn ghost" size="mini" bindtap="closeBankAuto">收起</button>
+      </view>
       <view class="tip">认领＝把这笔钱记到账上（抵某张应收/应付，或当成一笔支出），重复的点会提示。</view>
+      <view class="bankauto" wx:if="{{ba}}">
+        <view class="row1"><text class="nm">{{ba.text}}</text></view>
+        <view class="aline" wx:for="{{ba.rows}}" wx:key="id">
+          <text>{{item.date.slice(5)}} {{item.direction=='in'?'收':'付'}} ¥{{item.amount}}　{{item.memo}}</text>
+          <text class="aline-note">→ {{item.conf=='high'?'能自动认领':(item.conf=='mid'?'可能是':'没找到')}}{{item.target ? '：' + item.target.party + (item.target.item ? ' ' + item.target.item : '') + '（还欠 ¥' + item.target.left + '）' : ''}}</text>
+          <text class="aline-note" wx:if="{{item.why}}">{{item.why}}</text>
+          <view class="btns" wx:if="{{!item.done && item.target}}">
+            <button size="mini" bindtap="confirmBankAuto" data-i="{{index}}">就用这个</button>
+            <button size="mini" wx:for="{{item.alts}}" wx:for-item="alt" wx:for-index="ai" wx:key="id" bindtap="pickBankAlt" data-i="{{index}}" data-a="{{ai}}">{{alt.party}} ¥{{alt.left}}</button>
+          </view>
+          <text class="aline-note" wx:if="{{item.done}}">✓ 已自动认领</text>
+        </view>
+        <view class="frow" wx:if="{{ba.high>0}}">
+          <button class="btn" size="mini" bindtap="applyBankAuto">全部自动认领（{{ba.high}} 笔）</button>
+        </view>
+      </view>
     </view>
     <view class="list" wx:if="{{bank_rows.length}}">
       <view class="item" wx:for="{{bank_rows}}" wx:key="id">

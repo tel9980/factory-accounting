@@ -394,3 +394,7 @@
 
 /* 没设账期的单位提醒 */
 .termgap { margin: 10px 0; padding: 10px; background: #fff7e6; border: 1px solid #ffd591; border-radius: 8px; }
+
+/* 银行流水自动认领 */
+.bankauto { margin-top: 10px; padding: 10px; background: #f7f9fc; border: 1px solid #e3eaf5; border-radius: 8px; }
+.aline-note { display: block; font-size: 12px; color: #666; line-height: 1.6; margin-top: 2px; }
