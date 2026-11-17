@@ -901,7 +901,7 @@ Page({
     if (!p) return
     wx.showLoading({ title: '取文件…' })
     this.req({
-      url: API_BASE + '/month-report?month=' + encodeURIComponent(p.month), fail: () => wx.hideLoading(),
+      url: API_BASE + '/month-pack-file?month=' + encodeURIComponent(p.month), fail: () => wx.hideLoading(),
       success: (res) => { wx.hideLoading(); this.saveXlsxFile(res.data || {}) }
     })
   },

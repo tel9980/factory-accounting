@@ -1334,6 +1334,51 @@ const LOCK_INFO = {
   allowed: '查看任何页面、导出 Excel、打印对账单/月报/交接包、催款提醒、对账单、备份',
   unlock: '要改这个月的账：报表 → 月结归档 → 点这个月旁边的「解锁」（删归档），改完再结一次会生成新快照'
 }
+// 本月对账完成度：应核对几家、核对清楚几家（结账把关 / 月报共用）
+async function reconRate(db, mm) {
+  const out = { total: 0, done: 0, disputed: 0, diff: 0, none: 0, sent: 0, rate: 100, rows: [] }
+  const CNT = { done: 0, disputed: 0, diff: 0, sent: 0, none: 0 }
+  for (const type of ['ar', 'ap']) {
+    const isAr = type === 'ar'
+    const tbl = isAr ? 'orders' : 'payables'
+    const col = isAr ? 'customer' : 'supplier'
+    const amt = isAr ? 'price' : 'amount'
+    const OPEN = `${amt}-COALESCE(paid,0)-COALESCE(written_off,0)`
+    const [act, open, stmt, rlog, rconf] = await Promise.all([
+      db.prepare(`SELECT ${col} AS party, COUNT(*) c FROM ${tbl} WHERE substr(created_at,1,7)=? GROUP BY ${col}`).bind(mm).all().catch(() => ({ results: [] })),
+      db.prepare(`SELECT ${col} AS party, COALESCE(SUM(${OPEN}),0) l FROM ${tbl} WHERE ${OPEN}>0.005 GROUP BY ${col}`).all().catch(() => ({ results: [] })),
+      db.prepare("SELECT party, ack, ack_at, resolved_at, created_at FROM statement_log WHERE type=? AND substr(COALESCE(month,''),1,7)=? ORDER BY id DESC LIMIT 400").bind(type, mm).all().catch(() => ({ results: [] })),
+      db.prepare("SELECT party, done, state, diff FROM recon_log WHERE type=? AND substr(COALESCE(month,''),1,7)=? ORDER BY id DESC LIMIT 400").bind(type, mm).all().catch(() => ({ results: [] })),
+      db.prepare("SELECT party FROM recon_confirm WHERE type=? AND substr(COALESCE(month,''),1,7)=?").bind(type, mm).all().catch(() => ({ results: [] }))
+    ])
+    const smap = {}, lmap = {}, cmap = {}, omap = {}
+    for (const r of (stmt.results || [])) { const k = norm(r.party); if (!smap[k]) smap[k] = r }
+    for (const r of (rlog.results || [])) { const k = norm(r.party); if (!lmap[k]) lmap[k] = r }
+    for (const r of (rconf.results || [])) cmap[norm(r.party)] = 1
+    for (const r of (open.results || [])) omap[norm(r.party)] = round2(num(r.l))
+    const seen = {}
+    const push = (party, cnt) => {
+      const k = norm(party)
+      if (!party || seen[k]) return
+      seen[k] = 1
+      const s = smap[k], r = lmap[k]
+      let st = 'none'
+      if (s && s.ack === 'doubt' && !String(s.resolved_at || '')) st = 'disputed'
+      else if (cmap[k] || (s && s.ack === 'ok') || (r && num(r.done) === 1)) st = 'done'
+      else if (r && num(r.diff) > 0.005) st = 'diff'
+      else if (s) st = 'sent'
+      CNT[st] = num(CNT[st]) + 1
+      out.total++
+      out.rows.push({ type, party, st, cnt: num(cnt), left: round2(num(omap[k])) })
+    }
+    for (const r of (act.results || [])) push(r.party, r.c)
+    for (const r of (open.results || [])) push(r.party, 0)
+  }
+  out.done = CNT.done; out.disputed = CNT.disputed; out.diff = CNT.diff; out.sent = CNT.sent; out.none = CNT.none
+  out.rate = out.total ? Math.round(out.done * 100 / out.total) : 100
+  return out
+}
+
 async function closePrecheck(db, mm) {
   const [diff, anyRecon, summ, bk, unclosed, prevLock] = await Promise.all([
     db.prepare("SELECT COUNT(*) n FROM recon_log WHERE substr(month,1,7)=? AND done=0 AND COALESCE(state,'')<>'match'").bind(mm).first().catch(() => ({ n: 0 })),
@@ -1370,6 +1415,17 @@ async function closePrecheck(db, mm) {
     tip: na ? `本月和 ${na} 家对过账` : '这个月还没跟任何单位对过账',
     after: na ? '' : '不影响账目，只是没跟对方核过数，万一对方记的和你不一致，结完账才发现就麻烦',
     fixable: 'yes', fix_how: '对账随时都能做，结账不拦；下次结账前顺手对一遍就行' })
+  const rr = await reconRate(db, mm)
+  const rrBad = rr.total >= 3 && rr.rate < 60
+  items.push({ k: 'recon_rate', label: '本月对账完成度', count: rr.done, total: rr.total, rate: rr.rate,
+    tone: !rr.total ? 'ok' : (rr.rate >= 60 ? 'ok' : (rr.rate >= 30 ? 'warn' : 'bad')),
+    tip: !rr.total ? '本月没有需要对账的单位'
+      : `应核对 ${rr.total} 家，核对清楚 ${rr.done} 家（${rr.rate}%）` +
+        (rr.disputed ? `，其中 ${rr.disputed} 家对方说对不上` : '') +
+        (rr.none ? `，${rr.none} 家还没发过对账单` : ''),
+    after: rrBad ? '这个月没跟对方核过数就结了账，以后对方说数不对，只能解锁再改' : '',
+    fixable: 'yes',
+    fix_how: '报表 → 📊 对账完成度 看是哪几家；对完再结，或者照样结（会记下这次没对完）' })
   const okSumm = !!(summ && String(summ.v || '') === mm)
   items.push({ k: 'summary', label: '出过本月小结', count: okSumm ? 1 : 0, tone: okSumm ? 'ok' : 'warn',
     tip: okSumm ? '本月小结已出' : '还没出本月小结',
@@ -1392,6 +1448,7 @@ async function closePrecheck(db, mm) {
     fixable: 'yes', fix_how: '回头把上个月也结一次就行，顺序不影响数据' })
   const blockers = items.filter((x) => x.k === 'recon_diff' && x.count > 0).map((x) => x.k)
     .concat(items.filter((x) => x.k === 'summary' && !x.count).map((x) => x.k))
+    .concat(rrBad ? ['recon_rate'] : [])
   const warns = items.filter((x) => x.tone === 'warn').map((x) => x.k)
   return { month: mm, items, blockers, warns, can_close: blockers.length === 0, lock_info: LOCK_INFO,
     text: items.filter((x) => x.tone !== 'ok').map((x) => '· ' + x.tip + (x.after ? '（' + x.after + '）' : '')).join('\n') || '该做的都做了，可以放心结账' }
@@ -1469,17 +1526,18 @@ app.post('/month-close', async (c) => {
   const mm = String(m || '').trim()
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.json({ error: '月份格式：YYYY-MM，如 2026-11' }, 400)
   const confirmed = !!body.confirm
-  if (!confirmed) {
-    const pc = await closePrecheck(db, mm)
-    if (pc.blockers.length) {
-      return c.json({ error: '结账前还有事没做完（' + pc.blockers.length + ' 项）', code: 'need_confirm', blockers: pc.blockers, items: pc.items, text: pc.text, month: mm }, 409)
-    }
+  const pc = await closePrecheck(db, mm)
+  if (!confirmed && pc.blockers.length) {
+    return c.json({ error: '结账前还有事没做完（' + pc.blockers.length + ' 项）', code: 'need_confirm', blockers: pc.blockers, items: pc.items, text: pc.text, month: mm }, 409)
   }
+  const rri = pc.items.find((x) => x.k === 'recon_rate') || { count: 0, total: 0, rate: 100 }
   const snap = await monthSnapshot(db, mm)
   snap.closed_at = now()
   await saveArchive(db, snap)
   await db.prepare('INSERT OR IGNORE INTO month_lock (month, locked_at) VALUES (?,?)').bind(mm, now()).run()
-  await logAudit(db, '月结归档', mm, `结转 ${mm}：毛利 ${snap.profit}，成本 ${snap.cost}`)
+  await logAudit(db, '月结归档', mm, `结转 ${mm}：毛利 ${snap.profit}，成本 ${snap.cost}` +
+    (num(rri.total) ? `，对账 ${rri.count}/${rri.total} 家` : '') +
+    (confirmed && pc.blockers.length ? `（强制结账：${pc.blockers.map((k) => (BC_LABEL[k] || k)).join('、')}）` : ''))
   return c.json({ ok: true, snapshot: snap,
     lock_note: `${mm} 已经锁住了：这个月不能再新增、修改、删除单据，也不能再收付款、批量导入。`,
     unlock_how: '要改这个月的账：报表 → 月结归档 → 点这个月旁边的「解锁」，改完再结一次（归档会重新生成）。',
@@ -8375,7 +8433,7 @@ app.post('/migrate-apply', async (c) => {
     tip: pv.type === 'ar' && pv.rows.some((x) => x.ok && x.cost === null) ? '有些行没填成本：这些单子的毛利会偏高，方便时补一下成本（点开单子改成本）。' : '' })
 })
 
-const BC_LABEL = { recon_diff: '对账差异还没处理完', summary: '还没出本月小结' }
+const BC_LABEL = { recon_diff: '对账差异还没处理完', summary: '还没出本月小结', recon_rate: '这个月对账没做完' }
 async function yearCloseScan(db, y) {
   const [om, pm, lm, ar, rc] = await Promise.all([
     db.prepare("SELECT substr(created_at,1,7) m, COUNT(*) n, COALESCE(SUM(COALESCE(price,0)),0) s FROM orders WHERE substr(created_at,1,4)=? GROUP BY m").bind(y).all(),
@@ -8865,7 +8923,7 @@ app.get('/month-reports', async (c) => {
   return c.json({ ok: true, rows })
 })
 
-app.get('/month-report', async (c) => {
+app.get('/month-pack-file', async (c) => {
   const m = String(c.req.query('month') || '')
   const r = await c.env.DB.prepare('SELECT * FROM month_report WHERE month=? ORDER BY id DESC LIMIT 1').bind(m).first()
   if (!r) return c.json({ error: '这个月还没有自动生成的报表包' }, 404)
@@ -10611,6 +10669,11 @@ app.get('/month-report', async (c) => {
   const pl = await monthPL(db, m)
   lines.push(`材料·外协成本：¥${pl.mat}`)
   lines.push(`净利（权责）：¥${pl.profit}`)
+  const rr = await reconRate(db, m)
+  lines.push(`—— 对账 ——`)
+  lines.push(rr.total ? `应核对 ${rr.total} 家，核对清楚 ${rr.done} 家（${rr.rate}%）` : '本月没有需要对账的单位')
+  if (rr.disputed) lines.push(`对方说对不上：${rr.disputed} 家`)
+  if (rr.none) lines.push(`还没发过对账单：${rr.none} 家`)
   lines.push(`—— 钱花在哪 ——`)
   if (cats.length) cats.forEach((r) => lines.push(`${r.c}：¥${round2(num(r.t))}`))
   else lines.push('本月无支出')
@@ -10622,6 +10685,7 @@ app.get('/month-report', async (c) => {
   return c.json({
     month: m, cash_in: round2(num(inc.t)), cash_out: round2(num(out.t)), net: round2(num(inc.t) - num(out.t)),
     order_add: round2(num(oAdd.t)), payable_add: round2(num(pAdd.t)), mat_cost: pl.mat, profit: pl.profit, cats: cats.map((r) => ({ c: r.c, t: round2(num(r.t)) })),
+    recon: { total: rr.total, done: rr.done, rate: rr.rate, disputed: rr.disputed, none: rr.none },
     cash, ar, ap, net_worth: round2(cash + ar - ap), title: (head && head.value) || '', text: lines.join('\n')
   })
 })

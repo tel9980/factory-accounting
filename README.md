@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 326 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 327 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -937,7 +937,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（180）
+**其它（单个接口）**（181）
 
 - `GET /`
 - `GET /access-guide`
@@ -1028,6 +1028,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /month-end`
 - `GET /month-locks`
 - `GET /month-pack`
+- `GET /month-pack-file`
 - `POST /month-pack-run`
 - `GET /month-report`
 - `GET /month-reports`
@@ -1184,6 +1185,15 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 返回 `total`/`rate`/`cnt{done,disputed,diff,sent,none}`/`rows`/`curve`（近 N 个月逐月 `total/done/rate/bar`，每月应核对 = 当月开过单的家）/`advice`（分五种情况给下一步）/人话结论「2026-11 该核对 4 家，核对清楚 1 家（25%）：1 家对方说对不上、1 家没发过对账单、1 家等回话。」；
    - 前端报表页「📊 对账完成度」：月份可填（留空=本月），逐家一行显示状态与还欠，下面「近 6 个月对账完成度」逐月一行，可一键复制；
    - denyStaff 加 `/^\/recon-board/`（员工 403，实测）；实测：4 家（甲只发对账单 / 乙确认对得上 / 丙说对不上 / 丁没发过）→ 25%，四种状态全对，advice 三条分别指向核数、批量发对账单、过两天再问。
+
+227. ✅ **结账前的对账把关 + 顺手修掉一条被顶掉的路由**：以前结账自检只看「有没有未处理的差异」，不看「有多少家根本没对账」——4 家客户只对过 1 家，照样能一次点完结账。现在：
+   - `async function reconRate(db, mm)`（结账把关 / 月报共用）：按家算状态——`disputed`（对方说对不上，未解决）/ `diff`（有差异没处理完）/ `none`（没发过对账单）/ `sent`（发了没回话）/ `done`（对方确认对得上、签了确认单，或差异已处理完），返回 `{total,done,rate,disputed,diff,none,sent,rows}`；**应核对 = 本月开过单的家 + 还有未结欠款的家**（应收应付都算）；
+   - `closePrecheck` 新增第 7 项 `recon_rate`：「应核对 4 家，核对清楚 1 家（25%），3 家还没发过对账单」，**完成度 <60% 且应核对 ≥3 家 → 阻断结账**（`blockers` 加 `recon_rate`，`BC_LABEL` 加「这个月对账没做完」）；
+   - `/month-close` 改成总是先跑一次自检：不确认且有阻断 → 409 `need_confirm`；**强制结账（`confirm:true`）会在审计里留痕**——「结转 2026-11：毛利 14000，成本 0，对账 1/4 家（强制结账：还没出本月小结、这个月对账没做完）」；
+   - `/month-report` 月度小结文本新增「—— 对账 ——」段（应核对几家 / 核对清楚几家 / 对方说对不上几家 / 还没发对账单几家），返回体加 `recon{total,done,rate,disputed,none}`；
+   - **顺手修 bug：`app.get('/month-report')` 定义了两次**（前面那条是「取自动生成的报表包 b64」，后面那条是「月度小结文本」），Worker 先注册先匹配 → 前面那条永远不生效，「下载报表包」拿到的是文本、`b64` 为空，下载一直失败。把报表包那条改名为 `/month-pack-file`，前端 `downloadPack` 同步改；实测 404 提示正确、`/month-report` 文本照旧；
+   - **踩坑（自己写的 bug）**：`reconRate` 首版用 `out[st]++` 和 `out.done++` 同时累加，`st==='done'` 时把 `out.done` 加了两次 → 1/4 报成 2/4（`none` 3 家 + `done` 2 家 = 5 > total 4 才看出来）。改用独立 `CNT` 计数器再回写；
+   - 实测：4 家客户本月各 1 单、只确认了乙客户 → `recon_rate` 1/4 25% bad、阻断项 `['summary','recon_rate']`；不确认结账 409；`confirm:true` 结账成功且审计留「对账 1/4 家（强制结账：…）」；解锁重结正常；员工口令不受影响。
 
 222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
    - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；
