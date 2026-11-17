@@ -910,6 +910,38 @@
       <view class="tip" wx:if="{{ex_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
   </block>
+  <block wx:if="{{tab=='expense'}}">
+    <view class="form">
+      <view class="row1"><text class="nm">📦 材料台账（进货 / 领用 / 还剩多少）</text><text class="amt">{{mat.count||0}} 种</text></view>
+      <view class="tip">{{mat.text||'常用的钢板、焊丝、砂轮，各建一个名字和单位（吨/盘/片），进货和领用各记一笔。'}}</view>
+      <view class="tip" wx:for="{{mat.advice}}" wx:key="index">{{item.text}}</view>
+      <view class="item" wx:for="{{mat.rows}}" wx:key="name" bindtap="pickMatRow" data-n="{{item.name}}">
+        <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.low?'red':''}}">{{item.left}} {{item.unit}}</text></view>
+        <view class="row2">本月用了 {{item.month_out}} {{item.unit}}<text wx:if="{{item.min_qty>0}}"> · 低于 {{item.min_qty}} 就提醒</text><text wx:if="{{item.last_price>0}}"> · 最近进价 ¥{{item.last_price}}/{{item.unit}}</text><text wx:if="{{item.low}}" class="red"> · 该进货了</text></view>
+      </view>
+      <view class="frow">
+        <view class="chip {{mt_kind==0?'on':''}}" bindtap="onMtKind" data-k="0">进货</view>
+        <view class="chip {{mt_kind==1?'on':''}}" bindtap="onMtKind" data-k="1">领用</view>
+      </view>
+      <input class="inp" placeholder="材料名（钢板 / 焊丝 / 砂轮）" value="{{mt_name}}" bindinput="onMtName"/>
+      <picker wx:if="{{mats_names.length}}" range="{{mats_names}}" bindchange="pickMat"><view class="picker">从已有的里面选一种 ▾</view></picker>
+      <input class="inp" type="digit" placeholder="数量" value="{{mt_qty}}" bindinput="onMtQty"/>
+      <input class="inp" type="digit" placeholder="{{mt_kind==0?'单价（元，可不填）':'单价（不填就按最近进价估）'}}" value="{{mt_price}}" bindinput="onMtPrice"/>
+      <input class="inp" placeholder="日期（如 11-20，不填就今天）" value="{{mt_date}}" bindinput="onMtDate"/>
+      <input class="inp" placeholder="备注（给哪张单用的，可不填）" value="{{mt_note}}" bindinput="onMtNote"/>
+      <view class="btns"><button class="btn" size="mini" bindtap="addMove">记一笔</button><button class="btn ghost" size="mini" bindtap="toggleMatNew">新建材料</button></view>
+      <block wx:if="{{mat_new}}">
+        <input class="inp" placeholder="单位（吨 / 张 / 盘 / 片）" value="{{mat_unit}}" bindinput="onMatUnit"/>
+        <input class="inp" type="digit" placeholder="低于多少提醒你（可不填）" value="{{mat_min}}" bindinput="onMatMin"/>
+        <view class="btns"><button class="btn" size="mini" bindtap="addMaterial">保存材料</button></view>
+      </block>
+      <block wx:if="{{mv_open}}">
+        <view class="row1"><text class="nm">{{mv_open}} 的进出记录</text><text class="amt" bindtap="closeMoves">收起</text></view>
+        <view class="row2" wx:for="{{mv}}" wx:key="id">{{item.date}} {{item.kind_text}} {{item.qty}}<text wx:if="{{item.amount>0}}">（¥{{item.amount}}）</text> {{item.note}}<text class="red" bindtap="delMove" data-id="{{item.id}}"> 删除</text></view>
+        <view class="tip" wx:if="{{!mv.length}}">还没有进出记录。</view>
+      </block>
+    </view>
+  </block>
 
   <block wx:if="{{tab=='import'}}">
     <view class="form">

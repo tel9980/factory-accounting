@@ -471,6 +471,23 @@ CREATE TABLE IF NOT EXISTS wage_pays (
 );
 CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);
 
+-- 材料台账：进货 / 领用 / 结存（材料名与单位全部自定义，不预设行业）
+CREATE TABLE IF NOT EXISTS materials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE, unit TEXT DEFAULT '个',
+  min_qty REAL DEFAULT 0, note TEXT DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS material_moves (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  material TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'in',
+  date TEXT, month TEXT, qty REAL NOT NULL DEFAULT 0,
+  price REAL DEFAULT 0, amount REAL DEFAULT 0,
+  party TEXT DEFAULT '', order_id INTEGER DEFAULT 0,
+  note TEXT DEFAULT '', by TEXT DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mat_move_mat ON material_moves(material, month);
+
 -- 员工负责的客户：员工只看自己负责的那几家（老板在设置里可关）
 CREATE TABLE IF NOT EXISTS party_staff (
   party TEXT PRIMARY KEY,

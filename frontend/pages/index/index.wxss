@@ -450,3 +450,4 @@
 .qbtn .qb-d { font-size: 22rpx; opacity: .85; margin-top: 6rpx; }
 .page.big .qbtn .qb-t { font-size: 32rpx; }
 .page.big .qbtn .qb-d { font-size: 26rpx; }
+.red { color: #d93025; }

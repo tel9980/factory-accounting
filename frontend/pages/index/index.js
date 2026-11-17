@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    mat: null, mv: [], mv_open: '', mats_names: [], mt_name: '', mt_kind: 0, mt_qty: '', mt_price: '', mt_date: '', mt_note: '', mat_new: false, mat_unit: '个', mat_min: '',
     big: false,
     psv: null,
     fp: null, fr_party: '', fr_party_kw: '', fr_item: '', fr_price: '', fr_unit: '件', fr_note: '',
@@ -1624,7 +1625,7 @@ Page({
       this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadGroups(t || 'ar')
       this.loadLimits(); this.loadAdvances()
     } else if (t === 'expense') {
-      this.loadExpenses(); this.loadLoans(); this.loadSuggest()
+      this.loadExpenses(); this.loadLoans(); this.loadSuggest(); this.loadMaterials()
     } else if (t === 'history') {
       this.loadHistory()
     } else if (t === 'import') {
@@ -6682,6 +6683,88 @@ Page({
   },
   closeSupplyBook() { this.setData({ spb: null }) },
   // ===== 客户分给员工（员工只看自己负责的那几家） =====
+  // ===== 材料台账：进货 / 领用 / 还剩多少 =====
+  loadMaterials() {
+    this.req({ url: API_BASE + '/materials', silent: true, success: (res) => {
+      const d = res.data || {}
+      if (!d.ok) return
+      this.setData({ mat: d, mats_names: (d.rows || []).map((r) => r.name) })
+    } })
+  },
+  pickMat(e) {
+    const n = this.data.mats_names[Number(e.detail.value)] || ''
+    this.setData({ mt_name: n })
+    if (n) this.loadMoves(n)
+  },
+  onMtName(e) { this.setData({ mt_name: e.detail.value }) },
+  onMtKind(e) { this.setData({ mt_kind: Number(e.currentTarget.dataset.k) }) },
+  onMtQty(e) { this.setData({ mt_qty: e.detail.value }) },
+  onMtPrice(e) { this.setData({ mt_price: e.detail.value }) },
+  onMtDate(e) { this.setData({ mt_date: e.detail.value }) },
+  onMtNote(e) { this.setData({ mt_note: e.detail.value }) },
+  onMatUnit(e) { this.setData({ mat_unit: e.detail.value }) },
+  onMatMin(e) { this.setData({ mat_min: e.detail.value }) },
+  toggleMatNew() { this.setData({ mat_new: !this.data.mat_new }) },
+  addMaterial() {
+    const name = (this.data.mt_name || '').trim()
+    if (!name) return wx.showToast({ title: '先写材料名（钢板 / 焊丝 / 砂轮）', icon: 'none' })
+    this.req({ url: API_BASE + '/materials', method: 'POST', once: 'addMaterial',
+      data: { name, unit: this.data.mat_unit || '个', min_qty: Number(this.data.mat_min) || 0 },
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showModal({ title: '没存上', content: d.error || '稍后再试', showCancel: false })
+        wx.showToast({ title: '建好了', icon: 'success' })
+        this.setData({ mat_new: false, mat_unit: '个', mat_min: '' })
+        this.loadMaterials()
+      } })
+  },
+  addMove() {
+    const name = (this.data.mt_name || '').trim()
+    if (!name) return wx.showToast({ title: '先写材料名（如 钢板）', icon: 'none' })
+    const kind = this.data.mt_kind === 1 ? 'out' : 'in'
+    const qty = Number(this.data.mt_qty) || 0
+    if (!(qty > 0)) return wx.showToast({ title: '数量要大于 0', icon: 'none' })
+    const body = { material: name, kind, qty, price: Number(this.data.mt_price) || 0, date: this.data.mt_date || '', note: this.data.mt_note || '' }
+    this.req({ url: API_BASE + '/material-moves', method: 'POST', once: 'addMove', queue: true, data: body,
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) {
+          if (d.code === 'over_out') {
+            return wx.showModal({ title: '领多了', content: d.error, confirmText: '确实领这么多', cancelText: '我改一下',
+              success: (r) => { if (r.confirm) { body.allow_negative = true; this._postMove(body) } } })
+          }
+          return wx.showModal({ title: '没记上', content: d.error || '稍后再试', showCancel: false })
+        }
+        wx.showToast({ title: (kind === 'in' ? '进了 ' : '领了 ') + qty, icon: 'success' })
+        this.setData({ mt_qty: '', mt_note: '', mt_price: kind === 'in' ? this.data.mt_price : '' })
+        this.loadMaterials()
+        this.loadMoves(name)
+      } })
+  },
+  _postMove(body) {
+    this.req({ url: API_BASE + '/material-moves', method: 'POST', data: body,
+      success: (res) => { if ((res.data || {}).ok) { wx.showToast({ title: '记上了', icon: 'success' }); this.loadMaterials(); this.loadMoves(body.material) } } })
+  },
+  loadMoves(name) {
+    const n = name || this.data.mv_open || this.data.mt_name
+    if (!n) return
+    this.req({ url: API_BASE + '/material-moves?material=' + encodeURIComponent(n), silent: true, success: (res) => {
+      const d = res.data || {}
+      if (!d.ok) return
+      this.setData({ mv_open: n, mv: d.rows || [] })
+    } })
+  },
+  closeMoves() { this.setData({ mv_open: '', mv: [] }) },
+  pickMatRow(e) { const n = e.currentTarget.dataset.n; this.setData({ mt_name: n }); this.loadMoves(n) },
+  delMove(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({ title: '删掉这条？', content: '删掉后结存会跟着变。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/material-moves/' + id, method: 'DELETE', success: () => {
+        this.loadMaterials(); this.loadMoves(this.data.mv_open)
+      } })
+    } })
+  },
   loadPartyStaff() {
     this.req({ url: API_BASE + '/party-staff', success: (r) => {
       const d = r.data || {}

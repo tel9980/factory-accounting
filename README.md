@@ -913,11 +913,20 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **首页三个大按钮**：工作台最上面一行「＋ 记一笔应收 / 💰 收钱 / － 记一笔支出」，点一下直接跳到对应页（`quickGo` 复用 `setTab`，跳转后仍会自动滚到顶部、带出上次单价/供应商比价），少点两次。
    - 只动前端（`index.js`/`index.wxml`/`index.wxss`），后端无改动；静态检查 `missing/dups/unclosed/mismatch` 全空。
 
+258. ✅ **材料台账（进货 / 领用 / 还剩多少，材料名和单位你自己定）**：小厂最常见的现场事故是「做到一半发现料没了」，而这事在账上一直看不见——因为材料都塞在单子的成本里，没有一个地方记「还剩多少」。
+   - 完全自定义：你自己建材料名和单位（`钢板 / 吨`、`焊丝 / 盘`、`砂轮 / 片`），不预置清单、不限制行业。建的时候可以设「低于多少提醒我」。
+   - 两种记录：**进货**（可填单价，自动算金额）与**领用**（不填单价就按最近一次进货价估金额，只作参考）；都能填日期、备注（给哪张单用的）。领用超过账上结存会被拦住——`400 {code:'over_out'}`「「钢板」账上只剩 3.5，这次领 10 领多了。是之前进货没记？还是数量写错了？」，确认真要多记可以带 `allow_negative:true`。
+   - 汇总口径：每种材料给出累计进货、累计领用、**结存**、本月用量与金额、最近进价、是否低于下限，还按本月用量估算「还能用几天」。
+   - **口径说明（写清楚避免双算）**：材料的钱已经通过「单子上的成本」进了净利，所以这里的进货/领用**只做实物台账，不进利润、不进现金流**（真付了钱，照常在支出里记一笔）。这样既不会漏，也不会重复算。
+   - 接口：`GET /materials?month=`（台账 + `low` + 建议 + `text`）、`POST /materials`、`DELETE /materials/:id`（软停用）、`GET /material-moves?material=&month=`、`POST /material-moves`、`DELETE /material-moves/:id`；两张表 `materials`/`material_moves`（三库 + `schema.sql` 同步）。
+   - 前端：记账 → 支出页最下面「📦 材料台账」——材料列表（低于下限标红）、进货/领用切换、从已有里选、新建材料、点开看某材料的进出记录并可删。
+   - 实测：建「钢板/吨/低于 5 提醒」→ 进 5 吨×4200=21000 → 领 1.5 吨（金额按最近进价估 6300）→ 结存 3.5 报「低于下限 5，该进货了」；领 10 吨被拦；「焊丝/盘」边走单自动建；删一条流水后结存同步回去。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 386 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 392 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1027,6 +1036,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /loans`
 - `POST /loans/:id/reimburse`
 - `POST /loans/:id/return`
+
+**material-moves**（3）
+
+- `DELETE /material-moves/:id`
+- `GET /material-moves`
+- `POST /material-moves`
+
+**materials**（3）
+
+- `DELETE /materials/:id`
+- `GET /materials`
+- `POST /materials`
 
 **month-archive**（2）
 

@@ -770,6 +770,166 @@ app.delete('/attachment/:id', async (c) => {
 })
 
 // 工序停着没动：未交付的单多久没更新过工序
+// ===== 材料台账：进了多少、用了多少、还剩多少、该不该进货 =====
+async function matTable(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS materials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE, unit TEXT DEFAULT '个',
+    min_qty REAL DEFAULT 0, note TEXT DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS material_moves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    material TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'in',
+    date TEXT, month TEXT, qty REAL NOT NULL DEFAULT 0,
+    price REAL DEFAULT 0, amount REAL DEFAULT 0,
+    party TEXT DEFAULT '', order_id INTEGER DEFAULT 0,
+    note TEXT DEFAULT '', by TEXT DEFAULT '', created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_mat_move_mat ON material_moves(material, month)').run()
+}
+app.get('/materials', async (c) => {
+  const db = c.env.DB
+  await matTable(db)
+  const m = /^\d{4}-\d{2}$/.test(String(c.req.query('month') || '')) ? String(c.req.query('month')).slice(0, 7) : now().slice(0, 7)
+  const kinds = await db.prepare('SELECT name, unit, min_qty, note, active FROM materials ORDER BY name LIMIT 300').all().catch(() => ({ results: [] }))
+  const agg = await db.prepare(`SELECT material,
+      SUM(CASE WHEN kind='in' THEN qty ELSE 0 END) AS in_qty,
+      SUM(CASE WHEN kind='out' THEN qty ELSE 0 END) AS out_qty,
+      SUM(CASE WHEN kind='in' THEN amount ELSE 0 END) AS in_amt,
+      SUM(CASE WHEN kind='out' AND month=? THEN qty ELSE 0 END) AS month_out,
+      SUM(CASE WHEN kind='out' AND month=? THEN amount ELSE 0 END) AS month_amt,
+      MAX(date) AS last_day
+    FROM material_moves GROUP BY material`).bind(m, m).all().catch((e) => { noteFail(e, '材料汇总'); return { results: [] } })
+  const lastPrice = await db.prepare(`SELECT material, price, date FROM material_moves WHERE kind='in' AND price>0 ORDER BY date DESC, id DESC`).all().catch(() => ({ results: [] }))
+  const priceMap = {}
+  for (const r of (lastPrice.results || [])) if (!priceMap[r.material]) priceMap[r.material] = { price: round2(num(r.price)), date: r.date }
+  const aggMap = {}
+  for (const r of (agg.results || [])) aggMap[norm(r.material)] = r
+  const rows = ((kinds && kinds.results) || []).filter((k) => num(k.active) !== 0).map((k) => {
+    const a = aggMap[norm(k.name)] || {}
+    const inQty = num(a.in_qty)
+    const outQty = num(a.out_qty)
+    const left = round2(inQty - outQty)
+    const min = num(k.min_qty)
+    const lp = priceMap[k.name] || null
+    return {
+      name: k.name, unit: k.unit || '个', min_qty: min, note: k.note || '',
+      in_qty: round2(inQty), out_qty: round2(outQty), left,
+      month_out: round2(num(a.month_out)), month_amt: round2(num(a.month_amt)),
+      in_amt: round2(num(a.in_amt)), last_day: a.last_day || '',
+      last_price: lp ? lp.price : 0, last_price_day: lp ? lp.date : '',
+      low: min > 0 && left <= min, enough: min > 0 ? left > min : true,
+      // 按本月用量估还能用几天
+      days_left: num(a.month_out) > 0 ? Math.floor(left / (num(a.month_out) / 30)) : null
+    }
+  }).sort((x, y) => (y.low ? 1 : 0) - (x.low ? 1 : 0) || x.left - y.left)
+  const low = rows.filter((r) => r.low)
+  const advice = []
+  if (rows.length === 0) advice.push({ tone: 'info', text: '还没有建材料。常用的钢板、焊丝、砂轮，建一个名字和单位（吨/盘/片），以后进货和领用各记一笔，就不会出现「做到一半发现料没了」。' })
+  for (const r of low.slice(0, 3)) advice.push({ tone: 'bad', text: `${r.name}只剩 ${r.left} ${r.unit}（低于下限 ${r.min_qty}），该进货了${r.days_left != null && r.days_left <= 7 ? `，按现在的用法撑不到 ${Math.max(1, r.days_left)} 天` : ''}` })
+  const noMin = rows.filter((r) => !(r.min_qty > 0)).length
+  if (rows.length > 0 && noMin > 0) advice.push({ tone: 'info', text: `有 ${noMin} 种材料没设「低于多少提醒」，设了才会自动提醒` })
+  return c.json({
+    ok: true, month: m, count: rows.length, low_cnt: low.length,
+    low: low.slice(0, 20), rows,
+    text: rows.length === 0 ? '材料台账还是空的。' : `共 ${rows.length} 种材料${low.length ? `，${low.length} 种低于下限（${low.slice(0, 3).map((r) => r.name).join('、')}）` : '，都还够用'}。`,
+    advice, degraded: failBucket.slice()
+  })
+})
+app.post('/materials', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await matTable(db)
+  const name = String(body.name || '').trim()
+  if (!name) return c.json({ error: '材料名必填（钢板 / 焊丝 / 砂轮…）' }, 400)
+  const unit = String(body.unit || '个').trim() || '个'
+  const min = round2(num(body.min_qty))
+  const old = await db.prepare('SELECT id FROM materials WHERE name=?').bind(name).first()
+  if (old) {
+    await db.prepare('UPDATE materials SET unit=?, min_qty=?, note=?, active=1 WHERE id=?')
+      .bind(unit, min, String(body.note || '').trim(), old.id).run()
+    return c.json({ ok: true, updated: true })
+  }
+  await db.prepare('INSERT INTO materials (name, unit, min_qty, note, active, created_at) VALUES (?,?,?,?,1,?)')
+    .bind(name, unit, min, String(body.note || '').trim(), now()).run()
+  await logAudit(db, '新增材料', name, `${name}（${unit}）${min > 0 ? ' 低于 ' + min + ' 提醒' : ''}`, '', act(c))
+  return c.json({ ok: true })
+})
+app.delete('/materials/:id', async (c) => {
+  const db = c.env.DB
+  await matTable(db)
+  const id = c.req.param('id')
+  await db.prepare('UPDATE materials SET active=0 WHERE id=?').bind(id).run()
+  return c.json({ ok: true })
+})
+app.get('/material-moves', async (c) => {
+  const db = c.env.DB
+  await matTable(db)
+  const sp = new URL(c.req.url).searchParams
+  const mat = (sp.get('material') || '').trim()
+  const m = sp.get('month') || ''
+  const conds = []
+  const b = []
+  if (mat) { conds.push('material=?'); b.push(mat) }
+  if (/^\d{4}-\d{2}$/.test(m)) { conds.push('month=?'); b.push(m) }
+  const q = await db.prepare(`SELECT * FROM material_moves ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY date DESC, id DESC LIMIT 300`).bind(...b).all()
+  const rows = ((q && q.results) || []).map((r) => ({
+    id: r.id, material: r.material, kind: r.kind, kind_text: r.kind === 'out' ? '领用' : '进货',
+    date: String(r.date || '').slice(0, 10), qty: round2(num(r.qty)), price: round2(num(r.price)), amount: round2(num(r.amount)),
+    party: r.party || '', order_id: num(r.order_id), note: r.note || '', by: r.by || ''
+  }))
+  return c.json({ ok: true, count: rows.length, rows })
+})
+app.post('/material-moves', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await matTable(db)
+  const name = String(body.material || '').trim()
+  if (!name) return c.json({ error: '要写是哪种材料' }, 400)
+  const kind = String(body.kind || 'in') === 'out' ? 'out' : 'in'
+  const qty = round2(num(body.qty))
+  if (qty <= 0) return c.json({ error: '数量要大于 0' }, 400)
+  const price = round2(num(body.price))
+  const date = toIsoDate(body.date) || todayIso()
+  if (await isMonthLocked(db, date.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记' }, 403)
+  const mt = await db.prepare('SELECT * FROM materials WHERE name=?').bind(name).first()
+  if (!mt) {
+    await db.prepare('INSERT INTO materials (name, unit, min_qty, note, active, created_at) VALUES (?,?,0,\'\',1,?)')
+      .bind(name, String(body.unit || '个').trim() || '个', now()).run()
+  }
+  if (kind === 'out') {
+    const agg = await db.prepare("SELECT SUM(CASE WHEN kind='in' THEN qty ELSE -qty END) AS left FROM material_moves WHERE material=?").bind(name).first()
+    const left = round2(num(agg && agg.left))
+    if (body.allow_negative !== true && qty > left + 0.0001) {
+      return c.json({ error: `「${name}」账上只剩 ${left}，这次领 ${qty} 领多了。是之前进货没记？还是数量写错了？（真要记就勾「允许负数」）`, code: 'over_out', left }, 400)
+    }
+  }
+  // 领用时没写单价，就按最近一次进货价估个金额（只做参考，不进利润）
+  let unit = price
+  if (kind === 'out' && !(unit > 0)) {
+    const lp = await db.prepare("SELECT price FROM material_moves WHERE material=? AND kind='in' AND price>0 ORDER BY date DESC, id DESC LIMIT 1").bind(name).first()
+    unit = round2(num(lp && lp.price))
+  }
+  const amount = round2(unit > 0 ? unit * qty : num(body.amount))
+  await db.prepare(`INSERT INTO material_moves (material, kind, date, month, qty, price, amount, party, order_id, note, by, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(name, kind, date, date.slice(0, 7), qty, price, amount, String(body.party || '').trim(), num(body.order_id) || 0, String(body.note || '').trim(), act(c), now()).run()
+  await logAudit(db, kind === 'out' ? '材料领用' : '材料进货', name, `${name} ${kind === 'out' ? '领' : '进'} ${qty}${amount > 0 ? ' ¥' + amount : ''}`, '', act(c))
+  const agg2 = await db.prepare("SELECT SUM(CASE WHEN kind='in' THEN qty ELSE -qty END) AS left FROM material_moves WHERE material=?").bind(name).first()
+  return c.json({ ok: true, left: round2(num(agg2 && agg2.left)) })
+})
+app.delete('/material-moves/:id', async (c) => {
+  const db = c.env.DB
+  await matTable(db)
+  const id = c.req.param('id')
+  const r = await db.prepare('SELECT * FROM material_moves WHERE id=?').bind(id).first()
+  if (!r) return c.json({ error: '没有这条记录' }, 404)
+  if (await isMonthLocked(db, String(r.month || '').slice(0, 7))) return c.json({ error: '该月份已结账锁定' }, 403)
+  await db.prepare('DELETE FROM material_moves WHERE id=?').bind(id).run()
+  return c.json({ ok: true })
+})
+
 // ===== 合同 / 框架价：约定好的单价，下单低于它当场提醒 =====
 async function frameTable(db) {
   await db.prepare(`CREATE TABLE IF NOT EXISTS frame_prices (
