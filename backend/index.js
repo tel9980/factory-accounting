@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -6699,6 +6699,112 @@ app.get('/collect-list', async (c) => {
   const brk = out.filter((x) => x.promise_broken > 0)
   if (brk.length) advice.push({ tone: 'warn', text: `${brk.length} 家答应过付款没兑现（${brk.map((x) => x.party + ' ' + x.promise_broken + ' 次').slice(0, 3).join('、')}）：别只听日子，让他先付一部分。` })
   return c.json({ ok: true, type, total, count: list.length, list: out, ok_n: okN, hold_n: holdN, hold_amt: holdAmt, broken_n: brk.length, advice })
+})
+
+// ── 这周催款排班：按「金额 × 逾期 × 信用」排优先级，分到具体哪天打 ──
+const WD_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+const wdOf = (d) => WD_CN[new Date(String(d).slice(0, 10) + 'T00:00:00Z').getUTCDay()] || ''
+
+app.get('/collect-plan', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const isAr = type !== 'ap'
+  const span = Math.min(14, Math.max(1, Math.round(num(c.req.query('days')) || 7)))
+  const perDay = Math.min(6, Math.max(1, Math.round(num(c.req.query('per_day')) || 3)))
+  const tbl = isAr ? 'orders' : 'payables'
+  const col = isAr ? 'customer' : 'supplier'
+  const amt = isAr ? 'price' : 'amount'
+  const OPEN = `${amt}-COALESCE(paid,0)-COALESCE(written_off,0)`
+  const base = (await db.prepare(`SELECT ${col} AS party, COUNT(*) cnt, COALESCE(SUM(${OPEN}),0) left_amt,
+    MIN(substr(created_at,1,10)) oldest, MAX(CASE WHEN due_date IS NOT NULL THEN substr(due_date,1,10) END) due
+    FROM ${tbl} WHERE ${OPEN}>0.005 GROUP BY ${col}`).all().catch(() => ({ results: [] }))).results || []
+  const dun = {}
+  try {
+    for (const r of (await db.prepare('SELECT party, COUNT(*) n, MAX(created_at) last FROM dunning_log GROUP BY party').all()).results || []) {
+      dun[norm(r.party)] = { n: num(r.n), last: String(r.last || '').slice(0, 10) }
+    }
+  } catch (e) {}
+  const ackm = {}
+  try {
+    for (const a of (await db.prepare("SELECT party, ack, ack_at, note, resolved_at FROM statement_log WHERE type=? AND ack IN ('ok','doubt') ORDER BY id DESC LIMIT 400").bind(type).all()).results || []) {
+      const k = norm(a.party); if (!ackm[k]) ackm[k] = a
+    }
+  } catch (e) {}
+  const cb = await creditBook(db, type).catch(() => ({ rows: [] }))
+  const gmap = {}
+  for (const r of (cb.rows || [])) gmap[norm(r.party)] = r
+  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
+  const pmap = {}
+  for (const p of (pb.parties || [])) pmap[norm(p.party)] = p
+  const GW = { A: 0.9, B: 1, C: 1.15, D: 1.3, N: 1 }
+  const items = base.map((r) => {
+    const k = norm(r.party)
+    const left = round2(num(r.left_amt))
+    const days = daysSince(r.oldest)
+    const over = r.due ? Math.max(0, daysSince(r.due)) : 0
+    const g = gmap[k]
+    const grade = g ? g.grade : 'N'
+    const a = ackm[k]
+    const hold = !!(a && a.ack === 'doubt' && !String(a.resolved_at || ''))
+    const pm = pmap[k]
+    const today = todayIso()
+    const wait = pm && num(pm.pending) > 0 && String(pm.last_promise || '') >= today ? String(pm.last_promise).slice(0, 10) : ''
+    let score = left * (0.5 + Math.min(days, 180) / 60) * (1 + Math.min(over, 90) / 30) * (GW[grade] || 1)
+    if (hold) score *= 0.8
+    const dm = dun[k]
+    const toldDays = dm && dm.last ? daysSince(dm.last) : null
+    const cool = toldDays !== null && toldDays < 2
+    if (cool) score *= 0.5
+    let act = '发微信'
+    if (hold) act = '先核对数'
+    else if (wait) act = '等 ' + wait.slice(5, 10) + ' 那天'
+    else if (over > 30 || left >= 5000) act = '打电话'
+    const why = ['欠 ' + days + ' 天']
+    if (over > 0) why.push('逾期 ' + over + ' 天')
+    if (left >= 5000) why.push('金额大')
+    if (grade === 'C' || grade === 'D') why.push('信用 ' + grade)
+    if (hold) why.push('对账说对不上')
+    if (cool) why.push(toldDays === 0 ? '今天刚催过' : '刚催过（' + toldDays + ' 天前）')
+    return {
+      party: r.party || '', left, cnt: num(r.cnt), oldest_days: days, due: r.due || '', over,
+      grade, score: Math.round(score), act, why: why.join(' · '), hold, cool, wait,
+      told_days: toldDays, told_times: dm ? dm.n : 0
+    }
+  }).filter((x) => x.left > 0.005)
+  items.sort((a, b) => b.score - a.score)
+  const daysArr = []
+  for (let i = 0; i < span; i++) {
+    const d = addDaysIso(todayIso(), i)
+    const wd = wdOf(d)
+    daysArr.push({ date: d, wd, label: d.slice(5, 10), is_sun: wd === '周日', rows: [], amount: 0 })
+  }
+  const open = daysArr.filter((d) => !d.is_sun)
+  const pool = open.length ? open : daysArr
+  let rest = 0
+  for (const it of items) {
+    const use = it.cool ? pool.slice(2) : pool
+    const cand = use.filter((d) => d.rows.length < perDay)
+    if (!cand.length) { rest++; continue }
+    cand.sort((x, y) => x.amount - y.amount || x.rows.length - y.rows.length)
+    cand[0].rows.push(it)
+    cand[0].amount = round2(cand[0].amount + it.left)
+  }
+  const plan = pool.filter((d) => d.rows.length)
+  const planN = plan.reduce((a, d) => a + d.rows.length, 0)
+  const planAmt = round2(plan.reduce((a, d) => a + d.amount, 0))
+  const total = round2(items.reduce((a, x) => a + x.left, 0))
+  const first = items[0]
+  const text = !items.length
+    ? `没有还欠着钱的${isAr ? '客户' : '供应商'}，这周不用排催款。`
+    : `这 ${span} 天要催 ${planN} 家（共 ¥${planAmt}）：` + plan.map((d) => `${d.wd} ${d.rows.length} 家`).join('、') +
+      `。最急的是 ${first.party}（欠 ¥${first.left}，${first.why}）` + (() => {
+        const fd = plan.find((d) => d.rows.some((r) => r.party === first.party))
+        return fd ? `，排在${fd.wd}。` : '。'
+      })() + (rest ? ` 还有 ${rest} 家排不下，下周接着催。` : '')
+  return c.json({
+    ok: true, type, span, per_day: perDay, total, count: items.length,
+    plan, plan_n: planN, plan_amt: planAmt, rest, rows: items.slice(0, 40), text
+  })
 })
 
 // ── 没设账期的单位：主动列出来 + 一键补上（到期提醒靠账期）──

@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 323 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 324 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -937,7 +937,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（177）
+**其它（单个接口）**（178）
 
 - `GET /`
 - `GET /access-guide`
@@ -968,6 +968,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /close-precheck`
 - `POST /cloud-backup`
 - `GET /collect-list`
+- `GET /collect-plan`
 - `GET /compare`
 - `GET /contact-detail`
 - `GET /contacts`
@@ -1155,6 +1156,15 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 9 处 `termDue` 调用全部补上 `type`（建单 ar/ap、导入 ar/ap、老账搬家 ar/ap、对账补记/新建按 type），否则供应商会被按客户档位算；
    - 前端「单位 → 账期」区新增「⏱ 账期该收紧了」面板：逐家显示档位、`现在 X 天 → 建议 Y 天`、还欠多少、扣分原因，三个按钮「只收紧偏宽的（N 家）」「全部按信用调」「开启/关掉信用账期」；进「单位」tab 自动加载；
    - 实测：丙客户（A 档，设 60 天）→ 建议 45、`tighten`；甲客户（D 档，未设）→ 建议 7、`set`；乙客户（A 档，设 30）→ 建议 45、`loosen`；开启信用账期后给甲客户新单 → 到期日 = 开单日 +7 天，给新客户丁客户 → +30 天（N 档）；`apply mode=all` 后四家全部 `ok`，顺手补了 3 个到期日。
+
+224. ✅ **这周催款排班（谁先打、哪天打）**：以前 `/collect-list` 只给一个「谁最急」的排序，一周里怎么安排全靠自己——结果大额老账被新账挤到后面，或者同一家一周催三次。现在排成日历：
+   - `GET /collect-plan?type=ar|ap&days=7&per_day=3`：先算优先级 `score = 还欠 × (0.5 + min(欠款天数,180)/60) × (1 + min(逾期天数,90)/30) × 信用权重`（A 0.9 / B 1 / C 1.15 / D 1.3 / N 1），对账说「对不上」的 ×0.8（先核数别催钱）；
+   - **刚催过的往后排**：2 天内催过的 ×0.5，并且只从第 3 天起排，避免同一家天天被追；
+   - **分到具体哪天**：贪心分配——每天最多 `per_day` 家，每个客户往「当天金额最少」的那天空里塞，周日照排（小厂周日也干活）；排不下的给 `rest` 提示「下周接着催」；
+   - 每行给 `act` 建议动作：`先核对数`（对方说对不上）/ `等 11-20 那天`（有未到期的付款承诺）/ `打电话`（逾期 >30 天或 ≥5000）/ `发微信`（其余）；
+   - 返回 `plan[{date,wd,label,rows,amount}]`、`plan_n`/`plan_amt`/`rest`/`rows`（完整优先级）与人话结论「这 7 天要催 3 家（共 ¥13000）：周二 1 家、周四 1 家、周五 1 家。最急的是 甲客户（欠 ¥5000，欠 68 天 · 金额大 · 信用 D · 今天刚催过），排在周四。」；
+   - 前端应收/应付页各加「📅 这周催款排班」，面板按天分组（蓝色日期条 + 每家一行），点某家复制单条提醒，底部「整周排班复制」一次拷出整周安排；
+   - denyStaff 加 `/^\/collect-plan/`（含信用档位）；实测：3 家（5000/68 天/D 档、6000/10 天、2000/当天）→ 分到周二/周四/周五，甲客户因「今天刚催过」被挪到周四；再催一次丙客户 → 立刻挪到后半周；`per_day=1` 时也只排 3 家、`rest` 正确。
 
 222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
    - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；

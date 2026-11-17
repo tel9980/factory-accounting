@@ -392,6 +392,7 @@
       </view>
       <view class="frow">
         <button class="btn" size="mini" bindtap="openCollect" data-type="ar">📣 催款清单（谁欠得久先催谁）</button>
+        <button class="btn ghost" size="mini" bindtap="openCollectPlan" data-type="ar">📅 这周催款排班</button>
       </view>
       <view class="prev" wx:if="{{collect}}">
         <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
@@ -412,6 +413,21 @@
         </view>
         <view class="prev" wx:if="{{dun_log}}">
           <view class="prev-h">催款台账{{dun_log.type=='ap' ? '（应付）' : '（应收）'}}　共 {{dun_log.count}} 条　本月 {{dun_log.month_count}} 条{{dun_log.broken_count>0 ? '　失约 ' + dun_log.broken_count + ' 次' : ''}}</view>
+      <view class="prev" wx:if="{{cp}}">
+        <view class="prev-h">{{cp.text}}</view>
+        <block wx:for="{{cp.plan}}" wx:key="date">
+          <view class="cp-day">{{item.wd}} {{item.label}} · {{item.rows.length}} 家 · ¥{{item.amount}}</view>
+          <view class="prev-row" wx:for="{{item.rows}}" wx:for-item="r" wx:key="party" data-p="{{r.party}}" bindtap="copyPlanOne">
+            <text class="prev-t">{{r.party}}</text>
+            <text class="prev-n">¥{{r.left}} · {{r.act}}{{r.cool ? ' · 刚催过' : ''}}</text>
+            <text class="prev-n">{{r.why}}</text>
+          </view>
+        </block>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyPlanAll">📋 整周排班复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeCollectPlan">收起</button>
+        </view>
+      </view>
           <view class="prev-row" wx:for="{{dun_log.rows}}" wx:key="id">
             <text class="prev-t">{{item.date}} · {{item.party}}</text>
             <text class="prev-n">{{item.note || '已催'}}{{item.promise_date ? '　答应 ' + item.promise_date + ' 付' : ''}}{{item.pstate_text ? '（' + item.pstate_text + '）' : ''}}</text>
@@ -577,6 +593,7 @@
       </view>
       <view class="frow">
         <button class="btn" size="mini" bindtap="openCollect" data-type="ap">💸 要付清单（该安排付款了）</button>
+        <button class="btn ghost" size="mini" bindtap="openCollectPlan" data-type="ap">📅 这周付款排班</button>
       </view>
       <view class="prev" wx:if="{{collect}}">
         <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>

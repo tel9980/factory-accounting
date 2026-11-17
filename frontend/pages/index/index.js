@@ -141,7 +141,7 @@ Page({
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
     hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
-    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, tg: null, tadv: null, term_auto: false,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, cp: null, tg: null, tadv: null, term_auto: false,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
@@ -785,6 +785,39 @@ Page({
     if (r.bad.length) { lines.push('', '拖最久的：'); r.bad.forEach((p) => lines.push('· ' + p.party + ' ' + p.left + ' 元，最久 ' + p.worst + ' 天')) }
     lines.push('', r.level)
     wx.setClipboardData({ data: lines.join('\n') })
+  },
+  // 这周催款排班：按「金额 × 逾期 × 信用」排好，分到具体哪天打
+  openCollectPlan(e) {
+    const type = (e && e.currentTarget && e.currentTarget.dataset.type) || 'ar'
+    wx.showLoading({ title: '排班…' })
+    this.req({
+      url: API_BASE + '/collect-plan?type=' + type + '&days=7&per_day=3',
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        this.setData({ cp: Object.assign({}, d, { type_text: d.type === 'ap' ? '要付' : '要收' }) })
+        wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeCollectPlan() { this.setData({ cp: null }) },
+  copyPlanAll() {
+    const p = this.data.cp
+    if (!p) return
+    const lines = ['【' + p.type_text + '排班】这 ' + p.span + ' 天 ' + p.plan_n + ' 家 · 共 ¥' + p.plan_amt]
+    ;(p.plan || []).forEach((d) => {
+      lines.push('', d.wd + ' ' + d.label + '（' + d.rows.length + ' 家 ¥' + d.amount + '）')
+      d.rows.forEach((r) => lines.push('  ' + r.party + ' ¥' + r.left + ' · ' + r.act + ' · ' + r.why))
+    })
+    wx.setClipboardData({ data: lines.join('\n') })
+  },
+  copyPlanOne(e) {
+    const p = this.data.cp
+    if (!p) return
+    const name = e.currentTarget.dataset.p
+    const r = ((p.plan || []).reduce((a, d) => a.concat(d.rows), [])).find((x) => x.party === name)
+    if (r) wx.setClipboardData({ data: r.party + '　欠 ¥' + r.left + '（' + r.why + '）　建议：' + r.act })
   },
   closeCollect() { this.setData({ collect: null }) },
   // 月度报表包：每月 1 号自动生成，一个 Excel 装全套
