@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    big: false,
     psv: null,
     fp: null, fr_party: '', fr_party_kw: '', fr_item: '', fr_price: '', fr_unit: '件', fr_note: '',
     os: null, os_party: '', os_item: '', os_qty: '', os_price: '', os_due: '',
@@ -481,6 +482,9 @@ Page({
   },
 
   onShow() {
+    // 大字号模式：老板年纪大看着费劲时用（设置里开关，存本机）
+    const bigOn = wx.getStorageSync('big_font') === '1'
+    if (bigOn !== !!this.data.big) this.setData({ big: bigOn })
     // 第一次进来沿用上次记支出用的分类，少点一次
     if (!this._catInit) {
       this._catInit = true
@@ -2007,6 +2011,11 @@ Page({
     this.setData({ tab: t, group: g })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     this.enterTab(t)
+  },
+  // 首页三个大按钮：直接跳过去，少点两次
+  quickGo(e) {
+    const t = e.currentTarget.dataset.t
+    if (t) this.setTab({ currentTarget: { dataset: { t } } })
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
@@ -4170,6 +4179,12 @@ Page({
     this.setData({ spm: Object.assign({}, d, { rows }) })
   },
   toggleSelfOnly() { this.setData({ spm_self: !this.data.spm_self }) },
+  toggleBigFont() {
+    const v = !this.data.big
+    wx.setStorageSync('big_font', v ? '1' : '0')
+    this.setData({ big: v })
+    wx.showToast({ title: v ? '字放大了' : '恢复默认字号', icon: 'none' })
+  },
   toggleScopeOwn() { this.setData({ spm_scope: this.data.spm_scope === 'own' ? 'all' : 'own' }) },
   saveStaffPerms() {
     const d = this.data.spm

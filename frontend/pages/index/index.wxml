@@ -1,4 +1,4 @@
-<view class="page">
+<view class="page {{big?'big':''}}">
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
@@ -53,6 +53,11 @@
   </view>
 
   <block wx:if="{{tab=='home'}}">
+    <view class="qgrid">
+      <view class="qbtn blue" bindtap="quickGo" data-t="ar"><view class="qb-t">＋ 记一笔应收</view><view class="qb-d">客户又给活了</view></view>
+      <view class="qbtn green" bindtap="quickGo" data-t="ar"><view class="qb-t">💰 收钱</view><view class="qb-d">在应收那行点收款</view></view>
+      <view class="qbtn orange" bindtap="quickGo" data-t="expense"><view class="qb-t">－ 记一笔支出</view><view class="qb-d">当场花的钱</view></view>
+    </view>
     <view class="form">
       <input class="inp qinp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
       <view class="qrow">
@@ -1606,6 +1611,10 @@
         </view>
         <view class="tip" wx:if="{{!sad.rows.length}}">最近 7 天没有员工操作。</view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStaffAct">收起</button></view>
+      </view>
+      <view class="item" bindtap="toggleBigFont">
+        <view class="row1"><text class="nm">{{big?'🔠 大字号（已开）':'🔠 大字号（字太小看不清就开）'}}</text><text class="amt">{{big?'开着':'关着'}}</text></view>
+        <view class="row2">开了以后全站字放大一号、输入框变高，戴着老花镜也能看清。</view>
       </view>
       <view wx:if="{{role!='staff'}}">
         <button class="btn ghost" size="mini" bindtap="loadStaffPerms">👥 员工权限（谁能看哪块）</button>

@@ -410,3 +410,43 @@
 
 /* 信用档位小标签 */
 .tag{display:inline-block;min-width:26rpx;padding:0 8rpx;margin-left:8rpx;border-radius:6rpx;background:#eef3ff;color:#1f6feb;font-size:22rpx;text-align:center}
+.cp-day { margin: 10rpx 0 4rpx; padding: 6rpx 10rpx; background: #eef4ff; border-left: 6rpx solid #1f6feb; font-size: 26rpx; color: #0a4b8c; font-weight: 600; }
+
+.yrv-h { font-size: 17px; font-weight: 700; color: #0a4b8c; margin: 8px 0 6px; }
+
+.qrow { display: flex; align-items: flex-start; justify-content: space-between; width: 100%; }
+.qmain { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.qbtn { display: flex; gap: 12px; align-items: center; padding-left: 8px; }
+.qbtn .lnk { color: #1f6feb; font-size: 13px; }
+.tier { display: flex; justify-content: space-between; align-items: center; }
+.tier-tap { color: #999; font-size: 11px; margin-left: 6px; }
+
+/* ===== 大字号模式（45 岁以上看着费劲就用它） ===== */
+.page.big .nm { font-size: 34rpx; }
+.page.big .amt { font-size: 36rpx; }
+.page.big .row2 { font-size: 30rpx; color: #666; }
+.page.big .tip { font-size: 28rpx; color: #888; }
+.page.big .inp { font-size: 32rpx; padding: 18rpx; }
+.page.big .picker { font-size: 32rpx; padding: 18rpx 20rpx; }
+.page.big .ta { font-size: 32rpx; height: 300rpx; }
+.page.big .btns button { font-size: 30rpx; }
+.page.big .btn { padding: 18rpx 24rpx; }
+.page.big .mtab { font-size: 32rpx; }
+.page.big .sub { font-size: 30rpx; }
+.page.big .sun { font-size: 34rpx; }
+.page.big .sul { font-size: 26rpx; }
+.page.big .stat .num { font-size: 40rpx; }
+.page.big .stat .label { font-size: 26rpx; }
+.page.big .card .num { font-size: 46rpx; }
+.page.big .ct { font-size: 32rpx; }
+
+/* ===== 首页三个大按钮（常用动作一步到位） ===== */
+.qgrid { display: flex; gap: 12rpx; margin-bottom: 12rpx; }
+.qbtn { flex: 1; border-radius: 14rpx; padding: 20rpx 12rpx; text-align: center; color: #fff; }
+.qbtn.blue { background: #3d7bf5; }
+.qbtn.green { background: #2a9d57; }
+.qbtn.orange { background: #e0711e; }
+.qbtn .qb-t { font-size: 28rpx; font-weight: 700; }
+.qbtn .qb-d { font-size: 22rpx; opacity: .85; margin-top: 6rpx; }
+.page.big .qbtn .qb-t { font-size: 32rpx; }
+.page.big .qbtn .qb-d { font-size: 26rpx; }
