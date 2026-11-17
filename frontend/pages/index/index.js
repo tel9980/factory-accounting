@@ -69,6 +69,7 @@ const FEATS = [
 
 Page({
   data: {
+    qt: null, qt_n: 0, qh: null, qt_party: '', qt_item: '', qt_cost: '', qt_margin: '', qt_qty: '', qt_price: '', qt_days: '',
     yrv: null, yrv_year: '',
     mg: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
     tab: 'home', group: 'home',
@@ -724,6 +725,124 @@ Page({
     this.drawStatementImage({ text: lines.join('\n') }, true)
   },
   // 到期表：哪张单哪天到期
+  onQtParty(e) { this.setData({ qt_party: e.detail.value }) },
+  onQtItem(e) { this.setData({ qt_item: e.detail.value }) },
+  onQtCost(e) { this.setData({ qt_cost: e.detail.value }) },
+  onQtMargin(e) { this.setData({ qt_margin: e.detail.value }) },
+  onQtQty(e) { this.setData({ qt_qty: e.detail.value }) },
+  onQtPrice(e) { this.setData({ qt_price: e.detail.value }) },
+  onQtDays(e) { this.setData({ qt_days: e.detail.value }) },
+  // 报多少合适：按成本+想赚的毛利算，再对照这家以前给过什么价
+  quoteHint() {
+    const party = String(this.data.qt_party || '').trim()
+    const cost = Number(this.data.qt_cost) || 0
+    if (!party) return wx.showToast({ title: '先填报给谁', icon: 'none' })
+    if (!cost) return wx.showToast({ title: '填一下成本，才好算价', icon: 'none' })
+    this.req({
+      url: API_BASE + '/quote-hint?party=' + encodeURIComponent(party) + '&item=' + encodeURIComponent(this.data.qt_item || '') + '&cost=' + cost + '&margin=' + (Number(this.data.qt_margin) || 15),
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '算不出来', icon: 'none' })
+        this.setData({ qh: d })
+        if (!Number(this.data.qt_price)) {
+          const t = (d.tiers || []).filter((x) => x.k === 'target')[0]
+          if (t) this.setData({ qt_price: String(t.price) })
+        }
+      },
+      fail: () => wx.showToast({ title: '算不出来，下拉刷新再试', icon: 'none' })
+    })
+  },
+  pickTier(e) {
+    const p = e.currentTarget.dataset.p
+    if (p) this.setData({ qt_price: String(p) })
+  },
+  saveQuote() {
+    const party = String(this.data.qt_party || '').trim()
+    if (!party) return wx.showToast({ title: '先填报给谁', icon: 'none' })
+    const body = {
+      party: party, item: this.data.qt_item || '', qty: Number(this.data.qt_qty) || 1,
+      cost: Number(this.data.qt_cost) || 0, price: Number(this.data.qt_price) || 0,
+      margin: Number(this.data.qt_margin) || 15, valid_days: Number(this.data.qt_days) || 15
+    }
+    if (!body.price && !body.cost) return wx.showToast({ title: '单价和成本至少填一个', icon: 'none' })
+    this.req({
+      url: API_BASE + '/quotes', method: 'POST', data: body,
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        wx.showToast({ title: '报价单 ' + (d.no || '') + ' 存好了', icon: 'none' })
+        this.setData({ qt_price: '' })
+        this.loadQuotes()
+      },
+      fail: () => wx.showToast({ title: '没存上，再点一次', icon: 'none' })
+    })
+  },
+  loadQuotes() {
+    this.req({
+      url: API_BASE + '/quotes',
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ qt: d, qt_n: d.count || 0 })
+      },
+      fail: () => wx.showToast({ title: '拿不到报价单', icon: 'none' })
+    })
+  },
+  sendQuote(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({
+      url: API_BASE + '/quotes/' + id + '/send', method: 'POST', data: {},
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        wx.setClipboardData({
+          data: d.text || '',
+          success: () => wx.showModal({
+            title: '话术已复制',
+            content: '粘到微信发给对方就行。里面那个链接他点开就能看报价、直接点「可以」，你这边会自动变成「客户接受了」。',
+            showCancel: false
+          })
+        })
+        this.loadQuotes()
+      },
+      fail: () => wx.showToast({ title: '发不出去，再点一次', icon: 'none' })
+    })
+  },
+  quoteToOrder(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '转成应收单？',
+      content: '会按报价的金额、成本建一张单子，到期日按这家的账期算。',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/quotes/' + id + '/to-order', method: 'POST', data: {},
+          success: (res) => {
+            const d = res.data || {}
+            if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+            wx.showToast({ title: '已转成单子 ¥' + d.amount, icon: 'none' })
+            this.loadQuotes(); this.refresh()
+          },
+          fail: () => wx.showToast({ title: '转不了，再点一次', icon: 'none' })
+        })
+      }
+    })
+  },
+  delQuote(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删掉这份草稿？',
+      content: '发出去的报价会留着当记录，草稿删了就没了。',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/quotes/' + id, method: 'DELETE',
+          success: () => { this.loadQuotes() },
+          fail: () => wx.showToast({ title: '删不掉，再点一次', icon: 'none' })
+        })
+      }
+    })
+  },
   openDue(e) {
     const t = (e && e.currentTarget && e.currentTarget.dataset.type) || 'ar'
     wx.showLoading({ title: '算到期…' })

@@ -755,11 +755,23 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 前端报表页「📄 这一年」面板：年份输入 → 大标题、12 个月条、逐句话、客户排行，「复制这段」发微信、「打印一页纸」出 PDF；
    - 实测：空年份只说「还没记过账，先把单子和钱记上」，不硬凑故事；5 单造数 → 净利 15700（净利率 49.06%）、最大一单 兴旺五金 切割 12000、坏账 500 + 少赚 250、集中度 62.5% 提示全部正确；打印页 `@page size: A4`、柱状图、九句话、签字栏齐全。
 
+230. ✅ **报价单（先报个价，客户点头再转成单子）**：以前只有「历史成交价」（价格表），没有「给客户报个价」的东西——报价靠脑子记、靠微信翻聊天记录，报低了白干、报高了丢单，事后也说不清「报过多少、对方为啥没做」。现在从报价到接单串起来了：
+   - 新表 `quotes`（三库 + `backend/schema.sql`）：`no/party/item/qty/price/cost/margin/note/valid_days/status/token/order_id/sent_at/decided_at`，状态 `draft 草稿 → sent 已发出 → accepted 客户接受了 / rejected 没接受 / expired 过期了 → ordered 已转成单子`；
+   - `GET /quote-hint?party=&item=&cost=&margin=`：按成本 + 想赚的毛利算三档价（**保本价 / 目标价 / 多赚点**），并对照这家的历史成交价给提示——「这家以前做过 2 次「切割」，均价 3100 元，上次 3200 元」「按成本算要报到 X 元，比以前均价高不少，对方可能会觉得涨了」「以前那个价几乎不赚钱（毛利 8%），这次该提一提」；
+   - `POST /quotes`（单价和成本只填一个也行，另一个自动算）、`GET /quotes`（含 `by` 状态分布、**接受率**、还在谈的金额）、`GET /quotes/:id`、`PATCH`（只有草稿能改）、`DELETE`（只有草稿能删，发出去的留作记录）；
+   - `POST /quotes/:id/send`：生成免口令客户页 + 现成微信话术（「兴旺五金，切割的报价：4000 元（2 × 2000 元，含税不含运费），报价 10 天内有效。您点开看一眼…」）；
+   - `GET /quote-print?id=&t=`：A4 报价单（厂名电话地址、编号、有效期到哪天、项目/数量/单价/金额、说明、签字栏），底部两个大按钮「✓ 这个价可以，按这个做」「✗ 价不合适，再谈谈」，**客户点一下就直接回写状态**（`POST /quote-ack`，签名校验，伪造 403）；
+   - `POST /quotes/:id/to-order`：客户接受后一键转成应收单（金额 = 单价 × 数量、成本一起带过去、到期日按账期算、经手人写「报价转单」），转完状态变「已转成单子」并记 `order_id`，**同一份报价不能转两次**（409）；
+   - 过期判定：`sent_at + valid_days` 早于今天 → 自动算「过期了」（不写库，读时算），过期的报价不能转单；`days_left` 给前端显示「还有 N 天」；
+   - 员工口令看不到报价与毛利（`/quotes`、`/quote-hint` 返回 403，实测）；
+   - 前端应收页「💬 报价单」面板：填客户/产品/成本/想赚% → 「算个价」出三档（点一下就用那个价）→ 「存成报价单」→ 列表里「发出去」（复制话术+客户页链接）/「转成单子」/「删草稿」；
+   - 实测：兴旺五金切割（历史 3000/3200）→ 成本 1600、想赚 20% → 目标价 2000、提示「均价 3100，上次 3200」；发出去 → 客户页 200（`size: A4`、两个按钮齐全）→ 点接受 → 状态 `accepted` → 转单 → 应收单 4000/成本 3200/经手人「报价转单」、报价状态 `ordered`；伪造签名 403；过期报价转单被拦 400。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 332 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 342 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -922,6 +934,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /profiles`
 - `POST /profiles`
 
+**quotes**（7）
+
+- `DELETE /quotes/:id`
+- `GET /quotes`
+- `GET /quotes/:id`
+- `PATCH /quotes/:id`
+- `POST /quotes`
+- `POST /quotes/:id/send`
+- `POST /quotes/:id/to-order`
+
 **recon-log**（4）
 
 - `DELETE /recon-log`
@@ -1042,7 +1064,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（186）
+**其它（单个接口）**（189）
 
 - `GET /`
 - `GET /access-guide`
@@ -1160,6 +1182,9 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /profit-compare`
 - `GET /promise-book`
 - `POST /quick`
+- `POST /quote-ack`
+- `GET /quote-hint`
+- `GET /quote-print`
 - `GET /receipt-text`
 - `POST /receive-batch`
 - `GET /recon-board`

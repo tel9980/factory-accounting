@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -459,7 +459,7 @@ app.use('*', async (c, next) => {
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
-      || (/^\/(tax-pack|year-close|year-review)/.test(path))
+      || (/^\/(tax-pack|year-close|year-review|quotes?|quote-hint)/.test(path))
       || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
       || (/^\/bank-flows\/\d+\/match$/.test(path))
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
@@ -5071,6 +5071,269 @@ async function orderChecks(db, o) {
   }
   return out
 }
+
+// ===== 报价单：先报个价，客户点头再转成单子 =====
+const Q_ST = { draft: '草稿', sent: '已发出', accepted: '客户接受了', rejected: '客户没接受', expired: '过期了', ordered: '已转成单子' }
+function qPrice(cost, margin) {
+  const c = num(cost), m = Math.min(95, Math.max(0, num(margin)))
+  return round2(c / (1 - m / 100))
+}
+function qMargin(price, cost) {
+  const p = num(price), c = num(cost)
+  return p > 0 ? round2((p - c) / p * 100) : 0
+}
+const qAddDays = (iso, n) => new Date(dateNum(iso) + n * 86400000).toISOString().slice(0, 10)
+function qDaysLeft(r) {
+  const base = String(r.sent_at || r.created_at || '').slice(0, 10)
+  if (!base) return 0
+  const vd = num(r.valid_days) || 15
+  const exp = qAddDays(base, vd)
+  return Math.round((dateNum(exp) - dateNum(todayIso())) / 86400000)
+}
+function qState(r) {
+  const st = String(r.status || 'draft')
+  if (st === 'sent' && qDaysLeft(r) < 0) return 'expired'
+  return st
+}
+function qSlim(r) {
+  const st = qState(r)
+  return {
+    id: r.id, no: r.no, party: r.party, item: r.item, qty: num(r.qty) || 1,
+    price: round2(num(r.price)), cost: round2(num(r.cost)), margin: qMargin(r.price, r.cost),
+    amount: round2(num(r.price) * (num(r.qty) || 1)),
+    note: r.note || '', valid_days: num(r.valid_days) || 15, status: st, status_text: Q_ST[st] || st,
+    days_left: qDaysLeft(r), created_at: String(r.created_at || '').slice(0, 10),
+    sent_at: String(r.sent_at || '').slice(0, 10), decided_at: String(r.decided_at || '').slice(0, 10),
+    order_id: num(r.order_id) || 0
+  }
+}
+async function qGet(db, id) {
+  const r = await db.prepare('SELECT * FROM quotes WHERE id=?').bind(num(id)).first()
+  return r || null
+}
+
+// 报多少合适：按成本 + 想赚的毛利算，再对照这家以前给过什么价
+app.get('/quote-hint', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const item = String(c.req.query('item') || '').trim()
+  const cost = num(c.req.query('cost'))
+  const margin = num(c.req.query('margin')) || 15
+  let hist = { cnt: 0 }
+  if (party) {
+    const h = await db.prepare(`SELECT COUNT(*) cnt, MAX(price) mx, MIN(price) mn, AVG(price) av,
+      (SELECT price FROM orders WHERE customer=? AND (?='' OR item_name=?) ORDER BY id DESC LIMIT 1) last_price,
+      (SELECT COALESCE(cost,0) FROM orders WHERE customer=? AND (?='' OR item_name=?) ORDER BY id DESC LIMIT 1) last_cost,
+      (SELECT substr(created_at,1,10) FROM orders WHERE customer=? AND (?='' OR item_name=?) ORDER BY id DESC LIMIT 1) last_date
+      FROM orders WHERE customer=? AND (?='' OR item_name=?)`).bind(party, item, item, party, item, item, party, item, item, party, item, item).first().catch((e) => { noteFail(e, '报价参考'); return null })
+    if (h && num(h.cnt) > 0) hist = { cnt: num(h.cnt), max: round2(num(h.mx)), min: round2(num(h.mn)), avg: round2(num(h.av)), last_price: round2(num(h.last_price)), last_cost: round2(num(h.last_cost)), last_date: String(h.last_date || '').slice(0, 10) }
+  }
+  const tiers = []
+  if (cost > 0) {
+    tiers.push({ k: 'floor', label: '保本价（一分不赚）', price: round2(cost), profit: 0, margin: 0 })
+    tiers.push({ k: 'target', label: `目标价（赚 ${margin}%）`, price: qPrice(cost, margin), profit: round2(qPrice(cost, margin) - cost), margin: round2(margin) })
+    tiers.push({ k: 'fat', label: `多赚点（赚 ${Math.min(95, margin + 10)}%）`, price: qPrice(cost, margin + 10), profit: round2(qPrice(cost, margin + 10) - cost), margin: round2(Math.min(95, margin + 10)) })
+  }
+  const tips = []
+  if (hist.cnt && hist.avg) {
+    tips.push(`这家以前做过 ${hist.cnt} 次${item ? '「' + item + '」' : ''}，均价 ${hist.avg} 元，上次 ${hist.last_price} 元（${hist.last_date}）`)
+    const t = qPrice(cost, margin)
+    if (cost > 0 && t > hist.avg * 1.2) tips.push(`按成本算要报到 ${t} 元，比以前的均价高不少，对方可能会觉得涨了`)
+    if (cost > 0 && hist.avg > 0 && (hist.avg - cost) / hist.avg * 100 < 10) tips.push(`以前那个价几乎不赚钱（毛利 ${round2((hist.avg - cost) / hist.avg * 100)}%），这次该提一提`)
+  } else if (cost > 0) {
+    tips.push('这家第一次做这个活，没有历史价参考，按成本加毛利报就行')
+  }
+  return c.json({
+    ok: true, party, item, cost: round2(cost), margin: round2(margin), tiers, hist,
+    suggest: cost > 0 ? qPrice(cost, margin) : (hist.last_price || 0), tips,
+    text: [party ? `给 ${party} 报价${item ? '「' + item + '」' : ''}：` : '报价参考：']
+      .concat(tiers.map((t) => `${t.label} ${t.price} 元`)).concat(tips).join('\n')
+  })
+})
+
+app.post('/quotes', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const party = String(b.party || '').trim()
+  if (!party) return c.json({ error: '要写清楚报给谁' }, 400)
+  const cost = round2(num(b.cost))
+  let price = round2(num(b.price))
+  const margin = num(b.margin)
+  if (price <= 0 && cost > 0) price = qPrice(cost, margin || 15)
+  if (price <= 0) return c.json({ error: '单价要大于 0（填成本 + 想赚多少也行）' }, 400)
+  const created = now()
+  const r = await db.prepare('INSERT INTO quotes (party,item,qty,price,cost,margin,note,valid_days,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .bind(party, String(b.item || '').slice(0, 60), num(b.qty) || 1, price, cost, qMargin(price, cost), String(b.note || '').slice(0, 200), Math.min(180, Math.max(1, num(b.valid_days) || 15)), 'draft', created).run()
+  const id = num(r.meta && r.meta.last_row_id)
+  const no = 'Q' + created.slice(2, 10).replace(/-/g, '') + '-' + String(id).padStart(3, '0')
+  await db.prepare('UPDATE quotes SET no=? WHERE id=?').bind(no, id).run()
+  await logAudit(db, '新增报价', party, `${party} ${b.item || ''} ¥${price}`, '', act(c))
+  return c.json({ ok: true, id, no, price, margin: qMargin(price, cost) })
+})
+
+app.get('/quotes', async (c) => {
+  const db = c.env.DB
+  const st = String(c.req.query('status') || '')
+  const party = String(c.req.query('party') || '').trim()
+  const lim = Math.min(300, Math.max(1, Math.round(Number(c.req.query('limit')) || 100)))
+  let sql = 'SELECT * FROM quotes WHERE 1=1'
+  const binds = []
+  if (party) { sql += ' AND party=?'; binds.push(party) }
+  sql += ' ORDER BY id DESC LIMIT 300'
+  const rows = ((await db.prepare(sql).bind(...binds).all().catch((e) => { noteFail(e, '报价列表'); return { results: [] } })).results || []).map(qSlim)
+  const all = rows
+  const by = { draft: 0, sent: 0, accepted: 0, rejected: 0, expired: 0, ordered: 0 }
+  for (const r of all) by[r.status] = (by[r.status] || 0) + 1
+  const shown = st ? all.filter((r) => r.status === st) : all
+  const sentN = by.sent + by.accepted + by.rejected + by.expired + by.ordered
+  const okN = by.accepted + by.ordered
+  return c.json({
+    ok: true, status: st, party, count: shown.length, rows: shown.slice(0, lim),
+    by, sent_n: sentN, accepted_n: okN, rate: sentN ? Math.round(okN * 100 / sentN) : 0,
+    amount_open: round2(shown.filter((r) => r.status === 'sent' || r.status === 'accepted').reduce((a, r) => a + r.amount, 0)),
+    text: !all.length ? '还没有报价单。先给客户报个价，他点头了再转成单子，省得白干。'
+      : `共 ${all.length} 份报价：草稿 ${by.draft}、等回复 ${by.sent}、接受 ${okN}、没接受 ${by.rejected}、过期 ${by.expired}${sentN ? `（接受率 ${Math.round(okN * 100 / sentN)}%）` : ''}`
+  })
+})
+
+app.get('/quotes/:id', async (c) => {
+  const db = c.env.DB
+  const r = await qGet(db, c.req.param('id'))
+  if (!r) return c.json({ error: '报价单不存在' }, 404)
+  return c.json({ ok: true, quote: qSlim(r) })
+})
+
+app.patch('/quotes/:id', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const r = await qGet(db, id)
+  if (!r) return c.json({ error: '报价单不存在' }, 404)
+  if (qState(r) !== 'draft') return c.json({ error: '已经发出去的报价不能改，另开一份' }, 400)
+  const b = await c.req.json().catch(() => ({}))
+  const price = b.price === undefined ? round2(num(r.price)) : round2(num(b.price))
+  const cost = b.cost === undefined ? round2(num(r.cost)) : round2(num(b.cost))
+  await db.prepare('UPDATE quotes SET party=?,item=?,qty=?,price=?,cost=?,margin=?,note=?,valid_days=? WHERE id=?')
+    .bind(b.party === undefined ? r.party : String(b.party).trim(), b.item === undefined ? r.item : String(b.item).slice(0, 60),
+      b.qty === undefined ? num(r.qty) || 1 : (num(b.qty) || 1), price, cost, qMargin(price, cost),
+      b.note === undefined ? r.note : String(b.note).slice(0, 200),
+      b.valid_days === undefined ? num(r.valid_days) || 15 : Math.min(180, Math.max(1, num(b.valid_days))), id).run()
+  return c.json({ ok: true })
+})
+
+app.delete('/quotes/:id', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const r = await qGet(db, id)
+  if (!r) return c.json({ error: '报价单不存在' }, 404)
+  if (qState(r) !== 'draft') return c.json({ error: '发出去的报价留着当记录，不能删' }, 400)
+  await db.prepare('DELETE FROM quotes WHERE id=?').bind(id).run()
+  return c.json({ ok: true })
+})
+
+// 发出去：给一个免口令的客户页 + 一段现成的微信话术
+app.post('/quotes/:id/send', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const id = num(c.req.param('id'))
+  const r = await qGet(db, id)
+  if (!r) return c.json({ error: '报价单不存在' }, 404)
+  const saved = await getKey(mainDb)
+  const t = saved ? await sigOf(saved, 'quote', 'q:' + id) : ''
+  const at = now()
+  await db.prepare("UPDATE quotes SET status='sent', token=?, sent_at=? WHERE id=?").bind(t, at, id).run()
+  const base = c.req.url.split('/quotes/')[0]
+  const q = qSlim(Object.assign({}, r, { status: 'sent', sent_at: at }))
+  const text = [`${q.party}，${q.item || '这个活'}的报价：${q.amount} 元（${q.qty > 1 ? q.qty + ' × ' + q.price + ' 元，' : ''}含税不含运费），报价 ${q.valid_days} 天内有效。`,
+    '您点开看一眼，行就说一声，我这边排产：' + (t ? `${base}/quote-print?id=${id}&t=${t}` : '（链接生成失败，请在电脑上重试）')].join('\n')
+  await logAudit(db, '发报价', q.party, `${q.no || ''} ${q.party} ¥${q.amount}`, '', act(c))
+  return c.json({ ok: true, url: t ? `${base}/quote-print?id=${id}&t=${t}` : '', text, quote: q })
+})
+
+app.get('/quote-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const id = num(c.req.query('id'))
+  const want = String(c.req.query('t') || '')
+  const good = saved && id ? await sigOf(saved, 'quote', 'q:' + id) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请让对方重新发一次报价。</h3>')
+  const r = await qGet(db, id)
+  if (!r) return c.html('<h3>这份报价已经不在了。</h3>')
+  const t = await getTitle(db)
+  const q = qSlim(r)
+  const body = `<h1>报 价 单</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}${t.addr ? ' · ' + escHtml(t.addr) : ''}</div>
+<table class="meta"><tr><td>客户：${escHtml(q.party)}</td><td class="n">编号：${escHtml(q.no || '')}</td></tr>
+<tr><td>日期：${escHtml(q.created_at)}</td><td class="n">有效期：${q.valid_days} 天（到 ${escHtml(qAddDays(q.created_at, q.valid_days))}）</td></tr></table>
+<table><tr><th>项目</th><th class="n">数量</th><th class="n">单价（元）</th><th class="n">金额（元）</th></tr>
+<tr><td>${escHtml(q.item || '加工费')}</td><td class="n">${q.qty}</td><td class="n">${q.price}</td><td class="n">${q.amount}</td></tr>
+<tr class="total"><td>合计</td><td class="n"></td><td class="n"></td><td class="n">${q.amount}</td></tr></table>
+${q.note ? `<h2>说明</h2><div class="sub" style="text-align:left">${escHtml(q.note)}</div>` : ''}
+<h2>请确认</h2><div class="pick"><button class="ok" onclick="decide(1)">✓ 这个价可以，按这个做</button><button class="no" onclick="decide(0)">✗ 价不合适，再谈谈</button></div>
+<div class="tip2" id="tip2">点一下就行，不用打字。老板那边马上能看到。</div>
+<div class="sign"><span>报价人：____________</span><span>客户确认：____________</span><span>日期：____________</span></div>
+<script>
+function decide(ok){
+  document.querySelectorAll('.pick button').forEach(function(b){b.disabled=true});
+  fetch('/quote-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:${q.id},t:'${want}',ok:!!ok})})
+    .then(function(r){return r.json()}).then(function(d){
+      document.getElementById('tip2').textContent = d.ok ? (ok?'已回复「接受」，老板会尽快跟您确认排产。':'已回复「再谈谈」，老板会联系您。') : (d.error||'没提交成功，请再点一次');
+      document.getElementById('tip2').className = 'tip2 done';
+    }).catch(function(){document.getElementById('tip2').textContent='网络不太好，请再点一次'});
+}
+</script>`
+  return c.html(a4Page({
+    title: `${q.party} 报价单`,
+    body,
+    extraCss: `.meta{font-size:12.5px} .meta td{border:0;padding:2px 0} .sub{text-align:center}
+      .pick{display:flex;gap:10px;justify-content:center;margin:10px 0}
+      .pick button{font-size:14px;padding:10px 18px;border-radius:8px;border:1px solid #1f6feb;background:#fff;color:#1f6feb;cursor:pointer}
+      .pick button.ok{background:#1f6feb;color:#fff} .pick button.no{border-color:#999;color:#666}
+      .tip2{text-align:center;font-size:12px;color:#888} .tip2.done{color:#0a7a3d;font-weight:600}`,
+    sign: '',
+    btn: '打印 / 存 PDF',
+    tip: '这份报价由「加工厂账本」生成，金额和有效期以本页为准'
+  }))
+})
+
+app.post('/quote-ack', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const id = num(b.id)
+  const want = String(b.t || '')
+  const saved = await getKey(mainDb)
+  const good = saved && id ? await sigOf(saved, 'quote', 'q:' + id) : ''
+  if (!good || want !== good) return c.json({ error: '链接已失效，请让老板重发' }, 403)
+  const r = await qGet(db, id)
+  if (!r) return c.json({ error: '这份报价已经不在了' }, 404)
+  if (r.status === 'ordered') return c.json({ ok: true, already: true })
+  const ok = b.ok ? 1 : 0
+  await db.prepare("UPDATE quotes SET status=?, decided_at=? WHERE id=?").bind(ok ? 'accepted' : 'rejected', now(), id).run()
+  await logAudit(db, ok ? '客户接受报价' : '客户没接受报价', r.party, `${r.no || ''} ${r.party} ¥${num(r.price)}`)
+  return c.json({ ok: true })
+})
+
+// 客户接受了 → 一键转成应收单（省得再录一遍）
+app.post('/quotes/:id/to-order', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const r = await qGet(db, id)
+  if (!r) return c.json({ error: '报价单不存在' }, 404)
+  if (num(r.order_id)) return c.json({ error: '这份报价已经转成单子了', order_id: num(r.order_id) }, 409)
+  const st = qState(r)
+  if (st !== 'accepted' && st !== 'sent') return c.json({ error: `这份报价是「${Q_ST[st] || st}」，客户还没接受，先别转` }, 400)
+  const created = now()
+  if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再转单' }, 403)
+  const qty = num(r.qty) || 1
+  const total = round2(num(r.price) * qty)
+  const due = await termDue(db, r.party, created, 'ar')
+  const ins = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
+    .bind(r.party, String(r.item || '').slice(0, 60), total, due || null, '报价转单', round2(num(r.cost) * qty), created).run()
+  const oid = num(ins.meta && ins.meta.last_row_id)
+  await db.prepare("UPDATE quotes SET status='ordered', order_id=? WHERE id=?").bind(oid, id).run()
+  await logAudit(db, '报价转单', r.party, `${r.no || ''} ${r.party} ${r.item || ''} ¥${total}`, '', act(c))
+  return c.json({ ok: true, order_id: oid, amount: total, due_date: due || null })
+})
 
 app.post('/orders', async (c) => {
   const body = await c.req.json()

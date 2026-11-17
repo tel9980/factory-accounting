@@ -439,6 +439,52 @@
         <view class="tip">点某一家 = 只复制那家的话；「存成图片」= 生成一张提醒卡，微信里可以直接转发给对方。</view>
       </view>
 
+      <view class="form">
+        <view class="tip">💬 报价单（先报个价，客户点头再转成单子，省得白干）</view>
+        <view class="frow">
+          <input class="inp half" placeholder="报给谁（客户）" value="{{qt_party}}" bindinput="onQtParty"/>
+          <input class="inp half" placeholder="做什么（产品）" value="{{qt_item}}" bindinput="onQtItem"/>
+        </view>
+        <view class="frow">
+          <input class="inp third" type="digit" placeholder="成本" value="{{qt_cost}}" bindinput="onQtCost"/>
+          <input class="inp third" type="digit" placeholder="想赚 %" value="{{qt_margin}}" bindinput="onQtMargin"/>
+          <input class="inp third" type="digit" placeholder="数量" value="{{qt_qty}}" bindinput="onQtQty"/>
+        </view>
+        <view class="frow">
+          <input class="inp half" type="digit" placeholder="单价（留空按成本算）" value="{{qt_price}}" bindinput="onQtPrice"/>
+          <input class="inp half" type="number" placeholder="有效天数（15）" value="{{qt_days}}" bindinput="onQtDays"/>
+        </view>
+        <view class="frow">
+          <button class="btn half" size="mini" bindtap="quoteHint">算个价</button>
+          <button class="btn half" size="mini" bindtap="saveQuote">存成报价单</button>
+        </view>
+        <view wx:if="{{qh}}">
+          <view class="row2 tier" wx:for="{{qh.tiers}}" wx:key="k" bindtap="pickTier" data-p="{{item.price}}">{{item.label}}：<text class="b">{{item.price}}</text> 元（赚 {{item.profit}}）<text class="tier-tap">点一下用这个价</text></view>
+          <view class="row2 warn" wx:for="{{qh.tips}}" wx:key="*this">· {{item}}</view>
+        </view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="loadQuotes">看所有报价{{qt_n ? '（' + qt_n + '）' : ''}}</button>
+        </view>
+        <view wx:if="{{qt}}">
+          <view class="row2">{{qt.text}}</view>
+          <view class="prev-row" wx:for="{{qt.rows}}" wx:key="id">
+            <view class="qrow">
+              <view class="qmain">
+                <text class="prev-t">{{item.no || ''}} · {{item.party}}{{item.item ? ' · ' + item.item : ''}}</text>
+                <text class="prev-n">{{item.qty > 1 ? item.qty + ' × ' + item.price + ' = ' : ''}}{{item.amount}} 元　毛利 {{item.margin}}%</text>
+                <text class="prev-n {{item.status==='accepted'||item.status==='ordered'?'ok':(item.status==='rejected'||item.status==='expired'?'red':'')}}">{{item.status_text}}{{item.status==='sent' ? '（还有 ' + item.days_left + ' 天）' : ''}}{{item.decided_at ? ' · ' + item.decided_at : ''}}</text>
+              </view>
+              <view class="qbtn">
+                <text wx:if="{{item.status==='draft'}}" class="lnk" catchtap="sendQuote" data-id="{{item.id}}">发出去</text>
+                <text wx:if="{{item.status==='sent'||item.status==='accepted'}}" class="lnk" catchtap="quoteToOrder" data-id="{{item.id}}">转成单子</text>
+                <text wx:if="{{item.status==='draft'}}" class="red" catchtap="delQuote" data-id="{{item.id}}">删</text>
+              </view>
+            </view>
+          </view>
+          <view class="tip">客户在报价页点「这个价可以」就自动变成「客户接受了」，你不用手记；转成单子后金额、成本都带过去，到期日按账期算。</view>
+        </view>
+      </view>
+
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="openDue" data-type="ar">📅 到期表</button>
         <button class="btn ghost" size="mini" bindtap="openRisk" data-type="ar">⚠️ 超期分级</button>
