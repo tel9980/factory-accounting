@@ -392,6 +392,47 @@
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadStale">⏳ 有哪些单卡住了</button>
       </view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadOutsource">🏭 外协台账（发出去的活）</button>
+      </view>
+      <block wx:if="{{os}}">
+        <view class="box">
+          <view class="row1"><text class="nm">还压在外面 {{os.open_cnt}} 笔</text><text class="amt {{os.late_cnt?'red':''}}">¥{{os.open_amount}}</text></view>
+          <view class="row2">{{os.count}} 笔外协共 ¥{{os.amount}}{{os.late_cnt>0?' · 已超期 '+os.late_cnt+' 笔':''}}</view>
+          <view class="aline {{item.tone}}" wx:for="{{os.advice}}" wx:key="text">· {{item.text}}</view>
+        </view>
+        <view class="item" wx:for="{{os.rows}}" wx:key="id">
+          <view class="row1">
+            <text class="nm">{{item.party}}{{item.item?' · '+item.item:''}}</text>
+            <text class="amt">¥{{item.price}}</text>
+          </view>
+          <view class="row2">
+            <text class="{{item.late?'red':''}}">{{item.status_text}}{{item.due_date?' · 约定 '+item.due_date:''}}{{item.back_date?' · '+item.back_date+' 回的':''}}{{item.late?'（晚了 '+(-item.left_days)+' 天）':''}}</text>
+          </view>
+          <view class="row2">{{item.qty>0?item.qty+' 件 · ':''}}发出去 {{item.days_out!=null?item.days_out+' 天':'—'}}{{item.customer?' · 给 '+item.customer:''}}</view>
+          <view class="btns">
+            <button size="mini" class="ghost" wx:if="{{item.status=='open'}}" bindtap="osBack" data-id="{{item.id}}">✓ 回来了</button>
+            <button size="mini" class="ghost" bindtap="osDel" data-id="{{item.id}}">删</button>
+          </view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyOutsource">📋 复制这段</button>
+          <button class="btn ghost half" size="mini" bindtap="closeOutsource">收起</button>
+        </view>
+        <view class="box">
+          <view class="row1"><text class="nm">发一笔外协</text><text class="amt">约定什么时候回</text></view>
+          <view class="frow">
+            <input class="inp half" placeholder="给谁（热处理厂/老李）" value="{{os_party}}" bindinput="onOsField" data-k="os_party"/>
+            <input class="inp half" placeholder="什么活（淬火/车外圆）" value="{{os_item}}" bindinput="onOsField" data-k="os_item"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" type="digit" placeholder="多少件" value="{{os_qty}}" bindinput="onOsField" data-k="os_qty"/>
+            <input class="inp half" type="digit" placeholder="外协费(元)" value="{{os_price}}" bindinput="onOsField" data-k="os_price"/>
+          </view>
+          <input class="inp" placeholder="约定回厂日(如 11-25)" value="{{os_due}}" bindinput="onOsField" data-k="os_due"/>
+          <view class="frow"><button class="btn" size="mini" bindtap="addOutsource">＋ 记上</button></view>
+        </view>
+      </block>
       <block wx:if="{{ps}}">
         <view class="box">
           <view class="row1"><text class="nm">没交付的单，超过 7 天没动工序</text><text class="amt {{ps.high?'red':''}}">{{ps.count}} 张</text></view>

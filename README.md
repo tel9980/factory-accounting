@@ -882,11 +882,17 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 前端：应收表单「约定交货日(可选，排产用)」；报表页「📦 本周排产 / 交期」面板（天数可改、按天分组、每张单点开看明细、复制一段发群里）。
    - 实测：三张单（交货日 11-15 已过 / 11-18 只剩 1 天 / 没写）→ 面板出「共 2 张 ¥11000，已过期 1 张、要赶 1 张」，两份建议分别为「交货日过了 2 天还没交」「还有 1 天，还没开工」，并提示「另有 1 张在做的单没写交货日」。
 
+253. ✅ **外协台账（发出去的活，回来了没有）**：淬火、车外圆、电镀这类活发给别人做，最容易出的事是「忘了催」——回来晚了，你自己的交期跟着拖，客户骂的还是你。现在有一本外协台账：
+   - 记一笔 `POST /outsource`（给谁、什么活、多少件、外协费、约定回厂日），回来点「✓ 回来了」`POST /outsource/:id/back`（可补日期，会告诉你「比约定晚了 2 天回来」），记错可删 `DELETE /outsource/:id`（受月结锁定）。
+   - `GET /outsource-book?month=&status=` 出汇总：总笔数/金额、**还压在外面几笔几钱**、**几笔已超期**、按外协方分组（谁接的活最多、有几笔没回）、三条人话建议（超期了赶紧催 / 外协 70% 都在一家手上要当心 / 都回来了）。
+   - 前端：应收页「🏭 外协台账（发出去的活）」——列表带「发出去几天」「约定哪天回」「超期几天」，下面直接记一笔，不用切页。
+   - 实测：新华热处理 ¥1200 约定 11-12（已超 5 天）+ 老李车床 ¥600 约定 11-25 → 「共 2 笔 ¥1800，压在外面 2 笔，1 笔已超期」，建议「催一下新华热处理」；标回厂填 11-14 → 「比约定晚了 2 天回来」，压在外的变 1 笔 ¥600。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 376 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 380 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1018,6 +1024,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /orders/:id/receive`
 - `POST /orders/:id/status`
 - `POST /orders/:id/writeoff`
+
+**outsource**（3）
+
+- `DELETE /outsource/:id`
+- `POST /outsource`
+- `POST /outsource/:id/back`
 
 **party-terms**（4）
 
@@ -1224,7 +1236,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（202）
+**其它（单个接口）**（203）
 
 - `GET /`
 - `GET /access-guide`
@@ -1334,6 +1346,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /next-step`
 - `GET /order-print`
 - `GET /order-print-link`
+- `GET /outsource-book`
 - `POST /parse-import`
 - `GET /party-balance`
 - `GET /party-dups`

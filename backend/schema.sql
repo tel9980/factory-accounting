@@ -471,6 +471,18 @@ CREATE TABLE IF NOT EXISTS wage_pays (
 );
 CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);
 
+-- 外协台账：发出去的活（谁、多少钱、约定什么时候回、回了没）
+CREATE TABLE IF NOT EXISTS outsourcing (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT NOT NULL DEFAULT '', order_id INTEGER DEFAULT 0,
+  item TEXT DEFAULT '', qty REAL DEFAULT 0, price REAL NOT NULL DEFAULT 0,
+  sent_date TEXT, due_date TEXT, back_date TEXT,
+  status TEXT NOT NULL DEFAULT 'open', note TEXT DEFAULT '',
+  by TEXT DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_os_status ON outsourcing(status, due_date);
+CREATE INDEX IF NOT EXISTS idx_os_party ON outsourcing(party);
+
 -- 返工 / 报废 / 客诉台账（只记损失金额与原因，不重复进出款）
 CREATE TABLE IF NOT EXISTS reworks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

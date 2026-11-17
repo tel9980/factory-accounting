@@ -714,6 +714,119 @@ app.delete('/attachment/:id', async (c) => {
 })
 
 // 工序停着没动：未交付的单多久没更新过工序
+// ===== 外协台账：发出去的活（谁、多少钱、什么时候回、回了没） =====
+const OS_STATUS = { open: '还没回', done: '已回厂', cancel: '取消了' }
+async function osTable(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS outsourcing (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    party TEXT NOT NULL DEFAULT '', order_id INTEGER DEFAULT 0,
+    item TEXT DEFAULT '', qty REAL DEFAULT 0, price REAL NOT NULL DEFAULT 0,
+    sent_date TEXT, due_date TEXT, back_date TEXT,
+    status TEXT NOT NULL DEFAULT 'open', note TEXT DEFAULT '',
+    by TEXT DEFAULT '', created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_os_status ON outsourcing(status, due_date)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_os_party ON outsourcing(party)').run()
+}
+app.get('/outsource-book', async (c) => {
+  const db = c.env.DB
+  await osTable(db)
+  const today = now().slice(0, 10)
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const status = String(c.req.query('status') || '')
+  const conds = []
+  const b = []
+  if (/^\d{4}-\d{2}$/.test(month)) { conds.push('substr(COALESCE(sent_date,created_at),1,7) = ?'); b.push(month) }
+  if (status && OS_STATUS[status]) { conds.push('status = ?'); b.push(status) }
+  const where = conds.length ? 'WHERE ' + conds.join(' AND ') : ''
+  const q = await db.prepare(`SELECT o.*, (SELECT c.customer FROM orders c WHERE c.id=o.order_id) AS customer
+    FROM outsourcing o ${where} ORDER BY COALESCE(due_date,'9999') ASC, id DESC LIMIT 500`).bind(...b).all()
+  const all = ((q && q.results) || []).map((r) => {
+    const sent = String(r.sent_date || r.created_at || '').slice(0, 10)
+    const due = String(r.due_date || '').slice(0, 10)
+    const back = String(r.back_date || '').slice(0, 10)
+    const left = due ? Math.round((dateNum(due) - dateNum(today)) / 86400000) : null
+    const late = r.status === 'open' && left !== null && left < 0
+    return {
+      id: r.id, party: r.party || '', order_id: num(r.order_id), customer: r.customer || '',
+      item: r.item || '', qty: num(r.qty), price: round2(num(r.price)),
+      sent_date: sent, due_date: due, back_date: back,
+      status: r.status || 'open', status_text: OS_STATUS[r.status] || '还没回',
+      left_days: left, late, note: r.note || '', by: r.by || '',
+      days_out: back ? null : daysSince(sent)
+    }
+  })
+  const openRows = all.filter((r) => r.status === 'open')
+  const lateRows = openRows.filter((r) => r.late)
+  const byParty = {}
+  for (const r of all) {
+    const k = norm(r.party)
+    const o = byParty[k] || (byParty[k] = { party: r.party || '', cnt: 0, amount: 0, open: 0, late: 0 })
+    o.cnt += 1
+    o.amount = round2(o.amount + r.price)
+    if (r.status === 'open') { o.open += 1; if (r.late) o.late += 1 }
+  }
+  const parties = Object.values(byParty).sort((x, y) => y.amount - x.amount).slice(0, 20)
+  const advice = []
+  if (lateRows.length) advice.push({ tone: 'bad', text: `${lateRows.length} 笔外协已经超过约定回厂日（${lateRows.slice(0, 2).map((x) => x.party).join('、')}），催一下，不然你自己的交期要跟着拖` })
+  if (openRows.length === 0 && all.length > 0) advice.push({ tone: 'ok', text: '没有压在外面的活，外协都回来了' })
+  if (all.length === 0) advice.push({ tone: 'info', text: '这段时间没有外协记录。发出去外协的时候记一笔，回来点一下，就再也不用记在脑子里了' })
+  const bigParty = parties[0]
+  if (bigParty && parties.length >= 3 && bigParty.amount / Math.max(1, all.reduce((t, r) => t + r.price, 0)) >= 0.7) advice.push({ tone: 'warn', text: `外协 ${Math.round((bigParty.amount / all.reduce((t, r) => t + r.price, 0)) * 100)}% 在「${bigParty.party}」一家手上，这家出问题你就停线` })
+  const openAmount = round2(openRows.reduce((t, r) => t + r.price, 0))
+  const text = all.length === 0
+    ? (month ? `${month} 没有外协记录。` : '还没有外协记录。')
+    : `【外协】（${month || '全部'}）共 ${all.length} 笔、¥${round2(all.reduce((t, r) => t + r.price, 0))}；还压在外面 ${openRows.length} 笔、¥${openAmount}${lateRows.length ? `，其中 ${lateRows.length} 笔已超期` : ''}。`
+  return c.json({
+    ok: true, today, month, status, count: all.length, amount: round2(all.reduce((t, r) => t + r.price, 0)),
+    open_cnt: openRows.length, open_amount: openAmount, late_cnt: lateRows.length,
+    rows: all.slice(0, 100), parties, advice, text, degraded: failBucket.slice()
+  })
+})
+app.post('/outsource', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await osTable(db)
+  const party = String(body.party || '').trim()
+  if (!party) return c.json({ error: '外协给谁（加工厂/个人）必填' }, 400)
+  const price = round2(num(body.price))
+  if (price < 0) return c.json({ error: '外协金额不能是负数' }, 400)
+  const created = stampOf(body.sent_date)
+  const due = toIsoDate(body.due_date) || null
+  const sent = toIsoDate(body.sent_date) || created.slice(0, 10)
+  if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记' }, 403)
+  await db.prepare(`INSERT INTO outsourcing (party, order_id, item, qty, price, sent_date, due_date, status, note, by, created_at)
+    VALUES (?,?,?,?,?,?,?,'open',?,?,?)`)
+    .bind(party, num(body.order_id) || 0, String(body.item || '').trim(), num(body.qty), price, sent, due, String(body.note || '').trim(), act(c), created).run()
+  await logAudit(db, '外协发出', party, `${party} ${body.item || ''} ¥${price}`, '', act(c))
+  return c.json({ ok: true })
+})
+app.post('/outsource/:id/back', async (c) => {
+  const db = c.env.DB
+  await osTable(db)
+  const id = c.req.param('id')
+  const body = await c.req.json().catch(() => ({}))
+  const o = await db.prepare('SELECT * FROM outsourcing WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '没有这条外协记录' }, 404)
+  if (o.status === 'done') return c.json({ error: '这条已经标过「回来了」' }, 400)
+  const back = toIsoDate(body.back_date) || todayIso()
+  await db.prepare("UPDATE outsourcing SET status='done', back_date=? WHERE id=?").bind(back, id).run()
+  await logAudit(db, '外协回厂', o.party, `${o.party} ${o.item || ''} 回来了`, `outsource:${id}`, act(c))
+  const late = o.due_date ? Math.round((dateNum(back) - dateNum(String(o.due_date).slice(0, 10))) / 86400000) : 0
+  return c.json({ ok: true, back_date: back, late_days: late, note: late > 0 ? `比约定晚了 ${late} 天回来` : '按约定回来了' })
+})
+app.delete('/outsource/:id', async (c) => {
+  const db = c.env.DB
+  await osTable(db)
+  const id = c.req.param('id')
+  const o = await db.prepare('SELECT * FROM outsourcing WHERE id=?').bind(id).first()
+  if (!o) return c.json({ error: '没有这条外协记录' }, 404)
+  if (await isMonthLocked(db, String(o.created_at || '').slice(0, 7))) return c.json({ error: '该月份已结账锁定' }, 403)
+  await db.prepare('DELETE FROM outsourcing WHERE id=?').bind(id).run()
+  await logAudit(db, '删外协记录', o.party, `${o.party} ¥${num(o.price)}`, '', act(c))
+  return c.json({ ok: true })
+})
+
 // 本周排产 / 交期风险：约定交货日 + 工序进度，倒排「这周该交哪些、哪单要赶」
 app.get('/delivery-plan', async (c) => {
   const db = c.env.DB

@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    os: null, os_party: '', os_item: '', os_qty: '', os_price: '', os_due: '',
     dp: null, dp_days: 7,
     rw_faults: ['自己做坏了', '材料有问题', '客户改了要求', '图纸 / 尺寸给错', '别的原因'],
     rwk: null, rwk_month: '', rw_kind: 'rework', rw_party: '', rw_item: '', rw_qty: '', rw_cost: '', rw_reason: '', rw_fix: '', rw_fault_idx: 0,
@@ -6662,6 +6663,51 @@ Page({
     this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
   },
   closeSupplyBook() { this.setData({ spb: null }) },
+  // ===== 外协台账 =====
+  loadOutsource() {
+    this.req({ url: API_BASE + '/outsource-book', success: (r) => {
+      const d = r.data || {}
+      if (!d.ok) return wx.showToast({ title: d.error || '没取到', icon: 'none' })
+      this.setData({ os: d })
+    } })
+  },
+  closeOutsource() { this.setData({ os: null }) },
+  onOsField(e) { this.setData({ [e.currentTarget.dataset.k]: e.detail.value }) },
+  addOutsource() {
+    const d = this.data
+    const body = {
+      party: String(d.os_party || '').trim(), item: String(d.os_item || '').trim(),
+      qty: Number(d.os_qty) || 0, price: Number(d.os_price) || 0, due_date: String(d.os_due || '').trim()
+    }
+    if (!body.party) return wx.showToast({ title: '填外协给谁', icon: 'none' })
+    this.req({ url: API_BASE + '/outsource', method: 'POST', data: body, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showModal({ title: '没记上', content: x.error || '', showCancel: false })
+      wx.showToast({ title: '记上了' })
+      this.setData({ os_party: '', os_item: '', os_qty: '', os_price: '', os_due: '' })
+      this.loadOutsource()
+    } })
+  },
+  osBack(e) {
+    const id = e.currentTarget.dataset.id
+    this.req({ url: API_BASE + '/outsource/' + id + '/back', method: 'POST', data: {}, success: (r) => {
+      const x = r.data || {}
+      wx.showToast({ title: x.note || '标好了', icon: 'none' })
+      this.loadOutsource()
+    } })
+  },
+  osDel(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({ title: '删掉这条外协？', content: '删了就查不到这笔发出的活了。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/outsource/' + id, method: 'DELETE', success: () => this.loadOutsource() })
+    } })
+  },
+  copyOutsource() {
+    const d = this.data.os
+    if (!d) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制' }) })
+  },
   // ===== 本周排产 / 交期 =====
   loadDeliveryPlan() {
     const d = Math.max(1, Number(this.data.dp_days) || 7)
