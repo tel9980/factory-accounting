@@ -6957,6 +6957,72 @@ async function qGet(db, id) {
 }
 
 // 报多少合适：按成本 + 想赚的毛利算，再对照这家以前给过什么价
+// 单张单的真实成本预估：材料（单子上填的）＋ 人工（这个产品过去实际记的计件工钱）
+// 用途：开单 / 报价时当场告诉老板"这个价做下来能赚几个点，还是几乎白干"
+app.get('/cost-hint', async (c) => {
+  const db = c.env.DB
+  const sp = new URL(c.req.url).searchParams
+  const item = String(sp.get('item') || '').trim()
+  const costIn = num(sp.get('cost'))
+  const priceIn = num(sp.get('price'))
+  const qtyIn = num(sp.get('qty'))
+  const out = { ok: true, item, cost: 0, labor: 0, total: 0, price: round2(priceIn), profit: 0, margin: 0,
+    verdict: 'unknown', level: 'gray', text: '', labor_src: '', processes: [], hist_cnt: 0 }
+
+  // 1) 这个产品的人工：从历史 wage_records 按单汇总，算"每张单平均工钱"和"每件平均工钱"
+  let labor = 0, laborSrc = '', histCnt = 0, processes = [], perPiece = 0
+  if (item) {
+    try {
+      const o = await db.prepare(`SELECT COUNT(DISTINCT order_id) n, COALESCE(SUM(amount),0) amt, COALESCE(SUM(qty),0) q
+        FROM wage_records WHERE COALESCE(order_id,0) > 0 AND item = ?`).bind(item).first()
+      histCnt = num(o && o.n)
+      if (histCnt > 0) {
+        labor = round2(num(o.amt) / histCnt)
+        perPiece = num(o.q) > 0 ? round2(num(o.amt) / num(o.q)) : 0
+        laborSrc = `按这个产品过去 ${histCnt} 张单实际记的工钱平均`
+        const pr = (await db.prepare("SELECT process, COALESCE(SUM(amount),0) amt, COALESCE(SUM(qty),0) q, COUNT(*) n FROM wage_records WHERE COALESCE(order_id,0) > 0 AND item = ? AND COALESCE(process,'') <> '' GROUP BY process ORDER BY amt DESC LIMIT 8").bind(item).all()).results || []
+        processes = pr.map((x) => ({ process: x.process, amount: round2(num(x.amt)), qty: round2(num(x.q)), cnt: num(x.n), per_piece: num(x.q) > 0 ? round2(num(x.amt) / num(x.q)) : 0 }))
+      }
+    } catch (e) { noteFail(e, '成本预估人工') }
+  }
+  // 没有历史记工：退一步用"这个产品的单价表 × 单子件数"，再不济按条数也不瞎猜
+  if (labor <= 0 && item) {
+    try {
+      const rt = (await db.prepare("SELECT COALESCE(SUM(rate),0) s, COUNT(*) n FROM wage_rates WHERE active=1 AND (item = ? OR item = '' OR item = '*')").bind(item).first())
+      const n = num(rt && rt.n), sumRate = num(rt && rt.s)
+      if (n > 0 && sumRate > 0 && qtyIn > 0) {
+        labor = round2(sumRate * qtyIn)
+        laborSrc = `这个产品还没记过工，按单价表合计 ${round2(sumRate)} 元/件 × ${qtyIn} 件估`
+      } else if (n > 0 && sumRate > 0) {
+        laborSrc = `单价表里这个产品每件合计 ${round2(sumRate)} 元，填上件数就能估人工`
+      }
+    } catch (e) { noteFail(e, '成本预估单价') }
+  }
+
+  const mat = costIn > 0 ? round2(costIn) : 0
+  out.cost = mat
+  out.labor = labor
+  out.total = round2(mat + labor)
+  out.labor_src = laborSrc
+  out.processes = processes
+  out.hist_cnt = histCnt
+  out.per_piece = perPiece
+  if (priceIn > 0 && out.total > 0) {
+    out.profit = round2(priceIn - out.total)
+    out.margin = round2((priceIn - out.total) / priceIn * 100)
+  }
+  const m = out.margin
+  if (!item) { out.text = '先填产品名，我能按这个产品过去的人工帮你估成本。' }
+  else if (out.total <= 0) { out.text = '填上材料成本，我就能算出这单能赚几个点。' }
+  else if (priceIn <= 0) { out.text = `这单成本大约 ¥${out.total}（材料 ¥${out.cost} ＋ 人工 ¥${out.labor}），报价填上就能算毛利。` }
+  else if (out.profit < 0) { out.verdict = 'loss'; out.level = 'red'; out.text = `亏 ¥${Math.abs(out.profit)}：报价 ¥${out.price} 连成本 ¥${out.total} 都没盖住（材料 ¥${out.cost} ＋ 人工 ¥${out.labor}）。` }
+  else if (m < 10) { out.verdict = 'thin'; out.level = 'red'; out.text = `只赚 ${m}%（¥${out.profit}）——几乎白干，出点返工就贴钱。` }
+  else if (m < 20) { out.verdict = 'ok'; out.level = 'orange'; out.text = `赚 ${m}%（¥${out.profit}），偏薄，可以试着报 ${round2(out.total / 0.85)} 元（赚 15%）。` }
+  else { out.verdict = 'good'; out.level = 'green'; out.text = `赚 ${m}%（¥${out.profit}），成本 ¥${out.total}（材料 ¥${out.cost} ＋ 人工 ¥${out.labor}），这个价可以。` }
+  if (laborSrc && item && priceIn > 0) out.text += `　（人工${laborSrc}）`
+  return c.json(out)
+})
+
 app.get('/quote-hint', async (c) => {
   const db = c.env.DB
   const party = String(c.req.query('party') || '').trim()

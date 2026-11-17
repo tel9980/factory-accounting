@@ -978,11 +978,17 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 265b. **单据明细里直接看「材料＋工钱＝真实成本」**：`GET /orders/:id/detail` 新增 `wage_rows`（`{rows:[{worker,process,qty,rate,amount,date}], amount, qty}`），手机端点开一张单会多出两行——「成本 材料 4,000 ＋ 工钱 100（20 件）＝ 4,100；毛利 5,900」和逐人逐工序的记工明细。这样报工价时不用再翻工资表去凑。实测：一张 10,000 的单、材料 4,000、记工小王 20 件×5 元 → 明细显示成本 4,100、毛利 5,900。
 
+266. ✅ **这个价做下来能赚几个点（人工也算进去的保本价）**：报价时最容易犯的错是"只算材料"。一单 4,000 材料报 4,300 看着赚 300，其实人工还没算——工序上真正花钱的是工钱。
+   - **新接口 `GET /cost-hint?item=&cost=&price=`**：人工从**这个产品过去的计件记工**里估——按单汇总 `wage_records` 取平均（"按这个产品过去 2 张单实际记的工钱平均"），并给出按工序拆分（哪道工序最花钱、每件多少）。没有记工历史时退一步用单价表（`wage_rates` 里这个产品 + 通用 `*` 的合计），仍估不出来就明说，不瞎猜。
+   - 输出 `cost / labor / total / profit / margin` + 四档判断：`loss`（亏，连成本都没盖住）、`thin`（<10%，"几乎白干，出点返工就贴钱"）、`ok`（10–20%，"偏薄，可以试着报 X 元（赚 15%）"）、`good`（≥20%，"这个价可以"）。
+   - **前端**：开单表单里产品/加工费/成本任一格填完（bindblur）就当场算一遍，红字提示薄价，并在下面列出「人工估算：车 ¥200 等 2 道工序，平均每张单 ¥130」。
+   - **实测**：两张「齿轮」单 + 记工（车 20×5、磨 20×3）→ 人工均值 ¥130；报价 10,000 → 赚 58.7%（good）；4,700 → 12.13%（ok，提示"试着报 4,858.82 元赚 15%"）；4,300 → 3.95%（thin，红字"几乎白干"）；只填产品 → "这单成本大约 ¥130（材料 ¥0 ＋ 人工 ¥130），报价填上就能算毛利"。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 398 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
+共 399 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
 
 **accounts**（4）
 
@@ -1354,7 +1360,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（208）
+**其它（单个接口）**（209）
 
 - `GET /`
 - `GET /access-guide`
@@ -1395,6 +1401,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /compare`
 - `GET /contact-detail`
 - `GET /contacts`
+- `GET /cost-hint`
 - `GET /credit-book`
 - `GET /credit-grade`
 - `GET /credits`

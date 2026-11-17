@@ -2208,7 +2208,9 @@ Page({
   },
   onOItem(e) { this.setData({ o_item: e.detail.value }) },
   onOPrice(e) { this.setData({ o_price: e.detail.value }); this.priceWarn(e.detail.value) },
+  onOPriceBlur() { this.costHint() },
   onOCost(e) { this.setData({ o_cost: e.detail.value }) },
+  onOCostBlur() { this.costHint() },
   onODue(e) { this.setData({ o_due: e.detail.value }) },
   onODeliver(e) { this.setData({ o_deliver: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
@@ -3811,7 +3813,19 @@ Page({
       }
     })
   },
-  blurOItem() { this.priceLookup() },
+  blurOItem() { this.priceLookup(); this.costHint() },
+  // 这单价做下来能赚几个点：材料（填的）+ 人工（这个产品过去实际记的工钱）
+  costHint() {
+    const d = this.data
+    const item = (d.o_item || '').trim()
+    if (!item) { if (d.chint) this.setData({ chint: null }); return }
+    const q = '?item=' + encodeURIComponent(item) + '&cost=' + encodeURIComponent(d.o_cost || '') + '&price=' + encodeURIComponent(d.o_price || '')
+    this.req({ url: API_BASE + '/cost-hint' + q, silent: true, success: (res) => {
+      const r = res.data || {}
+      if (r.ok === false) return
+      this.setData({ chint: r })
+    } })
+  },
   priceLookup() {
     const party = (this.data.o_customer || '').trim()
     const item = (this.data.o_item || '').trim()

@@ -351,9 +351,11 @@
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}（已自动填好，改金额直接记）</view>
       <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem" bindblur="blurOItem"/>
       <view class="tip" wx:if="{{price_tip}}">{{price_tip}}</view>
-      <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice"/>
+      <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice" bindblur="onOPriceBlur"/>
       <view class="duesoon" wx:if="{{price_warn}}">{{price_warn}} —— 确认是这个价再记</view>
-      <input class="inp" placeholder="材料·外协成本(可选，填了才算真实毛利)" type="digit" value="{{o_cost}}" bindinput="onOCost"/>
+      <view class="{{chint && chint.level=='red' ? 'duesoon red' : 'tip'}}" wx:if="{{chint && chint.text}}">{{chint.text}}</view>
+      <view class="tip" wx:if="{{chint && chint.processes.length}}">人工估算：{{chint.processes[0].process}} ¥{{chint.processes[0].amount}} 等 {{chint.processes.length}} 道工序，平均每张单 ¥{{chint.labor}}</view>
+      <input class="inp" placeholder="材料·外协成本(可选，填了才算真实毛利)" type="digit" value="{{o_cost}}" bindinput="onOCost" bindblur="onOCostBlur"/>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
       <view class="tip" wx:if="{{!o_due}}">{{term_default>0 ? '收款日留空：按账期自动算（默认 ' + term_default + ' 天）' : '收款日留空：这单就不会提醒你收钱，去「设置 → 单位」设个默认账期更省事'}}</view>
