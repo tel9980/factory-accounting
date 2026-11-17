@@ -938,11 +938,20 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 员工口令不能用（`/^\/book-template/` 进 denyStaff）；套用会写审计「套用账本模板」。
    - 实测：空账本套「生产加工」→ 新增 4 个分类（刀具耗材/刀具/房租水电/运费，其余 10 项因已存在跳过）+ 账期写 30；再套「什么都记」→ 新增 7 个（社保/外协加工/办公/差旅/利息/折旧/废料）；记一张单后无确认 → 409，带 confirm → 正常补；分类总数不乱（去重正确）。
 
+261. ✅ **整体自检（全接口冒烟 + 三库结构比对 + 文档对账）**：功能做到 260 项之后，停下来把「整本账」当成一个产品从头验一遍，不再加新功能。
+   - **全接口冒烟**：脚本从 `backend/index.js` 正则抽出全部路由，对 220 个 GET 接口逐个真发请求（占位参数用 `1`）。结果 **201 个 200**，19 个非 200 里 18 个是**正常的业务拒绝**（缺参数 400、对象不存在 404），只有 1 个是真 bug：`GET /statement`（老的对账单文本接口）在没带 `name` 时 `bind(undefined)` → `D1_TYPE_ERROR: Type 'undefined' not supported` → 500。已修：`type` 归一成 ar/ap、`name` 去空格后为空直接 400「要看哪一家？在单位页点客户名字旁边的「🧾 对账单」」。修后再测：无参 400、带参正常出对账单、不存在的单位出「共 0 笔未结清 / 合计欠款 0 元」。
+   - **三库结构比对**：把 `backend/schema.sql` 按 `;` 切成语句，逐条解析 `CREATE TABLE` 的列与全部 `ALTER TABLE … ADD COLUMN`，再对三本账逐个 `PRAGMA table_info` 比对。**42 张表 × 3 本账 = 0 处缺失**（`/schema-check` 那个接口只核 12 张关键表，这次是全量表）。顺带确认 `dunning_log` 本来就没有 `month` 列、代码里全部用 `substr(created_at,1,7)`，早先那个「缺 month」是解析脚本把相邻语句一起吃进去的误报。
+   - **文档对账**：README 正文 `^\d+\. ✅` 共 **268 条，编号 1–260 无缺号**，重号只有 10–13、44–47 这两段历史重号（已在「编号说明」里写明保留不改）；「接口清单」附录条数与代码里 `new Set(method + path)` 的 **394 个**一致，60 个分组。
+   - **顺手修文档与实现不一致**：附录原来写「跑一次 `python3 scripts/gen-api-list.py`」，但容器里 python 已经没有了 → 新增 `scripts/gen-api-list.mjs`（同算法：去重 → 按 `method path` 排序 → 按一级路径分组、少于 2 条的并进「其它（单个接口）」），附录改成 `node scripts/gen-api-list.mjs`。
+   - **空态复查**（清库后逐个人话文案）：首页「今天没有必须处理的事」、「我的活」为空、健康分 100 分、`/books-check`「现在只有「主账本」在用…空着的：第二本、第三本」、`/month-end` 五件没办、`/cash-forecast`「这几天没有要收要付的款」、`/churn-risk`「都在正常节奏里」、`/process-stale`「没有，未交付的都在 7 天内动过」、`/delivery-plan`「7 天内没有要交的活」、`/outsource-book`「还没有外协记录」、`/materials`「材料台账还是空的」、`/payroll`「还没有记工记录」、`/rework-book`「共 0 笔，损失 ¥0」、`/party-staff`「还没有给员工分过客户」、`/book-templates`「这本账还是空的，挑一个模板一次配好」。
+   - **前端静态检查**（每次改 wxml/js 都跑）：绑定方法是否都有定义 `missing: []`、方法名重复 `dups: []`、标签栈配平 `unclosed: [] mismatch: []`。
+   - **已知边界**（写在这里免得反复讨论）：小程序真机与提审发布、微信订阅消息推送（要 AppID/Secret/模板审核）、微信登录到人（同上）、开发票与报税申报（个人主体无接口）、微信支付收款（需企业主体）、银行流水自动直连（各行无公开接口）。这些不是代码能补的，其余功能都已在线上可用。
+
 <!-- API-LIST:BEGIN -->
 
-## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
+## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 394 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 394 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
 
 **accounts**（4）
 

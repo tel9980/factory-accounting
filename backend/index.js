@@ -8088,8 +8088,9 @@ app.get('/party-balance', async (c) => {
 })
 
 app.get('/statement', async (c) => {
-  const type = c.req.query('type')
-  const name = c.req.query('name')
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const name = String(c.req.query('name') || '').trim()
+  if (!name) return c.json({ error: '要看哪一家？在单位页点客户名字旁边的「🧾 对账单」' }, 400)
   const db = c.env.DB
   const lines = []
   let total = 0
