@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 324 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 325 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -937,7 +937,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（178）
+**其它（单个接口）**（179）
 
 - `GET /`
 - `GET /access-guide`
@@ -988,6 +988,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /dunning`
 - `GET /dunning-effect`
 - `GET /dunning-month`
+- `GET /dunning-report`
 - `GET /dunning-year`
 - `POST /edit-request`
 - `GET /expense-compare`
@@ -1165,6 +1166,15 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 返回 `plan[{date,wd,label,rows,amount}]`、`plan_n`/`plan_amt`/`rest`/`rows`（完整优先级）与人话结论「这 7 天要催 3 家（共 ¥13000）：周二 1 家、周四 1 家、周五 1 家。最急的是 甲客户（欠 ¥5000，欠 68 天 · 金额大 · 信用 D · 今天刚催过），排在周四。」；
    - 前端应收/应付页各加「📅 这周催款排班」，面板按天分组（蓝色日期条 + 每家一行），点某家复制单条提醒，底部「整周排班复制」一次拷出整周安排；
    - denyStaff 加 `/^\/collect-plan/`（含信用档位）；实测：3 家（5000/68 天/D 档、6000/10 天、2000/当天）→ 分到周二/周四/周五，甲客户因「今天刚催过」被挪到周四；再催一次丙客户 → 立刻挪到后半周；`per_day=1` 时也只排 3 家、`rest` 正确。
+
+225. ✅ **月度催款战报（催了几次、催回多少、哪家白催）**：以前只能看「这个月催了几次」，看不出效果——催了 3 次一分没回的，和催一次就付清的，在表上长得一样。现在按月算账：
+   - `GET /dunning-report?type=ar|ap&month=`：把本月每次催款按单位归并，再和本月回款对上——`paid_after` = 该家**首催日之后**的回款（催之前就付的不算你的功劳）；
+   - 五种状态：`paid` 催回了 / `part` 催回一部分还欠 / `useless` **催 ≥3 次一分没回**（附「答应过 N 次也没付」）/ `broken` 答应过付款又没付 / `waiting` 刚催还没动静；
+   - 汇总：`times` 催款次数、`recovered` 催后收回、`all_paid` 本月总回款（算占比）、`per_time` 平均每催一次收回多少、`useless_n`/`broken_n`、`prev{times,paid}` 上月对比；
+   - 另有 `self_rows`：**没催自己付了的**（这几家不用花力气），给 `self_n`/`self_amt`；
+   - 建议四条：催款效率（占比 + 每催一次多少钱）、白催名单（「再催也是白费劲，改成打电话或上门，或者先停掉账期」）、失约家数、不用花力气的名单，再加一句和上月的次数对比；
+   - 前端报表页「📣 催款月报」：月份输入 + 每家一行（催几次、本月回款、催后回款、还欠、信用档）+ 「📋 复制月报」；denyStaff 加 `/^\/dunning-report/`；
+   - 实测：甲客户（5000，催 3 次、承诺 3 次全过期、一分没回）→ `useless`「催了 3 次，一分没回（答应过 3 次也没付）」；乙客户（催 1 次后付清 4000）→ `paid`；丙客户（没催自己付 3000）→ 进「不用花力气」；汇总「催了 2 家共 4 次，催后收回 ¥4000（本月总回款 ¥7000，占 57%），平均每催一次 ¥1000」；空月份「2026-08 没催过款、也没有回款记录」；员工口令 403。
 
 222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
    - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；

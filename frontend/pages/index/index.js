@@ -141,7 +141,7 @@ Page({
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
     hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
-    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, cp: null, tg: null, tadv: null, term_auto: false,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, cp: null, dr: null, dr_month: '', tg: null, tadv: null, term_auto: false,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
@@ -800,6 +800,31 @@ Page({
       },
       fail: () => wx.hideLoading()
     })
+  },
+  // 催款月报：这个月催了几次、催回多少、哪家催了也白催
+  onDrMonth(e) { this.setData({ dr_month: e.detail.value }) },
+  loadDunningReport() {
+    const m = String(this.data.dr_month || '').trim()
+    wx.showLoading({ title: '算月报…' })
+    this.req({
+      url: API_BASE + '/dunning-report?type=ar' + (m ? '&month=' + m : ''),
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ dr: d })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeDunningReport() { this.setData({ dr: null }) },
+  copyDunningReport() {
+    const d = this.data.dr
+    if (!d) return
+    const L = ['【催款月报 · ' + d.month + '】']
+    ;(d.advice || []).forEach((a) => L.push(a.text))
+    ;(d.rows || []).forEach((x) => L.push('· ' + x.party + '：' + x.state_text + '（催 ' + x.times + ' 次，还欠 ¥' + x.left + '）'))
+    wx.setClipboardData({ data: L.join('\n') })
   },
   closeCollectPlan() { this.setData({ cp: null }) },
   copyPlanAll() {

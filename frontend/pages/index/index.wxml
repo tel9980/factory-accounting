@@ -1995,6 +1995,24 @@
         <view class="aline {{item.tone}}" wx:for="{{pbook.advice}}" wx:key="text">· {{item.text}}</view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closePromiseBook">收起</button></view>
       </block>
+      <view class="tip">📣 催款月报（这个月催了几次、催回多少、哪家催了也白催）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空本月）" value="{{dr_month}}" bindinput="onDrMonth" bindconfirm="loadDunningReport"/>
+        <button class="btn half" size="mini" bindtap="loadDunningReport">看月报</button>
+      </view>
+      <block wx:if="{{dr}}">
+        <view class="aline {{dr.useless_n || dr.broken_n ? 'warn' : 'ok'}}">{{dr.text}}</view>
+        <view class="item" wx:for="{{dr.rows}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}{{item.grade ? ' · ' + item.grade : ''}}</text><text class="amt {{item.state=='paid' ? 'ok' : (item.state=='useless'||item.state=='broken' ? 'red' : '')}}">{{item.state_text}}</text></view>
+          <view class="row2">催 {{item.times}} 次（{{item.first}} 起）· 本月回款 ¥{{item.paid_month}} · 催后 ¥{{item.paid_after}} · 还欠 ¥{{item.left}}</view>
+        </view>
+        <view class="aline ok" wx:if="{{dr.self_n}}">没催自己付的：{{dr.self_n}} 家 ¥{{dr.self_amt}}</view>
+        <view class="aline {{item.tone}}" wx:for="{{dr.advice}}" wx:key="text">· {{item.text}}</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyDunningReport">📋 复制月报</button>
+          <button class="btn ghost" size="mini" bindtap="closeDunningReport">收起</button>
+        </view>
+      </block>
       <view class="tip">📤 批量发对账单（月底一次列出「谁还欠我 / 我还欠谁」，每家一段现成话术 + 打印页链接）</view>
       <view class="frow">
         <button class="btn" size="mini" bindtap="openStBatchAr">应收（客户欠我）</button>

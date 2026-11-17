@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -6699,6 +6699,112 @@ app.get('/collect-list', async (c) => {
   const brk = out.filter((x) => x.promise_broken > 0)
   if (brk.length) advice.push({ tone: 'warn', text: `${brk.length} 家答应过付款没兑现（${brk.map((x) => x.party + ' ' + x.promise_broken + ' 次').slice(0, 3).join('、')}）：别只听日子，让他先付一部分。` })
   return c.json({ ok: true, type, total, count: list.length, list: out, ok_n: okN, hold_n: holdN, hold_amt: holdAmt, broken_n: brk.length, advice })
+})
+
+// ── 月度催款战报：这个月催了几次、催回多少、哪家催了也白催 ──
+app.get('/dunning-report', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const isAr = type !== 'ap'
+  const q = String(c.req.query('month') || '')
+  const mm = /^\d{4}-\d{2}$/.test(q) ? q : todayIso().slice(0, 7)
+  const pm = monthAdd(mm + '-01', -1).slice(0, 7)
+  const tbl = isAr ? 'orders' : 'payables'
+  const col = isAr ? 'customer' : 'supplier'
+  const amt = isAr ? 'price' : 'amount'
+  const OPEN = `${amt}-COALESCE(paid,0)-COALESCE(written_off,0)`
+  const duns = (await db.prepare("SELECT id, party, COALESCE(type,'ar') t, note, promise_date, created_at FROM dunning_log WHERE substr(created_at,1,7)=? ORDER BY created_at").bind(mm).all().catch(() => ({ results: [] }))).results || []
+  const mine = duns.filter((d) => (String(d.t || 'ar') === 'ap' ? 'ap' : 'ar') === type)
+  const paySql = isAr
+    ? "SELECT o.customer AS party, substr(l.created_at,1,10) AS d, l.amount AS a FROM ledger l JOIN orders o ON l.ref_type='order' AND l.ref_id=o.id WHERE l.direction='in' AND substr(l.created_at,1,7)=?"
+    : "SELECT p.supplier AS party, substr(l.created_at,1,10) AS d, l.amount AS a FROM ledger l JOIN payables p ON l.ref_type='payable' AND l.ref_id=p.id WHERE l.direction='out' AND substr(l.created_at,1,7)=?"
+  const pays = (await db.prepare(paySql).bind(mm).all().catch(() => ({ results: [] }))).results || []
+  const openRows = (await db.prepare(`SELECT ${col} AS party, COALESCE(SUM(${OPEN}),0) left_amt FROM ${tbl} WHERE ${OPEN}>0.005 GROUP BY ${col}`).all().catch(() => ({ results: [] }))).results || []
+  const leftMap = {}
+  openRows.forEach((r) => { leftMap[norm(r.party)] = round2(num(r.left_amt)) })
+  const payMap = {}
+  for (const p of pays) {
+    const k = norm(p.party)
+    const e = payMap[k] || (payMap[k] = { all: 0, list: [] })
+    e.all = round2(e.all + num(p.a))
+    e.list.push({ d: String(p.d || '').slice(0, 10), a: num(p.a) })
+  }
+  const today = todayIso()
+  const gmap = {}
+  const cb = await creditBook(db, type).catch(() => ({ rows: [] }))
+  for (const r of (cb.rows || [])) gmap[norm(r.party)] = r.grade
+  // 逐家算：催了几次、首催日、催后收回多少、现在还欠、失约几次
+  const byParty = {}
+  for (const d of mine) {
+    const k = norm(d.party)
+    const e = byParty[k] || (byParty[k] = { party: d.party || '', times: 0, first: '', last: '', broken: 0, notes: [] })
+    e.times++
+    const day = String(d.created_at || '').slice(0, 10)
+    if (!e.first || day < e.first) e.first = day
+    if (!e.last || day > e.last) e.last = day
+    if (d.promise_date && String(d.promise_date).slice(0, 10) < today) e.broken++
+    if (d.note && e.notes.length < 3) e.notes.push(String(d.note).slice(0, 20))
+  }
+  const rows = Object.keys(byParty).map((k) => {
+    const e = byParty[k]
+    const pm2 = payMap[k] || { all: 0, list: [] }
+    const after = round2(pm2.list.filter((x) => x.d >= e.first).reduce((a, x) => a + x.a, 0))
+    const left = round2(num(leftMap[k]))
+    let state = 'waiting'
+    if (after > 0.005) state = left > 0.005 ? 'part' : 'paid'
+    else if (e.times >= 3) state = 'useless'
+    else if (e.broken > 0) state = 'broken'
+    const state_text = {
+      paid: '催回了，钱已到账',
+      part: '催回一部分，还欠 ¥' + left,
+      broken: '答应过付款又没付',
+      useless: '催了 ' + e.times + ' 次，一分没回' + (e.broken ? '（答应过 ' + e.broken + ' 次也没付）' : ''),
+      waiting: '刚催过，还没动静'
+    }[state]
+    const per = e.times ? round2(after / e.times) : 0
+    return {
+      party: e.party, times: e.times, first: e.first, last: e.last, broken: e.broken,
+      paid_month: round2(pm2.all), paid_after: after, left, state, state_text,
+      per_time: per, grade: gmap[k] || 'N', notes: e.notes.join(' / ')
+    }
+  })
+  rows.sort((a, b) => (a.state === 'useless' || a.state === 'broken' ? 0 : 1) - (b.state === 'useless' || b.state === 'broken' ? 0 : 1) || b.paid_after - a.paid_after)
+  // 没催但自己付了的
+  const dunKeys = new Set(Object.keys(byParty))
+  const selfRows = Object.keys(payMap).filter((k) => !dunKeys.has(k)).map((k) => ({
+    party: (payMap[k].list && payMap[k].list.length) ? (pays.find((p) => norm(p.party) === k) || {}).party || '' : '',
+    paid: round2(payMap[k].all)
+  })).filter((x) => x.paid > 0.005).sort((a, b) => b.paid - a.paid)
+  const selfAmt = round2(selfRows.reduce((a, x) => a + x.paid, 0))
+  const allPaid = round2(pays.reduce((a, x) => a + num(x.a), 0))
+  const times = rows.reduce((a, x) => a + x.times, 0)
+  const recovered = round2(rows.reduce((a, x) => a + x.paid_after, 0))
+  const useless = rows.filter((x) => x.state === 'useless')
+  const brokenN = rows.filter((x) => x.state === 'broken').length
+  const perTime = times ? round2(recovered / times) : 0
+  // 上月对比
+  const prevDun = (await db.prepare("SELECT COUNT(*) n FROM dunning_log WHERE substr(created_at,1,7)=?").bind(pm).first().catch(() => null))
+  const prevPay = (await db.prepare(paySql.replace('=?', '=?')).bind(pm).all().catch(() => ({ results: [] }))).results || []
+  const prevPaid = round2(prevPay.reduce((a, x) => a + num(x.a), 0))
+  const pTimes = num(prevDun && prevDun.n)
+  const advice = []
+  if (!times && !allPaid) advice.push({ tone: 'info', text: `${mm} 没催过款、也没有回款记录。` })
+  else if (!times) advice.push({ tone: 'warn', text: `${mm} 一次都没催过，但有 ¥${allPaid} 自己付进来了（${selfRows.length} 家）。老账还是要催一句。` })
+  else {
+    advice.push({ tone: 'ok', text: `${mm} 催了 ${rows.length} 家共 ${times} 次，催后收回 ¥${recovered}${allPaid > 0 ? `（本月总回款 ¥${allPaid}，占 ${Math.round((recovered / Math.max(allPaid, 1)) * 100)}%）` : ''}，平均每催一次 ¥${perTime}。` })
+    if (useless.length) advice.push({ tone: 'warn', text: `${useless.length} 家催了 3 次以上一分没回（${useless.map((x) => x.party + ' 欠 ¥' + x.left).slice(0, 3).join('、')}）：再催也是白费劲，改成打电话或上门，或者先停掉账期。` })
+    if (brokenN) advice.push({ tone: 'warn', text: `${brokenN} 家答应过付款又没付：下次别只听日子，让他先付一部分。` })
+    if (selfRows.length) advice.push({ tone: 'ok', text: `另有 ${selfRows.length} 家没催自己付了 ¥${selfAmt}（${selfRows.slice(0, 3).map((x) => x.party).join('、')}）：这几家不用花力气。` })
+    if (pTimes && times) advice.push({ tone: times > pTimes ? 'ok' : 'info', text: `比上月（催 ${pTimes} 次、回款 ¥${prevPaid}）${times > pTimes ? '多催了 ' + (times - pTimes) + ' 次' : times < pTimes ? '少催了 ' + (pTimes - times) + ' 次' : '次数一样'}。` })
+  }
+  const text = advice.length ? advice[0].text : ''
+  return c.json({
+    ok: true, type, month: mm, prev_month: pm,
+    times, parties: rows.length, recovered, all_paid: allPaid, self_amt: selfAmt, self_n: selfRows.length,
+    per_time: perTime, useless_n: useless.length, broken_n: brokenN,
+    prev: { times: pTimes, paid: prevPaid },
+    rows, self_rows: selfRows.slice(0, 10), advice, text
+  })
 })
 
 // ── 这周催款排班：按「金额 × 逾期 × 信用」排优先级，分到具体哪天打 ──
