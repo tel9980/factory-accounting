@@ -32,7 +32,10 @@ app.use('*', async (c, next) => {
   }
   const st = c.res ? c.res.status : 200
   // 500 时把「哪条统计失败了」一起记下来（noteFail 收集的），不然日志里只剩一个 500 没有原因
-  if (st >= 500) await logError(c, st, failBucket.join(' | '), Date.now() - t0)
+  const dur = Date.now() - t0
+  if (st >= 500) await logError(c, st, failBucket.join(' | '), dur)
+  // 服务器自己在这次请求里花了多少毫秒（不含网络）：排查"到底慢在服务器还是慢在网上"时看这个头
+  try { c.header('Server-Timing', 'app;dur=' + dur) } catch (e) {}
 })
 
 // 兜底：真正的 500 也要把错误原文记下来，并给前端一句人话（不然只看到「加载失败」）
@@ -6760,7 +6763,7 @@ async function creditBook(db, type) {
   const old = (await db.prepare(`SELECT ${who} AS party, COALESCE(SUM(${OPEN}),0) s FROM ${tbl}
     WHERE ${OPEN}>0.005 AND substr(created_at,1,10)<? GROUP BY ${who}`).bind(dayAgo(90)).all().catch(() => ({ results: [] }))).results || []
   const disp = (await db.prepare("SELECT party, COUNT(*) n FROM statement_log WHERE ack='doubt' AND COALESCE(resolved_at,'')='' GROUP BY party").all().catch(() => ({ results: [] }))).results || []
-  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
+  const pb = await pbP
   const om = {}, dm = {}, pm = {}
   old.forEach((r) => { om[norm(r.party)] = round2(num(r.s)) })
   disp.forEach((r) => { dm[norm(r.party)] = num(r.n) })
@@ -8732,15 +8735,21 @@ app.get('/collect-list', async (c) => {
   const cfgRow = await db.prepare("SELECT value FROM settings WHERE key='collect_min_days'").first().catch(() => null)
   const cfgMin = num(cfgRow && cfgRow.value)
   const minDays = Math.max(0, c.req.query('min_days') != null ? num(c.req.query('min_days')) : cfgMin)
-  const title = (await getTitle(db)).title
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
-  const rows = (await db.prepare(`SELECT ${col} AS party, COUNT(*) cnt, COALESCE(SUM(${amt}-paid-COALESCE(written_off,0)),0) left_amt, MIN(created_at) oldest, MAX(CASE WHEN due_date IS NOT NULL THEN due_date END) due FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0 GROUP BY ${col}`).all()).results || []
+  // 这几条互不依赖，一起发（串行发在 D1 上每条多等 80–120ms）
+  const [titleRow, rowsRes0] = await Promise.all([
+    getTitle(db),
+    db.prepare(`SELECT ${col} AS party, COUNT(*) cnt, COALESCE(SUM(${amt}-paid-COALESCE(written_off,0)),0) left_amt, MIN(created_at) oldest, MAX(CASE WHEN due_date IS NOT NULL THEN due_date END) due FROM ${tbl} WHERE ${amt}-paid-COALESCE(written_off,0) > 0 GROUP BY ${col}`).all()
+  ])
+  const title = titleRow.title
+  const rows = rowsRes0.results || []
   // 每家的历史付款速度（结清的单平均几天付清）——用来判断「催得动」还是「一直拖」
   const histSql = type === 'ap'
     ? "SELECT o.supplier AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM payables o JOIN ledger l ON l.ref_type='payable' AND l.ref_id=o.id AND l.direction='out' WHERE o.paid + COALESCE(o.written_off,0) >= o.amount GROUP BY o.id"
     : "SELECT o.customer AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id"
+  const pbP = promiseBook(db, 365, type).catch(() => ({ parties: [] }))
   const histRows = (await db.prepare(histSql).all()).results || []
   const hstat = {}
   for (const h of histRows) {
@@ -14283,6 +14292,28 @@ app.delete('/transfers/:id', async (c) => {
   await logAudit(db, '删除内部转账', '', `#${id}`)
   return c.json({ ok: true })
 })
+
+
+// ===== DDL 只跑一次 =====
+// 每次请求都 CREATE TABLE IF NOT EXISTS / CREATE INDEX 会白等一次 D1（实测每次多 80–150ms），
+// 表结构在 scheduled 里已经保证过，这里按「同一个 D1 绑定」记忆一次，后续请求直接跳过。
+const _ensuredDdl = new WeakMap()
+function _memoDdl(fn, tag) {
+  return async (db) => {
+    let set = _ensuredDdl.get(db)
+    if (!set) { set = new Set(); _ensuredDdl.set(db, set) }
+    if (set.has(tag)) return
+    await fn(db)
+    set.add(tag)
+  }
+}
+wageTable = _memoDdl(wageTable, 'wage')
+reworkTable = _memoDdl(reworkTable, 'rework')
+osTable = _memoDdl(osTable, 'os')
+frameTable = _memoDdl(frameTable, 'frame')
+partyStaffTable = _memoDdl(partyStaffTable, 'partystaff')
+matTable = _memoDdl(matTable, 'mat')
+ensureStaffTable = _memoDdl(ensureStaffTable, 'staff')
 
 export default {
   fetch: (req, env, ctx) => {
