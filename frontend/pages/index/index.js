@@ -2009,6 +2009,7 @@ Page({
     const n = (this.data.p_supplier || '').trim()
     if (!n) return
     this.applyLastDeal('ap', n)
+    this.loadSupplyPrice()
   },
   applyLastDeal(type, party) {
     this.req({
@@ -4033,6 +4034,23 @@ Page({
     })
   },
   // 钱的三条线（预收款 / 预付供应商 / 员工借支 / 借款）
+  // 工序卡住的单
+  loadStale() {
+    this.req({ url: API_BASE + '/process-stale?days=7', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ ps: d }) } })
+  },
+  closeStale() { this.setData({ ps: null }) },
+  copyStale() {
+    const d = this.data.ps
+    if (!d) return
+    wx.setClipboardData({ data: d.advice, success: () => wx.showToast({ title: '已复制' }) })
+  },
+  goOrderFromStale(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    if (!id) return
+    this.setData({ ps: null })
+    this.enterTab('ar')
+    wx.pageScrollTo({ scrollTop: 0, duration: 200 })
+  },
   // 这周的钱够不够付
   loadCashForecast() {
     this.req({ url: API_BASE + '/cash-forecast?days=14', silent: true, success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ cf: d }) } })
@@ -4131,7 +4149,7 @@ Page({
   },
   // 员工权限：老板勾哪些模块给员工用
   loadStaffPerms() {
-    this.req({ url: API_BASE + '/staff-perms', success: (res) => this.setData({ spm: res.data || null }) })
+    this.req({ url: API_BASE + '/staff-perms', success: (res) => { const d = res.data || {}; this.setData({ spm: d, spm_self: !!d.self_only }) } })
   },
   toggleStaffMod(e) {
     const k = e.currentTarget.dataset.k
@@ -4140,13 +4158,14 @@ Page({
     const rows = d.rows.map((r) => (r.k === k ? Object.assign({}, r, { on: !r.on }) : r))
     this.setData({ spm: Object.assign({}, d, { rows }) })
   },
+  toggleSelfOnly() { this.setData({ spm_self: !this.data.spm_self }) },
   saveStaffPerms() {
     const d = this.data.spm
     if (!d) return
     const modules = (d.rows || []).filter((r) => r.on).map((r) => r.k)
     if (!modules.length) return wx.showToast({ title: '至少留一个模块', icon: 'none' })
     this.req({
-      url: API_BASE + '/staff-perms', method: 'POST', data: { modules },
+      url: API_BASE + '/staff-perms', method: 'POST', data: { modules, self_only: !!this.data.spm_self },
       success: () => { wx.showToast({ title: '存好了', icon: 'success' }); this.loadStaffPerms() }
     })
   },
@@ -6595,17 +6614,62 @@ Page({
   onAssetCost(e) { this.setData({ asset_cost: e.detail.value }) },
   onAssetBuy(e) { this.setData({ asset_buy: e.detail.value }) },
   onAssetLife(e) { this.setData({ asset_life: e.detail.value }) },
+  onAssetMaint(e) { this.setData({ asset_maint: e.detail.value }) },
   onAssetRes(e) { this.setData({ asset_res: e.detail.value }) },
+  // 设备保养
+  loadAssetMaint() {
+    this.req({ url: API_BASE + '/asset-maint', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ am: d }) } })
+  },
+  closeAssetMaint() { this.setData({ am: null }) },
+  doMaint(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    const months = Number(e.currentTarget.dataset.m) || 0
+    if (!id) return
+    wx.showModal({ title: '记一次保养', content: '是今天保养的吗？记下后按 ' + (months || '不') + ' 个月后再提醒。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/assets/' + id + '/maint', method: 'POST', data: { months }, success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没记上', icon: 'none' })
+        wx.showToast({ title: '记上了' }); this.loadAssets(); this.loadAssetMaint()
+      } })
+    } })
+  },
+  copyAssetMaint() {
+    const d = this.data.am
+    if (!d) return
+    wx.setClipboardData({ data: d.text + '\n' + d.advice, success: () => wx.showToast({ title: '已复制' }) })
+  },
+  // 供应商比价（录应付时提示这次贵不贵）
+  loadSupplyPrice() {
+    const d = this.data
+    const party = String(d.p_supplier || '').trim()
+    if (!party) { this.setData({ sp_hint: '' }); return }
+    const amt = Number(d.p_amount) || 0
+    this.req({ url: API_BASE + '/supply-price?party=' + encodeURIComponent(party) + (amt ? '&amount=' + amt : ''), silent: true, success: (r) => {
+      const x = r.data || {}
+      if (x.ok) this.setData({ sp_hint: x.hint || '', sp_cnt: x.cnt, sp_avg: x.avg })
+    } })
+  },
+  loadSupplyBook() {
+    this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
+  },
+  closeSupplyBook() { this.setData({ spb: null }) },
+  copySupplyBook() {
+    const d = this.data.spb
+    if (!d) return
+    const t = (d.rows || []).map((r) => r.party + '　' + r.cnt + ' 笔　共 ' + r.total + '　平均 ' + r.avg).join('\n')
+    wx.setClipboardData({ data: '【供应商比价】\n' + t, success: () => wx.showToast({ title: '已复制' }) })
+  },
   addAsset() {
     const d = this.data
     if (!String(d.asset_name || '').trim()) return wx.showToast({ title: '填设备名称', icon: 'none' })
     if (!Number(d.asset_cost)) return wx.showToast({ title: '填设备原值', icon: 'none' })
     this.req({
       url: API_BASE + '/assets', method: 'POST',
-      data: { name: d.asset_name, cost: Number(d.asset_cost), buy_date: d.asset_buy, life_years: Number(d.asset_life) || 5, residual_rate: d.asset_res === '' ? 5 : Number(d.asset_res) },
+      data: { name: d.asset_name, cost: Number(d.asset_cost), buy_date: d.asset_buy, life_years: Number(d.asset_life) || 5, residual_rate: d.asset_res === '' ? 5 : Number(d.asset_res), maint_months: Number(d.asset_maint) || 0 },
       success: (res) => {
         if (res.data && res.data.ok) {
-          this.setData({ asset_name: '', asset_cost: '', asset_buy: '', asset_life: '', asset_res: '' })
+          this.setData({ asset_name: '', asset_cost: '', asset_buy: '', asset_life: '', asset_res: '', asset_maint: '' })
           this.loadAssets(); wx.showToast({ title: '已添加', icon: 'success' })
         } else wx.showToast({ title: (res.data && res.data.error) || '没加成功', icon: 'none' })
       }
@@ -7097,7 +7161,64 @@ Page({
       }
       const all = rows.concat(wos).concat(eds)
       const text = head + '\n' + (all.map((x) => x.k + '  ' + x.v).join('\n') || '还没有' + (type === 'ar' ? '收款' : '付款') + '记录')
-      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: all, detail_text: text })
+      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: all, detail_text: text, detail_id: id, detail_type: type === 'ar' ? 'order' : 'payable', detail_att: [] })
+      this.loadAttach(type === 'ar' ? 'order' : 'payable', id)
+    } })
+  },
+  // 单据照片：拍一张存着，随时能翻出来给人看
+  loadAttach(refType, refId) {
+    this.req({ url: API_BASE + '/attachments?ref_type=' + refType + '&ref_id=' + refId, silent: true, success: (r) => {
+      const d = r.data || {}
+      if (d.ok) this.setData({ detail_att: d.rows || [] })
+    } })
+  },
+  addAttach() {
+    const { detail_id, detail_type } = this.data
+    if (!detail_id) return
+    wx.chooseImage({
+      count: 1,
+      sizeType: ['compressed'],
+      sourceType: ['camera', 'album'],
+      success: (res) => {
+        const p = res.tempFilePaths[0]
+        const go = (path) => {
+          wx.getFileSystemManager().readFile({ filePath: path, encoding: 'base64', success: (f) => {
+            const b64 = String(f.data || '')
+            if (b64.length > 880000) { wx.showToast({ title: '这张太大，换张小的', icon: 'none' }); return }
+            wx.showLoading({ title: '存…' })
+            this.req({
+              url: API_BASE + '/attachments', method: 'POST',
+              data: { ref_type: detail_type, ref_id: detail_id, name: '单据照片', mime: 'image/jpeg', b64 },
+              success: (r) => {
+                wx.hideLoading()
+                const d = r.data || {}
+                if (!d.ok) return wx.showToast({ title: d.error || '没存上', icon: 'none' })
+                wx.showToast({ title: '存好了' })
+                this.loadAttach(detail_type, detail_id)
+              },
+              fail: () => { wx.hideLoading(); wx.showToast({ title: '没存上', icon: 'none' }) }
+            })
+          }, fail: () => wx.showToast({ title: '读不到这张图', icon: 'none' }) })
+        }
+        wx.compressImage({ src: p, quality: 60, success: (c) => go(c.tempFilePath), fail: () => go(p) })
+      }
+    })
+  },
+  viewAttach(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    if (!id) return
+    this.req({ url: API_BASE + '/attachment/' + id, success: (r) => {
+      const d = r.data || {}
+      if (!d.b64) return wx.showToast({ title: '照片不在了', icon: 'none' })
+      wx.previewImage({ urls: ['data:' + (d.mime || 'image/jpeg') + ';base64,' + d.b64] })
+    } })
+  },
+  delAttach(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    const { detail_id, detail_type } = this.data
+    wx.showModal({ title: '删掉这张照片？', content: '删了找不回来，要留证据就别删。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/attachment/' + id, method: 'DELETE', success: () => { this.loadAttach(detail_type, detail_id); wx.showToast({ title: '删了' }) } })
     } })
   },
   noop() {},

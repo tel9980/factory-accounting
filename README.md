@@ -838,11 +838,20 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 底部双签字栏「客户签收（签字 / 日期）」和「我方经手」，备注写明「货到请当场验收」；
    - 应收行加「打印单」按钮，链接复制到浏览器即可打印或存 PDF；签名绑定单据号，改单后旧链接失效。
 
+244. ✅ **哪些单卡住了（工序停着没动）**：`GET /process-stale?days=7`——未交付（status<2）的单，最后动工序那天距今 ≥N 天就上榜：
+   - 每行给客户、活、金额、当前工序与进度、最后动的日期、卡了几天；超过 3×N 天标红；
+   - 一句话建议「有 3 张单还没交付，其中 1 张超过 21 天没动过。挑最久的那张问车间一句：卡在哪、缺什么料、什么时候能出」；
+   - 应收页「⏳ 有哪些单卡住了」，点行跳对应 tab，可复制给车间看。实测 10-01 开的单 → 47 天没动上榜；PATCH 工序后立刻消失。
+245. ✅ **设备保养提醒**：`assets` 加 `maint_months`（每几个月保养一次，0=不提醒）与 `maint_last`（上次保养日）；`GET /asset-maint?days=15` 按「上次 + N 个月」算下次保养日，到期/过期都列出来（过期标红、`overdue` 计数）；`POST /assets/:id/maint {date?,months?}` 记一次保养（写审计，顺便可改周期）；新建设备时可填周期。实测：喷涂机每 3 个月一次、上次 08-01 → 下次 11-01、已超 16 天；点「保养了」后列表清空。
+246. ✅ **单据照片（送货单 / 验收单 / 转账截图）**：新表 `attachments(ref_type, ref_id, name, mime, size, b64, created_at)`；`POST /attachments`（单张压缩后上限约 650KB、每单最多 6 张）、`GET /attachments?ref_type=&ref_id=`（只出元信息）、`GET /attachment/:id`（取 base64 用 `wx.previewImage` 看）、`DELETE /attachment/:id`（写审计）。前端在应收/应付「明细」弹窗里：`wx.chooseImage` + `wx.compressImage(quality:60)` → base64 上传 → 显示「送货单 · 12KB · 11-17」，可看可删。**为什么存库而不存云盘**：一个人用、量小，存库不用再配一套存储和权限。
+247. ✅ **供应商比价**：`GET /supply-price?party=&amount=&kw=`——不传 party 出「各供应商采购额排行」（笔数/合计/平均/最高/最低/最近哪天）；传 party 出这家历史 30 笔，并按「除本笔外的历史均价」算这次偏高偏低：偏差 <10% 说「和平时差不多」，否则说「比平时贵 50%（平均 ¥4000）——是不是涨了价，或者这批料好一点？」或「便宜 12%，可以问一句为什么」。前端：应付录单时供应商/金额离开输入框就提示（`🏷` 一行），报表页「🏷 供应商比价」看全量。
+248. ✅ **员工只看自己录的单**：`orders`/`payables` 加 `created_by`（录单时写 `act(c)`，即「老板」/「员工·小王」）；设置 → 员工权限 加开关「员工只看自己录的单」（`settings.staff_self_only`），开了以后员工在 `/ar` `/ap` 列表里只看到 `created_by` 等于自己的单据（`selfOnly(c)` 统一判定，`GET /staff-perms` 返回 `self_only/self_note`）；汇总与报表仍是整本账，利润相关接口本来就对员工 403。**已知取舍**：开关打开后，员工看不到启用前录的单（那些行 `created_by` 为空），适合「新来的业务员只跑自己的客户」这种用法。实测：老板记 2 单、员工记 1 单 → 员工列表 1 条、老板 4 条；关掉开关员工立刻恢复看全部。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 354 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 362 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -857,13 +866,19 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /advances`
 - `POST /advances`
 
-**assets**（5）
+**assets**（6）
 
 - `DELETE /assets/:id`
 - `GET /assets`
 - `POST /assets`
 - `POST /assets/:id/dispose`
+- `POST /assets/:id/maint`
 - `POST /assets/run-depreciation`
+
+**attachment**（2）
+
+- `DELETE /attachment/:id`
+- `GET /attachment/:id`
 
 **bank-flows**（3）
 
@@ -1060,6 +1075,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /year-open`
 - `POST /year-open`
 
+**attachments**（2）
+
+- `GET /attachments`
+- `POST /attachments`
+
 **auth**（7）
 
 - `GET /auth/recover-info`
@@ -1147,7 +1167,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（195）
+**其它（单个接口）**（198）
 
 - `GET /`
 - `GET /access-guide`
@@ -1158,6 +1178,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /ap`
 - `GET /ar`
 - `GET /ar-summary`
+- `GET /asset-maint`
 - `GET /audit-logs`
 - `GET /backup`
 - `GET /backup-get`
@@ -1268,6 +1289,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /price-anomaly`
 - `GET /price-book`
 - `GET /price-lookup`
+- `GET /process-stale`
 - `GET /profit-compare`
 - `GET /promise-book`
 - `POST /quick`
@@ -1315,6 +1337,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /statement-pack`
 - `GET /statement-print`
 - `GET /suggest`
+- `GET /supply-price`
 - `GET /target-forecast`
 - `GET /target-history`
 - `GET /target-weeks`

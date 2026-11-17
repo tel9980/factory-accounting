@@ -10,11 +10,13 @@ CREATE TABLE IF NOT EXISTS orders (
   operator TEXT,                        -- 经手人
   progress TEXT DEFAULT '',             -- 当前工序（如 备料/加工/喷涂/包装）
   created_at TEXT NOT NULL,
-  month TEXT                          -- =substr(created_at,1,7)，触发器自动填，首页走索引
+  month TEXT,                         -- =substr(created_at,1,7)，触发器自动填，首页走索引
+  created_by TEXT                     -- 谁录的（'老板' / '员工·小王'），员工「只看自己录的单」用
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
 CREATE INDEX IF NOT EXISTS idx_orders_month ON orders(month);
+CREATE INDEX IF NOT EXISTS idx_orders_by ON orders(created_by);
 CREATE TRIGGER IF NOT EXISTS trg_orders_month AFTER INSERT ON orders WHEN NEW.month IS NULL
 BEGIN UPDATE orders SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
@@ -42,11 +44,13 @@ CREATE TABLE IF NOT EXISTS payables (
   operator TEXT,                        -- 经手人
   due_date TEXT,                        -- 约定付款日
   created_at TEXT NOT NULL,
-  month TEXT                          -- =substr(created_at,1,7)，触发器自动填
+  month TEXT,                         -- =substr(created_at,1,7)，触发器自动填
+  created_by TEXT                     -- 谁录的（'老板' / '员工·小王'）
 );
 CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);
 CREATE INDEX IF NOT EXISTS idx_payables_created ON payables(created_at);
 CREATE INDEX IF NOT EXISTS idx_payables_month ON payables(month);
+CREATE INDEX IF NOT EXISTS idx_payables_by ON payables(created_by);
 CREATE TRIGGER IF NOT EXISTS trg_payables_month AFTER INSERT ON payables WHEN NEW.month IS NULL
 BEGIN UPDATE payables SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
@@ -348,9 +352,19 @@ CREATE TABLE IF NOT EXISTS assets (
   residual_rate REAL DEFAULT 5,   -- 残值率 %
   disposed_at TEXT,               -- 卖掉/报废那天（空=还在用）
   dispose_amount REAL DEFAULT 0,  -- 卖了多少钱（报废填 0）
+  maint_months INTEGER DEFAULT 0,  -- 每几个月保养一次（0=不提醒）
+  maint_last TEXT,                 -- 上次保养日期
   created_at TEXT NOT NULL
 );
 
+
+-- 单据照片（送货单/验收单/发票照片，压缩后存 base64）
+CREATE TABLE IF NOT EXISTS attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ref_type TEXT NOT NULL, ref_id INTEGER NOT NULL,
+  name TEXT, mime TEXT, size INTEGER, b64 TEXT, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_att_ref ON attachments(ref_type, ref_id);
 
 -- 员工改单申请（员工不能直接删改单据，提申请由老板一键同意/驳回）
 -- 员工账号：一人一个口令，各自授权限（老的整体员工口令继续可用）

@@ -614,6 +614,175 @@ app.delete('/staff-users/:id', async (c) => {
   return c.json({ ok: true })
 })
 
+// 员工只看自己录的单（老板可在 设置 → 员工权限 开关）
+async function selfOnly(c) {
+  const role = c.get && c.get('role')
+  if (role !== 'staff') return { on: false, who: '' }
+  const main = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const row = await main.prepare("SELECT value FROM settings WHERE key='staff_self_only'").first().catch(() => null)
+  if (!row || String(row.value) !== '1') return { on: false, who: '' }
+  const nm = (c.get && c.get('staff_name')) || ''
+  return { on: true, who: nm ? '员工·' + nm : '员工' }
+}
+
+// 供应商比价：这家平时多少钱一笔，这次记的偏高还是偏低
+app.get('/supply-price', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const amount = num(c.req.query('amount'))
+  const kw = String(c.req.query('kw') || '').trim()
+  if (!party) {
+    const rows = (await db.prepare(`SELECT supplier party, COUNT(*) cnt, COALESCE(SUM(amount),0) total, COALESCE(AVG(amount),0) avg,
+        MAX(amount) max, MIN(amount) min, MAX(substr(created_at,1,10)) last_day
+      FROM payables GROUP BY supplier ORDER BY total DESC LIMIT 60`).all().catch(() => ({ results: [] }))).results || []
+    const list = rows.filter((r) => !kw || String(r.party).includes(kw)).map((r) => ({
+      party: r.party, cnt: num(r.cnt), total: round2(num(r.total)), avg: round2(num(r.avg)),
+      max: round2(num(r.max)), min: round2(num(r.min)), last_day: r.last_day, bar: Math.min(100, Math.round(num(r.total) / Math.max(1, num(rows[0] && rows[0].total)) * 100))
+    }))
+    return c.json({ ok: true, count: list.length, rows: list, text: list.length ? '按采购额排：' + list.slice(0, 5).map((r) => r.party + ' ¥' + r.total).join('、') : '还没有采购记录。' })
+  }
+  const q = (await db.prepare('SELECT id, amount, remark, substr(created_at,1,10) day FROM payables WHERE supplier=? ORDER BY id DESC LIMIT 30').bind(party).all().catch(() => ({ results: [] }))).results || []
+  const amts = q.map((x) => num(x.amount))
+  const cnt = amts.length
+  const avg = cnt ? amts.reduce((a, x) => a + x, 0) / cnt : 0
+  const hist = cnt >= 2 ? amts.slice(1) : amts
+  const histAvg = hist.length ? hist.reduce((a, x) => a + x, 0) / hist.length : 0
+  let pct = 0
+  let hint = ''
+  if (amount > 0 && histAvg > 0) {
+    pct = Math.round((amount - histAvg) / histAvg * 1000) / 10
+    hint = Math.abs(pct) < 10 ? '和这家平时的价位差不多（平均 ¥' + round2(histAvg) + '）'
+      : pct > 0 ? '比这家平时贵 ' + pct + '%（平均 ¥' + round2(histAvg) + '）——是不是涨了价，或者这批料好一点？'
+        : '比这家平时便宜 ' + (-pct) + '%（平均 ¥' + round2(histAvg) + '），可以问一句为什么'
+  }
+  const rows = q.slice(0, 8).map((x) => ({ id: num(x.id), day: x.day, amount: round2(num(x.amount)), remark: x.remark || '' }))
+  return c.json({
+    ok: true, party, cnt, avg: round2(avg), hist_avg: round2(histAvg),
+    max: cnt ? round2(Math.max(...amts)) : 0, min: cnt ? round2(Math.min(...amts)) : 0,
+    last: cnt ? round2(amts[0]) : 0, amount: round2(amount), pct, hint, rows,
+    text: cnt ? '「' + party + '」共 ' + cnt + ' 笔采购，平均 ¥' + round2(avg) + '（最高 ¥' + round2(Math.max(...amts)) + '、最低 ¥' + round2(Math.min(...amts)) + '）。' + (hint ? hint : '') : '「' + party + '」还没有采购记录，这是第一笔。'
+  })
+})
+
+// 单据照片：送货单、验收单、发票、微信转账截图，直接拍一张存着（压缩后存，一张几十 KB）
+const ATT_MAX_CHARS = 900000   // 单张 base64 上限（约 650KB）
+const ATT_TYPES = ['order', 'payable', 'asset', 'expense']
+app.post('/attachments', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const refType = String(b.ref_type || '').trim()
+  const refId = num(b.ref_id)
+  if (!ATT_TYPES.includes(refType)) return c.json({ error: '不支持挂在这种东西上' }, 400)
+  if (!refId) return c.json({ error: '缺单据号' }, 400)
+  const b64 = String(b.b64 || '').replace(/^data:[^;]+;base64,/, '')
+  if (!b64) return c.json({ error: '没有图片内容' }, 400)
+  if (b64.length > ATT_MAX_CHARS) return c.json({ error: '这张图太大（压缩后还超过 650KB），换个角度再拍一张' }, 400)
+  const cnt = await db.prepare('SELECT COUNT(*) n FROM attachments WHERE ref_type=? AND ref_id=?').bind(refType, refId).first().catch(() => null)
+  if (num(cnt && cnt.n) >= 6) return c.json({ error: '这一单已经存了 6 张，够用了（想换就先删一张）' }, 400)
+  const name = String(b.name || '照片').slice(0, 40)
+  const mime = String(b.mime || 'image/jpeg').slice(0, 30)
+  const r = await db.prepare('INSERT INTO attachments (ref_type, ref_id, name, mime, size, b64, created_at) VALUES (?,?,?,?,?,?,?)')
+    .bind(refType, refId, name, mime, b64.length, b64, now()).run()
+  const id = r.meta && r.meta.last_row_id ? num(r.meta.last_row_id) : 0
+  await logAudit(db, '存单据照片', refType, refType + ' #' + refId + ' 加了照片「' + name + '」', String(refId), act(c))
+  return c.json({ ok: true, id, kb: Math.round(b64.length / 1365) })
+})
+app.get('/attachments', async (c) => {
+  const db = c.env.DB
+  const refType = String(c.req.query('ref_type') || '').trim()
+  const refId = num(c.req.query('ref_id'))
+  if (!ATT_TYPES.includes(refType) || !refId) return c.json({ ok: true, count: 0, rows: [] })
+  const list = (await db.prepare('SELECT id, name, mime, size, created_at FROM attachments WHERE ref_type=? AND ref_id=? ORDER BY id').bind(refType, refId).all().catch((e) => { noteFail(e, '单据照片'); return { results: [] } })).results || []
+  return c.json({ ok: true, count: list.length, rows: list.map((a) => ({ id: num(a.id), name: a.name, size: num(a.size), kb: Math.round(num(a.size) / 1365), day: String(a.created_at || '').slice(0, 10) })) })
+})
+app.get('/attachment/:id', async (c) => {
+  const db = c.env.DB
+  const a = await db.prepare('SELECT * FROM attachments WHERE id=?').bind(num(c.req.param('id'))).first()
+  if (!a) return c.json({ error: '照片不在了' }, 404)
+  return c.json({ ok: true, id: num(a.id), name: a.name, mime: a.mime, b64: a.b64, day: String(a.created_at || '').slice(0, 10) })
+})
+app.delete('/attachment/:id', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const a = await db.prepare('SELECT * FROM attachments WHERE id=?').bind(id).first()
+  if (!a) return c.json({ error: '照片不在了' }, 404)
+  await db.prepare('DELETE FROM attachments WHERE id=?').bind(id).run()
+  await logAudit(db, '删单据照片', a.ref_type, '删了照片「' + a.name + '」', String(a.ref_id), act(c))
+  return c.json({ ok: true })
+})
+
+// 工序停着没动：未交付的单多久没更新过工序
+app.get('/process-stale', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(120, Math.max(1, Math.round(num(c.req.query('days'), 7))))
+  const ST = ['待加工', '加工中', '已交付']
+  const rows0 = (await db.prepare(`SELECT o.id, o.customer, o.item_name, o.price, o.progress, o.status, o.created_at,
+      (SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id = o.id) last_log
+    FROM orders o WHERE COALESCE(o.status,0) < 2 ORDER BY o.id DESC LIMIT 500`).all().catch((e) => { noteFail(e, '工序停滞'); return { results: [] } })).results || []
+  const rows = []
+  for (const r of rows0) {
+    const last = String(r.last_log || r.created_at || '').slice(0, 10)
+    if (!last) continue
+    const idle = daysSince(last)
+    if (idle < days) continue
+    rows.push({ id: num(r.id), customer: r.customer, item: r.item_name || '', price: round2(num(r.price)), progress: r.progress || '', status: ST[num(r.status)] || '待加工', last_day: last, idle_days: idle, level: idle >= days * 3 ? 'high' : 'mid' })
+  }
+  rows.sort((a, b) => b.idle_days - a.idle_days)
+  const high = rows.filter((r) => r.level === 'high').length
+  return c.json({
+    ok: true, days, count: rows.length, high, rows: rows.slice(0, 50),
+    advice: rows.length
+      ? '有 ' + rows.length + ' 张单还没交付，其中 ' + high + ' 张超过 ' + (days * 3) + ' 天没动过。挑最久的那张问车间一句：卡在哪、缺什么料、什么时候能出。'
+      : '没有卡住的单——未交付的都在 ' + days + ' 天内动过。',
+    text: rows.length
+      ? '【工序卡住的单】' + rows.slice(0, 5).map((r) => r.customer + (r.item ? '·' + r.item : '') + '（' + r.idle_days + ' 天没动）').join('、') + (rows.length > 5 ? ' 等 ' + rows.length + ' 张' : '')
+      : '【工序卡住的单】没有，未交付的都在 ' + days + ' 天内动过。'
+  })
+})
+
+// 设备保养：每 N 个月保养一次，到期提醒
+app.get('/asset-maint', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(120, Math.max(0, Math.round(num(c.req.query('days'), 15))))
+  const today = todayIso()
+  const list = (await db.prepare('SELECT * FROM assets ORDER BY id').all().catch((e) => { noteFail(e, '设备保养'); return { results: [] } })).results || []
+  const rows = []
+  for (const a of list) {
+    if (a.disposed_at) continue
+    const months = num(a.maint_months)
+    if (months <= 0) continue
+    const base = String(a.maint_last || a.buy_date || a.created_at || '').slice(0, 10) || today
+    // 下一个保养日 = 上次保养 + N 个月
+    const d = new Date(base + 'T00:00:00Z')
+    d.setUTCMonth(d.getUTCMonth() + Math.round(months))
+    const next = d.toISOString().slice(0, 10)
+    const left = Math.round((dateNum(next) - dateNum(today)) / 86400000)
+    if (left > days) continue
+    rows.push({ id: num(a.id), name: a.name, months, base_day: base, next_day: next, left_days: left, level: left < 0 ? 'high' : 'mid' })
+  }
+  rows.sort((a, b) => a.left_days - b.left_days)
+  const over = rows.filter((r) => r.left_days < 0).length
+  return c.json({
+    ok: true, today, count: rows.length, overdue: over, rows,
+    advice: rows.length
+      ? (over ? '有 ' + over + ' 台已经过了保养期，' : '') + '还有 ' + (rows.length - over) + ' 台 ' + days + ' 天内该保养。停一次机比保养贵得多，抽个空做掉。'
+      : '设备保养都还没到期（想提醒就给设备设个保养周期）。',
+    text: rows.length ? '【设备保养】' + rows.slice(0, 5).map((r) => r.name + '（' + (r.left_days < 0 ? '已超 ' + (-r.left_days) + ' 天' : r.left_days + ' 天后') + '）').join('、') : '【设备保养】都还没到期。'
+  })
+})
+app.post('/assets/:id/maint', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const b = await c.req.json().catch(() => ({}))
+  const a = await db.prepare('SELECT * FROM assets WHERE id=?').bind(id).first()
+  if (!a) return c.json({ error: '没有这台设备' }, 404)
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || '')) ? String(b.date) : todayIso()
+  const months = b.months != null ? Math.max(0, Math.round(num(b.months))) : num(a.maint_months)
+  await db.prepare('UPDATE assets SET maint_last=?, maint_months=? WHERE id=?').bind(day, months, id).run()
+  await logAudit(db, '设备保养', '设备', a.name + ' 保养了（' + day + '），下次 ' + (months ? months + ' 个月后' : '不提醒'), '', act(c))
+  return c.json({ ok: true, name: a.name, date: day, months })
+})
+
 // 这周的钱够不够付：未来 N 天要付的 vs 账上现金 + 该收的
 app.get('/cash-forecast', async (c) => {
   const db = c.env.DB
@@ -3030,7 +3199,10 @@ app.get('/staff-perms', async (c) => {
   const mods = await getStaffModules(mainDb)
   const rows = Object.keys(STAFF_MOD_LABEL).map((k) => ({ k, label: STAFF_MOD_LABEL[k], on: mods.includes(k) }))
   const off = rows.filter((r) => !r.on).map((r) => r.label)
-  return c.json({ ok: true, rows, on: mods, count: mods.length,
+  const so = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_self_only'").first()
+  const selfOn = !!(so && String(so.value) === '1')
+  return c.json({ ok: true, rows, on: mods, count: mods.length, self_only: selfOn,
+    self_note: selfOn ? '员工现在只能看到自己录的单（应收/应付列表），汇总和报表仍是整本账。' : '员工能看到全部单据（按模块权限）。',
     text: off.length ? '员工现在能用的：' + rows.filter((r) => r.on).map((r) => r.label).join('、') + '。不能用的：' + off.join('、') + '。' : '员工现在什么模块都能用（除了删改单、看毛利）。' })
 })
 app.post('/staff-perms', async (c) => {
@@ -3043,8 +3215,14 @@ app.post('/staff-perms', async (c) => {
   const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_modules'").first()
   if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_modules'").bind(v).run()
   else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_modules', ?)").bind(v).run()
-  await logAudit(mainDb, '改员工权限', '员工权限', mods.map((m) => STAFF_MOD_LABEL[m]).join('、'))
-  return c.json({ ok: true, modules: mods })
+  if (body.self_only != null) {
+    const sv = body.self_only ? '1' : '0'
+    const old2 = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_self_only'").first()
+    if (old2) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_self_only'").bind(sv).run()
+    else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_self_only', ?)").bind(sv).run()
+  }
+  await logAudit(mainDb, '改员工权限', '员工权限', mods.map((m) => STAFF_MOD_LABEL[m]).join('、') + (body.self_only != null ? (body.self_only ? '；只给看自己录的单' : '；可看全部单据') : ''))
+  return c.json({ ok: true, modules: mods, self_only: body.self_only != null ? !!body.self_only : undefined })
 })
 
 app.get('/me', async (c) => {
@@ -4964,6 +5142,8 @@ app.get('/ar', async (c) => {
   if (status === 'due') {
     conds.push("due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) <= ?"); b.push(dayAfter(7))
   }
+  const selfAr = await selfOnly(c)
+  if (selfAr.on) { conds.push('created_by = ?'); b.push(selfAr.who) }
   if (kw) {
     conds.push('(customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,\'\') LIKE ?)')
     b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
@@ -5226,6 +5406,8 @@ app.get('/ap', async (c) => {
   if (status === 'closed') conds.push('paid + COALESCE(written_off,0) >= amount')
   else if (status === 'all') conds.push('1=1')
   else conds.push('paid + COALESCE(written_off,0) < amount')
+  const selfAp = await selfOnly(c)
+  if (selfAp.on) { conds.push('created_by = ?'); b.push(selfAp.who) }
   if (status === 'overdue') { conds.push('substr(created_at,1,10) <= ?'); b.push(dayAgo(30)) }
   if (status === 'due') {
     conds.push("due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) <= ?"); b.push(dayAfter(7))
@@ -5763,8 +5945,8 @@ app.post('/orders', async (c) => {
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date) || (await termDue(db, customer, created, 'ar'))
   const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
-  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
-    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
+  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by) VALUES (?,?,?,0,0,?,?,?,?,?)')
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c)).run()
   await opMark(db, cid, 'order', 0)
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`, '', act(c))
   // 超信用额度提醒（不拦，只提醒）
@@ -5948,8 +6130,8 @@ app.post('/payables', async (c) => {
     if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
   }
   const checks = await orderChecks(db, { table: 'payables', who: 'supplier', amtcol: 'amount', itemcol: 'remark', party: supplier, item: remark || '', amount, cost: 0, created: stampOf(date), due: toIsoDate(due_date) })
-  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created, 'ap')) || null, created).run()
+  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at, created_by) VALUES (?,?,0,?,?,?,?,?,?)')
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created, 'ap')) || null, created, act(c)).run()
   await opMark(db, cid, 'payable', 0)
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`, '', act(c))
   return c.json(Object.assign({ ok: true }, checks.length ? { checks } : {}))
@@ -12060,6 +12242,7 @@ const assetCalc = (a) => {
     net, used_months: usedMonths, remain_months: Math.max(cap - usedMonths, 0),
     done: acc >= depCap - 0.01,
     disposed, disposed_at: a.disposed_at || '', dispose_amount: sell,
+    maint_months: num(a.maint_months), maint_last: a.maint_last || '',
     gain: disposed ? round2(sell - net) : null
   }
 }
@@ -12083,14 +12266,15 @@ app.get('/assets', async (c) => {
 })
 
 app.post('/assets', async (c) => {
-  const { name, cost, buy_date, life_years, residual_rate } = await c.req.json()
+  const { name, cost, buy_date, life_years, residual_rate, maint_months, maint_last } = await c.req.json()
   const nm = String(name || '').trim()
   if (!nm) return c.json({ error: '设备名称必填' }, 400)
   if (num(cost) <= 0) return c.json({ error: '原值必须大于 0' }, 400)
   const db = c.env.DB
-  await db.prepare('INSERT INTO assets (name, cost, buy_date, life_years, residual_rate, created_at) VALUES (?,?,?,?,?,?)')
+  await db.prepare('INSERT INTO assets (name, cost, buy_date, life_years, residual_rate, maint_months, maint_last, created_at) VALUES (?,?,?,?,?,?,?,?)')
     .bind(nm, num(cost), toIsoDate(buy_date) || now().slice(0, 10), num(life_years) || 5,
-      residual_rate === undefined ? 5 : num(residual_rate), now()).run()
+      residual_rate === undefined ? 5 : num(residual_rate),
+      Math.max(0, Math.round(num(maint_months))), toIsoDate(maint_last) || null, now()).run()
   await logAudit(db, '新增固定资产', nm, `${nm} 原值 ¥${num(cost)}`)
   return c.json({ ok: true })
 })

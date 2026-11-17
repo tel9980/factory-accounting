@@ -388,6 +388,23 @@
       <view class="su"><view class="sun red">{{ar_sum.overdue_amount || 0}}</view><view class="sul">逾期30天+ {{ar_sum.overdue_count || 0}} 单</view></view>
       <view class="su"><view class="sun org">{{ar_sum.due_amount || 0}}</view><view class="sul">7天内到期 {{ar_sum.due_count || 0}} 单</view></view>
       <view class="su"><view class="sun green">{{ar_sum.month_settled || 0}}</view><view class="sul">本月已收 · 新单 {{ar_sum.month_new || 0}}</view></view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadStale">⏳ 有哪些单卡住了</button>
+      </view>
+      <block wx:if="{{ps}}">
+        <view class="box">
+          <view class="row1"><text class="nm">没交付的单，超过 7 天没动工序</text><text class="amt {{ps.high?'red':''}}">{{ps.count}} 张</text></view>
+          <view class="row2">{{ps.advice}}</view>
+        </view>
+        <view class="item" wx:for="{{ps.rows}}" wx:key="id" bindtap="goOrderFromStale" data-id="{{item.id}}">
+          <view class="row1"><text class="nm">{{item.customer}}{{item.item?'·'+item.item:''}}</text><text class="amt {{item.level=='high'?'red':''}}">{{item.idle_days}} 天没动</text></view>
+          <view class="row2">{{item.status}}{{item.progress?' · '+item.progress:''}} · 最后动 {{item.last_day}} · ¥{{item.price}}</view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyStale">📋 复制给他看</button>
+          <button class="btn ghost" size="mini" bindtap="closeStale">收起</button>
+        </view>
+      </block>
     </view>
     <view class="form">
       <input class="inp" placeholder="搜索客户/产品" value="{{ar_kw}}" bindinput="onArKw"/>
@@ -602,7 +619,8 @@
         <text class="chip" wx:for="{{sug_ap}}" wx:key="index" bindtap="fillSug" data-t="ap" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
       </view>
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}</view>
-      <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount"/>
+      <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount" bindblur="loadSupplyPrice"/>
+      <view class="aline warn" wx:if="{{sp_hint}}">🏷 {{sp_hint}}</view>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
@@ -1554,6 +1572,10 @@
           <view class="item" wx:for="{{spm.rows}}" wx:key="k" bindtap="toggleStaffMod" data-k="{{item.k}}">
             <view class="row1"><text class="nm">{{item.on?'☑':'☐'}} {{item.label}}</text><text class="amt">{{item.on?'开着':'关着'}}</text></view>
           </view>
+          <view class="item" bindtap="toggleSelfOnly">
+            <view class="row1"><text class="nm">{{spm_self?'☑':'☐'}} 员工只看自己录的单</text><text class="amt">{{spm_self?'开着':'关着'}}</text></view>
+            <view class="row2">开了以后，员工在应收/应付里只看得到自己录的单（汇总和报表仍是整本账）。</view>
+          </view>
           <view class="frow">
             <button class="btn" size="mini" bindtap="saveStaffPerms">存下来</button>
             <button class="btn ghost" size="mini" bindtap="closeStaffPerms">收起</button>
@@ -2112,6 +2134,21 @@
           <button class="btn half" size="mini" bindtap="closeChurnRisk">收起</button>
         </view>
       </block>
+      <view class="tip">🏷 供应商比价（同一个供应商，这次贵了还是便宜了）</view>
+      <view class="frow">
+        <button class="btn half" size="mini" bindtap="loadSupplyBook">看各家采购</button>
+      </view>
+      <block wx:if="{{spb}}">
+        <view class="box"><view class="row2">{{spb.text}}</view></view>
+        <view class="item" wx:for="{{spb.rows}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt">共 ¥{{item.total}}</text></view>
+          <view class="row2">{{item.cnt}} 笔 · 平均 ¥{{item.avg}} · 最高 ¥{{item.max}} · 最低 ¥{{item.min}} · 最近 {{item.last_day}}</view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copySupplyBook">📋 复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeSupplyBook">收起</button>
+        </view>
+      </block>
       <view class="tip">🎚 信用分档（谁可以宽限、谁只做现款）</view>
       <view class="frow">
         <button class="btn half" size="mini" bindtap="loadCreditBook" data-type="ar">看客户</button>
@@ -2430,9 +2467,28 @@
       <input class="inp" placeholder="买入日期，如 2025-06-01" value="{{asset_buy}}" bindinput="onAssetBuy"/>
       <input class="inp" placeholder="用几年（不填=5 年）" type="digit" value="{{asset_life}}" bindinput="onAssetLife"/>
       <input class="inp" placeholder="残值率 %（不填=5）" type="digit" value="{{asset_res}}" bindinput="onAssetRes"/>
+      <input class="inp" placeholder="几保一次（月），不填=不提醒" type="digit" value="{{asset_maint}}" bindinput="onAssetMaint"/>
       <button class="btn" size="mini" bindtap="addAsset">加一台设备</button>
       <button class="btn-ghost" size="mini" bindtap="runDepreciation">立即计提本月折旧（记一笔支出）</button>
       <view class="tip">直线法：每月折旧 =（原值 − 残值）÷ 使用月数；计提后才进成本，不点就不会自动扣。</view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadAssetMaint">🔧 哪些设备该保养了</button>
+      </view>
+      <block wx:if="{{am}}">
+        <view class="box">
+          <view class="row1"><text class="nm">设备保养</text><text class="amt {{am.overdue?'red':''}}">{{am.count}} 台</text></view>
+          <view class="row2">{{am.advice}}</view>
+        </view>
+        <view class="item" wx:for="{{am.rows}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.left_days<0?'red':''}}">{{item.left_days<0?'已超 '+(-item.left_days)+' 天':item.left_days+' 天后'}}</text></view>
+          <view class="row2">每 {{item.months}} 个月一次 · 上次 {{item.base_day}} · 下次 {{item.next_day}}</view>
+          <view class="btns"><button size="mini" bindtap="doMaint" data-id="{{item.id}}" data-m="{{item.months}}">保养了</button></view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="copyAssetMaint">📋 复制</button>
+          <button class="btn ghost" size="mini" bindtap="closeAssetMaint">收起</button>
+        </view>
+      </block>
     </view>
     <view class="list" wx:if="{{asset_rows.length}}">
       <view class="item" wx:for="{{asset_rows}}" wx:key="id">
@@ -2925,8 +2981,17 @@
         <view class="pre">{{detail_head}}</view>
         <view class="detail-line" wx:for="{{detail_rows}}" wx:key="index">{{item.k}}  {{item.v}}</view>
         <view class="tip" wx:if="{{!detail_rows.length}}">还没有收付记录</view>
+        <view class="tip">📷 照片（送货单 / 验收单 / 转账截图）{{detail_att.length?('· 已存 '+detail_att.length+' 张'):'· 还没存'}}</view>
+        <view class="item" wx:for="{{detail_att}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.name}} · {{item.kb}}KB</text><text class="amt">{{item.day}}</text></view>
+          <view class="btns">
+            <button size="mini" bindtap="viewAttach" data-id="{{item.id}}">看</button>
+            <button size="mini" bindtap="delAttach" data-id="{{item.id}}">删</button>
+          </view>
+        </view>
       </scroll-view>
       <view class="btns">
+        <button size="mini" bindtap="addAttach">📷 拍一张存着</button>
         <button size="mini" bindtap="copyDetail">复制明细</button>
         <button size="mini" bindtap="closeDetail">关闭</button>
       </view>
