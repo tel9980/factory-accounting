@@ -31,6 +31,8 @@ jobs:
           node-version: 24
       - name: 跑自检
         run: node scripts/check.mjs
+      - name: 合批回归（首屏 18 个请求不许退回逐个发）
+        run: node scripts/test-batch.mjs
 
   smoke:
     name: 起本地服务，把 224 个 GET 接口挨个打一遍

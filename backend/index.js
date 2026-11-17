@@ -8558,7 +8558,10 @@ app.get('/statement-month', async (c) => {
 app.post('/batch', async (c) => {
   let body = {}
   try { body = await c.req.json() } catch (e) { body = {} }
-  const qs = Array.isArray(body.qs) ? body.qs.slice(0, 16) : []
+  // 上限 24：小程序首屏一屏就要 18 条（refresh() 那一串），以前卡在 16 会被截断 →
+  // 前端发现「回来的条数不对」就整批作废、退回逐个发，等于白白多做一轮 16 次查询（详见 README 275）。
+  // 24 是「够用 + 一次别跑太多」的折中；前端那边也按 16 分批，两边都新就都新。
+  const qs = Array.isArray(body.qs) ? body.qs.slice(0, 24) : []
   if (!qs.length) return c.json({ ok: false, error: '没说要取什么' })
   const hdrs = {}
   for (const [k, v] of c.req.raw.headers.entries()) {

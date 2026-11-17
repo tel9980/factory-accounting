@@ -450,6 +450,19 @@ Page({
     const q = this._bq || []
     this._bq = []
     if (!q.length) return
+    // 一次 /batch 最多带 16 条（后端上限 24，但老版本后端是 16；这边按 16 分组，两边新旧都不会错）。
+    // 为什么要分组：首屏 refresh() 一进来就是 18 条 GET，攒成一个 tick 后超了 16 → 后端截断成 16 条、
+    // 这边发现「回来的条数对不上」就整批作废退回逐个发 —— 等于白跑一轮 16 次查询再发 18 个请求。
+    // 分组之后 18 条 = 16 + 2 两批，全都走批量，一次都不浪费。
+    const CHUNK = 16
+    if (q.length > CHUNK) {
+      for (let i = 0; i < q.length; i += CHUNK) this._batchSend(q.slice(i, i + CHUNK))
+      return
+    }
+    this._batchSend(q)
+  },
+  _batchSend(q) {
+    if (!q || !q.length) return
     const ak = wx.getStorageSync('ak') || ''
     const bk = String(wx.getStorageSync('book') || 1)
     const fallback = () => q.forEach((it) => this._send(it.opts, ak))
