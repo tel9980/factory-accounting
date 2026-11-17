@@ -1928,7 +1928,7 @@ app.post('/recon-fix', async (c) => {
   if (mode === 'add') {
     if (!(amount > 0)) return c.json({ error: '补记的金额要大于 0' }, 400)
     if (await isMonthLocked(db, month)) return c.json({ error: `${month} 已结账锁定，先解锁再补记` }, 403)
-    const due = await termDue(db, party, created)
+    const due = await termDue(db, party, created, type)
     if (type === 'ar') {
       const r = await db.prepare('INSERT INTO orders (customer, item_name, price, cost, status, paid, created_at, due_date, operator) VALUES (?,?,?,?,0,0,?,?,?)')
         .bind(party, '对账补记', amount, 0, created, due, '对账').run()
@@ -2161,7 +2161,7 @@ app.post('/recon-fix-batch', async (c) => {
     try {
       if (state === 'more') {
         if (!(gap > 0)) { skipped++; continue }
-        const due = await termDue(db, party, `${month}-01T00:00:00.000Z`)
+        const due = await termDue(db, party, `${month}-01T00:00:00.000Z`, type)
         const created = `${month}-01T00:00:00.000Z`
         if (type === 'ar') {
           await db.prepare('INSERT INTO orders (customer, item_name, price, cost, status, paid, created_at, due_date, operator) VALUES (?,?,?,0,0,0,?,?,?)')
@@ -2197,7 +2197,7 @@ app.post('/recon-fix-batch', async (c) => {
         cut = round2(cut + cutDone)
         done.push({ party, state, mode: 'cut', amount: cutDone, left: leftCut })
       } else if (state === 'new') {
-        const due = await termDue(db, party, `${month}-01T00:00:00.000Z`)
+        const due = await termDue(db, party, `${month}-01T00:00:00.000Z`, type)
         if (type === 'ar') {
           await db.prepare('INSERT INTO orders (customer, item_name, price, cost, status, paid, created_at, due_date, operator) VALUES (?,?,?,0,0,0,?,?,?)')
             .bind(party, '对账新建', imported, `${month}-01T00:00:00.000Z`, due, '对账').run()
@@ -2689,11 +2689,25 @@ const getTitle = async (db) => {
   } catch (e) { return { title: '加工厂', note: '', phone: '', addr: '', bank: '' } }
 }
 // 账期：客户/供应商约定「月结 N 天」，建单没填到期日就自动算出到期日
-const termDue = async (db, party, baseIso) => {
+const GRADE_DAYS = { A: 45, B: 30, C: 15, D: 7, N: 30 }
+const termAutoOn = async (db) => {
+  try {
+    const r = await db.prepare("SELECT value FROM settings WHERE key='term_auto'").first()
+    return String((r && r.value) || '') === '1'
+  } catch (e) { return false }
+}
+const termDue = async (db, party, baseIso, type) => {
   try {
     const t = await db.prepare('SELECT term_days FROM party_terms WHERE party=?').bind(String(party || '')).first()
     if (t && num(t.term_days) > 0) return addDaysIso(baseIso, num(t.term_days)) + 'T00:00:00.000Z'
   } catch (e) { /* 表还没建也不影响建单 */ }
+  try {
+    if (await termAutoOn(db)) {
+      const g = await gradeLight(db, party, type)
+      const d = GRADE_DAYS[g.grade]
+      if (d) return addDaysIso(baseIso, d) + 'T00:00:00.000Z'
+    }
+  } catch (e) { /* 算不出就退回默认账期 */ }
   try {
     const g = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first()
     if (g && num(g.value) > 0) return addDaysIso(baseIso, num(g.value)) + 'T00:00:00.000Z'
@@ -4844,6 +4858,41 @@ function lev(a, b) {
   }
   return dp[m][n]
 }
+// ===== 信用打分（creditBook 与账期建议共用同一套规则）=====
+function gradeCalc(x) {
+  const why = []
+  let score = 100
+  const broken = num(x && x.broken), done = num(x && x.done), rate = (x && x.rate != null) ? num(x.rate) : null
+  if (broken) { score -= Math.min(50, broken * 25); why.push(`答应付款失约 ${broken} 次`) }
+  if (rate != null && rate < 50 && done >= 2) { score -= 10; why.push(`答应的事只兑现 ${rate}%`) }
+  if (num(x && x.oldest) > 60) { score -= 10; why.push(`最老一笔欠了 ${num(x.oldest)} 天`) }
+  if (num(x && x.over90) > 0.005) { score -= 10; why.push(`超 90 天未结 ¥${round2(num(x.over90))}`) }
+  if (num(x && x.doubt) > 0) { score -= 10; why.push(`${num(x.doubt)} 份对账单对方说对不上`) }
+  score = Math.max(0, Math.min(100, score))
+  const grade = score >= 85 ? 'A' : score >= 70 ? 'B' : score >= 50 ? 'C' : 'D'
+  return { score, grade, why }
+}
+
+// 单家轻量档位（只查两次，建单时算账期用，不加载流水）
+async function gradeLight(db, party, type) {
+  const isAr = type !== 'ap'
+  const tbl = isAr ? 'orders' : 'payables'
+  const who = isAr ? 'customer' : 'supplier'
+  const amt = isAr ? 'price' : 'amount'
+  const OPEN = `${amt}-COALESCE(paid,0)-COALESCE(written_off,0)`
+  const p = String(party || '').trim()
+  if (!p) return { grade: 'N', score: 100, why: [] }
+  const [br, op] = await Promise.all([
+    db.prepare("SELECT COUNT(*) n FROM dunning_log WHERE party=? AND promise_date IS NOT NULL AND substr(promise_date,1,10) < ?").bind(p, todayIso()).first().catch(() => null),
+    db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(${OPEN}),0) s, MIN(CASE WHEN ${OPEN}>0.005 THEN substr(created_at,1,10) END) d FROM ${tbl} WHERE ${who}=?`).bind(p).first().catch(() => null)
+  ])
+  if (!op || !num(op.n)) return { grade: 'N', score: 100, why: [] }
+  const oldest = op.d ? daysSince(op.d) : 0
+  const over90 = 0
+  const g = gradeCalc({ broken: num(br && br.n), oldest, over90 })
+  return { grade: g.grade, score: g.score, why: g.why }
+}
+
 // ===== 客户/供应商信用分档：失约几次、欠多久、有没有争议 =====
 async function creditBook(db, type) {
   const isAr = type !== 'ap'
@@ -4875,15 +4924,8 @@ async function creditBook(db, type) {
     const broken = p ? num(p.broken) : 0
     const done = kept + broken
     const rate = done ? Math.round((kept / done) * 100) : null
-    const why = []
-    let score = 100
-    if (broken) { const d = Math.min(50, broken * 25); score -= d; why.push(`答应付款失约 ${broken} 次`) }
-    if (rate != null && rate < 50 && done >= 2) { score -= 10; why.push(`答应的事只兑现 ${rate}%`) }
-    if (oldest > 60) { score -= 10; why.push(`最老一笔欠了 ${oldest} 天`) }
-    if (over90 > 0) { score -= 10; why.push(`超 90 天未${isAr ? '收' : '付'} ¥${over90}`) }
-    if (doubt) { score -= 10; why.push(`${doubt} 份对账单对方说对不上`) }
-    score = Math.max(0, Math.min(100, score))
-    const grade = score >= 85 ? 'A' : score >= 70 ? 'B' : score >= 50 ? 'C' : 'D'
+    const gc = gradeCalc({ broken, done, rate, oldest, over90, doubt })
+    const score = gc.score, grade = gc.grade, why = gc.why
     const label = { A: '可以放心', B: '正常', C: '要盯一下', D: '只做现款' }[grade]
     const advice = grade === 'A'
       ? '老客户，偶尔晚几天不用紧张'
@@ -4987,7 +5029,7 @@ app.post('/orders', async (c) => {
     if (near) return c.json({ dup: true, code: 'dup_soon', id: near.id, error: '刚记过一张一样的：' + customer + ' ¥' + num(price) + '。是又记了一笔吗？' }, 409)
   }
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
-  const due = toIsoDate(due_date) || (await termDue(db, customer, created))
+  const due = toIsoDate(due_date) || (await termDue(db, customer, created, 'ar'))
   const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
   await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
     .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created).run()
@@ -5175,7 +5217,7 @@ app.post('/payables', async (c) => {
   }
   const checks = await orderChecks(db, { table: 'payables', who: 'supplier', amtcol: 'amount', itemcol: 'remark', party: supplier, item: remark || '', amount, cost: 0, created: stampOf(date), due: toIsoDate(due_date) })
   await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at) VALUES (?,?,0,?,?,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created)) || null, created).run()
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created, 'ap')) || null, created).run()
   await opMark(db, cid, 'payable', 0)
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`, '', act(c))
   return c.json(Object.assign({ ok: true }, checks.length ? { checks } : {}))
@@ -6269,7 +6311,7 @@ async function importRows(db, type, rows, opts) {
         const from = addDaysIso(dk, -7)
         const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(customer, num(price), from, dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar' }); continue }
-        const dueIso = dueC && looksLikeDate(dueC) ? toIsoDate(dueC) : await termDue(db, customer, d)
+        const dueIso = dueC && looksLikeDate(dueC) ? toIsoDate(dueC) : await termDue(db, customer, d, 'ar')
         const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, operator, created_at, import_batch) VALUES (?,?,?,0,0,?,?,?,?,?)')
           .bind(customer, item || '批量导入', num(price), round2(num(cost)), dueIso || null, operC ? String(operC).trim() : null, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
@@ -6291,7 +6333,7 @@ async function importRows(db, type, rows, opts) {
         const dk = (d || t).slice(0, 10)
         const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
-        const dueIso = dueP && looksLikeDate(dueP) ? toIsoDate(dueP) : await termDue(db, supplier, d)
+        const dueIso = dueP && looksLikeDate(dueP) ? toIsoDate(dueP) : await termDue(db, supplier, d, 'ap')
         const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, operator, created_at, import_batch) VALUES (?,?,0,?,?,?,?,?,?)')
           .bind(supplier, num(amount), '', remark || '', dueIso || null, operP ? String(operP).trim() : null, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
@@ -6726,6 +6768,112 @@ app.post('/term-gap/apply', async (c) => {
   }
   await logAudit(db, '一键补账期', 'party_terms', `给 ${done} 家设 ${days} 天账期，补 ${filled} 个到期日`)
   return c.json({ ok: true, updated: done, filled, term_days: days })
+})
+
+// ===== 账期按信用收紧：信用差的别给 30 天，信用好的可以放宽 =====
+const termAdvise = async (db, type) => {
+  const isAr = type !== 'ap'
+  const [book, terms, auto] = await Promise.all([
+    creditBook(db, type),
+    db.prepare('SELECT party, term_days FROM party_terms').all().catch(() => ({ results: [] })),
+    termAutoOn(db)
+  ])
+  const tm = {}
+  ;(terms.results || []).forEach((t) => { tm[norm(t.party)] = num(t.term_days) })
+  const rows = (book.rows || []).map((r) => {
+    const nowDays = tm[norm(r.party)] || 0
+    const sug = GRADE_DAYS[r.grade] || 30
+    let action = 'ok'
+    if (!nowDays) action = 'set'
+    else if (nowDays > sug + 5) action = 'tighten'
+    else if (nowDays < sug - 10) action = 'loosen'
+    const actionText = {
+      set: `还没设账期，建议 ${sug} 天`,
+      tighten: `现在给 ${nowDays} 天，建议收紧到 ${sug} 天`,
+      loosen: `现在只给 ${nowDays} 天，可以放宽到 ${sug} 天`,
+      ok: `现在 ${nowDays} 天，跟信用匹配`
+    }[action]
+    return {
+      party: r.party, grade: r.grade, score: r.score, why: r.why,
+      now_days: nowDays, suggest_days: sug, action, action_text: actionText,
+      unpaid: r.unpaid, oldest_days: r.oldest_days, broken: r.broken
+    }
+  })
+  const order = { tighten: 0, set: 1, loosen: 2, ok: 3 }
+  rows.sort((a, b) => (order[a.action] - order[b.action]) || b.unpaid - a.unpaid)
+  const cnt = { tighten: 0, loosen: 0, set: 0, ok: 0 }
+  rows.forEach((r) => { cnt[r.action]++ })
+  const tgt = rows.filter((r) => r.action === 'tighten')
+  const text = !rows.length
+    ? `还没有${isAr ? '客户' : '供应商'}记录，等记过几单再看账期建议。`
+    : tgt.length
+      ? `${tgt.length} 家${isAr ? '客户' : '供应商'}的账期该收紧了（${tgt.slice(0, 3).map((r) => `${r.party} ${r.now_days}→${r.suggest_days} 天`).join('、')}${tgt.length > 3 ? ' 等' : ''}），其中还欠着 ¥${round2(tgt.reduce((a, r) => a + r.unpaid, 0))}。`
+      : cnt.set
+        ? `还有 ${cnt.set} 家没设账期；其余的账期都跟信用匹配。`
+        : '账期都跟信用匹配，没有要调的。'
+  return { ok: true, type: isAr ? 'ar' : 'ap', auto, rows, count: rows.length, counts: cnt, text, grade_days: GRADE_DAYS }
+}
+
+app.get('/term-advice', async (c) => {
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  return c.json(await termAdvise(c.env.DB, type))
+})
+
+// 一键采用建议账期：mode='tighten' 只收紧，'all' 收紧+放宽+补未设
+app.post('/term-advice/apply', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  const mode = b.mode === 'all' ? 'all' : 'tighten'
+  const fixOpen = !!b.fix_open
+  const adv = await termAdvise(db, type)
+  let want = (adv.rows || []).filter((r) => (mode === 'all' ? r.action !== 'ok' : r.action === 'tighten'))
+  const pick = Array.isArray(b.parties) ? b.parties.map((x) => String(x).trim()).filter(Boolean) : []
+  if (pick.length) {
+    const set = new Set(pick.map((x) => norm(x)))
+    want = want.filter((r) => set.has(norm(r.party)))
+  }
+  if (!want.length) return c.json({ ok: true, updated: 0, fixed: 0, text: mode === 'all' ? '没有要调的账期' : '没有该收紧的账期' })
+  const isAr = type !== 'ap'
+  const tbl = isAr ? 'orders' : 'payables'
+  const who = isAr ? 'customer' : 'supplier'
+  const amt = isAr ? 'price' : 'amount'
+  let updated = 0, fixed = 0
+  const doneRows = []
+  for (const r of want) {
+    await db.prepare('INSERT INTO party_terms (party, kind, term_days, recon_cycle, recon_day, note, created_at) VALUES (?,?,?,0,0,\'\',?) ON CONFLICT(party) DO UPDATE SET term_days=excluded.term_days')
+      .bind(r.party, isAr ? 'ar' : 'ap', r.suggest_days, now()).run()
+    updated++
+    if (fixOpen) {
+      const rs = (await db.prepare(`SELECT id, created_at FROM ${tbl} WHERE ${who}=? AND ${amt}-COALESCE(paid,0)-COALESCE(written_off,0)>0.005`).bind(r.party).all().catch(() => ({ results: [] }))).results || []
+      for (const x of rs) {
+        const mm = String(x.created_at || '').slice(0, 7)
+        if (await isMonthLocked(db, mm)) continue
+        await db.prepare(`UPDATE ${tbl} SET due_date=? WHERE id=?`).bind(addDaysIso(String(x.created_at || now()).slice(0, 10), r.suggest_days) + 'T00:00:00.000Z', x.id).run()
+        fixed++
+      }
+    }
+    doneRows.push({ party: r.party, from: r.now_days, to: r.suggest_days })
+  }
+  await logAudit(db, '按信用调账期', 'party_terms', `${doneRows.map((x) => `${x.party} ${x.from}→${x.to} 天`).join('；')}${fixOpen ? `，补 ${fixed} 个到期日` : ''}`)
+  return c.json({ ok: true, updated, fixed, rows: doneRows,
+    text: `调好 ${updated} 家的账期（${doneRows.slice(0, 3).map((x) => `${x.party} ${x.from || '未设'}→${x.to} 天`).join('、')}${doneRows.length > 3 ? ' 等' : ''}）${fixOpen ? `，顺手补了 ${fixed} 个到期日` : ''}。以后这些家新单就按新账期算到期日。` })
+})
+
+// 开关：新单位（没单独设账期的）按信用自动定账期
+app.get('/term-auto', async (c) => {
+  const on = await termAutoOn(c.env.DB)
+  return c.json({ ok: true, on, grade_days: GRADE_DAYS,
+    text: on ? '已开启：没单独设账期的新单位，按信用自动给账期（A 45 天 / B 30 天 / C 15 天 / D 7 天）。' : '现在没开：没单独设账期的单位都按默认账期算。' })
+})
+app.post('/term-auto', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const on = !!b.on
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('term_auto', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(on ? '1' : '0').run()
+  await logAudit(db, on ? '开启信用账期' : '关闭信用账期', 'settings', on ? '新单位按信用自动定账期' : '改回默认账期')
+  return c.json({ ok: true, on,
+    text: on ? '已开启：以后没单独设账期的新单位，按信用自动给（A 45 天 / B 30 天 / C 15 天 / D 7 天）。' : '已关闭：改回统一按默认账期算。' })
 })
 
 // ===== 催款记录：哪天跟谁催过、说了什么，避免一周催三次同一家 =====
@@ -7898,12 +8046,12 @@ app.post('/migrate-apply', async (c) => {
     if (r.dup && !confirmDup) { skipped++; continue }
     const created = r.date + 'T00:00:00.000Z'
     if (r.type === 'ar') {
-      const due = (await termDue(db, r.party, created)) || addDaysIso(r.date, 30)
+      const due = (await termDue(db, r.party, created, 'ar')) || addDaysIso(r.date, 30)
       const ins = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
         .bind(r.party, MIG_ITEM, r.amount, due || null, '期初搬入', r.cost, created).run()
       addedRows.push({ type: 'ar', id: ins.meta && ins.meta.last_row_id, party: r.party, amount: r.amount })
     } else {
-      const due = (await termDue(db, r.party, created)) || addDaysIso(r.date, 30)
+      const due = (await termDue(db, r.party, created, 'ap')) || addDaysIso(r.date, 30)
       const ins = await db.prepare('INSERT INTO payables (supplier, amount, remark, due_date, operator, paid, created_at) VALUES (?,?,?,?,?,0,?)')
         .bind(r.party, r.amount, MIG_ITEM, due || null, '期初搬入', created).run()
       addedRows.push({ type: 'ap', id: ins.meta && ins.meta.last_row_id, party: r.party, amount: r.amount })

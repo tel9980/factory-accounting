@@ -2352,6 +2352,23 @@
           <button class="btn ghost" size="mini" bindtap="closeTermGap">收起</button>
         </view>
       </view>
+      <view class="termgap" wx:if="{{tadv}}">
+        <view class="row1"><text class="nm">⏱ 账期该收紧了</text><text class="amt {{tadv.counts.tighten?'red':'ok'}}">{{tadv.counts.tighten ? tadv.counts.tighten + ' 家偏宽' : '都匹配'}}</text></view>
+        <view class="row2">{{tadv.text}}</view>
+        <block wx:for="{{tadv.rows}}" wx:key="party">
+          <view class="item" wx:if="{{item.action!=='ok'}}">
+            <view class="row1"><text class="nm">{{item.party}} <text class="tag">{{item.grade}}</text></text><text class="amt {{item.action==='tighten'?'red':'warn'}}">{{item.action_text}}</text></view>
+            <view class="row2">还欠 ¥{{item.unpaid}} · 最老 {{item.oldest_days}} 天 · {{item.why}}</view>
+          </view>
+        </block>
+        <view class="frow">
+          <button class="btn warn" size="mini" bindtap="applyTermAdvice" data-mode="tighten" wx:if="{{tadv.counts.tighten}}">只收紧偏宽的（{{tadv.counts.tighten}} 家）</button>
+          <button class="btn ghost" size="mini" bindtap="applyTermAdvice" data-mode="all">全部按信用调</button>
+          <button class="btn ghost" size="mini" bindtap="toggleTermAuto">{{term_auto ? '关掉信用账期' : '开启信用账期'}}</button>
+          <button class="btn ghost" size="mini" bindtap="closeTermAdvice">收起</button>
+        </view>
+        <view class="tip">信用分档决定账期：A 45 天 / B 30 天 / C 15 天 / D 7 天。开了「信用账期」以后，没单独设账期的新单位自动按档位算到期日；已经开出去的单到期日不变，除非点「补到期日」。</view>
+      </view>
       <view class="tip">默认账期（不单独设的单位都按这个算，比如 30 天；设了以后新单自动带出到期日）</view>
       <view class="frow">
         <input class="inp" placeholder="默认账期天数，0=不设" type="number" value="{{term_default}}" bindinput="onTermDefault"/>

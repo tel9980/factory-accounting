@@ -141,7 +141,7 @@ Page({
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
     hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
-    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, tg: null,
+    terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, tg: null, tadv: null, term_auto: false,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
     report_year: '', report_text: '', chart: [],
@@ -526,6 +526,56 @@ Page({
     })
   },
   closeTermGap() { this.setData({ tg: null }) },
+  loadTermAdvice() {
+    this.req({
+      url: API_BASE + '/term-advice?type=ar',
+      success: (res) => {
+        const d = res.data || {}
+        if (d.ok) this.setData({ tadv: d, term_auto: !!d.auto })
+      }
+    })
+  },
+  closeTermAdvice() { this.setData({ tadv: null }) },
+  toggleTermAuto() {
+    const on = !this.data.term_auto
+    this.req({
+      url: API_BASE + '/term-auto', method: 'POST', data: { on },
+      success: (r) => {
+        const x = r.data || {}
+        if (!x.ok) return
+        this.setData({ term_auto: !!x.on })
+        wx.showToast({ title: x.on ? '已开启' : '已关闭', icon: 'none' })
+        wx.showModal({ title: x.on ? '信用账期已开启' : '信用账期已关闭', content: x.text || '', showCancel: false })
+        this.loadTermAdvice()
+      }
+    })
+  },
+  applyTermAdvice(e) {
+    const mode = (e && e.currentTarget && e.currentTarget.dataset.mode) || 'tighten'
+    const d = this.data.tadv
+    if (!d) return
+    const n = mode === 'all' ? (d.counts.tighten + d.counts.loosen + d.counts.set) : d.counts.tighten
+    if (!n) return wx.showToast({ title: mode === 'all' ? '没有要调的' : '没有该收紧的', icon: 'none' })
+    wx.showModal({
+      title: mode === 'all' ? '按信用调 ' + n + ' 家账期' : '收紧 ' + n + ' 家账期',
+      content: (mode === 'all'
+        ? '信用好的放宽、差的收紧、没设的补上，按建议天数写进账期表。'
+        : '只收紧给得太宽的那几家，不动其他。') + '\n新单以后就按新账期算到期日；已经开出去的单到期日不变。',
+      confirmText: '改',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({
+          url: API_BASE + '/term-advice/apply', method: 'POST', data: { type: 'ar', mode },
+          success: (r) => {
+            const x = r.data || {}
+            if (!x.ok) return
+            wx.showModal({ title: '调好了', content: x.text || '', showCancel: false })
+            this.loadTermAdvice(); this.loadPartyTerms(); this.loadTermGap(); this.refresh()
+          }
+        })
+      }
+    })
+  },
   applyTermGap() {
     const d = this.data.tg
     if (!d || !d.count) return
@@ -1360,7 +1410,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTermGap(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal(); this.loadReconCal()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTermGap(); this.loadTermAdvice(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal(); this.loadReconCal()
       this.loadEditReqs()
     } else if (t === 'me') {
       this.loadHelpKw()

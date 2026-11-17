@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 319 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 323 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -912,6 +912,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /target`
 - `POST /target`
 
+**term-advice**（2）
+
+- `GET /term-advice`
+- `POST /term-advice/apply`
+
+**term-auto**（2）
+
+- `GET /term-auto`
+- `POST /term-auto`
+
 **term-default**（2）
 
 - `GET /term-default`
@@ -1136,6 +1146,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 返回新增 `ok_n`/`hold_n`/`hold_amt`/`advice`：`hold_n>0` 时给「有 N 家（共 ¥X）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催」，`ok_n>0` 时给「这几家话术里写明了『您确认过』，催起来更硬气」；
    - 前端催款清单每行多一行回执标记：`✓ 对方 N 天前确认过对得上` / `⚠ 先别催钱 · 对方 N 天前说对不上（…）`，顶部把 `advice` 逐条渲染成提示条；
    - 实测：甲客户 ack=ok → 话术带「您确认过对得上」；乙客户 ack=doubt（差 ¥800，备注「6月那笔少了」）→ `hold=true`、话术转核对口径、`hold_amt=3000`、两条 advice 都对；伪造签名 POST → 403。
+223. ✅ **账期按信用收紧（信用差的别给 30 天）**：账期以前是手动设的死数字，D 档客户照样给 30 天——
+   - `gradeCalc({broken,done,rate,oldest,over90,doubt})` 抽成公共打分函数，`creditBook` 与新加的 `gradeLight(db,party,type)`（只查 2 次、不加载流水，建单时用）共用同一套规则；
+   - **档位对应账期**：`const GRADE_DAYS = { A: 45, B: 30, C: 15, D: 7, N: 30 }`；
+   - `GET /term-advice?type=ar|ap`：每家给 `now_days`（现在设的天数，没设=0）/`suggest_days`（按档位）/`action`（`set` 没设 / `tighten` 偏宽（now>sug+5）/ `loosen` 偏紧（now<sug−10）/ `ok`）/`action_text`（「现在给 60 天，建议收紧到 45 天」），带 `unpaid`/`oldest_days`/`broken`/`why`，按「该收紧 → 该补 → 可放宽 → 匹配」排序；返回 `counts{tighten,loosen,set,ok}`、`auto`、`grade_days` 与人话结论「1 家客户的账期该收紧了（丙客户 60→45 天），其中还欠着 ¥3000」；
+   - `POST /term-advice/apply {type, mode:'tighten'|'all', parties?, fix_open?}`：`tighten` 只动偏宽的，`all` 收紧+放宽+补未设；写 `party_terms` 用 `ON CONFLICT(party) DO UPDATE SET term_days=excluded.term_days`（保留原有的对账周期/对账日）；`fix_open:true` 时顺手把未结单的到期日按新账期重算（**已结账月份跳过**）；写审计「按信用调账期」；
+   - `GET|POST /term-auto {on}`：settings `term_auto`；**开启后 `termDue(db,party,baseIso,type)` 对「没单独设账期」的单位按档位算到期日**（原来一律用默认账期），单独设过账期的照旧优先；
+   - 9 处 `termDue` 调用全部补上 `type`（建单 ar/ap、导入 ar/ap、老账搬家 ar/ap、对账补记/新建按 type），否则供应商会被按客户档位算；
+   - 前端「单位 → 账期」区新增「⏱ 账期该收紧了」面板：逐家显示档位、`现在 X 天 → 建议 Y 天`、还欠多少、扣分原因，三个按钮「只收紧偏宽的（N 家）」「全部按信用调」「开启/关掉信用账期」；进「单位」tab 自动加载；
+   - 实测：丙客户（A 档，设 60 天）→ 建议 45、`tighten`；甲客户（D 档，未设）→ 建议 7、`set`；乙客户（A 档，设 30）→ 建议 45、`loosen`；开启信用账期后给甲客户新单 → 到期日 = 开单日 +7 天，给新客户丁客户 → +30 天（N 档）；`apply mode=all` 后四家全部 `ok`，顺手补了 3 个到期日。
+
 222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
    - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；
    - 扣分规则：答应付款失约每次 −25（最多 −50）、兑现率<50% 且≥2 次 −10、最老一笔欠款>60 天 −10、超 90 天未收 −10、对方说对不上的对账单 −10；

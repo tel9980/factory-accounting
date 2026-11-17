@@ -403,3 +403,10 @@
 .xp-row { display: flex; align-items: center; padding: 6px 0; border-bottom: 1px dashed #eee; }
 .xp-row.dropped { opacity: .38; text-decoration: line-through; }
 .prev-ok.gray { color: #999; }
+
+.mg-row { border-bottom: 1px solid #f0f1f3; padding: 10rpx 0; }
+.mg-t { font-size: 27rpx; color: #222; }
+.mg-d { font-size: 23rpx; color: #888; margin-top: 4rpx; }
+
+/* 信用档位小标签 */
+.tag{display:inline-block;min-width:26rpx;padding:0 8rpx;margin-left:8rpx;border-radius:6rpx;background:#eef3ff;color:#1f6feb;font-size:22rpx;text-align:center}
