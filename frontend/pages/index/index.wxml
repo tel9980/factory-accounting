@@ -2094,25 +2094,30 @@
     <view class="form">
       <view class="seg {{history_type=='ar'?'on':''}}" bindtap="setHistoryType" data-t="ar">已收完的应收</view>
       <view class="seg {{history_type=='ap'?'on':''}}" bindtap="setHistoryType" data-t="ap">已付完的应付</view>
+      <view class="tip">结清的单都在这儿：哪天结的、拖了几天、走的哪个账户。查老账、算回款速度用这个。</view>
+      <view class="frow">
+        <input class="inp" placeholder="搜单位 / 产品 / 经手人" value="{{st_kw}}" bindinput="onStKw" confirm-type="search" bindconfirm="searchSettled"/>
+        <button class="btn" size="mini" bindtap="searchSettled">搜</button>
+      </view>
+      <view class="chips" wx:if="{{st && st.months.length}}">
+        <text class="chip {{st_month==''?'on':''}}" bindtap="pickStMonth" data-m="">全部</text>
+        <text class="chip {{st_month==item.m?'on':''}}" wx:for="{{st.months}}" wx:key="m" bindtap="pickStMonth" data-m="{{item.m}}">{{item.label}} {{item.cnt}}单</text>
+      </view>
     </view>
-    <block wx:if="{{history_type=='ar'}}">
-      <view class="list">
-        <view class="item" wx:for="{{history_ar_list}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt ok">{{item.settle}}</text></view>
-          <view class="row2">结清 · {{item.created_at}}</view>
+    <view class="form" wx:if="{{st}}">
+      <view class="row1"><text class="nm">{{st.text}}</text><text class="amt" bindtap="copySettled">复制</text></view>
+      <view class="tip" wx:if="{{st.tip}}">{{st.tip}}</view>
+    </view>
+    <view class="list" wx:if="{{st}}">
+      <view class="item" wx:for="{{st.rows}}" wx:key="id">
+        <view class="row1">
+          <text class="nm">{{item.party}}{{item.item ? ' · ' + item.item : ''}}</text>
+          <text class="amt ok">¥{{item.amount}}</text>
         </view>
-        <view class="empty" wx:if="{{!history_ar_list.length}}">暂无已结清应收</view>
+        <view class="row2">{{item.settle_date}} 结清 · {{item.days_text}}{{item.accs ? ' · ' + item.accs : ''}}{{item.wo > 0 ? ' · 含核销 ¥' + item.wo : ''}}{{item.operator ? ' · ' + item.operator : ''}}</view>
       </view>
-    </block>
-    <block wx:else>
-      <view class="list">
-        <view class="item" wx:for="{{history_ap_list}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt ok">{{item.settle}}</text></view>
-          <view class="row2">{{item.remark}} · 结清 · {{item.created_at}}</view>
-        </view>
-        <view class="empty" wx:if="{{!history_ap_list.length}}">暂无已结清应付</view>
-      </view>
-    </block>
+      <view class="empty" wx:if="{{!st.rows.length}}">{{history_type=='ar' ? '这个范围里没有已结清的应收' : '这个范围里没有已结清的应付'}}</view>
+    </view>
   </block>
 
   <block wx:if="{{tab=='contact'}}">

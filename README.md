@@ -581,11 +581,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - `GET /term-gap`：列出所有在 orders/payables 出现过、但还没设账期的单位（按欠款倒序），含每家应收/应付类别、总单数、未结单数、欠款额，附白话总结；
    - `POST /term-gap/apply {term_days?, parties?}`：给没设账期的单位（或指定名单）批量写入账期，并把其未结单按「单据日期 + 账期天数」补上到期日，返回 updated/filled；
    - 顺带修正 schema.sql 里 party_terms 缺 `recon_day` 列的历史漂移。
+206. ✅ **结算台账（已结清的单：哪天结的、拖了几天、走的哪个账户）**：「历史」页从「一堆结清的单」升级成能查能算的台账：
+   - `GET /settled?type=ar|ap&month=&kw=&limit=`：每张已结清单给出 **结清日期**（取该单最后一笔收款/付款流水时间）、**拖了多少天**（结清日 − 开单日）、**走过的账户**（现金/银行卡/微信/支付宝）、核销金额、经手人；
+   - 汇总：单数、总金额、平均回款天数、最快/最慢，以及按月分组（最近 12 个月，各多少单多少钱），点月份即可切换；
+   - 白话说一句：`2026 年 11 月结清 2 单，共 ¥5000；平均 13.33 天收回（最快 0 天、最慢 40 天）`，全当天结清时说「都是当天结清的」；
+   - 支持搜单位/产品/经手人、一键复制整页；核销结清（没有收款流水）的单会单独提示「有 N 单是核销/豁免结清的」。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 286 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 287 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -842,7 +847,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（151）
+**其它（单个接口）**（152）
 
 - `GET /`
 - `GET /access-guide`
@@ -971,6 +976,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /schema-check`
 - `GET /search`
 - `GET /selfcheck`
+- `GET /settled`
 - `GET /staff-activity`
 - `GET /statement`
 - `GET /statement-batch`

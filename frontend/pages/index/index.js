@@ -146,7 +146,7 @@ Page({
     flows: null, flows_month: '', flows_kw: '', flows_dir: '', profile_edit: false, pf_party: '', pf_contact: '', pf_phone: '', pf_addr: '', pf_note: '', profiles: [],
     th: null, thTips: [], tw: null, tf: null,
     q_text: '',
-    history_type: 'ar', history_ar_list: [], history_ap_list: [],
+    history_type: 'ar', history_ar_list: [], history_ap_list: [], st: null, st_month: '', st_kw: '',
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
     sug_ar: [], sug_ap: [], sug_ex: [], last_tip: '',
     contact_show: false, contact_title: '', contact_text: '',
@@ -4582,10 +4582,32 @@ Page({
     })
   },
   loadHistory() {
-    this.req({ url: API_BASE + '/history?type=ar', success: (res) => this.setData({ history_ar_list: res.data || [] }) })
-    this.req({ url: API_BASE + '/history?type=ap', success: (res) => this.setData({ history_ap_list: res.data || [] }) })
+    const d = this.data
+    const q = '?type=' + d.history_type + (d.st_month ? '&month=' + d.st_month : '') + (d.st_kw ? '&kw=' + encodeURIComponent(d.st_kw) : '')
+    this.req({
+      url: API_BASE + '/settled' + q,
+      success: (res) => { const x = res.data || {}; if (x.ok) this.setData({ st: x }) }
+    })
   },
-  setHistoryType(e) { this.setData({ history_type: e.currentTarget.dataset.t }) },
+  setHistoryType(e) {
+    this.setData({ history_type: e.currentTarget.dataset.t, st_month: '', st_kw: '' }, () => this.loadHistory())
+  },
+  pickStMonth(e) {
+    const m = e.currentTarget.dataset.m || ''
+    this.setData({ st_month: m }, () => this.loadHistory())
+  },
+  onStKw(e) { this.setData({ st_kw: e.detail.value }) },
+  searchSettled() { this.loadHistory() },
+  clearStKw() { this.setData({ st_kw: '' }, () => this.loadHistory()) },
+  copySettled() {
+    const st = this.data.st
+    if (!st) return
+    const lines = [st.text]
+    ;(st.rows || []).slice(0, 60).forEach((x) => {
+      lines.push(`${x.settle_date}  ${x.party}  ${x.item}  ¥${x.amount}  ${x.days_text}${x.accs ? '（' + x.accs + '）' : ''}`)
+    })
+    wx.setClipboardData({ data: lines.join('\n'), success: () => wx.showToast({ title: '已复制' }) })
+  },
   loadContacts() {
     this.req({ url: API_BASE + '/contacts', success: (res) => {
       if (res.data && !res.data.error) {

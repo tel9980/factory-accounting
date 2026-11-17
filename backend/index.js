@@ -7977,6 +7977,75 @@ app.get('/history', async (c) => {
   return c.json(results.map((r) => ({ ...r, settle: round2(r.price) })))
 })
 
+// ── 结算台账：已经结清的单，什么时候结的、拖了几天、走的哪个账户 ──
+app.get('/settled', async (c) => {
+  const db = c.env.DB
+  const sp = new URL(c.req.url).searchParams
+  const type = sp.get('type') === 'ap' ? 'ap' : 'ar'
+  const month = /^\d{4}-\d{2}$/.test(String(sp.get('month') || '')) ? String(sp.get('month')) : ''
+  const kw = String(sp.get('kw') || '').trim()
+  const isAr = type === 'ar'
+  const tbl = isAr ? 'orders' : 'payables'
+  const partyCol = isAr ? 'customer' : 'supplier'
+  const amtCol = isAr ? 'price' : 'amount'
+  const itemCol = isAr ? 'item_name' : 'remark'
+  const refType = isAr ? 'order' : 'payable'
+  const dir = isAr ? 'in' : 'out'
+  const docR = db.prepare(`SELECT id, COALESCE(${partyCol},'') AS party, COALESCE(${itemCol},'') AS item,
+      COALESCE(${amtCol},0) AS amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo,
+      created_at, COALESCE(operator,'') AS operator,
+      (SELECT MAX(l.created_at) FROM ledger l WHERE l.ref_type='${refType}' AND l.ref_id=${tbl}.id AND l.direction='${dir}') AS last_pay
+    FROM ${tbl}
+    WHERE COALESCE(paid,0) + COALESCE(written_off,0) >= COALESCE(${amtCol},0)
+    ORDER BY id DESC LIMIT 3000`).all().catch(() => ({ results: [] }))
+  const accR = db.prepare(`SELECT l.ref_id AS rid, GROUP_CONCAT(DISTINCT COALESCE(a.name,'')) AS accs
+    FROM ledger l LEFT JOIN accounts a ON a.id = l.account_id
+    WHERE l.ref_type='${refType}' AND l.direction='${dir}' GROUP BY l.ref_id`).all().catch(() => ({ results: [] }))
+  const [doc, acc] = await Promise.all([docR, accR])
+  const accMap = {}
+  for (const x of (acc.results || [])) accMap[num(x.rid)] = String(x.accs || '')
+  const all = []
+  for (const r of (doc.results || [])) {
+    const created = String(r.created_at || '').slice(0, 10)
+    const settle = String(r.last_pay || '').slice(0, 10) || created
+    const days = created ? Math.max(0, Math.round((Date.parse(settle + 'T00:00:00Z') - Date.parse(created + 'T00:00:00Z')) / 86400000)) : 0
+    all.push({
+      id: num(r.id), party: r.party, item: r.item, amount: round2(num(r.amount)),
+      paid: round2(num(r.paid)), wo: round2(num(r.wo)), operator: r.operator,
+      created, settle_date: settle, days, month: settle.slice(0, 7),
+      no_flow: !r.last_pay, accs: accMap[num(r.id)] || '',
+      days_text: days === 0 ? '当天结清' : '拖了 ' + days + ' 天'
+    })
+  }
+  let rows = all
+  if (month) rows = rows.filter((x) => x.month === month)
+  if (kw) rows = rows.filter((x) => (x.party + ' ' + x.item + ' ' + x.operator).indexOf(kw) >= 0)
+  // 按月汇总（不受月份筛选影响，方便点月份切换）
+  const mM = {}
+  for (const x of all) {
+    const e = mM[x.month] || (mM[x.month] = { m: x.month, cnt: 0, total: 0 })
+    e.cnt++; e.total += x.amount
+  }
+  const months = Object.values(mM).sort((a, b) => (a.m < b.m ? 1 : -1)).slice(0, 12)
+    .map((x) => ({ m: x.m, label: x.m.slice(5) + ' 月', cnt: x.cnt, total: round2(x.total) }))
+  const cnt = rows.length
+  const total = round2(rows.reduce((a, x) => a + x.amount, 0))
+  const daysArr = rows.map((x) => x.days).sort((a, b) => a - b)
+  const avg = cnt ? round2(daysArr.reduce((a, b) => a + b, 0) / cnt) : 0
+  const fast = cnt ? daysArr[0] : 0
+  const slow = cnt ? daysArr[cnt - 1] : 0
+  const noFlow = rows.filter((x) => x.no_flow).length
+  const scope = month ? month.slice(0, 4) + ' 年 ' + month.slice(5) + ' 月' : '全部'
+  const text = cnt
+    ? (slow === 0
+      ? `${scope}结清 ${cnt} 单，共 ¥${total}；都是当天结清的。`
+      : `${scope}结清 ${cnt} 单，共 ¥${total}；平均 ${avg} 天${isAr ? '收回' : '付出'}（最快 ${fast} 天、最慢 ${slow} 天）。`)
+    : (month ? `${scope}还没有结清的单。` : `还没有结清的单。`)
+  return c.json({ ok: true, type, month, kw, count: cnt, total, avg_days: avg, fast, slow, no_flow_cnt: noFlow,
+    rows: rows.slice(0, 300), months, text,
+    tip: noFlow ? `有 ${noFlow} 单是核销/豁免结清的，没有对应的收款记录。` : '' })
+})
+
 // 单位列表（客户/供应商汇总）
 // 收付流水：逐笔看钱进钱出（老板最常问「这个月钱花哪了」）
 // ── 逐笔对账：这个月的单和这个月的收款，一笔一笔对起来 ──
