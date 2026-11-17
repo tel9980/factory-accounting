@@ -6427,18 +6427,50 @@ app.get('/collect-list', async (c) => {
     const drows = (await db.prepare("SELECT party, COUNT(*) n, MAX(created_at) last FROM dunning_log GROUP BY party").all()).results || []
     drows.forEach((r) => { dmap[norm(r.party)] = { n: num(r.n), last: String(r.last || '') } })
   } catch (e) {}
+  // 对方对账回执：说「对得上」催款更硬气；说「对不上」先核数别催钱
+  const amap = {}
+  try {
+    const arows = (await db.prepare("SELECT party, ack, ack_at, note, month, resolved_at, created_at FROM statement_log WHERE type=? AND ack IN ('ok','doubt') ORDER BY id DESC LIMIT 400").bind(type).all()).results || []
+    for (const a of arows) { const k = norm(a.party); if (!amap[k]) amap[k] = a }
+  } catch (e) {}
   const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, (() => {
     const dm = dmap[norm(x.party)]
     const last = dm && dm.last ? dm.last.slice(0, 10) : ''
     return { told_times: dm ? dm.n : 0, told_last: last, told_days: last ? daysSince(last) : null, told_text: dm ? ('已催 ' + dm.n + ' 次，上次 ' + last.slice(5) + '（' + daysSince(last) + ' 天前）') : '还没催过' }
-  })(), {
-    no: i + 1,
-    text: type === 'ap'
-      ? `${x.party} 你好，我这边欠你 ${x.left} 元（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${title}，这两天安排一下，方便的话把对账单发我对一下。`
-      : `${x.party} 你好，${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${x.due ? `，约定 ${String(x.due).slice(5, 10)} 到期` : ''}。方便的话这两天结一下，或者把对账单发我核一核。`
-  }))
+  })(), (() => {
+    const a = amap[norm(x.party)]
+    let kind = '', ackDays = null, ackNote = '', ackMonth = ''
+    if (a) {
+      kind = a.ack === 'ok' ? 'ok' : (String(a.resolved_at || '') ? 'fixed' : 'doubt')
+      ackDays = daysSince(a.ack_at || a.created_at)
+      ackNote = String(a.note || '').replace(/^对方说对不上[，,]?/, '').replace(/^对方确认[:：]?/, '').trim()
+      ackMonth = String(a.month || '')
+    }
+    const ackText = kind === 'ok' ? `对方 ${ackDays} 天前确认过对得上`
+      : kind === 'doubt' ? `对方 ${ackDays} 天前说对不上${ackNote ? '（' + ackNote + '）' : ''}`
+      : kind === 'fixed' ? '对方提的差异已核清' : ''
+    let text
+    if (type === 'ap') {
+      text = `${x.party} 你好，我这边欠你 ${x.left} 元（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${title}，这两天安排一下，方便的话把对账单发我对一下。`
+    } else if (kind === 'ok' && ackDays !== null && ackDays <= 120) {
+      text = `${x.party} 你好，${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）。${ackMonth ? ackMonth + ' ' : ''}我们对过账，您那边确认过对得上，这笔数没疑问，麻烦这两天安排一下，谢谢。`
+    } else if (kind === 'doubt') {
+      text = `${x.party} 你好，上次对账您说有一笔对不上${ackNote ? '（' + ackNote + '）' : ''}，我这边先把数核清楚，核完把明细发您。数对上了咱再谈结款，不着急。`
+    } else if (kind === 'fixed') {
+      text = `${x.party} 你好，上次对账您提的差异已经核清补记了。${title}账上现在还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前），方便的话这两天结一下。`
+    } else {
+      text = `${x.party} 你好，${title}账上你这边还有 ${x.left} 元没结（${x.cnt} 笔，最早 ${x.oldest_days} 天前）${x.due ? `，约定 ${String(x.due).slice(5, 10)} 到期` : ''}。方便的话这两天结一下，或者把对账单发我核一核。`
+    }
+    return { ack_kind: kind, ack_days: ackDays, ack_note: ackNote, ack_text: ackText, hold: kind === 'doubt', text }
+  })()))
   const total = round2(list.reduce((a, x) => a + x.left, 0))
-  return c.json({ ok: true, type, total, count: list.length, list: out })
+  const okN = out.filter((x) => x.ack_kind === 'ok').length
+  const holdN = out.filter((x) => x.hold).length
+  const holdAmt = round2(out.filter((x) => x.hold).reduce((a, x) => a + x.left, 0))
+  const advice = []
+  if (holdN) advice.push({ tone: 'warn', text: `有 ${holdN} 家（共 ¥${holdAmt}）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催。` })
+  if (okN) advice.push({ tone: 'ok', text: `${okN} 家确认过对得上：这几家话术里写明了「您确认过」，催起来更硬气。` })
+  return c.json({ ok: true, type, total, count: list.length, list: out, ok_n: okN, hold_n: holdN, hold_amt: holdAmt, advice })
 })
 
 // ── 没设账期的单位：主动列出来 + 一键补上（到期提醒靠账期）──

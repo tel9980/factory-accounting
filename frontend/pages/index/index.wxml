@@ -395,10 +395,12 @@
       </view>
       <view class="prev" wx:if="{{collect}}">
         <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
+        <view class="aline {{item.tone}}" wx:for="{{collect.advice}}" wx:key="text">{{item.text}}</view>
         <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
           <text class="prev-t">{{item.no}}. {{item.party}}</text>
           <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
           <text class="prev-n {{item.told_days!==null && item.told_days<=3 ? 'red':''}}">{{item.told_text}}</text>
+          <text class="prev-n {{item.hold?'red':'ok'}}" wx:if="{{item.ack_text}}">{{item.hold?'⚠ 先别催钱 · ':'✓ '}}{{item.ack_text}}</text>
           <text class="red" catchtap="recordDunning" data-party="{{item.party}}" data-type="{{collect.type}}">记一笔催款</text>
         </view>
         <view class="frow">
@@ -577,10 +579,12 @@
       </view>
       <view class="prev" wx:if="{{collect}}">
         <view class="prev-h">【{{collect.type_text}}清单】{{collect.count}} 家 · 合计 {{collect.total}} 元（按「欠得久 × 欠得多」排）</view>
+        <view class="aline {{item.tone}}" wx:for="{{collect.advice}}" wx:key="text">{{item.text}}</view>
         <view class="prev-row" wx:for="{{collect.list}}" wx:key="party" data-i="{{index}}" bindtap="copyCollectOne">
           <text class="prev-t">{{item.no}}. {{item.party}}</text>
           <text class="prev-n">欠 {{item.left}} · {{item.why}}</text>
           <text class="prev-n {{item.told_days!==null && item.told_days<=3 ? 'red':''}}">{{item.told_text}}</text>
+          <text class="prev-n {{item.hold?'red':'ok'}}" wx:if="{{item.ack_text}}">{{item.hold?'⚠ 先别催钱 · ':'✓ '}}{{item.ack_text}}</text>
           <text class="red" catchtap="recordDunning" data-party="{{item.party}}" data-type="{{collect.type}}">记一笔催款</text>
         </view>
         <view class="frow">
