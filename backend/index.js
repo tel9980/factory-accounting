@@ -3462,7 +3462,7 @@ app.get('/next-step', async (c) => {
   const dnum = num(today.slice(8, 10))
   const soon = addDaysIso(today, 7)
   const P = (sql, ...b) => db.prepare(sql).bind(...b).all().catch((e) => { noteFail(e, '下一步'); return { results: [] } })
-  const [arOld, apOld, cnts, unsent, bk] = await Promise.all([
+  const [arOld, apOld, cnts, unsent, bk, staleQ, maintQ] = await Promise.all([
     P(`SELECT customer party, (price - COALESCE(paid,0) - COALESCE(written_off,0)) left_amt, substr(due_date,1,10) due
        FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> ''
         AND substr(due_date,1,10) < ? ORDER BY substr(due_date,1,10) ASC LIMIT 1`, today),
@@ -3476,13 +3476,18 @@ app.get('/next-step', async (c) => {
         (SELECT COUNT(*) FROM recon_log WHERE done=0 AND COALESCE(state,'')<>'match') AS recon_open,
         (SELECT COUNT(*) FROM recon_log WHERE substr(created_at,1,7)=?) AS recon_month,
         (SELECT COUNT(*) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price) AS ar_open_n,
-        (SELECT COUNT(*) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount) AS ap_open_n`, soon, soon, soon, soon, m),
+        (SELECT COUNT(*) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount) AS ap_open_n,
+        (SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) >= ? AND substr(due_date,1,10) <= ?) AS ar_soon_amt,
+        (SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) >= ? AND substr(due_date,1,10) <= ?) AS ap_soon_amt
+`, today, soon, today, soon, m, today, soon, today, soon),
     P(`SELECT
         (SELECT COUNT(*) FROM (SELECT DISTINCT customer p FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price) x
            WHERE NOT EXISTS (SELECT 1 FROM statement_log s WHERE s.party = x.p AND substr(s.month,1,7) = ?)) AS ar_n,
         (SELECT COUNT(*) FROM (SELECT DISTINCT supplier p FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount) y
            WHERE NOT EXISTS (SELECT 1 FROM statement_log s WHERE s.party = y.p AND substr(s.month,1,7) = ?)) AS ap_n`, m, m),
-    P("SELECT created_at FROM backups ORDER BY id DESC LIMIT 1")
+    P("SELECT created_at FROM backups ORDER BY id DESC LIMIT 1"),
+    P(`SELECT COUNT(*) n, COALESCE(MAX(CAST(julianday(?) - julianday(COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=o.id), o.created_at)) AS INTEGER)),0) mx FROM orders o WHERE COALESCE(o.status,0)<2`, today),
+    P("SELECT name, maint_months, maint_last FROM assets WHERE COALESCE(maint_months,0)>0 AND COALESCE(disposed_at,'')=''"),
   ])
   const rows = (x) => (x && x.results) || []
   const c0 = rows(cnts)[0] || {}
@@ -3497,6 +3502,27 @@ app.get('/next-step', async (c) => {
   if (num(c0.recon_open) > 0) push(90 + Math.min(num(c0.recon_open), 9), 'recon', '把对账差异处理掉', `有 ${num(c0.recon_open)} 条差异还没处理，拖着结账会被拦`, 'report:bill', 0)
   if (num(c0.ar_soon) + num(c0.ap_soon) > 0) push(70 + num(c0.ar_soon) + num(c0.ap_soon), 'soon', '把 7 天内到期的钱过一遍', `这周有 ${num(c0.ar_soon)} 笔要收、${num(c0.ap_soon)} 笔要付`, 'home:home', 0)
   if (num(c0.no_cost) > 0) push(62 + Math.min(num(c0.no_cost), 20), 'cost', '给没填成本的单补上成本', `${num(c0.no_cost)} 张单没填材料/外协成本，毛利算不准`, 'bill:ar', 0)
+  // 钱够不够付：现金 + 这周该收 vs 这周该付
+  try {
+    const accList = await accountBalances(db).catch(() => [])
+    const cashSum = (accList || []).reduce((t, x) => t + num(x && x.balance), 0)
+    const gap = round2(cashSum + num(c0.ar_soon_amt) - num(c0.ap_soon_amt))
+    if (gap < 0 && num(c0.ap_soon_amt) > 0) push(96, 'cash', '这周的钱可能不够付', '账上 ¥' + round2(cashSum) + '，这周要付 ¥' + round2(num(c0.ap_soon_amt)) + '、该收 ¥' + round2(num(c0.ar_soon_amt)) + '，还差 ¥' + Math.abs(gap), 'home:home', Math.abs(gap))
+  } catch (e) { noteFail(e, '下一步') }
+  // 工序卡住：没交付、又很久没动的单
+  const stale0 = rows(staleQ)[0] || {}
+  if (num(stale0.n) > 0 && num(stale0.mx) >= 7) push(78 + Math.min(num(stale0.mx), 60), 'stale', '问一句车间：卡在哪了', '有 ' + num(stale0.n) + ' 张单还没交付，最久 ' + num(stale0.mx) + ' 天没动过', 'bill:ar', 0)
+  // 设备保养到期
+  const maintDue = (rows(maintQ) || []).filter((a) => {
+    const mo = num(a.maint_months)
+    if (!mo) return false
+    const base = String(a.maint_last || '').slice(0, 10)
+    if (!base) return true
+    const d0 = new Date(base + 'T00:00:00Z')
+    d0.setUTCMonth(d0.getUTCMonth() + mo)
+    return (Date.now() + 15 * 86400000) >= d0.getTime()
+  })
+  if (maintDue.length) push(74, 'maint', '该保养设备了', maintDue.length + ' 台（' + maintDue.slice(0, 2).map((x) => x.name).join('、') + (maintDue.length > 2 ? '…' : '') + '）到了保养周期', 'stat:asset', 0)
   const hasBook = num(c0.ar_open_n) + num(c0.ap_open_n) > 0
   if (hasBook && dnum >= 10 && num(c0.recon_month) === 0) push(58, 'reconmonth', '和客商对一次账', '这个月还没对过账', 'bill:import', 0)
   if (dnum >= 20 && num(u0.ar_n) + num(u0.ap_n) > 0) push(55 + num(u0.ar_n) + num(u0.ap_n), 'stmt', '把对账单发给客商', `还有 ${num(u0.ar_n) + num(u0.ap_n)} 家这个月没发（应收 ${num(u0.ar_n)} · 应付 ${num(u0.ap_n)}）`, 'report:bill', 0)
@@ -3505,7 +3531,7 @@ app.get('/next-step', async (c) => {
   const top = cand[0] || null
   const total = num(c0.ar_soon) + num(c0.ap_soon) + num(c0.no_cost) + num(c0.recon_open) + num(u0.ar_n) + num(u0.ap_n)
   return c.json({
-    ok: true, today, item: top,
+    ok: true, today, item: top, degraded: failBucket.slice(),
     others: cand.slice(1, 6).map((x) => ({ k: x.k, title: x.title, why: x.why, tab: x.tab, amount: x.amount })),
     rest: Math.max(cand.length - 1, 0),
     text: top ? `现在先做这一件：${top.title}——${top.why}` : (total === 0 ? '今天没有必须处理的事，有空把今天的单记上就行。' : '没有急事，往下翻有别的提醒。')
@@ -13177,10 +13203,15 @@ app.get('/reminders', async (c) => {
     db.prepare("SELECT COUNT(*) n FROM (SELECT 1 FROM orders WHERE paid + COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='') UNION ALL SELECT 1 FROM payables WHERE paid + COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date=''))").first(),
     db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null),
     db.prepare('SELECT type, party, (amount - COALESCE(used,0)) AS remain, created_at FROM advances WHERE amount - COALESCE(used,0) > 0.005 ORDER BY created_at').all()
+    ,
+    db.prepare("SELECT COUNT(*) n, COALESCE(MAX(CAST(julianday(?) - julianday(COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=o.id), o.created_at)) AS INTEGER)),0) mx FROM orders o WHERE COALESCE(o.status,0)<2").bind(today).first(),
+    db.prepare("SELECT name, maint_months, maint_last FROM assets WHERE COALESCE(maint_months,0)>0 AND COALESCE(disposed_at,'')=''").all(),
+    db.prepare("SELECT customer party, COUNT(*) cnt, MIN(substr(created_at,1,10)) first_day, MAX(substr(created_at,1,10)) last_day FROM orders GROUP BY customer HAVING COUNT(*)>=2").all()
+
   ]
   const R = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e); return null })))
   const rows0 = (x) => ((x && x.results) || [])
-  const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm, advRows] = R
+  const [od, ds, ps, bo, un, lo, iv, ro, rl, br, leftRows, so, ts, sents, dp, nr, ns, nc, doneRecon, noDue, dterm, advRows, staleR, maintR, custR] = R
   const items = []
   const push = (level, text, tab, list) => items.push({ level, text, tab, list: list || [] })
   // 员工提的改单申请：老板点了同意才生效，别忘了
@@ -13237,6 +13268,28 @@ app.get('/reminders', async (c) => {
       push('yellow', `${ao.n} 家预付款付了料还没到（共 ¥${ao.sum}），最早 ${ao.oldest} 天前`, 'me',
         ao.rs.slice(0, 3).map((r) => ({ party: r.party, amount: r.amount, note: r.days ? `${r.days} 天前付的` : '今天付的' })))
     }
+  } catch (e) {}
+  // 工序卡住 / 设备保养 / 老客户很久没来（以前要手动点开面板才看得见）
+  try {
+    const sR = staleR || {}
+    if (num(sR.n) > 0 && num(sR.mx) >= 7) push('yellow', `${num(sR.n)} 张单还没交付，最久 ${num(sR.mx)} 天没动过`, 'ar')
+    const mDue = rows0(maintR).filter((a) => {
+      const mo = num(a.maint_months)
+      if (!mo) return false
+      const base = String(a.maint_last || '').slice(0, 10)
+      if (!base) return true
+      const d0 = new Date(base + 'T00:00:00Z')
+      d0.setUTCMonth(d0.getUTCMonth() + mo)
+      return Date.now() >= d0.getTime()
+    })
+    if (mDue.length) push('yellow', `${mDue.length} 台设备该保养了（${mDue.slice(0, 2).map((x) => x.name).join('、')}）`, 'asset')
+    const chHigh = rows0(custR).map((r) => {
+      const g = daysSince(String(r.first_day || '').slice(0, 10)) - daysSince(String(r.last_day || '').slice(0, 10))
+      const gapPer = num(r.cnt) > 1 ? g / (num(r.cnt) - 1) : 0
+      const since = daysSince(String(r.last_day || '').slice(0, 10))
+      return { party: r.party, cnt: num(r.cnt), since, gapPer, high: gapPer > 0 && since >= gapPer * 3 && since >= 45 }
+    }).filter((x) => x.high).sort((a, b) => b.since - a.since)
+    if (chHigh.length) push('gray', `${chHigh.length} 家老客户很久没下单了（最久 ${chHigh[0].since} 天没来：${chHigh[0].party}）`, 'report')
   } catch (e) {}
   // 对账：有差异没处理优先提醒，其次「这个月还没对过账」
   if (num(ro && ro.n) > 0) {
