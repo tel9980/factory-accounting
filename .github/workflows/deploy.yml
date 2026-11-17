@@ -1,19 +1,47 @@
-name: Deploy Cloudflare Worker
+name: 自检 + 部署 Cloudflare Worker
+
+# 为什么先自检再部署：README 里记过的坑（路由重名被顶掉、reconRate 双重计数、
+# loadHealth 定义了两次首页分数条从来不渲染、按 schema.sql 新装建不出表）
+# 全是「机器一秒能看出来、当时没人看」。scripts/check.mjs 把这些做成一条命令，
+# 红了就别上生产。
 
 on:
   push:
     branches: [main]
     paths:
       - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/**'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/**'
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  check:
+    name: 自检（语法 / 路由重名 / schema 建库 / SQL / 前端绑定）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 要 node 24：自检用内置 node:sqlite 在内存里真建一遍库，node 20 没有这个模块
+          node-version: 24
+      - name: 跑自检
+        run: node scripts/check.mjs
+
+  deploy:
+    name: 部署到 Cloudflare
+    needs: check
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - name: 安装依赖

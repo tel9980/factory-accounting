@@ -76,7 +76,8 @@ docs/               需求文档
 
 ## 快速开始
 
-1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，执行 `schema.sql` 建表，再 `npx wrangler deploy`。
+1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 54 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
+   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 600 条 SQL 在这种新库上跑不跑得通、前端的 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
 2. **前端**：微信开发者工具导入 `frontend` 目录，把 `frontend/pages/index/index.js` 顶部 `API_BASE` 改成你的 Worker 地址。
 3. **上线**：微信公众平台把该域名加进 `request` 合法域名；本地调试勾选「不校验合法域名」。
 
@@ -789,7 +790,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **顺手堵了真漏洞**：员工口令原先能直接看 `/kpi` `/year-summary` `/year-book` `/year-customers` `/loss-book` `/price-book` `/handover` `/month-report` `/report-view`（全是毛利和家底），现在全部 403；`/dashboard` 早就有 `hideProfit`，利润字段对员工返回 null；
    - 实测：只开「应收」后员工 `/ar` 200，`/ap` `/expenses` `/assets` `/contacts` 全 403；带 `X-Staff-Name` 记单后 `by_person` 正确分出「小王 1 笔 / 小李 1 笔」。
 234. ✅ **备份是真的完整、也能自证能用**（这轮发现两个真问题）：
-   - **原来 `buildBackup` 只导出 应收/应付/流水 三张表**——恢复完账户期初、设备、借款、预收、发票、固定支出、账期约定全没了，等于「以为备份了，其实只备份了半个账本」。现在带上 24 张表（accounts/advances/loans/debts/debt_repays/assets/invoices/fixed_expenses/party_terms/party_profiles/credit_limits/quotes/categories/transfers/writeoffs/recon_log/statement_log/dunning_log/net_snapshots/targets/budgets/edit_requests/month_archive/settings），标 `version: 2`；**口令类（access_key/staff_key/sealed\*）不进备份文件**，恢复时也不删它们（否则恢复完自己都进不来）；
+   - **原来 `buildBackup` 只导出 应收/应付/流水 三张表**——恢复完账户期初、设备、借款、预收、发票、固定支出、账期约定全没了，等于「以为备份了，其实只备份了半个账本」。现在带上 24 张表（accounts/advances/loans/debts/debt_repays/assets/invoices/fixed_expenses/party_terms/party_profiles/credit_limits/quotes/categories/transfers/writeoffs/recon_log/statement_log/dunning_log/net_snapshots/targets/budgets/edit_requests/month_archive/settings），标 `version: 2`（**这个数字后来不够用了：工钱、材料、返工这些表又漏在外面，267 扩到 45 张并改成清单驱动**）；**口令类（access_key/staff_key/sealed\*）不进备份文件**，恢复时也不删它们（否则恢复完自己都进不来）；
    - 恢复按 `PRAGMA table_info` 取真实列名动态拼 INSERT，老备份缺的表直接跳过、不算错，返回 `extra:{accounts:4,assets:1,...}`；
    - 新接口 `GET /backup-verify`：把最新一份备份拆开，逐表比「备份里有多少 / 现在有多少」，给 `usable`、`missing`（旧格式缺哪几类）、`drift_count`、`warns`（内容坏了 / 旧格式 / 超 7 天没备份 / 不到 200 字节）与人话 `text`；设置页「🔍 查一下备份能不能用」；
    - 实测：删光 accounts/assets/advances/loans 再 `POST /backup-restore {id:14,confirm:true}` → 账户 4 个、设备 1 台 12000、预收 2000、借支 1000 全部回来；`/backup-verify` 报「和现在完全一致」；旧格式备份会明确报「缺 24 类数据」。
@@ -983,6 +984,40 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 输出 `cost / labor / total / profit / margin` + 四档判断：`loss`（亏，连成本都没盖住）、`thin`（<10%，"几乎白干，出点返工就贴钱"）、`ok`（10–20%，"偏薄，可以试着报 X 元（赚 15%）"）、`good`（≥20%，"这个价可以"）。
    - **前端**：开单表单里产品/加工费/成本任一格填完（bindblur）就当场算一遍，红字提示薄价，并在下面列出「人工估算：车 ¥200 等 2 道工序，平均每张单 ¥130」。
    - **实测**：两张「齿轮」单 + 记工（车 20×5、磨 20×3）→ 人工均值 ¥130；报价 10,000 → 赚 58.7%（good）；4,700 → 12.13%（ok，提示"试着报 4,858.82 元赚 15%"）；4,300 → 3.95%（thin，红字"几乎白干"）；只填产品 → "这单成本大约 ¥130（材料 ¥0 ＋ 人工 ¥130），报价填上就能算毛利"。
+
+267. ✅ **备份不再「以为备份了，其实只备份了半个账本」**（接 234 那轮的 24 张表）：把清单从 `BACKUP_EXTRA` 这种「想起哪张加哪张」改成**一份清单管三件事** —— 导出（`buildBackup`）、恢复（`restoreCore`）、自检（`/backup-verify`）都读同一个 `BACKUP_TABLES`，以后再也不会出现「导出里有、恢复时不认」的两套账。
+   - **补齐 16 张漏掉的业务表**：`wage_rates / wage_records / wage_pays`（计件工资、实发工钱）、`materials / material_moves`（材料台账与出入库）、`reworks`（返工报废损失）、`outsourcing`（外协）、`frame_prices`（框架价）、`party_staff`（员工分客户）、`recon_confirm`（对账结论单）、`process_log`（工序）、`trash`（回收站）、`import_log`、`track_log`、`prepaids`（待摊费用）、`bank_flows`（银行流水勾对）。现在一共 **45 张表**，标 `version: 3`。
+   - **不进备份的表必须写明原因**（`BACKUP_SKIP`）：`backups` 不套娃、`attachments`/`month_report` 是图片和 xlsx 本体会把备份撑爆、`staff_users` 存员工 PIN 不出本机、`audit_log` 恢复时不覆盖、`error_log`/`slow_log`/`op_dedupe`/`wx_users` 是日志和试用额度。`/backup-verify` 会把这些**原样列给用户看**，不再是悄悄漏。
+   - **自检说实话**：`/backup-verify` 现在一次 `batch` 查出 45 张表的行数（原来是逐表 await，1–2 秒），会分开报「这份备份缺哪几类数据（旧格式）」「哪几张表既不在备份里也没写原因（`uncovered`，加表时忘了登记）」「哪几张按设计不进备份（带原因）」，并在备份超过 1.5MB 时提醒 D1 单行 2MB 上限。恢复完还会把 12 张表的 `month` 列按 `created_at`（或 `date`）补一遍，否则按月报表会缺这几块。
+   - **前端**：设置 → 数据体检里的备份自检多显示「缺哪几类」「按设计不进备份的表 + 原因」两行（`index.wxml` 的 `bv.missing` / `bv.skipped`）。
+   - **实测（本地 wrangler + 真 SQLite）**：`/backup` 导出 47 个键（45 张表 + `exported_at` + `version: 3`），该进的 16 张都在、不该进的 9 张都不在；`/backup-verify` 报「覆盖 45 张表…另有 9 张表按设计不进备份」且 `uncovered=[]`；记一张单后 `/backup-restore` 恢复，订单 5 → 3、当月流水行仍是 `2026-11 out 300`（说明 `month` 补全生效）。
+
+268. ✅ **员工口令真的看不到「钱」了**：以前只有首页用 `hideProfit` 把利润字段置空，`/margin-by`（按客户/产品的毛利分析）、`/cost-hint`（报价成本）、`/wip`（在制里压的材料+工钱）、`/networth`、`/funding`、`/report-data`、`/cashbook` 这些**员工照看不误**，等于「员工看不到毛利」这句承诺只兑现了首页。
+   - 分两类处理，都不弹窗、不打断干活：**纯分析页直接 403**（`STAFF_MONEY_DENY`：`/margin-by`、`/cost-hint`、`/report-data`、`/report`、`/cashbook`、`/health-report`、`/invoice-check`、`/cashflow`、`/networth(-snapshots)`、`/funding`、`/year-print-link`）；**员工干活时要打开的台账照常返回、只把金额抹空**（`STAFF_MONEY_SCRUB`：`/wip`、`/materials`、`/supply-price`、`/frame-prices`、`/rework-book`、`/outsource-book`，中间件在 `await next()` 之后改写响应，加一句 `staff_hidden` 说明为什么是空的）。
+   - 字段名归一化后比对（`total_cost`/`totalCost`/`in_amt` 都能命中），人话里带钱的字段（`text/tip/note/hint/verdict`）也一并抹掉；**唯一例外是 `/materials` 的 `left`**——那是「还剩多少张」，领料的人必须看得见（`STAFF_MONEY_KEEP`）。
+   - 顺手补上「模块授权」的盲区：`ar` 模块的路径正则原来只到 `/edit-request`，`/credits`、`/wip`、`/materials`、`/material-moves`、`/rework`、`/outsourcing` 这些既不匹配任何模块、也不在 `denyStaff` 里，勾不勾模块都拦不住。
+   - **实测（本地起 worker，老板 `8888` / 员工 `1234`）**：员工请求 8 个涉钱分析接口全部 403（`code: staff_denied`）；`/materials` 的 `last_price/in_amt` 变 `null`、`left` 保持 0；`/wip` 的 `cost/total_cost/price/wage` 全 `null` 并带 `staff_hidden`；`/dashboard`、`/ar`、`/ar-summary`、`/settled`、`/reminders`、`/next-step` 仍 200（员工照常干活）。
+
+269. ✅ **上线前自检（`scripts/check.mjs` + CI 先跑它）**：README 里记过的 bug 有个共同点 —— 机器一秒能看出来，但当时没人看：路由重名被顶掉（227）、`reconRate` 双重计数（1/4 报成 2/4）、`loadHealth` 定义了两次首页分数条从来没渲染（229）、按 `schema.sql` 新装建不出表（267 那轮发现）。现在一条命令全查：
+   - **语法**：`node --check` 两个大文件。
+   - **路由**：399 条路由没有重名（Hono 后注册的会顶掉先注册的，表现是「新功能没生效」）。
+   - **`schema.sql` 能不能一次建出新库**：用 `node:sqlite` 在内存里真跑一遍（不是看，是建）。
+   - **代码要的表和列 schema 有没有**：从 `INSERT INTO t (a,b,c)` 反推 45 张表要哪些列，和建表语句、`PRAGMA table_info` 双向核对。
+   - **写死的 600 条 SQL 真跑一遍**：`db.prepare` 就会报 `no such column`，当场抓出 `statement_log.resolved_at` 这种「线上老库有、schema 里没有」的漏列。
+   - **`/schema-check` 那份「必须有」清单**（`REQ_SCHEMA`）和三本账的结构对不对得上。
+   - **前端 251 个接口调用**后台有没有；**733 个 wxml 绑定**在 js 里有没有对应方法；页面方法有没有重名。
+   - **CI**：`.github/workflows/deploy.yml` 在 `wrangler deploy` 之前先跑 `node scripts/check.mjs`，红了就不部署（node 20 → 24，因为要用 `node:sqlite`）。
+
+270. ✅ **按月查询全走 `month` 索引（42 处替换，带等价验证）**：`month` 列和触发器早就有了（177 那轮首页提速），但只有 `monthPL` 走索引，其余 75 处还在 `substr(created_at,1,7)=?` —— 函数包着字段，索引全用不上，等于每查一次扫一遍全表。这次**只改有算子的谓词**（`= / >= / <= / > / <`），并且**只改 `orders / payables / ledger` 三张有触发器的表**（别的表的 `month` 是代码自己写的，语义不一定等于 `created_at` 的月份，不动）。
+   - 剩下 45 处是有意保留的：投影里的 `substr(created_at,1,7) AS m`（本来就该现算）、`statement_log/dunning_log/recon_log/writeoffs/advances` 这些表的按月过滤、以及跨行的动态拼接（`sql += ' AND substr(created_at,1,7)=?'`，改之前得先知道拼给哪张表）。
+   - **等价验证**：造 80 单 / 160 条流水的两份月度数据，把改过的语句和「`month` 换回 `substr(created_at,1,7)`」的旧写法**在同一批数据上各跑一遍比对结果**，305 组（5 种参数 × 每条语句）**全部一致**；`scripts/check.mjs` 也确认 600 条 SQL 在新库上仍可 prepare。
+
+271. ✅ **`schema.sql` 终于能「照 README 新装」了**：以前线上一直好使，是因为线上库是更早版本 schema 建的；**拿现在的 `schema.sql` 新建一本账，会卡在第一条 `CREATE INDEX ... ON ledger(account_id)` 上直接失败**（`no such column: account_id`），而且还有 11 张表压根没有建表语句。
+   - **补 11 张没有建表语句的表**：`debts / debt_repays / invoices / transfers / writeoffs / targets / credit_limits`（线上是老库建的）+ `prepaids / wx_users / bank_flows / month_report`（同上）。列是按代码实际读写的字段反推的；线上已有的表不受影响（`IF NOT EXISTS` 不改结构）。新表同时在 `ensureBaseTables()` 里兜底建一次（老库/新库都不会因为缺表 500）。
+   - **补缺列**：`ledger.account_id/cash/import_batch`、`orders.cost/written_off/rev/no_invoice/delivered_at/import_batch`、`payables.written_off/rev/import_batch`、`statement_log.ack/ack_at/resolved_at`、`dunning_log.promise_date`、`import_log.batch`、`loans.import_batch`。
+   - **修两处「一句话被注释吃掉」的坑**：`orders` 建表最后一行 `created_by TEXT -- …用, delivered_at TEXT` 把 `delivered_at` 整列注释掉了；`ALTER TABLE dunning_log ADD COLUMN promise_date` 是一条**没注释掉的 ALTER**，新装必报错。
+   - **删掉重复建表**：`accounts / categories / advances` 各建了两遍（后面那份注释更全，留后面那份）。
+   - **实测**：`node scripts/check.mjs` 报「新库能建出 54 张表」；`npx wrangler d1 execute factory-db --local --file=schema.sql` 从报错变成 exit 0；随后本地起 worker，记单、首页、报表、备份、恢复、员工权限全部真跑通。
 
 <!-- API-LIST:BEGIN -->
 

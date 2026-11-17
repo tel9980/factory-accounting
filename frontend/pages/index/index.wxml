@@ -1790,11 +1790,15 @@
       <button class="btn ghost" size="mini" bindtap="loadBackupVerify">🔍 查一下备份能不能用</button>
       <view wx:if="{{bv}}">
         <view class="prev-h">{{bv.text}}</view>
+        <view class="tip" wx:if="{{bv.missing.length}}">这份备份里没有的表（旧格式）：{{bv.missing}}</view>
         <block wx:for="{{bv.tables}}" wx:key="name">
         <view class="item" wx:if="{{item.drift || item.in_backup}}">
           <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{item.in_backup}} / 现在 {{item.live}}</text></view>
         </view>
         </block>
+        <view class="tip" wx:if="{{bv.skipped.length}}">按设计不进备份的表（不是漏）：
+          <block wx:for="{{bv.skipped}}" wx:key="name" wx:for-item="sk">· {{sk.name}}（{{sk.why}}）</block>
+        </view>
         <view class="tip" wx:for="{{bv.warns}}" wx:key="*this" wx:for-item="wn">⚠ {{wn}}</view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeBackupVerify">收起</button></view>
       </view>

@@ -12,8 +12,13 @@ CREATE TABLE IF NOT EXISTS orders (
   progress TEXT DEFAULT '',             -- 当前工序（如 备料/加工/喷涂/包装）
   created_at TEXT NOT NULL,
   month TEXT,                         -- =substr(created_at,1,7)，触发器自动填，首页走索引
-  created_by TEXT                     -- 谁录的（'老板' / '员工·小王'），员工「只看自己录的单」用,
-  delivered_at TEXT
+  created_by TEXT,                    -- 谁录的（'老板' / '员工·小王'），员工「只看自己录的单」用这个
+  delivered_at TEXT,                  -- 实际交付时间
+  cost REAL DEFAULT 0,                -- 这一单的材料/外协成本，算真实毛利用
+  written_off REAL DEFAULT 0,         -- 已核销（坏账/抹零），算欠款时要扣掉
+  rev INTEGER DEFAULT 0,              -- 反结账标记：1 = 这单是红冲的倒记账
+  no_invoice INTEGER DEFAULT 0,       -- 客户说不要票，不进「待开票」清单
+  import_batch TEXT                   -- 从 Excel 一次导入的批次号，导错了整批撤回
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
@@ -33,8 +38,8 @@ CREATE TABLE IF NOT EXISTS process_log (
 );
 CREATE INDEX IF NOT EXISTS idx_process_order ON process_log(order_id);
 
--- orders.cost：这一单的材料/外协成本（算真实毛利用）
--- ALTER TABLE orders ADD COLUMN cost REAL DEFAULT 0;
+-- 说明：cost / written_off / rev / no_invoice / import_batch 这些列早年是用 ALTER 加到线上库的，
+-- 现在直接写进上面的建表语句，新装也能一次建全（老库 IF NOT EXISTS 不受影响）。
 
 -- 应付来源：应付单
 CREATE TABLE IF NOT EXISTS payables (
@@ -48,7 +53,10 @@ CREATE TABLE IF NOT EXISTS payables (
   due_date TEXT,                        -- 约定付款日
   created_at TEXT NOT NULL,
   month TEXT,                         -- =substr(created_at,1,7)，触发器自动填
-  created_by TEXT                     -- 谁录的（'老板' / '员工·小王'）
+  created_by TEXT,                    -- 谁录的（'老板' / '员工·小王'）
+  written_off REAL DEFAULT 0,         -- 已核销，算欠款时要扣掉
+  rev INTEGER DEFAULT 0,              -- 反结账标记
+  import_batch TEXT                   -- 导入批次号
 );
 CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);
 CREATE INDEX IF NOT EXISTS idx_payables_created ON payables(created_at);
@@ -68,7 +76,10 @@ CREATE TABLE IF NOT EXISTS ledger (
   remark TEXT,
   operator TEXT,             -- 经手人
   created_at TEXT NOT NULL,
-  month TEXT                 -- =substr(created_at,1,7)，触发器自动填
+  month TEXT,                -- =substr(created_at,1,7)，触发器自动填
+  account_id INTEGER DEFAULT 0,   -- 哪张卡/哪个钱包（0 = 没指定，算默认账户）
+  cash INTEGER DEFAULT 1,         -- 1 = 真金白银进出；0 = 预收预付抵扣/摊销，不动现金
+  import_batch TEXT               -- 导入批次号
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_month ON ledger(month);
@@ -145,41 +156,10 @@ CREATE TABLE IF NOT EXISTS phrases (
   created_at TEXT NOT NULL
 );
 
--- 资金账户（现金/银行卡/微信/支付宝）
-CREATE TABLE IF NOT EXISTS accounts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  kind TEXT DEFAULT 'cash',
-  opening REAL DEFAULT 0,
-  created_at TEXT NOT NULL
-);
--- 预收款/预付款（客户先打钱、先付供应商定金）
-CREATE TABLE IF NOT EXISTS advances (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL,
-  party TEXT NOT NULL,
-  amount REAL NOT NULL DEFAULT 0,
-  used REAL NOT NULL DEFAULT 0,
-  remark TEXT,
-  account_id INTEGER DEFAULT 0,
-  created_at TEXT NOT NULL
-);
--- 收支分类（可自定义）
-CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL,
-  name TEXT NOT NULL,
-  sort INTEGER DEFAULT 0,
-  created_at TEXT NOT NULL
-);
--- ledger 增加：所属账户、是否现金流水（预收抵扣这类不算现金）
--- ALTER TABLE ledger ADD COLUMN account_id INTEGER DEFAULT 0;
--- ALTER TABLE ledger ADD COLUMN cash INTEGER DEFAULT 1;
+-- （资金账户 / 预收预付 / 收支分类三张表建在下面「第一档」那一段，这里不再重复建）
+-- account_id / cash 早年单独 ALTER 加过，现在已并入上面的建表语句，新装一次到位。
 
 -- ── 第一档：资金账户 / 收支分类 / 预收预付（2026-11 新增）──
--- 已用 ALTER 加到线上三库：
---   ALTER TABLE ledger ADD COLUMN account_id INTEGER DEFAULT 0;
---   ALTER TABLE ledger ADD COLUMN cash INTEGER DEFAULT 1;   -- 0 = 预收/预付抵扣，不动现金
 
 CREATE TABLE IF NOT EXISTS accounts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,6 +201,7 @@ CREATE TABLE IF NOT EXISTS loans (
   returned REAL NOT NULL DEFAULT 0,
   remark TEXT,
   account_id INTEGER DEFAULT 0,
+  import_batch TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_loans_staff ON loans(staff);
@@ -260,6 +241,7 @@ CREATE TABLE IF NOT EXISTS import_log (
   ids TEXT,
   src TEXT,
   undone INTEGER DEFAULT 0,
+  batch TEXT,                      -- 本批批次号，和 orders/payables/ledger.import_batch 对得上
   created_at TEXT
 );
 
@@ -283,11 +265,16 @@ CREATE TABLE IF NOT EXISTS party_profiles (
 );
 
 -- 催款记录（哪天跟谁催过）
-CREATE TABLE IF NOT EXISTS dunning_log (id INTEGER PRIMARY KEY AUTOINCREMENT, party TEXT, type TEXT, channel TEXT, note TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS dunning_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT,
+  type TEXT,
+  channel TEXT,             -- 微信 / 电话 / 当面 / 短信
+  note TEXT,
+  promise_date TEXT,        -- 对方答应的付款日（答应了没付就提醒）——早年是 ALTER 加的，新装直接建
+  created_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_dunning_party ON dunning_log(party);
-
--- 催款时对方答应的付款日（答应 X 日付，过了没付就提醒）
-ALTER TABLE dunning_log ADD COLUMN promise_date TEXT;
 
 -- 对账单送达记录（哪天把对账单发给谁了）
 CREATE TABLE IF NOT EXISTS statement_log (
@@ -297,6 +284,9 @@ CREATE TABLE IF NOT EXISTS statement_log (
   month TEXT,
   channel TEXT,
   note TEXT,
+  ack TEXT,                 -- 客户那边的回执：收到 / 有异议
+  ack_at TEXT,              -- 点开确认的时间
+  resolved_at TEXT,         -- 有异议的那家，哪天处理完的
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_statement_log_party ON statement_log(party);
@@ -413,7 +403,7 @@ CREATE TABLE IF NOT EXISTS recon_confirm (
 CREATE INDEX IF NOT EXISTS idx_recon_confirm ON recon_confirm(month, type, party);
 
 -- 客户不要发票的单据（不进待开票清单）
--- ALTER TABLE orders ADD COLUMN no_invoice INTEGER DEFAULT 0;
+-- no_invoice 已并入 orders 建表语句。
 
 -- 报价单：先报价、客户点头再转成应收单（status: draft/sent/accepted/rejected/ordered）
 CREATE TABLE IF NOT EXISTS quotes (
@@ -545,3 +535,134 @@ CREATE TABLE IF NOT EXISTS reworks (
 );
 CREATE INDEX IF NOT EXISTS idx_rw_month ON reworks(month);
 CREATE INDEX IF NOT EXISTS idx_rw_party ON reworks(party);
+
+-- ===== 早期就有的表，一直漏在 schema.sql 之外 =====
+-- 这 7 张表（借款、还款、发票、内部转账、核销、月度目标、信用额度）线上库早就有了
+-- （是更早版本的 schema 建的），但后来的 schema.sql 里没有它们、代码里也没有建表语句。
+-- 后果：线上照旧能用，但**按 schema.sql 新装一本账时，这 7 个功能全是空的**（接口 catch 掉报错返回空列表）。
+-- 列是按代码里实际读写的字段反推的；线上已有的表不受影响（IF NOT EXISTS 不会改结构）。
+-- scripts/check.mjs 会检查「代码里 SELECT 的表是否都有建表语句」，防止再漏。
+
+CREATE TABLE IF NOT EXISTS debts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lender TEXT DEFAULT '',
+  kind TEXT DEFAULT 'bank',
+  principal REAL NOT NULL DEFAULT 0,
+  rate REAL DEFAULT 0,
+  start_date TEXT,
+  term_months INTEGER DEFAULT 0,
+  pay_kind TEXT DEFAULT 'interest',
+  account_id INTEGER DEFAULT 0,
+  remark TEXT DEFAULT '',
+  status TEXT DEFAULT 'open',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_debts_status ON debts(status);
+CREATE TABLE IF NOT EXISTS debt_repays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  debt_id INTEGER NOT NULL,
+  rdate TEXT,
+  amount REAL NOT NULL DEFAULT 0,
+  kind TEXT DEFAULT 'interest',
+  account_id INTEGER DEFAULT 0,
+  remark TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_debt_repays_debt ON debt_repays(debt_id);
+CREATE TABLE IF NOT EXISTS invoices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL DEFAULT 'out',
+  no TEXT DEFAULT '',
+  party TEXT DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  tax REAL DEFAULT 0,
+  date TEXT,
+  remark TEXT DEFAULT '',
+  order_id INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date);
+CREATE INDEX IF NOT EXISTS idx_invoices_order ON invoices(order_id);
+CREATE TABLE IF NOT EXISTS transfers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_id INTEGER DEFAULT 0,
+  to_id INTEGER DEFAULT 0,
+  amount REAL NOT NULL DEFAULT 0,
+  remark TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS writeoffs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ref_type TEXT NOT NULL,
+  ref_id INTEGER NOT NULL DEFAULT 0,
+  party TEXT DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  reason TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_writeoffs_ref ON writeoffs(ref_type, ref_id);
+CREATE TABLE IF NOT EXISTS targets (
+  month TEXT PRIMARY KEY,
+  receive REAL DEFAULT 0,
+  order_add REAL DEFAULT 0,
+  created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS credit_limits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT UNIQUE,
+  limit_amount REAL DEFAULT 0,
+  note TEXT DEFAULT '',
+  created_at TEXT
+);
+
+-- ── 同样漏过建表语句的 4 张表（2026-11 补）──
+-- prepaids / wx_users / bank_flows / month_report 和上面 7 张一个情况：线上是老库建的，schema.sql 里一直没有。
+-- 列按代码实际读写反推：INTO prepaids(…)、INTO wx_users(…)、INTO bank_flows(…)、INTO month_report(…)。
+
+-- 待摊费用（房租/保险一次付多月，按月摊销进成本，摊销流水 cash=0 不动现金）
+CREATE TABLE IF NOT EXISTS prepaids (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT DEFAULT '',
+  total REAL NOT NULL DEFAULT 0,   -- 一次付了多少
+  months INTEGER DEFAULT 1,        -- 摊几个月
+  start_date TEXT,                 -- 从哪个月开始摊
+  category TEXT DEFAULT '房租',
+  account_id INTEGER DEFAULT 0,
+  remark TEXT DEFAULT '',
+  active INTEGER DEFAULT 1,        -- 1=在摊 0=摊完/停摊
+  created_at TEXT NOT NULL
+);
+
+-- 微信小程序用户（体验额度，一个人给几次试用）
+CREATE TABLE IF NOT EXISTS wx_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  openid TEXT NOT NULL UNIQUE,
+  nickname TEXT DEFAULT '',
+  quota INTEGER NOT NULL DEFAULT 0,  -- 还剩几次额度
+  created_at TEXT,
+  last_at TEXT
+);
+
+-- 银行流水（导入银行卡账单，和对账单逐笔勾对）
+CREATE TABLE IF NOT EXISTS bank_flows (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT,
+  direction TEXT,                  -- in 收 / out 付
+  amount REAL NOT NULL DEFAULT 0,
+  memo TEXT DEFAULT '',
+  matched_type TEXT,               -- 勾到哪种单据：order / payable / expense
+  matched_id INTEGER DEFAULT 0,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bank_flows_date ON bank_flows(date);
+
+-- 月度全套报表存档（月底自动生成 Excel，存 base64 供下载；和 backups 一样不进备份）
+CREATE TABLE IF NOT EXISTS month_report (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT,
+  name TEXT,
+  b64 TEXT,
+  size INTEGER DEFAULT 0,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_month_report_month ON month_report(month);
