@@ -1525,12 +1525,29 @@
       </view>
       <view wx:if="{{sad}}">
         <view class="tip">{{sad.advice}}</view>
+        <view class="row2" wx:for="{{sad.by_person}}" wx:key="who" wx:for-item="p">👤 {{p.name}}：{{p.cnt}} 笔</view>
         <view class="item" wx:for="{{sad.rows}}" wx:key="index">
-          <view class="row1"><text class="nm">{{item.date}} {{item.time}} · {{item.action}}</text><text class="amt">{{item.target}}</text></view>
+          <view class="row1"><text class="nm">{{item.date}} {{item.time}} · {{item.name}} · {{item.action}}</text><text class="amt">{{item.target}}</text></view>
           <view class="row2">{{item.detail}}</view>
         </view>
         <view class="tip" wx:if="{{!sad.rows.length}}">最近 7 天没有员工操作。</view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeStaffAct">收起</button></view>
+      </view>
+      <view wx:if="{{role!='staff'}}">
+        <button class="btn ghost" size="mini" bindtap="loadStaffPerms">👥 员工权限（谁能看哪块）</button>
+        <view wx:if="{{spm}}">
+          <view class="tip">{{spm.text}}</view>
+          <view class="item" wx:for="{{spm.rows}}" wx:key="k" bindtap="toggleStaffMod" data-k="{{item.k}}">
+            <view class="row1"><text class="nm">{{item.on?'☑':'☐'}} {{item.label}}</text><text class="amt">{{item.on?'开着':'关着'}}</text></view>
+          </view>
+          <view class="frow">
+            <button class="btn" size="mini" bindtap="saveStaffPerms">存下来</button>
+            <button class="btn ghost" size="mini" bindtap="closeStaffPerms">收起</button>
+          </view>
+        </view>
+      </view>
+      <view wx:if="{{role=='staff'}}">
+        <button class="btn ghost" size="mini" bindtap="askStaffName" data-force="1">✏️ 改我的名字</button>
       </view>
       <view class="tip" wx:if="{{role=='staff'}}">你现在用的是员工口令：能记账、收款付款、查欠款；毛利、删单、改设置需要老板口令。</view>
     </view>
@@ -1584,6 +1601,17 @@
       </view>
       <view class="tip" wx:if="{{btl}}">{{btl.note}}</view>
       <button class="btn ghost" size="mini" bindtap="loadBackupTimeline">刷新备份列表</button>
+      <button class="btn ghost" size="mini" bindtap="loadBackupVerify">🔍 查一下备份能不能用</button>
+      <view wx:if="{{bv}}">
+        <view class="prev-h">{{bv.text}}</view>
+        <block wx:for="{{bv.tables}}" wx:key="name">
+        <view class="item" wx:if="{{item.drift || item.in_backup}}">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{item.in_backup}} / 现在 {{item.live}}</text></view>
+        </view>
+        </block>
+        <view class="tip" wx:for="{{bv.warns}}" wx:key="*this" wx:for-item="wn">⚠ {{wn}}</view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closeBackupVerify">收起</button></view>
+      </view>
     </view>
     <view class="form">
       <view class="tip">🤝 账本交接包：换人管账（或者自己半年后忘了怎么记）时，一页说清这本账怎么记的、还欠谁、接手的人第一步做什么。</view>
@@ -2361,7 +2389,9 @@
 
     <view class="form">
       <view class="tip">银行流水对账（把银行卡/微信账单粘进来，再一笔笔认领成账）</view>
-      <textarea class="restore-ta" placeholder="{{bank_hint}}" value="{{bank_text}}" bindinput="onBankText"></textarea>
+            <view class="tip">认得出的格式：微信/支付宝导出的 CSV（有表头那种）、银行流水的借方/贷方表、以及「日期,收/付,金额,摘要」一行一笔。粘进来不用管列的顺序。</view>
+<textarea class="restore-ta" placeholder="{{bank_hint}}" value="{{bank_text}}" bindinput="onBankText"></textarea>
+      <view class="tip" wx:if="{{bank_layout}}">✓ 认出这是「{{bank_layout}}」{{bank_skip ? '，跳过 ' + bank_skip + ' 笔不计收支/退款的' : ''}}</view>
       <button class="btn" size="mini" bindtap="importBank">导入流水</button>
       <view class="duesoon" wx:if="{{bank_unmatched.count>0}}">{{bank_unmatched.count}} 笔还没认领，合计 ¥{{bank_unmatched.amount}}</view>
       <view class="frow" wx:if="{{bank_unmatched.count>0}}">

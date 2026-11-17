@@ -774,11 +774,34 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 前端设置页账套区：月份输入 + 逐本一行（接单/净利/占比/单数/现金/应收/应付/家底），底部合计，可「复制这段」发微信；
    - denyStaff 加 `/^\/merge-summary/`（含各本利润）；实测：主账本 1 单 10000（净利 6000）+ 第二本 1 单 6000（净利 3500，支出 500）→ 合计 16000 / 9500 / 59.38%，占比 62.5% 与 37.5%，第三本标「这本还空着」。
 
+232. ✅ **员工记的账，记到人头上**：以前员工口令记的单，审计里只写「员工」两个字——三个人共用一个口令，出了问题不知道是谁。现在：
+   - 前端第一次用员工口令进来会弹「你叫什么」（`askStaffName`，存本地 `staff_name`，最多 12 字），之后每次请求都带 `X-Staff-Name` 头（**头里只能放 ASCII，中文名用 `encodeURIComponent` 编码，后端 `decodeURIComponent` 还原**，直接塞中文会报 `Cannot convert argument to a ByteString`）；
+   - `act(c)` 返回 `'员工·小王'`，9 处员工可达的审计点全部带名字；`/staff-activity` 的 `WHERE by='员工'` 改成 `LIKE '员工%'`，并新增 `by_person:[{who,name,cnt}]` 按人聚合（设置页「👀 员工最近记了什么」显示 `👤 小王：3 笔`）；
+   - 员工侧设置页多一个「✏️ 改我的名字」。
+233. ✅ **员工权限能按模块开**（原来员工口令要么全能记、要么全不能用）：
+   - 六个模块：应收 / 应付 / 支出与流水 / 批量导入 / 单位与对账 / 家底（账户·设备·发票），默认全开；
+   - `STAFF_MOD_RULES` 用正则把路径映射到模块，中间件在 denyStaff 之后再判一次：没开就 403「员工口令没有开「应付（进货、付款）」，要开让老板去 设置 → 员工权限 勾上」；
+   - 设置页「👥 员工权限（谁能看哪块）」勾选保存（`GET|POST /staff-perms`，至少留一个模块，否则 400）；
+   - **顺手堵了真漏洞**：员工口令原先能直接看 `/kpi` `/year-summary` `/year-book` `/year-customers` `/loss-book` `/price-book` `/handover` `/month-report` `/report-view`（全是毛利和家底），现在全部 403；`/dashboard` 早就有 `hideProfit`，利润字段对员工返回 null；
+   - 实测：只开「应收」后员工 `/ar` 200，`/ap` `/expenses` `/assets` `/contacts` 全 403；带 `X-Staff-Name` 记单后 `by_person` 正确分出「小王 1 笔 / 小李 1 笔」。
+234. ✅ **备份是真的完整、也能自证能用**（这轮发现两个真问题）：
+   - **原来 `buildBackup` 只导出 应收/应付/流水 三张表**——恢复完账户期初、设备、借款、预收、发票、固定支出、账期约定全没了，等于「以为备份了，其实只备份了半个账本」。现在带上 24 张表（accounts/advances/loans/debts/debt_repays/assets/invoices/fixed_expenses/party_terms/party_profiles/credit_limits/quotes/categories/transfers/writeoffs/recon_log/statement_log/dunning_log/net_snapshots/targets/budgets/edit_requests/month_archive/settings），标 `version: 2`；**口令类（access_key/staff_key/sealed\*）不进备份文件**，恢复时也不删它们（否则恢复完自己都进不来）；
+   - 恢复按 `PRAGMA table_info` 取真实列名动态拼 INSERT，老备份缺的表直接跳过、不算错，返回 `extra:{accounts:4,assets:1,...}`；
+   - 新接口 `GET /backup-verify`：把最新一份备份拆开，逐表比「备份里有多少 / 现在有多少」，给 `usable`、`missing`（旧格式缺哪几类）、`drift_count`、`warns`（内容坏了 / 旧格式 / 超 7 天没备份 / 不到 200 字节）与人话 `text`；设置页「🔍 查一下备份能不能用」；
+   - 实测：删光 accounts/assets/advances/loans 再 `POST /backup-restore {id:14,confirm:true}` → 账户 4 个、设备 1 台 12000、预收 2000、借支 1000 全部回来；`/backup-verify` 报「和现在完全一致」；旧格式备份会明确报「缺 24 类数据」。
+235. ✅ **微信/支付宝/银行的账单直接粘进来**（原来只认「日期,收/付,金额,摘要」这一种，粘微信导出的 CSV 一笔都认不出）：
+   - `parseBankSmart`：自动找表头（前 30 行里 ≥2 个列名命中且 ≥3 列），支持三种版式——微信/支付宝（`交易时间 / 交易类型 / 交易对方 / 商品 / 收/支 / 金额(元) / 支付方式 / 当前状态 / 交易单号 / 商户单号 / 备注`）、银行流水（借方金额 / 贷方金额 或 支出/收入）、通用表格（日期/收付/金额/摘要），认不出表头就退回老格式；
+   - **三个坑都修了**：① 千分位逗号 `¥1,200.00` 会被当列分隔符切成两列 → 切之前先把 `(\d),(\d{3})` 粘回去；② 方向要优先认「收/支」列，否则会先命中「交易类型」（值「商户消费」）导致全判成收入；③ 日期用 `bkDate` 归一（`2026-11-03 09:12:00` 原来会退成今天）；
+   - 跳过「不计收支 / 中性 / 已退款 / 交易关闭 / 合计行」，摘要合并「交易对方 + 商品 + 备注」并排除单号/支付方式/状态，截 80 字；
+   - 返回 `layout` / `layout_text`（微信/支付宝账单、银行流水（借方/贷方）、通用表格、简单格式）与 `skipped`，前端粘完显示「✓ 认出这是「微信/支付宝账单」，跳过 1 笔不计收支/退款的」；
+   - 实测三种格式全对：微信 3 笔（1200 出 / 3000 入 / 260 出，跳过 1 笔不计收支）、银行 3 笔（5000 出 / 8000 入 / 300 出）、老格式 2 笔。
+236. ✅ **5000 单压测实测**（上一轮只测到 2000 单）：往第三本灌 5000 张应收 + 3334 条流水后实测（含本机到服务器约 1 秒网络）——首页 `/dashboard` 冷 3.4s / 热 1.2s、`/ar` 1.2s、`/ar-summary` 0.85s、`/party-groups` 0.48s、`/report-view` 0.72s、`/kpi` 0.66s、`/year-summary` 0.48s、`/aging` 0.66s、`/due-schedule` 0.94s、`/settled` 0.49s、`/networth` 0.47s。结论：**首页是唯一随单量明显变慢的接口**（12 条子查询各自全表扫 `substr(created_at,1,7)`，D1 上没法走索引），5000 单时 1–3 秒还能用，但到 2 万单要动手（加月份列或按年分表）；其余接口都在 1 秒内。测完把 5000 单清掉。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 343 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 346 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1036,6 +1059,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /seal`
 - `POST /seal`
 
+**staff-perms**（2）
+
+- `GET /staff-perms`
+- `POST /staff-perms`
+
 **statement-ack**（2）
 
 - `GET /statement-ack`
@@ -1071,7 +1099,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（190）
+**其它（单个接口）**（191）
 
 - `GET /`
 - `GET /access-guide`
@@ -1089,6 +1117,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /backup-restore`
 - `GET /backup-timeline`
 - `POST /backup-to-notes`
+- `GET /backup-verify`
 - `POST /bank-auto-match`
 - `POST /bank-import`
 - `POST /batch`

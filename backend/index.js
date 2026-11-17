@@ -118,7 +118,33 @@ const logAudit = async (db, action, target, detail, ref, by) => {
   }
 }
 // 谁动的手：员工口令操作记为「员工」，老板口令或未登录记为「老板」
-const act = (c) => ((c && c.get && c.get('role') === 'staff') ? '员工' : '老板')
+const act = (c) => {
+  if (!(c && c.get && c.get('role') === 'staff')) return '老板'
+  const rawName = String((c.req && c.req.header && c.req.header('x-staff-name')) || '').trim()
+  let nm = rawName
+  // 头里只能放 ASCII，前端用 encodeURIComponent 传中文名字
+  try { nm = decodeURIComponent(rawName) } catch (e) { nm = rawName }
+  nm = nm.replace(/[\r\n]/g, '').slice(0, 12)
+  return nm ? '员工·' + nm : '员工'
+}
+// 员工能开哪些模块：老板在「设置 → 员工权限」里勾
+const STAFF_MOD_LABEL = { ar: '应收（开单、收款）', ap: '应付（进货、付款）', exp: '支出与流水', import: '批量导入', contact: '单位与对账', asset: '家底（账户、设备、发票）' }
+const STAFF_MOD_DEFAULT = ['ar', 'ap', 'exp', 'import', 'contact', 'asset']
+const STAFF_MOD_RULES = [
+  ['ar', /^\/(orders|ar|ar-summary|history|settled|writeoffs|edit-request)/],
+  ['ap', /^\/(payables|ap|ap-summary)/],
+  ['exp', /^\/(expenses|ledger|fixed|run-fixed|advances|prepaids)/],
+  ['import', /^\/(import|bank-|migrate-)/],
+  ['contact', /^\/(contacts|party-groups|party-items|party-terms|party-balance|party-dups|party-merge|statement|recon-|dunning|collect-list|reminders|due-schedule|aging|track)/],
+  ['asset', /^\/(accounts|networth|assets|invoices|funding|loans|debts|credit-limits|transfers)/]
+]
+function staffModOf(path) { for (const [k, re] of STAFF_MOD_RULES) if (re.test(path)) return k; return '' }
+async function getStaffModules(db) {
+  const r = await db.prepare("SELECT value FROM settings WHERE key='staff_modules'").first().catch(() => null)
+  const v = String((r && r.value) || '')
+  if (!v) return STAFF_MOD_DEFAULT.slice()
+  return v.split(',').map((x) => x.trim()).filter((x) => STAFF_MOD_LABEL[x])
+}
 // 把「改了什么」拼成人话：金额 3000→3200；客户 张三→李四
 const diffText = (pairs) => pairs
   .filter(([, a, b]) => String(a == null ? '' : a) !== String(b == null ? '' : b))
@@ -365,7 +391,7 @@ app.get('/access-guide', async (c) => {
     mainDb.prepare("SELECT value FROM settings WHERE key='recover_hash'").first().catch(() => null),
     g("SELECT value FROM settings WHERE key='book_name'"),
     g("SELECT MAX(created_at) t FROM backups"),
-    g("SELECT COUNT(*) n FROM audit_log WHERE by='员工'"),
+    g("SELECT COUNT(*) n FROM audit_log WHERE by LIKE '员工%'"),
     g("SELECT COUNT(*) n FROM orders WHERE (due_date IS NULL OR due_date='') AND price > paid + COALESCE(written_off,0)"),
     g("SELECT COUNT(*) n, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) amt FROM orders WHERE price > paid + COALESCE(written_off,0)"),
     g("SELECT COUNT(*) n, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) amt FROM payables WHERE amount > paid + COALESCE(written_off,0)"),
@@ -452,7 +478,7 @@ app.use('*', async (c, next) => {
       (/^\/recon-save/.test(path) && m !== 'OPTIONS') ||
       (/^\/assets/.test(path) && m !== 'GET') ||
       (/^\/trash/.test(path) && m !== 'GET')
-      || /^\/staff-activity/.test(path)
+      || /^\/(staff-activity|staff-perms|backup-verify)/.test(path)
       || /^\/party-merge/.test(path)
       || /^\/(schema-check|books-check|merge-summary|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/recon-board/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
@@ -461,8 +487,14 @@ app.use('*', async (c, next) => {
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
       || (/^\/(tax-pack|year-close|year-review|quotes?|quote-hint)/.test(path))
       || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
+      || (/^\/(kpi|year-summary|year-book|year-customers|loss-book|price-book|handover|month-report|report-view)$/.test(path) && m !== 'OPTIONS')
       || (/^\/bank-flows\/\d+\/match$/.test(path))
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
+    const mod = staffModOf(path)
+    if (mod) {
+      const mods = await getStaffModules(mainDb)
+      if (!mods.includes(mod)) return c.json({ code: 'staff_module', error: '员工口令没有开「' + (STAFF_MOD_LABEL[mod] || mod) + '」，要开让老板去 设置 → 员工权限 勾上' }, 403)
+    }
   }
   c.set('role', role)
   // 账本封存：整本只读（GET 照常），要动账先解封。放行：口令类、批量取数、封存开关本身
@@ -2724,13 +2756,37 @@ app.post('/unseal', async (c) => {
   return c.json({ ok: true, sealed: false })
 })
 
+// 员工权限：能开哪些模块（老板专用）
+app.get('/staff-perms', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const mods = await getStaffModules(mainDb)
+  const rows = Object.keys(STAFF_MOD_LABEL).map((k) => ({ k, label: STAFF_MOD_LABEL[k], on: mods.includes(k) }))
+  const off = rows.filter((r) => !r.on).map((r) => r.label)
+  return c.json({ ok: true, rows, on: mods, count: mods.length,
+    text: off.length ? '员工现在能用的：' + rows.filter((r) => r.on).map((r) => r.label).join('、') + '。不能用的：' + off.join('、') + '。' : '员工现在什么模块都能用（除了删改单、看毛利）。' })
+})
+app.post('/staff-perms', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  const want = Array.isArray(body.modules) ? body.modules : []
+  const mods = want.map((x) => String(x)).filter((x) => STAFF_MOD_LABEL[x])
+  if (!mods.length) return c.json({ error: '至少给员工留一个模块，不然他进来什么都点不了' }, 400)
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const v = mods.join(',')
+  const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_modules'").first()
+  if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_modules'").bind(v).run()
+  else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_modules', ?)").bind(v).run()
+  await logAudit(mainDb, '改员工权限', '员工权限', mods.map((m) => STAFF_MOD_LABEL[m]).join('、'))
+  return c.json({ ok: true, modules: mods })
+})
+
 app.get('/me', async (c) => {
   const role = c.get('role') || 'owner'
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const staff = await getStaffKey(mainDb)
   const seal = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed'").first().catch(() => null)
   const sealAt = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed_at'").first().catch(() => null)
-  return c.json({ role, book: String(c.env.BOOK || '1'), staff_enabled: !!staff, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '' })
+  const mods = role === 'staff' ? await getStaffModules(mainDb) : Object.keys(STAFF_MOD_LABEL)
+  return c.json({ role, book: String(c.env.BOOK || '1'), staff_enabled: !!staff, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '', staff_modules: mods, staff_mod_labels: STAFF_MOD_LABEL })
 })
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
 const addDaysIso = (iso, n) => {
@@ -10755,16 +10811,24 @@ app.get('/contact-detail', async (c) => {
 })
 
 // 生成全量备份 JSON
+// 备份里除了账目，还要带上「账目以外的家底」，否则恢复完账户期初、设备、借款都没了
+const BACKUP_EXTRA = ['accounts', 'advances', 'loans', 'debts', 'debt_repays', 'assets', 'invoices', 'fixed_expenses', 'party_terms', 'party_profiles', 'credit_limits', 'quotes', 'categories', 'transfers', 'writeoffs', 'recon_log', 'statement_log', 'dunning_log', 'net_snapshots', 'targets', 'budgets', 'edit_requests', 'month_archive', 'settings']
+// 口令这类东西不进备份文件，免得备份发出去把口令也带出去
+const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sealed', 'sealed_at', 'sealed_note']
 async function buildBackup(db) {
   const orders = await db.prepare('SELECT * FROM orders ORDER BY id').all()
   const payables = await db.prepare('SELECT * FROM payables ORDER BY id').all()
   const ledger = await db.prepare('SELECT * FROM ledger ORDER BY id').all()
-  return JSON.stringify({
-    exported_at: now(),
-    orders: orders.results,
-    payables: payables.results,
-    ledger: ledger.results
-  }, null, 2)
+  const out = { exported_at: now(), version: 2, orders: orders.results, payables: payables.results, ledger: ledger.results }
+  for (const t of BACKUP_EXTRA) {
+    try {
+      const r = await db.prepare('SELECT * FROM ' + t).all()
+      let rows = r.results || []
+      if (t === 'settings') rows = rows.filter((x) => !BACKUP_SETTINGS_SKIP.includes(String(x.key)))
+      out[t] = rows
+    } catch (e) { out[t] = [] }
+  }
+  return JSON.stringify(out, null, 2)
 }
 
 // ── 备份到笔记站（md.1211.cc.cd）──
@@ -10919,8 +10983,30 @@ async function restoreCore(db, data) {
       .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now(), num(l.account_id), l.cash === undefined ? 1 : num(l.cash)))
   }
   await runBatch(db, stmts)
-  await logAudit(db, '数据恢复', '', `恢复 应收${orders.length - skipped.orders} 应付${payables.length - skipped.payables} 流水${ledger.length - skipped.ledger}`)
-  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, skipped }
+  // 账目以外的家底也一起还原（老备份没有这些字段就跳过，不算错）
+  const extra = {}
+  for (const t of BACKUP_EXTRA) {
+    const rows = Array.isArray(data[t]) ? data[t] : null
+    if (!rows) continue
+    try {
+      const info = (await db.prepare('PRAGMA table_info(' + t + ')').all()).results || []
+      const cols = info.map((x) => x.name)
+      if (!cols.length) continue
+      const st = [t === 'settings'
+        ? db.prepare("DELETE FROM settings WHERE key NOT IN ('access_key','staff_key','sealed','sealed_at','sealed_note')")
+        : db.prepare('DELETE FROM ' + t)]
+      for (const r of rows) {
+        if (t === 'settings' && BACKUP_SETTINGS_SKIP.includes(String(r.key))) continue
+        const use = cols.filter((cn) => r[cn] !== undefined)
+        if (!use.length) continue
+        st.push(db.prepare('INSERT INTO ' + t + ' (' + use.join(',') + ') VALUES (' + use.map(() => '?').join(',') + ')').bind(...use.map((cn) => r[cn])))
+      }
+      await runBatch(db, st)
+      extra[t] = rows.length
+    } catch (e) { extra[t] = -1 }
+  }
+  await logAudit(db, '数据恢复', '', `恢复 应收${orders.length - skipped.orders} 应付${payables.length - skipped.payables} 流水${ledger.length - skipped.ledger} 家底${Object.keys(extra).length}类`)
+  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, extra, skipped }
 }
 
 app.post('/restore', async (c) => {
@@ -10977,6 +11063,48 @@ app.get('/backup-timeline', async (c) => {
 })
 
 // 回到某一份备份（服务端直接恢复，不用手抄 JSON）
+// 备份能不能用：不是「有没有备份」，而是「这份备份真能恢复吗」
+app.get('/backup-verify', async (c) => {
+  const db = c.env.DB
+  const row = await db.prepare('SELECT id, created_at, length(content) AS size, content FROM backups ORDER BY id DESC LIMIT 1').first().catch(() => null)
+  if (!row) return c.json({ ok: true, has: false, usable: false, text: '还没有任何备份。报表页点一次「立即备份」，以后就能回到这一天。' })
+  let d = null
+  try { d = JSON.parse(row.content) } catch (e) { d = null }
+  const CORE = ['orders', 'payables', 'ledger']
+  const ALL = CORE.concat(BACKUP_EXTRA)
+  const live = {}
+  for (const t of ALL) {
+    try {
+      live[t] = t === 'settings'
+        ? num((await db.prepare("SELECT COUNT(*) n FROM settings WHERE key NOT IN ('access_key','staff_key','sealed','sealed_at','sealed_note')").first()).n)
+        : num((await db.prepare('SELECT COUNT(*) n FROM ' + t).first()).n)
+    } catch (e) { live[t] = -1 }
+  }
+  const tables = []
+  const missing = []
+  for (const t of ALL) {
+    const rows = d && Array.isArray(d[t]) ? d[t] : null
+    const inB = rows ? rows.length : null
+    if (inB === null) { missing.push(t); continue }
+    tables.push({ name: t, in_backup: inB, live: live[t], drift: live[t] >= 0 ? live[t] - inB : 0 })
+  }
+  const usable = !!d && CORE.every((t) => Array.isArray(d[t]))
+  const days = daysSince(String(row.created_at || '').slice(0, 10))
+  const warns = []
+  if (!usable) warns.push('这份备份内容坏了（不是有效 JSON 或缺账目），恢复不了')
+  if (missing.length) warns.push('这份备份是旧格式，缺 ' + missing.length + ' 类数据（' + missing.slice(0, 6).join('、') + '…），恢复完这些会空着')
+  if (days > 7) warns.push('最近一份备份是 ' + days + ' 天前的，超过一周没备份了')
+  if (num(row.size) < 200) warns.push('备份只有 ' + row.size + ' 字节，可能是空账本')
+  const drift = tables.filter((x) => Math.abs(x.drift) > 0).length
+  const text = !usable
+    ? '最近一份备份用不了：' + (warns[0] || '内容不完整')
+    : '最近一份备份是 ' + String(row.created_at || '').slice(0, 16) + '（' + Math.round(num(row.size) / 1024) + ' KB），能恢复。' +
+      (missing.length ? ' 但它是旧格式，缺 ' + missing.length + ' 类数据。' : ' 账目以外的家底也都在里面。') +
+      (drift ? ' 和现在比有 ' + drift + ' 类数量不一样（备份之后又记了新东西，正常）。' : ' 和现在完全一致。')
+  return c.json({ ok: true, has: true, usable, id: row.id, at: row.created_at, days_ago: days, size: num(row.size), version: d && d.version || 1,
+    tables, missing, drift_count: drift, warns, text })
+})
+
 app.post('/backup-restore', async (c) => {
   const db = c.env.DB
   const b = await c.req.json().catch(() => ({}))
@@ -11768,23 +11896,117 @@ const parseBankText = (text) => {
     if (amount < 0) { amount = -amount; dir = 'out' }
     else if (String(rest[0] || '').trim().startsWith('-')) { dir = 'out' }
     const memo = rest.slice(1).join(' ').trim()
-    out.push({ date, direction: dir, amount: round2(amount), memo })
+    out.push({ date: String(date || '').slice(0, 10), direction: dir, amount: round2(amount), memo })
   }
   return out
+}
+
+// 微信/支付宝/银行导出的账单格式各不相同，先认表头再按列取数
+const BK_COL = {
+  date: /^(交易时间|交易日期|日期|时间|记账日期|入账日期)/,
+  dir: /^(收\/支|收支|收付|借贷标志|交易类型|类型)$/,
+  amount: /^(金额\(元\)|金额|交易金额|发生额)/,
+  debit: /^(借方金额|支出金额|付款金额|借方发生额)/,
+  credit: /^(贷方金额|收入金额|收款金额|贷方发生额)/,
+  memo: /(摘要|商品|交易对方|对方|备注|说明|用途|商户)/
+}
+function bkCell(x) { return String(x == null ? '' : x).replace(/^["'\s]+|["'\s]+$/g, '').replace(/¥|￥|元/g, '').replace(/,/g, '') }
+function bkAmount(x) {
+  const v = Number(bkCell(x))
+  return isFinite(v) ? v : 0
+}
+function parseBankSmart(text) {
+  const lines = String(text || '').split(/\r?\n/).map((x) => x.trim()).filter((x) => x)
+  if (!lines.length) return { rows: [], layout: 'unknown', skipped: 0 }
+  const split = (line) => {
+    // 千分位逗号（1,200.00）先粘回去，否则会被当成列分隔符
+    const fixed = String(line).replace(/(\d),(\d{3})(?=\D|$)/g, '$1$2').replace(/(\d),(\d{3})(?=\D|$)/g, '$1$2')
+    if (/[,\t，]/.test(fixed)) return fixed.split(/[,\t，]/).map(bkCell)
+    return fixed.split(/\s{2,}|\s+/).map(bkCell)
+  }
+  const bkDate = (v) => {
+    const t = String(v == null ? '' : v).trim()
+    const m = t.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/)
+    if (m) return m[1] + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[3]).padStart(2, '0')
+    const iso = toIsoDate(t)
+    return iso ? String(iso).slice(0, 10) : ''
+  }
+  let headIdx = -1, head = null
+  for (let i = 0; i < Math.min(lines.length, 30); i++) {
+    const cells = split(lines[i])
+    const hits = cells.filter((c) => Object.keys(BK_COL).some((k) => BK_COL[k].test(c))).length
+    if (hits >= 2 && cells.length >= 3) { headIdx = i; head = cells; break }
+  }
+  if (headIdx < 0) {
+    // 没有表头：退回老格式（日期,收/付,金额,摘要）
+    return { rows: parseBankText(text), layout: 'plain', skipped: 0 }
+  }
+  const idx = (re) => head.findIndex((c) => re.test(c))
+  const iDate = idx(BK_COL.date)
+  const iDir2 = head.findIndex((x) => /^(收\/支|收支|收付)$/.test(x))
+  const iDir = iDir2 >= 0 ? iDir2 : idx(BK_COL.dir)
+  const iAmt = idx(BK_COL.amount)
+  const iDeb = idx(BK_COL.debit)
+  const iCre = idx(BK_COL.credit)
+  const iMemo = idx(BK_COL.memo)
+  const layout = iDeb >= 0 || iCre >= 0 ? 'bank' : (iDir >= 0 ? 'wallet' : 'simple')
+  const rows = []
+  let skipped = 0
+  for (let i = headIdx + 1; i < lines.length; i++) {
+    const c = split(lines[i])
+    if (!c.length) continue
+    if (/^(合计|总计|小计|—|--)/.test(c[0] || '')) continue
+    const date = bkDate(c[iDate >= 0 ? iDate : 0]) || ''
+    let dir = ''
+    let amount = 0
+    if (layout === 'bank') {
+      const deb = iDeb >= 0 ? bkAmount(c[iDeb]) : 0
+      const cre = iCre >= 0 ? bkAmount(c[iCre]) : 0
+      if (deb > 0) { dir = 'out'; amount = deb } else if (cre > 0) { dir = 'in'; amount = cre }
+    } else {
+      const dv = String(c[iDir >= 0 ? iDir : 1] || '')
+      if (/支出|付款|转出|借/.test(dv)) dir = 'out'
+      else if (/收入|收款|转入|贷/.test(dv)) dir = 'in'
+      else if (/不计收支|中性/.test(dv)) { skipped++; continue }
+      amount = bkAmount(c[iAmt >= 0 ? iAmt : 2])
+    }
+    if (!amount) { skipped++; continue }
+    if (amount < 0) { amount = -amount; dir = dir || 'out' }
+    if (!dir) dir = 'in'
+    // 已退款/已关闭的交易不算真收支
+    const line = lines[i]
+    if (/已全额退款|交易关闭|已退款/.test(line)) { skipped++; continue }
+    const memoParts = []
+    const seen = {}
+    for (let k = 0; k < head.length; k++) {
+      if (!BK_COL.memo.test(head[k])) continue
+      if (/单号|订单号|支付方式|收\/付款方式|当前状态|交易状态/.test(head[k])) continue
+      if (k === iDate || k === iDir || k === iAmt || k === iDeb || k === iCre) continue
+      const v = String(c[k] || '').trim()
+      if (!v || seen[v]) continue
+      seen[v] = 1
+      memoParts.push(v)
+    }
+    if (!memoParts.length && iMemo >= 0 && c[iMemo]) memoParts.push(String(c[iMemo]).trim())
+    rows.push({ date: date || now().slice(0, 10), direction: dir, amount: round2(amount), memo: memoParts.join(' ').slice(0, 80) })
+  }
+  return { rows, layout, skipped }
 }
 
 app.post('/bank-import', async (c) => {
   const { text, account_id } = await c.req.json()
   const db = c.env.DB
-  const rows = parseBankText(text)
-  if (!rows.length) return c.json({ error: '没解析出流水，格式：日期,收/付,金额,摘要（一行一笔）' }, 400)
+  const parsed = parseBankSmart(text)
+  const rows = parsed.rows
+  if (!rows.length) return c.json({ error: '没解析出流水。可以直接粘贴微信/支付宝/银行导出的 CSV 原文（有表头那种），或者「日期,收/付,金额,摘要」一行一笔' }, 400)
   const acc = num(account_id) || 0
   for (const r of rows) {
     await db.prepare('INSERT INTO bank_flows (date, direction, amount, memo, matched_type, matched_id, created_at) VALUES (?,?,?,?,?,0,?)')
       .bind(r.date, r.direction, r.amount, `${r.memo}${acc ? ' [账户' + acc + ']' : ''}`, null, now()).run()
   }
   await logAudit(db, '导入银行流水', '银行流水', `导入 ${rows.length} 笔`)
-  return c.json({ ok: true, imported: rows.length, rows })
+  const LAYOUT_CN = { wallet: '微信/支付宝账单', bank: '银行流水（借方/贷方）', simple: '通用表格（日期/收付/金额）', plain: '简单格式（日期,收付,金额,摘要）' }
+  return c.json({ ok: true, imported: rows.length, rows, layout: parsed.layout, layout_text: LAYOUT_CN[parsed.layout] || parsed.layout, skipped: parsed.skipped })
 })
 
 app.get('/bank-flows', async (c) => {
@@ -11985,11 +12207,12 @@ app.get('/staff-activity', async (c) => {
   const db = c.env.DB
   const days = Math.min(Math.max(num(c.req.query('days')) || 7, 1), 90)
   const since = addDaysIso(now().slice(0, 10), -days)
-  const [rows, byDay, byAct, staffCfg] = await Promise.all([
-    db.prepare("SELECT action, target, detail, created_at FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? ORDER BY id DESC LIMIT 120").bind(since).all().catch(() => ({ results: [] })),
-    db.prepare("SELECT substr(created_at,1,10) d, COUNT(*) n FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? GROUP BY d ORDER BY d DESC").bind(since).all().catch(() => ({ results: [] })),
-    db.prepare("SELECT action, COUNT(*) n FROM audit_log WHERE by='员工' AND substr(created_at,1,10)>=? GROUP BY action ORDER BY n DESC LIMIT 8").bind(since).all().catch(() => ({ results: [] })),
-    db.prepare("SELECT value AS v FROM settings WHERE key='staff_key'").first().catch(() => null)
+  const [rows, byDay, byAct, staffCfg, byPerson] = await Promise.all([
+    db.prepare("SELECT action, target, detail, created_at, by AS who FROM audit_log WHERE by LIKE '员工%' AND substr(created_at,1,10)>=? ORDER BY id DESC LIMIT 120").bind(since).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT substr(created_at,1,10) d, COUNT(*) n FROM audit_log WHERE by LIKE '员工%' AND substr(created_at,1,10)>=? GROUP BY d ORDER BY d DESC").bind(since).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT action, COUNT(*) n FROM audit_log WHERE by LIKE '员工%' AND substr(created_at,1,10)>=? GROUP BY action ORDER BY n DESC LIMIT 8").bind(since).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT value AS v FROM settings WHERE key='staff_key'").first().catch(() => null),
+    db.prepare("SELECT by AS who, COUNT(*) n FROM audit_log WHERE by LIKE '员工%' AND substr(created_at,1,10)>=? GROUP BY by ORDER BY n DESC").bind(since).all().catch(() => ({ results: [] }))
   ])
   // created_at 已经存的就是北京时间，这里只做格式整理
   const local = (t) => {
@@ -12000,7 +12223,7 @@ app.get('/staff-activity', async (c) => {
   }
   const list = (rows.results || []).map((r) => {
     const lt = local(r.created_at)
-    return { date: lt.slice(0, 10), time: lt.slice(11, 16), action: r.action, target: r.target || '', detail: r.detail || '' }
+    return { date: lt.slice(0, 10), time: lt.slice(11, 16), action: r.action, target: r.target || '', detail: r.detail || '', who: r.who || '员工', name: String(r.who || '').replace(/^员工·?/, '') || '没写名字' }
   })
   const cnt = list.length
   const last = list[0] ? list[0].date + ' ' + list[0].time : ''
@@ -12011,6 +12234,7 @@ app.get('/staff-activity', async (c) => {
   return c.json({ ok: true, days, since, count: cnt, last, rows: list,
     by_day: (byDay.results || []).map((x) => ({ date: x.d, cnt: num(x.n) })),
     by_action: (byAct.results || []).map((x) => ({ action: x.action, cnt: num(x.n) })),
+    by_person: (byPerson.results || []).map((x) => ({ who: x.who, name: String(x.who || '').replace(/^员工·?/, '') || '没写名字', cnt: num(x.n) })),
     staff_enabled: enabled, advice })
 })
 

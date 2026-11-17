@@ -69,6 +69,8 @@ const FEATS = [
 
 Page({
   data: {
+    bank_layout: '', bank_skip: 0,
+    bv: null,
     mg: null, mg_month: '',
     qt: null, qt_n: 0, qh: null, qt_party: '', qt_item: '', qt_cost: '', qt_margin: '', qt_qty: '', qt_price: '', qt_days: '',
     yrv: null, yrv_year: '',
@@ -336,7 +338,12 @@ Page({
           if (!opts.silent) wx.showToast({ title: '网络不好，稍后再试', icon: 'none' })
           opts.fail && opts.fail(err)
         },
-        header: Object.assign({ 'X-Access-Key': key, 'X-Book': bk }, opts.header),
+        header: Object.assign({ 'X-Access-Key': key, 'X-Book': bk }, (function () {
+          try {
+            const sn = String(wx.getStorageSync('staff_name') || '').trim()
+            return sn ? { 'X-Staff-Name': encodeURIComponent(sn) } : {}
+          } catch (e) { return {} }
+        })(), opts.header),
         success: (res) => {
           if (res.statusCode === 401) {
             if (this._askingKey) return
@@ -1449,6 +1456,7 @@ Page({
             role: res.data.role || 'owner',
             issue_count: res.data.issue_count || 0, issue_at: res.data.issue_at || ''
           })
+          if (res.data.role === 'staff') this.askStaffName()
         }
       }
     })
@@ -4057,6 +4065,48 @@ Page({
     const t = d.text + (d.tips && d.tips.length ? '\n' + d.tips.map((x) => '· ' + x).join('\n') : '')
     wx.setClipboardData({ data: t, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
   },
+  // 员工第一次用时记个名字，之后每笔操作日志都能看出是谁记的
+  askStaffName(force) {
+    let cur = ''
+    try { cur = String(wx.getStorageSync('staff_name') || '') } catch (e) { cur = '' }
+    if (cur && !force) return
+    wx.showModal({
+      title: '你叫什么名字',
+      editable: true,
+      placeholderText: '比如 小王（只用来区分谁记的账）',
+      content: cur,
+      success: (r) => {
+        if (!r.confirm) return
+        const nm = String(r.content || '').trim().slice(0, 12)
+        if (!nm) return
+        try { wx.setStorageSync('staff_name', nm) } catch (e) {}
+        wx.showToast({ title: '记住了：' + nm, icon: 'none' })
+        this.refresh()
+      }
+    })
+  },
+  // 员工权限：老板勾哪些模块给员工用
+  loadStaffPerms() {
+    this.req({ url: API_BASE + '/staff-perms', success: (res) => this.setData({ spm: res.data || null }) })
+  },
+  toggleStaffMod(e) {
+    const k = e.currentTarget.dataset.k
+    const d = this.data.spm
+    if (!d || !d.rows) return
+    const rows = d.rows.map((r) => (r.k === k ? Object.assign({}, r, { on: !r.on }) : r))
+    this.setData({ spm: Object.assign({}, d, { rows }) })
+  },
+  saveStaffPerms() {
+    const d = this.data.spm
+    if (!d) return
+    const modules = (d.rows || []).filter((r) => r.on).map((r) => r.k)
+    if (!modules.length) return wx.showToast({ title: '至少留一个模块', icon: 'none' })
+    this.req({
+      url: API_BASE + '/staff-perms', method: 'POST', data: { modules },
+      success: () => { wx.showToast({ title: '存好了', icon: 'success' }); this.loadStaffPerms() }
+    })
+  },
+  closeStaffPerms() { this.setData({ spm: null }) },
   loadStaffAct() {
     this.req({
       url: API_BASE + '/staff-activity?days=7',
@@ -5513,6 +5563,11 @@ Page({
     })
   },
   closeHandover() { this.setData({ ho: null, ho_open: false, ho_note: '' }) },
+  // 备份能不能用：不是有没有备份，是这份真能恢复吗
+  loadBackupVerify() {
+    this.req({ url: API_BASE + '/backup-verify', success: (res) => this.setData({ bv: res.data || null }) })
+  },
+  closeBackupVerify() { this.setData({ bv: null }) },
   loadBackupTimeline() {
     this.req({ url: API_BASE + '/backup-timeline', success: (res) => this.setData({ btl: res.data }) })
   },
@@ -6513,7 +6568,11 @@ Page({
       url: API_BASE + '/bank-import', method: 'POST', data: { text: t },
       success: (res) => {
         const d = res.data || {}
-        if (d.ok) { this.setData({ bank_text: '' }); this.loadBankFlows(); wx.showToast({ title: '导入 ' + d.imported + ' 笔', icon: 'success' }) }
+        if (d.ok) {
+          this.setData({ bank_text: '', bank_layout: d.layout_text || '', bank_skip: d.skipped || 0 })
+          this.loadBankFlows()
+          wx.showToast({ title: '导入 ' + d.imported + ' 笔', icon: 'success' })
+        }
         else wx.showToast({ title: d.error || '导入失败', icon: 'none' })
       }
     })
