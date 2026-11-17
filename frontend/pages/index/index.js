@@ -69,6 +69,7 @@ const FEATS = [
 
 Page({
   data: {
+    yrv: null, yrv_year: '',
     mg: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
     tab: 'home', group: 'home',
     ar_total: 0, ap_total: 0,
@@ -4102,6 +4103,46 @@ Page({
         this.setData({ yb: d })
       },
       fail: () => wx.showToast({ title: '取不到年度总账', icon: 'none' })
+    })
+  },
+  onYrvYear(e) { this.setData({ yrv_year: e.detail.value }) },
+  // 一张纸的年度回顾：给家里人看的话，不是给会计的表
+  loadYearReview() {
+    const y = String(this.data.yrv_year || '').trim()
+    if (y && !/^\d{4}$/.test(y)) return wx.showToast({ title: '年份写 4 位数，如 2026', icon: 'none' })
+    this.req({
+      url: API_BASE + '/year-review' + (y ? '?year=' + y : ''),
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ yrv: d })
+      },
+      fail: () => wx.showToast({ title: '取不到年度回顾', icon: 'none' })
+    })
+  },
+  closeYearReview() { this.setData({ yrv: null }) },
+  copyYearReview() {
+    const d = this.data.yrv || {}
+    if (!d.text) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+  },
+  openYearReviewPrint() {
+    const y = (this.data.yrv || {}).year
+    if (!y) return wx.showToast({ title: '先看这一年', icon: 'none' })
+    this.req({
+      url: API_BASE + '/year-review-print-link?year=' + y,
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '生成不了链接', icon: 'none' })
+        wx.setClipboardData({
+          data: u,
+          success: () => wx.showModal({
+            title: '打印链接已复制',
+            content: '在电脑浏览器里粘贴打开，就能打印或存 PDF，发给家里人看。\n链接带签名，改字符就失效。',
+            showCancel: false
+          })
+        })
+      }
     })
   },
   onYbYear(e) { this.setData({ yb_year: e.detail.value }) },

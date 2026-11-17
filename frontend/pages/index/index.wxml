@@ -1252,6 +1252,32 @@
       </view>
     </view>
     <view class="form">
+      <view class="tip">📄 这一年（给家里人看的一页纸，不是给会计的）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="年份，如 2026（不填=今年）" value="{{yrv_year}}" bindinput="onYrvYear" bindconfirm="loadYearReview"/>
+        <button class="btn half" size="mini" bindtap="loadYearReview">看这一年</button>
+      </view>
+      <view wx:if="{{yrv}}">
+        <view class="yrv-h">{{yrv.headline}}</view>
+        <view class="row2">{{yrv.stats.customers}} 家客户 · {{yrv.stats.orders}} 单 · 接单 <text class="b">{{yrv.stats.income}}</text> · 净利 <text class="b">{{yrv.stats.profit}}</text>（{{yrv.stats.margin}}%）</view>
+        <view class="plrow" wx:for="{{yrv.months}}" wx:key="label">
+          <text class="pll">{{item.label}}</text>
+          <text class="plv {{item.profit<0?'bad':'ok'}}">{{item.profit}}</text>
+          <view class="ybar"><view class="{{item.profit<0?'ybar-in bad':'ybar-in'}}" style="width:{{item.bar}}%"></view></view>
+        </view>
+        <view class="aline {{item.tone}}" wx:for="{{yrv.sentences}}" wx:key="text">{{item.text}}</view>
+        <view wx:if="{{yrv.customers.length}}">
+          <view class="prev-h">做得最多的几家</view>
+          <view class="row2" wx:for="{{yrv.customers}}" wx:key="party">{{item.rank}}. {{item.party}}　{{item.cnt}} 单　{{item.income}} 元（{{item.share}}%）</view>
+        </view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="copyYearReview">复制这段</button>
+          <button class="btn ghost" size="mini" bindtap="openYearReviewPrint">打印一页纸</button>
+          <button class="btn ghost" size="mini" bindtap="closeYearReview">收起</button>
+        </view>
+      </view>
+    </view>
+    <view class="form">
       <view class="tip">赚没赚（两种算法，看你想看什么）</view>
       <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{pc_month}}" bindinput="onPcMonth"/>
       <button class="btn" size="mini" bindtap="loadProfitCompare">算一下</button>

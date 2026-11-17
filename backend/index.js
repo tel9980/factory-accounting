@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -459,7 +459,7 @@ app.use('*', async (c, next) => {
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
-      || (/^\/(tax-pack|year-close)/.test(path))
+      || (/^\/(tax-pack|year-close|year-review)/.test(path))
       || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
       || (/^\/bank-flows\/\d+\/match$/.test(path))
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
@@ -8298,6 +8298,128 @@ app.get('/year-book', async (c) => {
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
   return c.json(await yearBook(c.env.DB, y))
+})
+
+
+// ===== 一张纸的年度回顾：给家里人/合伙人看的，不是给会计看的 =====
+async function yearReview(db, y) {
+  const y1 = y + '-12-31'
+  const yb = await yearBook(db, y)
+  const jobs = [
+    db.prepare(`SELECT customer party, COALESCE(SUM(price),0) inc, COUNT(*) n FROM orders WHERE substr(created_at,1,4)=? GROUP BY customer ORDER BY inc DESC`).bind(y).all(),
+    db.prepare(`SELECT customer, item_name, price, created_at FROM orders WHERE substr(created_at,1,4)=? ORDER BY price DESC LIMIT 1`).bind(y).first(),
+    db.prepare(`SELECT party, MIN(substr(created_at,1,10)) d, COUNT(*) n FROM dunning_log WHERE substr(created_at,1,4)=? GROUP BY party`).bind(y).all(),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) v, COUNT(*) n FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,4)=?`).bind(y).first(),
+    db.prepare(`SELECT COALESCE(SUM(price*0.15-(price-COALESCE(cost,0))),0) v, COUNT(*) n FROM orders
+      WHERE substr(created_at,1,4)=? AND price>=1000 AND COALESCE(cost,0)>0 AND (price-COALESCE(cost,0))*1.0/price < 0.15`).bind(y).first(),
+    db.prepare(`SELECT o.customer party, substr(l.created_at,1,10) d, l.amount FROM ledger l JOIN orders o ON o.id=l.ref_id
+      WHERE l.ref_type='order' AND l.direction='in' AND substr(l.created_at,1,4)=?`).bind(y).all()
+  ]
+  const [custR, bigR, dunR, woR, lowR, inR] = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e, '年度回顾'); return null })))
+  const custs = ((custR && custR.results) || []).map((r) => ({ party: r.party, income: round2(num(r.inc)), cnt: num(r.n) }))
+  const big = bigR && num(bigR.price) ? { party: bigR.customer, item: bigR.item_name, price: round2(num(bigR.price)), date: String(bigR.created_at || '').slice(0, 10) } : null
+  const duns = (dunR && dunR.results) || []
+  const firstDun = {}
+  for (const r of duns) firstDun[norm(r.party)] = r.d
+  let recovered = 0, recoveredParties = 0
+  const hit = {}
+  for (const r of ((inR && inR.results) || [])) {
+    const k = norm(r.party)
+    const d0 = firstDun[k]
+    if (!d0) continue
+    if (String(r.d) >= d0) { recovered += num(r.amount); hit[k] = 1 }
+  }
+  recoveredParties = Object.keys(hit).length
+  const realLoss = round2(num(woR && woR.v)), realCnt = num(woR && woR.n)
+  const missed = round2(num(lowR && lowR.v)), missedCnt = num(lowR && lowR.n)
+  const income = yb.totals.income, profit = yb.totals.profit, margin = yb.totals.margin
+  const cnt = yb.totals.cnt
+  const active = yb.months.filter((m) => m.income > 0 || m.profit !== 0)
+  // 最好/最差只在「有账的月份」里挑：把还没到的月份算成「最差 0 元」会误导
+  const actSorted = active.slice().sort((a, b) => b.profit - a.profit)
+  const best = actSorted.length ? { label: actSorted[0].label, profit: actSorted[0].profit } : yb.best
+  const worst = actSorted.length ? { label: actSorted[actSorted.length - 1].label, profit: actSorted[actSorted.length - 1].profit } : yb.worst
+  const topShare = income > 0 && custs.length ? round2(custs[0].income / income * 100) : 0
+  const S = []
+  if (!income && !yb.totals.exp) {
+    S.push({ tone: 'gray', text: `${y} 年还没记过账，先把单子和钱记上，年底就能回顾了。` })
+  } else {
+    S.push({ tone: 'info', text: `${y} 年一共做了 ${custs.length} 家客户的 ${cnt} 单活，接单 ${income} 元，净利 ${profit} 元（净利率 ${margin}%）。` })
+    if (big) S.push({ tone: 'info', text: `最大的一单是 ${big.party} 的「${big.item || '加工'}」，${big.price} 元，${big.date} 开的。` })
+    if (active.length >= 2 && best.profit > 0) S.push({ tone: 'ok', text: `最好的一个月是 ${best.label}（${best.profit} 元），最差是 ${worst.label}（${worst.profit} 元）。` })
+    if (duns.length) {
+      const times = duns.reduce((a, x) => a + num(x.n), 0)
+      S.push({ tone: recovered > 0 ? 'ok' : 'warn', text: `催款催了 ${duns.length} 家共 ${times} 次，催完收回 ${round2(recovered)} 元${recovered > 0 ? `（${recoveredParties} 家给了钱）` : '（一分没回）'}。` })
+    }
+    if (realLoss > 0) S.push({ tone: 'warn', text: `有 ${realLoss} 元是真收不回来的（${realCnt} 单核销掉了）。` })
+    if (missed > 0) S.push({ tone: 'warn', text: `还有约 ${missed} 元是「本来能赚没赚到」的（${missedCnt} 单报价偏低，毛利不到 15%）。` })
+    if (yb.ar_end > 0) S.push({ tone: 'warn', text: `到年底还有 ${yb.ar_end} 元在外面没收回，这笔钱不在兜里。` })
+    S.push({ tone: 'info', text: `年底现金 ${yb.cash.end} 元，算上别人欠的和欠别人的，家底 ${yb.net_worth} 元。` })
+    if (topShare >= 50 && custs.length >= 3) S.push({ tone: 'warn', text: `${custs[0].party} 一家就占了 ${topShare}% 的活，太靠一家了，明年可以多找一家。` })
+    if (margin < 15 && income > 0) S.push({ tone: 'bad', text: `全年净利率只有 ${margin}%，几乎白干，得看看哪几单不赚钱。` })
+  }
+  const text = [`【${y} 年回顾】`].concat(S.map((x) => x.text)).join('\n')
+  return {
+    ok: true, year: y,
+    headline: income ? `${y} 年：${cnt} 单活，净赚 ${profit} 元` : `${y} 年还没记过账`,
+    stats: { customers: custs.length, orders: cnt, income, profit, margin, cash_end: yb.cash.end, ar_end: yb.ar_end, ap_end: yb.ap_end, net_worth: yb.net_worth, active_months: active.length },
+    biggest: big, best: { label: best.label, profit: best.profit }, worst: { label: worst.label, profit: worst.profit },
+    collect: { parties: duns.length, times: duns.reduce((a, x) => a + num(x.n), 0), recovered: round2(recovered), recovered_parties: recoveredParties },
+    loss: { real: realLoss, real_cnt: realCnt, missed, missed_cnt: missedCnt, total: round2(realLoss + missed) },
+    customers: custs.slice(0, 6).map((c, i) => ({ rank: i + 1, party: c.party, income: c.income, cnt: c.cnt, share: income > 0 ? round2(c.income / income * 100) : 0 })),
+    months: yb.months.map((m) => ({ label: m.label, profit: m.profit, bar: m.bar })),
+    prev: yb.prev, sentences: S, text
+  }
+}
+
+app.get('/year-review', async (c) => {
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  return c.json(await yearReview(c.env.DB, y))
+})
+
+app.get('/year-review-print-link', async (c) => {
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const saved = await getKey(c.env.DB)
+  const t = saved ? await sigOf(saved, 'yearreview', 'yr:' + y) : ''
+  return c.json({ ok: true, url: `${c.req.url.split('/year-review-print-link')[0]}/year-review-print?year=${encodeURIComponent(y)}&t=${encodeURIComponent(t)}`, year: y })
+})
+
+app.get('/year-review-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'yearreview', 'yr:' + y) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度回顾。</h3>')
+  const d = await yearReview(db, y)
+  const t = await getTitle(db)
+  const bars = d.months.map((m) => `<div class="bc"><div class="bv">${m.profit || ''}</div><div class="bb" style="height:${Math.max(2, Math.round(Math.abs(m.profit) / Math.max(1, ...d.months.map((x) => Math.abs(x.profit))) * 90))}px"></div><div class="bl">${escHtml(m.label)}</div></div>`).join('')
+  const cust = d.customers.map((r) => `<tr><td>${escHtml(r.party)}</td><td class="n">${r.cnt}</td><td class="n">${r.income}</td><td class="n">${r.share}%</td></tr>`).join('')
+  const ss = d.sentences.map((x) => `<li>${escHtml(x.text)}</li>`).join('')
+  const body = `<h1>${escHtml(y)} 年这一年</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}　${now().slice(0, 10)}</div>
+<div class="head">${escHtml(d.headline)}</div>
+<table class="kv"><tr><td>客户</td><td class="n">${d.stats.customers} 家</td><td>单数</td><td class="n">${d.stats.orders} 单</td></tr>
+<tr><td>接单额</td><td class="n">${d.stats.income}</td><td>净利</td><td class="n b">${d.stats.profit}（${d.stats.margin}%）</td></tr>
+<tr><td>年底现金</td><td class="n">${d.stats.cash_end}</td><td>家底</td><td class="n">${d.stats.net_worth}</td></tr></table>
+<h2>每个月的净利</h2><div class="chart">${bars}</div>
+<h2>这一年发生了什么</h2><ul class="ss">${ss}</ul>
+<h2>做得最多的几家</h2><table><tr><th>客户</th><th>单数</th><th>接单额</th><th>占比</th></tr>${cust || '<tr><td colspan="4">还没有客户</td></tr>'}</table>
+<div class="sub" style="text-align:left;margin-top:8px">净利口径：接单额 − 单子上的材料·外协成本 − 现金费用 − 摊销 − 折旧 − 预提利息；赊购不算成本。催后收回指该家第一次催款之后收到的钱。</div>`
+  return c.html(a4Page({
+    title: `${y} 年回顾`,
+    body,
+    extraCss: `.head{text-align:center;font-size:19px;font-weight:700;margin:6px 0 12px;color:#0a4b8c}
+      .sub{text-align:center} .kv td{padding:5px 8px} .kv td:nth-child(odd){color:#666;width:22%}
+      .chart{display:flex;align-items:flex-end;gap:4px;height:120px;border-bottom:1px solid #ccc;padding:0 4px;margin:4px 0 2px}
+      .bc{flex:1;text-align:center;display:flex;flex-direction:column;justify-content:flex-end;height:100%}
+      .bv{font-size:9px;color:#666} .bb{background:#1f6feb;border-radius:2px 2px 0 0} .bl{font-size:10px;color:#555}
+      .ss{margin:4px 0 0 18px;padding:0} .ss li{margin:3px 0;line-height:1.6}`,
+    sign: `<span>制表人：____________</span><span>家里人：____________</span><span>日期：____________</span>`,
+    tip: '这张是给自己和家人看的，不是给会计的；要报税用「给会计的资料包」'
+  }))
 })
 
 // 年度总账打印链接（签名，免口令）
