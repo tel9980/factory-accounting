@@ -35,6 +35,9 @@ const FEATS = [
   { n: "月度结账（锁账）", go: "stat:report", desc: "结完这个月就不能再改，防止事后乱动", kw: "结账 锁账 月结 封账" },
   { n: "月底收尾清单", go: "stat:report", desc: "六步：录完单、对过账、差异清完、出小结、备份、结账", kw: "月底 收尾 清单 该做什么" },
   { n: "现金流预测（会不会缺钱）", go: "home:home", desc: "按到期日算未来 45 天手头钱够不够", kw: "缺钱 现金 预测 撑得住" },
+  { n: "这周的钱够不够（要不要催一笔）", go: "home:home", desc: "账上现金 + 14 天内该收 − 该付，差多少、先催谁", kw: "够不够 付不出 周转 缺口 催一笔 现金流" },
+  { n: "老客户是不是跑了", go: "stat:report", desc: "按这家自己多久下一单来比，超了就提醒，带问候话术", kw: "老客户 流失 很久没来 复购 问一句 留住客户" },
+  { n: "打印加工单 / 送货单", go: "bill:ar", desc: "单张单据 A4 打印，客户签收签字带回", kw: "打印 加工单 送货单 签收 车间 带去客户" },
   { n: "净资产 / 家底曲线", go: "stat:asset", desc: "现金 + 别人欠我 − 我欠别人，每月存档", kw: "家底 净资产 存款 有多少钱 身家 总资产" },
   { n: "家底存档（留个底）", go: "stat:asset", desc: "每月末自动存一份，改老单据不影响历史", kw: "存档 快照 历史 曲线" },
   { n: "账龄 / 坏账准备", go: "stat:asset", desc: "欠了多久、分几档、该提多少坏账", kw: "账龄 欠多久 老账 坏账" },
@@ -496,6 +499,7 @@ Page({
     this.loadMyWork()
     this.loadMyDay()
     this.loadFunding()
+    this.loadCashForecast()
     this.loadNextStep()
     this.loadMonthTip()
     this.loadTermDefault()
@@ -4029,6 +4033,46 @@ Page({
     })
   },
   // 钱的三条线（预收款 / 预付供应商 / 员工借支 / 借款）
+  // 这周的钱够不够付
+  loadCashForecast() {
+    this.req({ url: API_BASE + '/cash-forecast?days=14', silent: true, success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ cf: d }) } })
+  },
+  toggleCashForecast() { this.setData({ cf_open: !this.data.cf_open }); if (!this.data.cf) this.loadCashForecast() },
+  copyCashForecast() {
+    const d = this.data.cf
+    if (!d) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制' }) })
+  },
+  // 老客户是不是跑了
+  loadChurnRisk() {
+    this.req({ url: API_BASE + '/churn-risk', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ ch: d }) } })
+  },
+  closeChurnRisk() { this.setData({ ch: null }) },
+  copyChurnOne(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const row = (this.data.ch && this.data.ch.rows && this.data.ch.rows[i]) || null
+    if (!row) return
+    wx.setClipboardData({ data: row.text, success: () => wx.showToast({ title: '已复制，发给客户就行' }) })
+  },
+  copyChurnAll() {
+    const d = this.data.ch
+    if (!d) return
+    const t = (d.rows || []).map((r) => r.text).join('\n\n')
+    wx.setClipboardData({ data: t, success: () => wx.showToast({ title: '全部话术已复制' }) })
+  },
+  // 打印加工单（链接复制到浏览器打开就能打）
+  printOrder(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    if (!id) return
+    this.req({
+      url: API_BASE + '/order-print-link?id=' + id,
+      success: (r) => {
+        const d = r.data || {}
+        if (!d.url) return wx.showToast({ title: d.error || '生成失败', icon: 'none' })
+        wx.setClipboardData({ data: d.url, success: () => wx.showModal({ title: '打印链接已复制', content: '粘到浏览器地址栏打开，就能打印或存 PDF。车间打一张带给客户签字。', showCancel: false }) })
+      }
+    })
+  },
   loadFunding() {
     this.req({
       url: API_BASE + '/funding',

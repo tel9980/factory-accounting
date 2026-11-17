@@ -232,6 +232,19 @@
       </view>
       <view class="tip">{{fund.text}}</view>
     </view>
+    <view class="card" wx:if="{{cf}}">
+      <view class="card-h">💰 这周的钱够不够<text class="card-n" bindtap="copyCashForecast">复制</text><text class="card-n" bindtap="toggleCashForecast">{{cf_open?'收起':'明细'}}</text></view>
+      <view class="row1"><text class="nm">账上现金 ¥{{cf.cash}}</text><text class="amt {{cf.safe<0?'red':''}}">{{cf.safe>=0?'够付':'差 ¥' + (0-cf.safe)}}</text></view>
+      <view class="row2">14 天内该收 ¥{{cf.ar_due}}（{{cf.ar_n}} 笔） · 该付 ¥{{cf.ap_due}}（{{cf.ap_n}} 笔）</view>
+      <view class="tip">{{cf.advice}}</view>
+      <view wx:if="{{cf_open}}">
+        <view class="item" wx:for="{{cf.rows}}" wx:key="k">
+          <view class="row1"><text class="nm">{{item.label}}</text><text class="amt">{{item.amount}}</text></view>
+          <view class="row2">{{item.note}}</view>
+        </view>
+        <view class="tip" wx:if="{{cf.no_due_note}}">{{cf.no_due_note}}</view>
+      </view>
+    </view>
     <view class="card" bindtap="openHelp"><view class="card-h">❓ 怎么用（一页纸）<text class="tip">新接手的人看这个 ›</text></view></view>
     <view class="card" bindtap="openFeatSearch"><view class="card-h">🔎 找功能<text class="tip">170 多项，不知道在哪点？输个词 ›</text></view></view>
     <view class="card" wx:if="{{feat_open}}">
@@ -534,6 +547,7 @@
               <button size="mini" bindtap="receiveAll" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">收清</button>
               <button size="mini" bindtap="payOrder" data-id="{{it.id}}">收款</button>
               <button size="mini" bindtap="showDetail" data-id="{{it.id}}" data-type="ar">明细</button>
+              <button size="mini" bindtap="printOrder" data-id="{{it.id}}">打印单</button>
               <button size="mini" bindtap="openReceipt" data-id="{{it.id}}" data-type="ar">收据</button>
               <button size="mini" bindtap="editDue" data-id="{{it.id}}" data-type="ar" data-due="{{it.due_short}}">改期</button>
               <button size="mini" bindtap="writeoffOrder" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">核销</button>
@@ -2078,6 +2092,25 @@
           <view class="aline {{item.tone}}" wx:for="{{lb.advice}}" wx:key="text">· {{item.text}}</view>
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyLossBook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeLossBook">收起</button></view>
+      </block>
+      <view class="tip">🕰 老客户是不是跑了（按这家自己多久下一单来比，不是一刀切）</view>
+      <view class="frow">
+        <button class="btn half" size="mini" bindtap="loadChurnRisk">看看谁很久没来了</button>
+      </view>
+      <block wx:if="{{ch}}">
+        <view class="box">
+          <view class="row1"><text class="nm">可能跑掉的老客户</text><text class="amt">{{ch.count}} 家</text></view>
+          <view class="row2">{{ch.advice}}</view>
+        </view>
+        <view class="item" wx:for="{{ch.rows}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.level=='high'?'red':''}}">{{item.days_since}} 天没来</text></view>
+          <view class="row2">做过 {{item.cnt}} 单共 ¥{{item.income}} · 平常 {{item.avg_gap}} 天来一次 · 上次 {{item.last_day}}{{item.last_item?' · '+item.last_item:''}}</view>
+          <view class="btns"><button size="mini" bindtap="copyChurnOne" data-i="{{index}}">复制话术</button></view>
+        </view>
+        <view class="frow" wx:if="{{ch.rows.length}}">
+          <button class="btn" size="mini" bindtap="copyChurnAll">📋 全部话术</button>
+          <button class="btn half" size="mini" bindtap="closeChurnRisk">收起</button>
+        </view>
       </block>
       <view class="tip">🎚 信用分档（谁可以宽限、谁只做现款）</view>
       <view class="frow">

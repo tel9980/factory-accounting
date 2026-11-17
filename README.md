@@ -820,11 +820,29 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 实测：给「小王」只开应收 → 他 `/ar` 正常、`/ap` 403 且提示带模块名、管理员工账号 403；他记一单后 `/staff-activity` 的 `by_person` 显示「员工·小王 1 笔」。
 240. ✅ **微信提醒的配置自检清单**：订阅消息要填 AppID / AppSecret / 模板 ID / 字段名，还要有人点过授权——少一样都推不出去，但以前只报一句「还没配置完整」。现在 `/wx-config` 返回 `wx_guide`（五项：好了/还差 + 每项「怎么弄」的具体路径）、`missing`、`next`、`ready`，设置页照着清单一项项打勾即可。
 
+241. ✅ **这周的钱够不够付（现金流预警）**：家底页能看「现在有多少钱」，但看不出「这周付不付得出」——房租、工资、材料款挤在一起的时候最容易慌。新增 `GET /cash-forecast?days=14`：
+   - 账上现金（各账户余额合计）+ N 天内该收（按到期日）− N 天内该付 → 给两个口径：**「就算一分钱收不回」** 和 **「应收都按时到账」**，差多少直接说；
+   - 差钱时点名先说：「先把 X 的 8000 元催回来（11-20 到期）」「实在来不及，和钢材厂说一声晚几天付」；
+   - **另有没约定日期的欠款**会单独说一句（客户欠 21000 元 4 笔）——否则「14 天该收 0」会让人以为没人欠钱；
+   - 附近 90 天平均每天净流入，判断这个缺口是常态还是偶发；
+   - 首页「💰 这周的钱够不够」卡片，红字显示「差 ¥5000」，点「明细」展开五项，可一键复制整段发给合伙人。
+242. ✅ **老客户是不是跑了（按各自的下单节奏判断）**：一刀切「60 天没下单就提醒」会误报——一个月来两次的客户 60 天没来是真跑了，一年来一次的客户 61 天没来很正常。新增 `GET /churn-risk?days=60`：
+   - 每家算 `avg_gap = (最后一单 − 第一单) / (单数 − 1)`，**超过 max(60 天, 2×avg_gap) 才提醒**，超过 3×avg_gap 标红；
+   - 只统计做过 ≥2 单的客户（一单客户不算流失）；
+   - 每行给：做过几单共多少钱、平常多少天来一次、上次哪天、上次做的什么活，外加**现成的问候话术**「张老板，上次给您做的「切割」用得还顺吗？下批大概什么时候要？我这边好给您留工期」——不催钱，只问下批；
+   - 报表页「🕰 老客户是不是跑了」，可单条复制或全部复制。
+243. ✅ **单张加工单 / 送货单打印**：对账单只能整户打，车间和客户要的是「这一单」。新增 `GET /order-print-link?id=`（签名链接）→ `GET /order-print?id=&t=` A4 页面：
+   - 抬头厂名、第 N 号、客户与电话、开单日期、约定收款日；
+   - 表格：产品/工序、金额、已收、**未收加粗**；
+   - 当前工序（待加工/加工中/已交付 + 具体进度）、经手人；
+   - 底部双签字栏「客户签收（签字 / 日期）」和「我方经手」，备注写明「货到请当场验收」；
+   - 应收行加「打印单」按钮，链接复制到浏览器即可打印或存 PDF；签名绑定单据号，改单后旧链接失效。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 350 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 354 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1129,7 +1147,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（191）
+**其它（单个接口）**（195）
 
 - `GET /`
 - `GET /access-guide`
@@ -1156,8 +1174,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /books-check`
 - `GET /break-even`
 - `GET /cash-bridge`
+- `GET /cash-forecast`
 - `GET /cashbook`
 - `GET /cashflow`
+- `GET /churn-risk`
 - `GET /close-precheck`
 - `POST /cloud-backup`
 - `GET /collect-list`
@@ -1233,6 +1253,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /networth`
 - `GET /networth-snapshots`
 - `GET /next-step`
+- `GET /order-print`
+- `GET /order-print-link`
 - `POST /parse-import`
 - `GET /party-balance`
 - `GET /party-dups`

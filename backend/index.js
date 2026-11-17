@@ -476,7 +476,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -612,6 +612,114 @@ app.delete('/staff-users/:id', async (c) => {
   await db.prepare('DELETE FROM staff_users WHERE id=?').bind(id).run()
   await logAudit(db, '删员工账号', '员工账号', `删了 ${row.name}`, '', act(c))
   return c.json({ ok: true })
+})
+
+// 这周的钱够不够付：未来 N 天要付的 vs 账上现金 + 该收的
+app.get('/cash-forecast', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(60, Math.max(3, Math.round(num(c.req.query('days'), 14))))
+  const today = todayIso()
+  const to = addDaysIso(today, days)
+  const ago90 = addDaysIso(today, -90)
+  const P = (sql, ...b) => db.prepare(sql).bind(...b).first().catch((e) => { noteFail(e, '现金预测'); return null })
+  const PA = (sql, ...b) => db.prepare(sql).bind(...b).all().catch((e) => { noteFail(e, '现金预测'); return { results: [] } })
+  const [accs, arDue, apDue, arTop, apTop, recent] = await Promise.all([
+    accountBalances(db).catch(() => []),
+    P(`SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) t FROM orders
+        WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?`, today, to),
+    P(`SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) t FROM payables
+        WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?`, today, to),
+    PA(`SELECT customer party, (price - COALESCE(paid,0) - COALESCE(written_off,0)) left_amt, substr(due_date,1,10) due
+        FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?
+        ORDER BY left_amt DESC LIMIT 5`, today, to),
+    PA(`SELECT supplier party, (amount - COALESCE(paid,0) - COALESCE(written_off,0)) left_amt, substr(due_date,1,10) due
+        FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND substr(COALESCE(due_date,''),1,10) BETWEEN ? AND ?
+        ORDER BY left_amt DESC LIMIT 5`, today, to),
+    PA(`SELECT direction, COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10) >= ? GROUP BY direction`, ago90)
+  ])
+  const noDue = await db.prepare(`SELECT
+      (SELECT COUNT(*) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date = '')) ar_n,
+      (SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date = '')) ar_t,
+      (SELECT COUNT(*) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date = '')) ap_n,
+      (SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date = '')) ap_t`).first().catch(() => null)
+  const cash = round2((accs || []).reduce((a, x) => a + num(x.balance), 0))
+  const arT = round2(num(arDue && arDue.t))
+  const apT = round2(num(apDue && apDue.t))
+  const inT = round2(((recent.results || []).find((x) => x.direction === 'in') || {}).t)
+  const outT = round2(((recent.results || []).find((x) => x.direction === 'out') || {}).t)
+  const dailyNet = round2((inT - outT) / 90)
+  const optimistic = round2(cash + arT - apT)
+  const safe = round2(cash - apT)
+  const rows = [
+    { k: 'cash', label: '现在账上现金', amount: cash, note: (accs || []).length ? (accs || []).map((a) => a.name + ' ' + a.balance).join('、') : '还没记账户' },
+    { k: 'ar', label: days + ' 天内该收（' + num(arDue && arDue.n) + ' 笔）', amount: arT, note: '按约定日期能到账的话' },
+    { k: 'ap', label: days + ' 天内该付（' + num(apDue && apDue.n) + ' 笔）', amount: apT, note: '房租、工资、材料款都算' },
+    { k: 'safe', label: '就算一分钱收不回，够不够付', amount: safe, note: safe >= 0 ? '够，余 ' + round2(safe) + ' 元' : '差 ' + round2(-safe) + ' 元' },
+    { k: 'opt', label: '应收都按时到账的话', amount: optimistic, note: optimistic >= 0 ? '够，余 ' + round2(optimistic) + ' 元' : '还差 ' + round2(-optimistic) + ' 元' }
+  ]
+  let advice = ''
+  if (!cash && !arT && !apT) advice = '这几天没有要收要付的款，账上现金 ' + cash + ' 元。'
+  else if (safe < 0) {
+    const t0 = (apTop.results || [])[0]
+    const a0 = (arTop.results || [])[0]
+    advice = '这 ' + days + ' 天要付 ' + apT + ' 元，账上只有 ' + cash + ' 元，差 ' + round2(-safe) + ' 元。'
+    if (a0) advice += '先把 ' + a0.party + ' 的 ' + round2(num(a0.left_amt)) + ' 元催回来（' + a0.due + ' 到期）。'
+    if (t0) advice += '实在来不及，和 ' + t0.party + ' 说一声晚几天付。'
+  } else if (optimistic < 0) {
+    advice = '账上够付，但要把该收的 ' + arT + ' 元收回来才周转得开——现在账上 ' + cash + ' 元，要付 ' + apT + ' 元。'
+  } else {
+    advice = '这 ' + days + ' 天的钱够用：账上 ' + cash + ' 元，要付 ' + apT + ' 元，还要收 ' + arT + ' 元。'
+  }
+  const ndArN = num(noDue && noDue.ar_n)
+  const ndApN = num(noDue && noDue.ap_n)
+  const ndArT = round2(num(noDue && noDue.ar_t))
+  const ndApT = round2(num(noDue && noDue.ap_t))
+  const noDueNote = (ndArN || ndApN) ? '另有没约定日期的欠款' + (ndArN ? '：客户欠 ' + ndArT + ' 元（' + ndArN + ' 笔）' : '') + (ndApN ? '：欠供应商 ' + ndApT + ' 元（' + ndApN + ' 笔）' : '') + '，想排进计划就给这些单补个到期日。' : ''
+  const text = '【这 ' + days + ' 天的钱够不够】\n账上现金 ¥' + cash + '\n' + days + ' 天内该收 ¥' + arT + '，该付 ¥' + apT + '\n' + advice + (noDueNote ? '\n' + noDueNote : '') + (dailyNet ? '\n（近 90 天平均每天净流入 ¥' + dailyNet + '）' : '')
+  return c.json({ ok: true, days, today, cash, ar_due: arT, ap_due: apT, ar_no_due: ndArT, ap_no_due: ndApT, ar_no_due_n: ndArN, ap_no_due_n: ndApN, no_due_note: noDueNote, safe, optimistic, daily_net: dailyNet, ar_n: num(arDue && arDue.n), ap_n: num(apDue && apDue.n), ar_top: arTop.results || [], ap_top: apTop.results || [], rows, advice, text })
+})
+
+// 老客户是不是跑了：按「这家自己多久下一单」判断，不是一刀切 30 天
+app.get('/churn-risk', async (c) => {
+  const db = c.env.DB
+  const days = Math.min(365, Math.max(15, Math.round(num(c.req.query('days'), 60))))
+  const today = todayIso()
+  const list = (await db.prepare(`SELECT customer party, COUNT(*) cnt, COALESCE(SUM(price),0) income,
+      MIN(substr(created_at,1,10)) first_day, MAX(substr(created_at,1,10)) last_day
+    FROM orders GROUP BY customer`).all().catch((e) => { noteFail(e, '流失预警'); return { results: [] } })).results || []
+  const lastItems = {}
+  const li = (await db.prepare(`SELECT customer, item_name, price, substr(created_at,1,10) d FROM orders ORDER BY id DESC LIMIT 600`).all().catch(() => ({ results: [] }))).results || []
+  for (const r of li) if (!lastItems[r.customer]) lastItems[r.customer] = r
+  const rows = []
+  for (const r of list) {
+    const cnt = num(r.cnt)
+    if (cnt < 2) continue
+    const gapDays = Math.max(1, Math.round((dateNum(r.last_day) - dateNum(r.first_day)) / 1000 / 86400))
+    const avgGap = Math.max(1, Math.round(gapDays / (cnt - 1)))
+    const since = daysSince(r.last_day)
+    const limit = Math.max(days, avgGap * 2)
+    if (since < limit) continue
+    const level = since >= avgGap * 3 ? 'high' : 'mid'
+    const li0 = lastItems[r.party] || {}
+    rows.push({
+      party: r.party, cnt, income: round2(num(r.income)), last_day: r.last_day, days_since: since,
+      avg_gap: avgGap, limit, level,
+      last_item: li0.item_name || '', last_price: round2(num(li0.price)),
+      text: (r.party || '老板') + '，上次给您的' + (li0.item_name ? '「' + li0.item_name + '」' : '那批货') + '用得还顺吗？下批大概什么时候要？我这边好给您留工期。'
+    })
+  }
+  rows.sort((a, b) => b.days_since - a.days_since)
+  const high = rows.filter((r) => r.level === 'high').length
+  const incomeAtRisk = round2(rows.reduce((a, r) => a + r.income, 0))
+  return c.json({
+    ok: true, days, count: rows.length, high, income_at_risk: incomeAtRisk, rows: rows.slice(0, 40),
+    advice: rows.length
+      ? '有 ' + rows.length + ' 家老客户超过他们自己的下单间隔没再来（其中 ' + high + ' 家拖得最久），累计做过 ' + incomeAtRisk + ' 元的活。挑最久的那两三个，用下面的话术问一句就行——不催钱，只问下批什么时候要。'
+      : '老客户都在正常下单节奏里，没有需要特别问的。',
+    text: rows.length
+      ? '【老客户提醒】' + rows.length + ' 家超过自己下单间隔没来：' + rows.slice(0, 5).map((r) => r.party + '（' + r.days_since + ' 天）').join('、') + '。'
+      : '【老客户提醒】都在正常节奏里，没有该问的。'
+  })
 })
 
 // 批量发对账单：一次列出「谁还欠我 / 我还欠谁」，每家一段现成话术 + 打印页链接
@@ -1717,6 +1825,62 @@ app.get('/report-link', async (c) => {
   const t = await sigOf(saved, 'report:' + mm, 'rp')
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t })
+})
+
+// 单张加工单 / 送货单：老板或车间直接打印，客户签字带回
+app.get('/order-print-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const id = num(c.req.query('id'))
+  if (!id) return c.json({ error: '缺单据号' }, 400)
+  const db = c.env.DB
+  const row = await db.prepare('SELECT id FROM orders WHERE id=?').bind(id).first()
+  if (!row) return c.json({ error: '没找到这张单' }, 404)
+  if (!saved) return c.json({ error: '先设访问口令才能生成打印页' }, 400)
+  const t = await sigOf(saved, String(id), 'order')
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/order-print?id=' + id + '&t=' + t })
+})
+
+app.get('/order-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const id = num(c.req.query('id'))
+  const want = String(c.req.query('t') || '')
+  const good = saved && id ? await sigOf(saved, String(id), 'order') : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印加工单」生成新链接。</h3>')
+  const d = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
+  if (!d) return c.html('<h3>没找到这张单。</h3>')
+  const t = await getTitle(db)
+  const prof = await db.prepare('SELECT * FROM party_profiles WHERE party=?').bind(d.customer).first().catch(() => null)
+  const money = (v) => Number(v || 0).toFixed(2)
+  const ST = ['待加工', '加工中', '已交付']
+  const left = Math.max(0, num(d.price) - num(d.paid) - num(d.written_off))
+  const pageBody = `
+<h1>${escHtml(t.title || '加工单')}</h1>
+<div class="sub">加工单 / 送货单（第 ${escHtml(String(d.id))} 号）</div>
+<div class="meta"><div>客户：<b>${escHtml(d.customer || '')}</b></div><div>开单日期：${escHtml(String(d.created_at || '').slice(0, 10))}</div><div>联系电话：${escHtml((prof && prof.phone) || '')}</div><div>约定收款：${escHtml(String(d.due_date || '').slice(0, 10) || '—')}</div></div>
+<table>
+<thead><tr><th style="width:38%">产品 / 工序</th><th>数量</th><th class="n">金额（元）</th></tr></thead>
+<tbody>
+<tr><td>${escHtml(d.item_name || '—')}</td><td>按实际</td><td class="n">${money(d.price)}</td></tr>
+<tr><td colspan="2">已收</td><td class="n">${money(d.paid)}</td></tr>
+<tr class="total"><td colspan="2">未收</td><td class="n">${money(left)}</td></tr>
+</tbody></table>
+<div class="sum"><table>
+<tr><td>当前工序</td><td class="n">${escHtml(ST[num(d.status)] || '待加工')}${d.progress ? '（' + escHtml(d.progress) + '）' : ''}</td></tr>
+<tr><td>经手人</td><td class="n">${escHtml(d.operator || '—')}</td></tr>
+</table></div>
+<div class="tip">备注：${escHtml(t.note || '')}　货到请当场验收，数量和外观有异议请在签收时注明。</div>
+`
+  return c.html(a4Page({
+    title: '加工单 ' + (d.customer || '') + ' 第' + d.id + '号',
+    body: pageBody,
+    extraCss: '.meta{display:flex;flex-wrap:wrap;gap:6px 24px;margin:6px 0 12px}.meta div{min-width:45%}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px 8px;font-size:13px}th{background:#f4f6f8;text-align:left}.sum{margin-top:10px}.sum table{width:60%;margin-left:auto}.sum td{border:0;padding:3px 6px}',
+    sign: '<span>客户签收（签字 / 日期）</span><span>我方经手（签字 / 日期）</span>',
+    tip: '这张单只认单据号和签名，凭这条链接打开就能打印；改单请在小程序里改，重新生成链接。'
+  }))
 })
 
 app.get('/report-print', async (c) => {
