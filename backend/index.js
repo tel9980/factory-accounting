@@ -510,6 +510,7 @@ app.use('*', async (c, next) => {
       (/^\/import-undo/.test(path) && m !== 'OPTIONS') ||
       (/^\/accounts/.test(path) && m !== 'GET') ||
       (/^\/categories/.test(path) && m !== 'GET') ||
+      (/^\/book-template/.test(path) && m !== 'GET') ||
       (/^\/budgets/.test(path) && m !== 'GET') ||
       (/^\/fixed/.test(path) && m !== 'GET' && path !== '/run-fixed') ||
       ((/^\/debts/.test(path) || /^\/credit-limits/.test(path)) && m !== 'OPTIONS') ||
@@ -4526,6 +4527,123 @@ const ensureCats = async (db) => {
     for (const n of DEFAULT_CATS_IN) await db.prepare('INSERT INTO categories (type, name, sort, created_at) VALUES (?,?,?,?)').bind('in', n, i++, now()).run()
   } catch (e) { console.error('ensureCats', e) }
 }
+
+// ===== 新账本模板：这本还是空的时候，一次把分类/账户/账期配好 =====
+const BOOK_TEMPLATES = [
+  {
+    k: 'factory', name: '生产加工（最常见）',
+    desc: '接单 → 记料和工时 → 收款；分类按小厂日常（房租水电工资运费刀具耗材）；账户现金 + 银行卡；默认账期 30 天。',
+    cats_out: ['工资', '水电', '房租', '运费', '刀具耗材', '维修', '刀具', '房租水电', '税金', '其他'],
+    cats_in: ['加工费', '运费'],
+    accounts: [{ name: '现金', kind: 'cash' }, { name: '银行卡', kind: 'bank' }],
+    term: 30
+  },
+  {
+    k: 'cash_only', name: '只管流水（最简单）',
+    desc: '不记应收应付，只记“今天收了多少钱、花了多少钱”；分类就三四类，适合一个人干活、当场结清。',
+    cats_out: ['材料', '工资', '房租水电', '吃饭杂用', '其他'],
+    cats_in: ['加工费', '其他'],
+    accounts: [{ name: '现金', kind: 'cash' }, { name: '微信', kind: 'wx' }],
+    term: 0
+  },
+  {
+    k: 'ar_only', name: '只管应收（只盯着谁欠我）',
+    desc: '只记客户欠款和收款，不管进货和支出；账期短（15 天），适合纯代工、材料客户自备。',
+    cats_out: ['工资', '房租水电', '其他'],
+    cats_in: ['加工费'],
+    accounts: [{ name: '现金', kind: 'cash' }],
+    term: 15
+  },
+  {
+    k: 'full', name: '什么都记（含设备借款）',
+    desc: '生产加工 + 设备折旧 + 借款利息 + 预收预付都能用；分类最全，适合已经有规模、要给会计看账的。',
+    cats_out: ['工资', '社保', '水电', '房租', '运费', '刀具耗材', '维修', '外协加工', '税金', '办公', '差旅', '利息', '折旧', '其他'],
+    cats_in: ['加工费', '运费', '废料', '其他'],
+    accounts: [{ name: '现金', kind: 'cash' }, { name: '银行卡', kind: 'bank' }, { name: '微信', kind: 'wx' }, { name: '支付宝', kind: 'ali' }],
+    term: 30
+  }
+]
+async function bookUsage(db) {
+  const q = async (sql) => { try { const r = await db.prepare(sql).first(); return num(r && r.n) } catch (e) { return 0 } }
+  return {
+    orders: await q('SELECT COUNT(*) n FROM orders'),
+    payables: await q('SELECT COUNT(*) n FROM payables'),
+    ledger: await q('SELECT COUNT(*) n FROM ledger'),
+    accounts: await q('SELECT COUNT(*) n FROM accounts'),
+    cats: await q('SELECT COUNT(*) n FROM categories')
+  }
+}
+app.get('/book-templates', async (c) => {
+  const db = c.env.DB
+  const use = await bookUsage(db)
+  const cur = await db.prepare('SELECT name FROM accounts').all().catch(() => ({ results: [] }))
+  const has = ((cur && cur.results) || []).map((r) => r.name)
+  const termRow = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first().catch(() => null)
+  const empty = use.orders === 0 && use.payables === 0 && use.ledger === 0
+  const rows = BOOK_TEMPLATES.map((t) => ({
+    k: t.k, name: t.name, desc: t.desc,
+    will_add_cats: t.cats_out.length + t.cats_in.length,
+    will_add_accs: t.accounts.filter((a) => has.indexOf(a.name) < 0).map((a) => a.name),
+    term: t.term,
+    order: `${t.cats_out.length} 个支出分类、${t.cats_in.length} 个收入分类、${t.accounts.length} 个账户${t.term ? '、默认账期 ' + t.term + ' 天' : '、不设账期'}`,
+    fit: empty ? '这本还空着，完全可以照它建' : '这本已经有账了：只会补上缺的分类和账户，已有数据一分不动'
+  }))
+  return c.json({
+    ok: true, empty, usage: use, current_accounts: has,
+    current_term: termRow ? num(termRow.value) : 0,
+    rows, count: rows.length,
+    text: empty ? '这本账还是空的，挑一个模板一次配好，比一个个建分类快。' : '这本已经有账了，套模板只会补缺的分类和账户，不会改任何已有数据。'
+  })
+})
+app.post('/book-template/apply', async (c) => {
+  const body = await c.req.json()
+  const tpl = BOOK_TEMPLATES.find((t) => t.k === String(body.tpl || ''))
+  if (!tpl) return c.json({ error: '没有这个模板（可选：' + BOOK_TEMPLATES.map((t) => t.k).join(' / ') + '）' }, 400)
+  const db = c.env.DB
+  const use = await bookUsage(db)
+  const empty = use.orders === 0 && use.payables === 0 && use.ledger === 0
+  if (!empty && body.confirm !== true) {
+    return c.json({
+      code: 'need_confirm',
+      error: `${use.orders} 张应收、${use.payables} 张应付、${use.ledger} 条流水已经在账上。套模板只会补上缺的分类和账户，不动这些数据；要按「${tpl.name}」补一下吗？`,
+      usage: use, text: '只补，不删、不改已有数据'
+    }, 409)
+  }
+  await ensureCats(db)
+  const created = { cats: [], accounts: [] }
+  const skipped = { cats: [], accounts: [] }
+  let sort = 100
+  for (const nm of tpl.cats_out) {
+    const has = await db.prepare("SELECT id FROM categories WHERE type='out' AND name=?").bind(nm).first()
+    if (has) { skipped.cats.push(nm); continue }
+    await db.prepare('INSERT INTO categories (type, name, sort, created_at) VALUES (?,?,?,?)').bind('out', nm, sort++, now()).run()
+    created.cats.push(nm)
+  }
+  sort = 100
+  for (const nm of tpl.cats_in) {
+    const has = await db.prepare("SELECT id FROM categories WHERE type='in' AND name=?").bind(nm).first()
+    if (has) { skipped.cats.push(nm); continue }
+    await db.prepare('INSERT INTO categories (type, name, sort, created_at) VALUES (?,?,?,?)').bind('in', nm, sort++, now()).run()
+    created.cats.push(nm)
+  }
+  for (const a of tpl.accounts) {
+    const has = await db.prepare('SELECT id FROM accounts WHERE name=?').bind(a.name).first()
+    if (has) { skipped.accounts.push(a.name); continue }
+    await db.prepare('INSERT INTO accounts (name, kind, opening, created_at) VALUES (?,?,0,?)').bind(a.name, a.kind || 'cash', now()).run()
+    created.accounts.push(a.name)
+  }
+  if (tpl.term > 0) {
+    const t = await db.prepare("SELECT value FROM settings WHERE key='default_term'").first()
+    if (!t || !num(t.value)) {
+      await db.prepare("INSERT INTO settings (key, value) VALUES ('default_term', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(String(tpl.term)).run()
+    }
+  }
+  await logAudit(db, '套用账本模板', tpl.name, `新增分类 ${created.cats.length}、账户 ${created.accounts.length}`, '', act(c))
+  return c.json({
+    ok: true, tpl: tpl.k, name: tpl.name, created, skipped,
+    text: `按「${tpl.name}」配好了：新增 ${created.cats.length} 个分类${created.accounts.length ? `、${created.accounts.length} 个账户（${created.accounts.join('、')}）` : ''}${skipped.cats.length || skipped.accounts.length ? `；已有的 ${skipped.cats.length + skipped.accounts.length} 项跳过` : ''}。`
+  })
+})
 
 app.get('/categories', async (c) => {
   const db = c.env.DB

@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    btp: null,
     ri: null, ri_type: 'ar_update', ri_b64: '',
     mat: null, mv: [], mv_open: '', mats_names: [], mt_name: '', mt_kind: 0, mt_qty: '', mt_price: '', mt_date: '', mt_note: '', mat_new: false, mat_unit: '个', mat_min: '',
     big: false,
@@ -6043,6 +6044,36 @@ Page({
   },
   onMgMonth(e) { this.setData({ mg_month: e.detail.value }) },
   // 三本账合起来看：分厂/分项目各记一本，老板要一个总数
+  // ===== 新账本模板：空账本一次配好分类/账户/账期 =====
+  loadBookTpl() {
+    this.req({ url: API_BASE + '/book-templates', silent: true, success: (res) => {
+      const d = res.data || {}
+      if (!d.ok) return
+      this.setData({ btp: d })
+    } })
+  },
+  closeBookTpl() { this.setData({ btp: null }) },
+  applyBookTpl(e) {
+    const k = e.currentTarget.dataset.k
+    const d = this.data.btp
+    if (!d) return
+    const row = (d.rows || []).find((x) => x.k === k) || {}
+    wx.showModal({
+      title: '按「' + (row.name || k) + '」配一下？',
+      content: (row.order || '') + '。\n' + (d.empty ? '这本还空着，照它建最省事。' : '已有的分类和账户会跳过，数据一分不动。'),
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({ url: API_BASE + '/book-template/apply', method: 'POST', once: 'applyBookTpl', data: { tpl: k, confirm: true },
+          success: (res) => {
+            const x = res.data || {}
+            if (!x.ok) return wx.showModal({ title: '没配上', content: x.error || '稍后再试', showCancel: false })
+            wx.showModal({ title: '配好了', content: x.text, showCancel: false })
+            this.setData({ btp: null })
+            this.loadCategories(); this.loadAccounts(); this.loadBookTpl()
+          } })
+      }
+    })
+  },
   loadMergeSummary() {
     const m = String(this.data.mg_month || '').trim()
     if (m && !/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '月份写成 2026-11 这样', icon: 'none' })

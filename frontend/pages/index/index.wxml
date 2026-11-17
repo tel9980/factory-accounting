@@ -3210,6 +3210,18 @@
       <input class="inp" placeholder="给当前账套改名，如 一车间" value="{{rename_text}}" bindinput="onRenameText"/>
       <button class="btn" size="mini" bindtap="renameBook">改当前账套名</button>
       <button class="btn" size="mini" bindtap="loadBooksCheck">🧾 看看三个账本都在干嘛</button>
+      <button class="btn ghost" size="mini" bindtap="loadBookTpl">🧱 新账本模板（空账本一次配好）</button>
+      <view wx:if="{{btp}}">
+        <view class="tip">{{btp.text}}</view>
+        <view class="item" wx:for="{{btp.rows}}" wx:key="k">
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{item.term?item.term+' 天账期':'不设账期'}}</text></view>
+          <view class="row2">{{item.desc}}</view>
+          <view class="row2">会建：{{item.order}}{{item.will_add_accs.length?'（新增账户 '+item.will_add_accs.join('、')+'）':''}}</view>
+          <view class="row2">{{item.fit}}</view>
+          <view class="btns"><button class="btn" size="mini" bindtap="applyBookTpl" data-k="{{item.k}}">用这个</button></view>
+        </view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closeBookTpl">收起</button></view>
+      </view>
       <view class="frow">
         <input class="inp half" placeholder="月份，如 2026-11（不填=本月）" value="{{mg_month}}" bindinput="onMgMonth"/>
         <button class="btn half" size="mini" bindtap="loadMergeSummary">🧮 三本合起来看</button>
