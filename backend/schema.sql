@@ -471,6 +471,16 @@ CREATE TABLE IF NOT EXISTS wage_pays (
 );
 CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);
 
+-- 合同 / 框架价：约定好的单价，下单低于它当场提醒（不拦）
+CREATE TABLE IF NOT EXISTS frame_prices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  party TEXT NOT NULL DEFAULT '', item TEXT DEFAULT '',
+  price REAL NOT NULL DEFAULT 0, unit TEXT DEFAULT '件',
+  start_date TEXT, end_date TEXT, note TEXT DEFAULT '',
+  active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_frame_party ON frame_prices(party, active);
+
 -- 外协台账：发出去的活（谁、多少钱、约定什么时候回、回了没）
 CREATE TABLE IF NOT EXISTS outsourcing (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    fp: null, fr_party: '', fr_party_kw: '', fr_item: '', fr_price: '', fr_unit: '件', fr_note: '',
     os: null, os_party: '', os_item: '', os_qty: '', os_price: '', os_due: '',
     dp: null, dp_days: 7,
     rw_faults: ['自己做坏了', '材料有问题', '客户改了要求', '图纸 / 尺寸给错', '别的原因'],
@@ -6663,6 +6664,45 @@ Page({
     this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
   },
   closeSupplyBook() { this.setData({ spb: null }) },
+  // ===== 合同 / 框架价 =====
+  loadFramePrices() {
+    const party = String(this.data.fr_party_kw || '').trim()
+    this.req({ url: API_BASE + '/frame-prices' + (party ? '?kw=' + encodeURIComponent(party) : ''), success: (r) => {
+      const d = r.data || {}
+      if (!d.ok) return wx.showToast({ title: d.error || '没取到', icon: 'none' })
+      this.setData({ fp: d })
+    } })
+  },
+  closeFramePrices() { this.setData({ fp: null }) },
+  onFrField(e) { this.setData({ [e.currentTarget.dataset.k]: e.detail.value }) },
+  addFramePrice() {
+    const d = this.data
+    const body = {
+      party: String(d.fr_party || '').trim(), item: String(d.fr_item || '').trim(),
+      price: Number(d.fr_price) || 0, unit: String(d.fr_unit || '件').trim(), note: String(d.fr_note || '').trim()
+    }
+    if (!body.party) return wx.showToast({ title: '填客户名', icon: 'none' })
+    if (body.price <= 0) return wx.showToast({ title: '框架价要大于 0', icon: 'none' })
+    this.req({ url: API_BASE + '/frame-prices', method: 'POST', data: body, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showModal({ title: '没加上', content: x.error || '', showCancel: false })
+      wx.showToast({ title: '加上了' })
+      this.setData({ fr_item: '', fr_price: '', fr_note: '' })
+      this.loadFramePrices()
+    } })
+  },
+  delFramePrice(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({ title: '停用这条框架价？', content: '停用后不再用它提醒，历史单据不受影响。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/frame-prices/' + id, method: 'DELETE', success: () => this.loadFramePrices() })
+    } })
+  },
+  frameForParty(e) {
+    const party = e.currentTarget.dataset.party || ''
+    this.setData({ fr_party: party, fr_party_kw: party })
+    this.loadFramePrices()
+  },
   // ===== 外协台账 =====
   loadOutsource() {
     this.req({ url: API_BASE + '/outsource-book', success: (r) => {

@@ -888,11 +888,19 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 前端：应收页「🏭 外协台账（发出去的活）」——列表带「发出去几天」「约定哪天回」「超期几天」，下面直接记一笔，不用切页。
    - 实测：新华热处理 ¥1200 约定 11-12（已超 5 天）+ 老李车床 ¥600 约定 11-25 → 「共 2 笔 ¥1800，压在外面 2 笔，1 笔已超期」，建议「催一下新华热处理」；标回厂填 11-14 → 「比约定晚了 2 天回来」，压在外的变 1 笔 ¥600。
 
+254. ✅ **合同 / 框架价（约定好的价，别自己往下打折）**：老客户常有「协议价」——切割一件 3200、一年不变。可现场报价时随手给个 2800，月底才发现白干。现在把框架价写进去，下单低于它当场提醒：
+   - `POST /frame-prices`（客户、产品可空=全部、单价、单位、有效期、备注）、`GET /frame-prices?party=&kw=`、`DELETE /frame-prices/:id`（停用，不删历史）。
+   - `GET /frame-check?party=&item=&price=` 单次核对：「兴旺五金 「切割」框架价 3200 元/件，这单 2800 低了 400」。
+   - **接进录单自查**：`orderChecks` 新增 `below_frame`——记单时若低于该客户该产品的框架价，弹「和兴旺五金 约定的框架价是 ¥3200（切割），这单 ¥2800 低了 ¥400。是打折还是填错了？」（**只提醒不拦**，真要打折就照记，但你会知道）。
+   - 匹配规则：产品名精确优先，其次「全部产品」那一条；有效期外的框架价不参与（换年不提醒）。
+   - 前端：单位页「📝 合同价 / 框架价」面板（搜索、列出现有约定、停用、新增）。
+   - 实测：兴旺五金「切割 3200 元/件」+「全部产品 5000 元/批」→ `/frame-check` 对 2800 报「低了 400」、3500 报「没低于框架价」；下单 2800 时 `checks` 返回 `below_frame` 那条文案。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 380 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 384 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -970,6 +978,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `DELETE /fixed/:id`
 - `GET /fixed`
 - `POST /fixed`
+
+**frame-prices**（3）
+
+- `DELETE /frame-prices/:id`
+- `GET /frame-prices`
+- `POST /frame-prices`
 
 **import-log**（3）
 
@@ -1236,7 +1250,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（203）
+**其它（单个接口）**（204）
 
 - `GET /`
 - `GET /access-guide`
@@ -1301,6 +1315,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /export-xlsx`
 - `GET /flows`
 - `GET /forecast`
+- `GET /frame-check`
 - `GET /funding`
 - `GET /handover`
 - `POST /handover-note`

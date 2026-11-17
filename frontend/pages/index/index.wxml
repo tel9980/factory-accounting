@@ -2906,6 +2906,36 @@
       <view class="tip">「补到期日」= 给这家现有还没结完的单，按账期天数补上到期日（这样首页 7 天内到期提醒才准）。</view>
     </view>
     <view class="form">
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadFramePrices">📝 合同价 / 框架价</button>
+      </view>
+      <block wx:if="{{fp}}">
+        <view class="box">
+          <view class="row1"><text class="nm">约定过的单价</text><text class="amt">{{fp.count}} 条</text></view>
+          <view class="row2">{{fp.text}}</view>
+        </view>
+        <view class="item" wx:for="{{fp.rows}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.party}} · {{item.item}}</text><text class="amt">{{item.price}} 元/{{item.unit}}</text></view>
+          <view class="row2">{{item.note||'—'}}{{item.start_date||item.end_date?' · '+(item.start_date||'…')+' ~ '+(item.end_date||'…'):''}}</view>
+          <view class="btns"><button size="mini" class="ghost" bindtap="delFramePrice" data-id="{{item.id}}">停用</button></view>
+        </view>
+        <view class="frow">
+          <button class="btn ghost half" size="mini" bindtap="closeFramePrices">收起</button>
+        </view>
+        <view class="box">
+          <view class="row1"><text class="nm">加一条框架价</text><text class="amt">低于它下单会提醒</text></view>
+          <view class="frow">
+            <input class="inp half" placeholder="客户名" value="{{fr_party}}" bindinput="onFrField" data-k="fr_party"/>
+            <input class="inp half" placeholder="产品（空=全部）" value="{{fr_item}}" bindinput="onFrField" data-k="fr_item"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" type="digit" placeholder="单价(元)" value="{{fr_price}}" bindinput="onFrField" data-k="fr_price"/>
+            <input class="inp half" placeholder="单位(件/批/米)" value="{{fr_unit}}" bindinput="onFrField" data-k="fr_unit"/>
+          </view>
+          <input class="inp" placeholder="备注（年度价 / 含运…）" value="{{fr_note}}" bindinput="onFrField" data-k="fr_note"/>
+          <view class="frow"><button class="btn" size="mini" bindtap="addFramePrice">＋ 加上</button></view>
+        </view>
+      </block>
       <view class="tip">🔀 合并重名 / 改名（同一家被记成两个名字，对账就永远对不上）</view>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadPartyDups">🔀 查有没有重名</button>

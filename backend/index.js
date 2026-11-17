@@ -714,6 +714,90 @@ app.delete('/attachment/:id', async (c) => {
 })
 
 // 工序停着没动：未交付的单多久没更新过工序
+// ===== 合同 / 框架价：约定好的单价，下单低于它当场提醒 =====
+async function frameTable(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS frame_prices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    party TEXT NOT NULL DEFAULT '', item TEXT DEFAULT '',
+    price REAL NOT NULL DEFAULT 0, unit TEXT DEFAULT '件',
+    start_date TEXT, end_date TEXT, note TEXT DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_frame_party ON frame_prices(party, active)').run()
+}
+async function frameOf(db, party, item, day) {
+  try {
+    await frameTable(db)
+    const r = await db.prepare(`SELECT price, unit, item, note FROM frame_prices
+      WHERE party=? AND active=1 AND (COALESCE(item,'')='' OR item=?)
+        AND (COALESCE(start_date,'')='' OR substr(start_date,1,10) <= ?)
+        AND (COALESCE(end_date,'')='' OR substr(end_date,1,10) >= ?)
+      ORDER BY (CASE WHEN item=? THEN 1 ELSE 0 END) DESC, price DESC LIMIT 1`).bind(party, item || '', day || todayIso(), day || todayIso(), item || '').first()
+    return r || null
+  } catch (e) { noteFail(e, '框架价'); return null }
+}
+app.get('/frame-prices', async (c) => {
+  const db = c.env.DB
+  await frameTable(db)
+  const party = String(c.req.query('party') || '').trim()
+  const kw = String(c.req.query('kw') || '').trim()
+  const conds = ['active=1']
+  const b = []
+  if (party) { conds.push('party=?'); b.push(party) }
+  if (kw) { conds.push('(party LIKE ? OR item LIKE ?)'); b.push('%' + kw + '%', '%' + kw + '%') }
+  const q = await db.prepare(`SELECT * FROM frame_prices WHERE ${conds.join(' AND ')} ORDER BY party, item LIMIT 300`).bind(...b).all()
+  const rows = ((q && q.results) || []).map((r) => ({
+    id: r.id, party: r.party || '', item: r.item || '（全部产品）', price: round2(num(r.price)), unit: r.unit || '件',
+    start_date: String(r.start_date || '').slice(0, 10), end_date: String(r.end_date || '').slice(0, 10), note: r.note || '',
+    text: `${r.party} · ${r.item || '全部产品'}：${round2(num(r.price))} 元/${r.unit || '件'}${r.note ? '（' + r.note + '）' : ''}`
+  }))
+  const parts = new Set(rows.map((r) => r.party))
+  return c.json({
+    ok: true, count: rows.length, party_count: parts.size, rows,
+    text: rows.length === 0 ? '还没有约定过框架价。常做的老客户，把「一张多少钱、一年内不变」写进来，以后下单低于这个价就会提醒你。' : `共 ${rows.length} 条框架价，涉及 ${parts.size} 家：` + rows.slice(0, 6).map((r) => r.text).join('；'),
+    degraded: failBucket.slice()
+  })
+})
+app.post('/frame-prices', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await frameTable(db)
+  const party = String(body.party || '').trim()
+  if (!party) return c.json({ error: '要写是哪一家（客户名）' }, 400)
+  const price = round2(num(body.price))
+  if (price <= 0) return c.json({ error: '框架价要大于 0' }, 400)
+  await db.prepare('INSERT INTO frame_prices (party, item, price, unit, start_date, end_date, note, active, created_at) VALUES (?,?,?,?,?,?,?,1,?)')
+    .bind(party, String(body.item || '').trim(), price, String(body.unit || '件').trim(), toIsoDate(body.start_date) || null, toIsoDate(body.end_date) || null, String(body.note || '').trim(), now()).run()
+  await logAudit(db, '加框架价', party, `${party} ${body.item || '全部'} ¥${price}`, '', act(c))
+  return c.json({ ok: true })
+})
+app.delete('/frame-prices/:id', async (c) => {
+  const db = c.env.DB
+  await frameTable(db)
+  const id = c.req.param('id')
+  const r = await db.prepare('SELECT * FROM frame_prices WHERE id=?').bind(id).first()
+  if (!r) return c.json({ error: '没有这条框架价' }, 404)
+  await db.prepare('UPDATE frame_prices SET active=0 WHERE id=?').bind(id).run()
+  await logAudit(db, '停用框架价', r.party, `${r.party} ${r.item || '全部'} ¥${num(r.price)}`, '', act(c))
+  return c.json({ ok: true })
+})
+app.get('/frame-check', async (c) => {
+  const db = c.env.DB
+  const party = String(c.req.query('party') || '').trim()
+  const item = String(c.req.query('item') || '').trim()
+  const price = num(c.req.query('price'))
+  if (!party) return c.json({ ok: true, has: false, text: '还没选客户' })
+  const fr = await frameOf(db, party, item, todayIso())
+  if (!fr) return c.json({ ok: true, has: false, text: `${party} 还没约定框架价` })
+  const fp = round2(num(fr.price))
+  const below = price > 0 && price < fp - 0.005
+  return c.json({
+    ok: true, has: true, frame_price: fp, unit: fr.unit || '件', item: fr.item || '',
+    price: round2(price), below,
+    text: `${party} ${fr.item ? '「' + fr.item + '」' : ''}框架价 ${fp} 元/${fr.unit || '件'}${price > 0 ? (below ? `，这单 ${round2(price)} 低了 ${round2(fp - price)}` : `，这单 ${round2(price)} 没低于框架价`) : ''}`
+  })
+})
+
 // ===== 外协台账：发出去的活（谁、多少钱、什么时候回、回了没） =====
 const OS_STATUS = { open: '还没回', done: '已回厂', cancel: '取消了' }
 async function osTable(db) {
@@ -6269,6 +6353,12 @@ async function orderChecks(db, o) {
     const m = num(mx && mx.mx)
     if (m > 0 && amt > m * 5 && amt > 20000) out.push({ k: 'big', text: `这一笔 ¥${amt}，比近 90 天最大的一笔（¥${m}）大 5 倍以上，确认没多打一个 0？` })
     else if (m === 0 && amt >= 50000) out.push({ k: 'big', text: `这一笔 ¥${amt}，是第一次记这么大的数，确认没多打一个 0？` })
+  }
+  if (o.table === 'orders' && o.party && amt > 0) {
+    const fr = await frameOf(db, o.party, o.item || '', day || todayIso())
+    if (fr && num(fr.price) > 0 && amt < num(fr.price) - 0.005) {
+      out.push({ k: 'below_frame', text: `和 ${o.party} 约定的框架价是 ¥${round2(num(fr.price))}${fr.item ? '（' + fr.item + '）' : ''}，这单 ¥${amt} 低了 ¥${round2(num(fr.price) - amt)}。是打折还是填错了？` })
+    }
   }
   return out
 }
