@@ -456,6 +456,7 @@ app.use('*', async (c, next) => {
       || /^\/party-merge/.test(path)
       || /^\/(schema-check|books-check)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
+      || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
       || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
@@ -9319,7 +9320,9 @@ app.get('/invoices', async (c) => {
     const r = await db.prepare("SELECT COALESCE(SUM(amount),0) a, COALESCE(SUM(tax),0) tx, COUNT(*) n FROM invoices WHERE type=? AND substr(date,1,7)=?").bind(t, month).first()
     return { amount: round2(num(r.a)), tax: round2(num(r.tx)), count: num(r.n) }
   }
-  const unin = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(o.price),0) t FROM orders o WHERE o.paid > 0 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.order_id=o.id)").first()
+  const unin = await db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(todo),0) t FROM (
+    SELECT MIN(COALESCE(o.paid,0), COALESCE(o.price,0)) - COALESCE((SELECT SUM(i.amount) FROM invoices i WHERE i.type='out' AND i.order_id=o.id),0) AS todo
+    FROM orders o WHERE COALESCE(o.paid,0) > 0 AND COALESCE(o.no_invoice,0)=0) WHERE todo > 0.005`).first()
   return c.json({
     month, rows,
     summary: { out: await sumOf('out'), in: await sumOf('in') },
@@ -9381,6 +9384,95 @@ app.get('/invoice-check', async (c) => {
       ? '这个月收款和开票对得上，没有遗留。'
       : (noInv.length ? `有 ${noInv.length} 笔收了钱没开票（共 ${round2(noInv.reduce((a, x) => a + x.paid, 0))} 元），对方要票就得补开。` : `有 ${invNoMoney.length} 笔开了票但钱没到账，记得催。`)
   })
+})
+
+// ===== 待开票清单：哪一笔收了钱还没开票，一键开 =====
+// 口径：待开 = min(已收, 单据金额) − 这张单已开票金额；客户说不要票的（no_invoice=1）不进清单
+app.get('/invoice-todo', async (c) => {
+  const db = c.env.DB
+  const rate = Math.max(0, Math.min(0.3, num(c.req.query('rate')) || 0.13))
+  const party = String(c.req.query('party') || '').trim()
+  const sql = `SELECT o.id, o.customer AS party, COALESCE(NULLIF(o.item_name,''),'加工费') AS item,
+      COALESCE(o.price,0) AS price, COALESCE(o.paid,0) AS paid, COALESCE(o.written_off,0) AS wo,
+      o.created_at, o.due_date,
+      COALESCE((SELECT SUM(i.amount) FROM invoices i WHERE i.type='out' AND i.order_id=o.id),0) AS invoiced
+    FROM orders o
+    WHERE COALESCE(o.paid,0) > 0 AND COALESCE(o.no_invoice,0)=0` + (party ? ' AND o.customer=?' : '') +
+    ` ORDER BY o.created_at ASC, o.id ASC LIMIT 500`
+  const raw = (await db.prepare(sql).bind(...(party ? [party] : [])).all()).results || []
+  const rows = []
+  for (const o of raw) {
+    const paid = round2(num(o.paid))
+    const price = round2(num(o.price))
+    const todo = round2(Math.min(paid, price) - num(o.invoiced))
+    if (todo <= 0.005) continue
+    const tax = round2(todo * rate / (1 + rate))
+    rows.push({
+      order_id: num(o.id), party: o.party, item: o.item, date: String(o.created_at || '').slice(0, 10),
+      price, paid, invoiced: round2(num(o.invoiced)), todo, rate, tax, net: round2(todo - tax),
+      days: daysSince(String(o.created_at || '').slice(0, 10)),
+      text: `${o.party}：${o.item} 已收 ${paid} 元，还没开票，开票金额 ${todo} 元（税率 ${Math.round(rate * 100)}%，税额 ${tax} 元）。`
+    })
+  }
+  const total = round2(rows.reduce((a, x) => a + x.todo, 0))
+  const taxTotal = round2(rows.reduce((a, x) => a + x.tax, 0))
+  const byParty = {}
+  for (const r of rows) {
+    const k = r.party
+    if (!byParty[k]) byParty[k] = { party: k, todo: 0, cnt: 0, tax: 0 }
+    byParty[k].todo = round2(byParty[k].todo + r.todo)
+    byParty[k].tax = round2(byParty[k].tax + r.tax)
+    byParty[k].cnt++
+  }
+  const parties = Object.values(byParty).sort((a, b) => b.todo - a.todo)
+  const skipped = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(COALESCE(paid,0)),0) t FROM orders WHERE COALESCE(no_invoice,0)=1").first().catch(() => null)
+  const text = rows.length
+    ? `还有 ${rows.length} 笔收了钱没开票，共 ${total} 元（税约 ${taxTotal} 元，涉及 ${parties.length} 家）。`
+    : '收了钱的单子都开过票了，没有要补的。'
+  return c.json({
+    ok: true, rate, count: rows.length, total, tax_total: taxTotal, net_total: round2(total - taxTotal),
+    parties, rows: rows.slice(0, 200), text,
+    skipped: { count: num(skipped && skipped.n), amount: round2(num(skipped && skipped.t)) },
+    all_text: rows.length ? rows.map((r) => r.text).join('\n') : ''
+  })
+})
+
+// 按单据开一张票（金额默认=待开金额）
+app.post('/invoice-from-order', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  const oid = num(body.order_id)
+  if (!oid) return c.json({ error: '要指定哪一张单' }, 400)
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oid).first()
+  if (!o) return c.json({ error: '这张单不存在' }, 404)
+  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '这张单所在月份已结账锁定' }, 403)
+  const rate = Math.max(0, Math.min(0.3, body.rate === undefined ? 0.13 : num(body.rate)))
+  const invoiced = round2(num((await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM invoices WHERE type='out' AND order_id=?").bind(oid).first()).a))
+  const maxTodo = round2(Math.min(num(o.paid), num(o.price)) - invoiced)
+  const amount = body.amount === undefined ? maxTodo : round2(num(body.amount))
+  if (amount <= 0) return c.json({ error: '金额得大于 0' }, 400)
+  if (amount > maxTodo + 0.005) return c.json({ error: `这张单最多还能开 ${maxTodo} 元（已收 ${round2(num(o.paid))}、已开 ${invoiced}）` }, 400)
+  const tax = body.tax === undefined ? round2(amount * rate / (1 + rate)) : round2(num(body.tax))
+  const d = toIsoDate(body.date) || now().slice(0, 10)
+  const no = String(body.no || '').trim()
+  await db.prepare('INSERT INTO invoices (type, no, party, amount, tax, date, remark, order_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
+    .bind('out', no, o.customer, amount, tax, d, `按单据开票（${o.item_name || '加工费'} ${String(o.created_at || '').slice(0, 10)}）`, oid, now()).run()
+  await logAudit(db, '开发票', o.customer, `${o.customer} ¥${amount}（税率 ${Math.round(rate * 100)}%，税额 ${tax}）`)
+  return c.json({ ok: true, amount, tax, net: round2(amount - tax), left: round2(maxTodo - amount), text: `已记：${o.customer} 开票 ${amount} 元，税额 ${tax} 元。` })
+})
+
+// 客户说不要票：标一下，别一直挂在待开清单里
+app.post('/invoice-skip', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  const oid = num(body.order_id)
+  if (!oid) return c.json({ error: '要指定哪一张单' }, 400)
+  const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(oid).first()
+  if (!o) return c.json({ error: '这张单不存在' }, 404)
+  const skip = body.skip === false ? 0 : 1
+  await db.prepare('UPDATE orders SET no_invoice=? WHERE id=?').bind(skip, oid).run()
+  await logAudit(db, skip ? '标记不要票' : '取消不要票', o.customer, `${o.customer} ${o.item_name || '加工费'}`)
+  return c.json({ ok: true, no_invoice: skip, text: skip ? '记下了：这家不要票，不再提醒。' : '已取消标记，会重新进待开票清单。' })
 })
 
 app.post('/invoices', async (c) => {
@@ -9854,7 +9946,9 @@ app.get('/reminders', async (c) => {
     db.prepare("SELECT COUNT(*) n FROM budgets WHERE amount > 0 AND (SELECT COALESCE(SUM(l.amount),0) FROM ledger l WHERE l.direction='out' AND l.cash=1 AND l.ref_type<>'transfer' AND COALESCE(NULLIF(l.category,''),'其他')=budgets.category AND substr(l.created_at,1,7)=?) >= budgets.amount").bind(curM).first(),
     db.prepare('SELECT COUNT(*) n FROM bank_flows WHERE matched_type IS NULL').first(),
     db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount-used-returned),0) t FROM loans').first(),
-    db.prepare('SELECT COUNT(*) n FROM orders o WHERE o.paid > 0 AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.order_id=o.id)').first(),
+    db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(todo),0) t FROM (
+      SELECT MIN(COALESCE(o.paid,0), COALESCE(o.price,0)) - COALESCE((SELECT SUM(i.amount) FROM invoices i WHERE i.type='out' AND i.order_id=o.id),0) AS todo
+      FROM orders o WHERE COALESCE(o.paid,0) > 0 AND COALESCE(o.no_invoice,0)=0) WHERE todo > 0.005`).first(),
     db.prepare("SELECT COUNT(*) n FROM recon_log WHERE done=0 AND state<>'match'").first(),
     db.prepare('SELECT COUNT(*) n FROM recon_log WHERE month=?').bind(curM).first(),
     db.prepare("SELECT d.party, d.promise_date, d.note FROM dunning_log d WHERE d.promise_date IS NOT NULL AND substr(d.promise_date,1,10) < ? AND d.id = (SELECT MAX(x.id) FROM dunning_log x WHERE x.party=d.party AND x.promise_date IS NOT NULL)").bind(today).all(),
@@ -9900,6 +9994,7 @@ app.get('/reminders', async (c) => {
       psR.slice(0, 3).map((r) => ({ party: r.supplier || '', amount: round2(num(r.unpaid)), note: (r.due_date || '').slice(5, 10) + ' 要付' })))
   }
   if (num(bo && bo.n) > 0) push('yellow', `${num(bo.n)} 个分类已经花超预算`, 'home')
+  if (num(iv && iv.n) > 0) push('yellow', `${num(iv.n)} 笔收了钱还没开票，共 ¥${round2(num(iv.t))}`, 'asset')
   if (num(un && un.n) > 0) push('yellow', `${num(un.n)} 笔银行流水还没认领`, 'nw')
   if (num(lo && lo.n) > 0 && num(lo && lo.t) > 0) push('yellow', `员工借支还有 ¥${round2(num(lo.t))} 没清`, 'expense')
   if (num(iv && iv.n) > 0) push('gray', `${num(iv.n)} 张已收款的单还没开发票`, 'nw')

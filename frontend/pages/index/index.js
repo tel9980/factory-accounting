@@ -86,6 +86,7 @@ Page({
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     xp: null, xp_open: false,
     rcc: null, rcc_month: '',
+    itd: null, itd_rate: 0.13,
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0, e_date: '',
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
@@ -5620,6 +5621,70 @@ Page({
   queryInv() {
     const m = this.data.inv_month && /^\d{4}-\d{2}$/.test(this.data.inv_month) ? this.data.inv_month : ''
     this.setData({ inv_month: m }); this.loadInvoices()
+  },
+  // 该开还没开的票：按单子算待开金额，一键开
+  loadInvoiceTodo() {
+    this.req({
+      url: API_BASE + '/invoice-todo?rate=' + (this.data.itd_rate || 0.13),
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ itd: d })
+      },
+      fail: () => wx.showToast({ title: '取不到待开票清单', icon: 'none' })
+    })
+  },
+  closeInvoiceTodo() { this.setData({ itd: null }) },
+  copyInvTodoOne(e) {
+    const r = ((this.data.itd || {}).rows || [])[Number(e.currentTarget.dataset.i)]
+    if (!r) return
+    wx.setClipboardData({ data: r.text, success: () => wx.showToast({ title: '开票信息已复制', icon: 'none' }) })
+  },
+  copyInvTodoAll() {
+    const d = this.data.itd || {}
+    if (!d.all_text) return wx.showToast({ title: '没有要开的', icon: 'none' })
+    wx.setClipboardData({ data: d.all_text, success: () => wx.showToast({ title: '全部已复制', icon: 'none' }) })
+  },
+  openInvFromOrder(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const r = ((this.data.itd || {}).rows || [])[i]
+    if (!r) return
+    wx.showModal({
+      title: '开这张的票',
+      editable: true,
+      placeholderText: '开票金额（留空 = 全部 ' + r.todo + ' 元）',
+      content: String(r.todo),
+      success: (m) => {
+        if (!m.confirm) return
+        const amt = String(m.content || '').trim()
+        this.req({
+          url: API_BASE + '/invoice-from-order', method: 'POST',
+          data: { order_id: r.order_id, rate: (this.data.itd || {}).rate || 0.13, amount: amt ? Number(amt) : undefined },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.error) return wx.showModal({ title: '没开成', content: d.error, showCancel: false })
+            wx.showModal({ title: '开好了', content: d.text + (d.left > 0 ? '\n还剩 ' + d.left + ' 元没开。' : ''), showCancel: false })
+            this.loadInvoiceTodo()
+          }
+        })
+      }
+    })
+  },
+  skipInvoice(e) {
+    const r = ((this.data.itd || {}).rows || [])[Number(e.currentTarget.dataset.i)]
+    if (!r) return
+    wx.showModal({
+      title: '这家不要票？',
+      content: r.party + ' 的这张单（' + r.todo + ' 元）以后不再提醒开票。想反悔可以在发票台账里重新打开。',
+      confirmText: '不要票',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({
+          url: API_BASE + '/invoice-skip', method: 'POST', data: { order_id: r.order_id, skip: true },
+          success: () => { wx.showToast({ title: '已记下', icon: 'none' }); this.loadInvoiceTodo() }
+        })
+      }
+    })
   },
   addInvoice() {
     const d = this.data

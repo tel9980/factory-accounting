@@ -1985,6 +1985,26 @@
       <input class="inp" placeholder="备注（可不填）" value="{{inv_remark}}" bindinput="onInvRemark"/>
       <button class="btn" size="mini" bindtap="addInvoice">记一张发票</button>
       <view class="tip">发票只做台账，不影响收支和利润（免得一笔钱算两次）。</view>
+      <button class="btn" size="mini" bindtap="loadInvoiceTodo">🧾 该开还没开的票（一键开）</button>
+
+      <view class="prev" wx:if="{{itd}}">
+        <view class="prev-h">{{itd.text}}</view>
+        <view class="tip">按单子算：已收多少、已经开了多少，差多少就是待开。客户不要票的点「不要票」，就不再提醒。</view>
+        <view class="prev-row" wx:for="{{itd.rows}}" wx:key="order_id">
+          <text class="prev-t">{{item.party}} · {{item.item}}</text>
+          <text class="prev-n">{{item.date}} 开单 · 已收 {{item.paid}} · 已开 {{item.invoiced}} → 待开 {{item.todo}}</text>
+          <text class="row2">税 {{item.rate*100}}% ≈ {{item.tax}} 元（不含税 {{item.net}}）</text>
+          <view class="frow">
+            <button class="btn" size="mini" data-i="{{index}}" bindtap="openInvFromOrder">开这张</button>
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="copyInvTodoOne">复制开票信息</button>
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="skipInvoice">不要票</button>
+          </view>
+        </view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" wx:if="{{itd.count}}" bindtap="copyInvTodoAll">复制全部</button>
+          <button class="btn ghost" size="mini" bindtap="closeInvoiceTodo">收起</button>
+        </view>
+      </view>
     </view>
 
     <view class="form">

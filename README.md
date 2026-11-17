@@ -615,11 +615,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **收到的钱**：最近 30 笔收款的日期、对应单子、金额——对方最想自己核对的就是这个；
    - 底部「有疑问打 0574-…」（`tel:` 直接拨号）+「这是一条只读链接，只能看这一家」；
    - 签名绑定单位名（改字符即「链接已失效」），每次访问写 `track_log`，小程序里能看到「对方点开过 N 次」。
+212. ✅ **该开还没开的票（按单子算，一键开）**：`GET /invoice-todo?rate=` 逐张单算「已收多少 − 已经开了多少 = 待开」，
+   - 每行给开票话术「甲客户：切割 已收 3000 元，还没开票，开票金额 3000 元（税率 13%，税额 345.13 元）」；
+   - **税额按价税合计口径**：`税 = 金额 × 税率 ÷ (1 + 税率)`，同时给不含税金额；
+   - `POST /invoice-from-order {order_id, rate, amount?, no?, date?}` 一键开票：金额默认=待开全额，**超过待开会拦**（「这张单最多还能开 X 元」），自动挂 `order_id` 进台账、写审计；
+   - `POST /invoice-skip {order_id}` 客户不要票就标一下（`orders.no_invoice`），不再提醒，可取消；
+   - 首页提醒加「N 笔收了钱还没开票，共 ¥X」；`/invoices` 的 `uninvoiced` 与提醒都改成同一口径（算部分开票、排除不要票）；
+   - 前端家底页发票区「🧾 该开还没开的票（一键开）」：每行显示已收/已开/待开/税额，可「开这张」「复制开票信息」「不要票」。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 294 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 297 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -881,7 +888,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（157）
+**其它（单个接口）**（160）
 
 - `GET /`
 - `GET /access-guide`
@@ -952,6 +959,9 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /import-undo/:id`
 - `POST /import-xlsx`
 - `GET /invoice-check`
+- `POST /invoice-from-order`
+- `POST /invoice-skip`
+- `GET /invoice-todo`
 - `GET /kpi`
 - `GET /last-deal`
 - `GET /loss-book`

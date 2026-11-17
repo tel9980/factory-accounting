@@ -364,3 +364,6 @@ CREATE TABLE IF NOT EXISTS recon_confirm (
   note TEXT, by TEXT, created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_recon_confirm ON recon_confirm(month, type, party);
+
+-- 客户不要发票的单据（不进待开票清单）
+-- ALTER TABLE orders ADD COLUMN no_invoice INTEGER DEFAULT 0;
