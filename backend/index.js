@@ -13296,7 +13296,7 @@ app.get('/reminders', async (c) => {
     const lst = rows0(await db.prepare("SELECT party, type, diff FROM recon_log WHERE done=0 AND state<>'match' ORDER BY id DESC LIMIT 3").all())
     push('yellow', `对账还有 ${num(ro.n)} 条差异没处理`, 'import',
       lst.map((x) => ({ party: x.party || '', amount: round2(Math.abs(num(x.diff))), note: x.type === 'ap' ? '应付' : '应收' })))
-  } else if (num(rl && rl.n) === 0 && num(today.slice(8, 10)) >= 10) {
+  } else if (num(rl && rl.n) === 0 && num(today.slice(8, 10)) >= 10 && rows0(leftRows).length > 0) {
     push('gray', `${curM.slice(5)} 月还没和客户/供应商对过账`, 'import')
   }
   // 欠款金额表（催款相关几条都要用）
