@@ -1912,6 +1912,25 @@
         </view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyLossBook">📋 复制这段</button><button class="btn half" size="mini" bindtap="closeLossBook">收起</button></view>
       </block>
+      <view class="tip">🎚 信用分档（谁可以宽限、谁只做现款）</view>
+      <view class="frow">
+        <button class="btn half" size="mini" bindtap="loadCreditBook" data-type="ar">看客户</button>
+        <button class="btn half ghost" size="mini" bindtap="loadCreditBook" data-type="ap">看供应商</button>
+      </view>
+      <block wx:if="{{cr}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{cr.type==='ap'?'供应商':'客户'}} {{cr.count}} 家</text><text class="amt {{cr.bad_count?'red':''}}">要盯 {{cr.bad_count}} 家</text></view>
+          <view class="row2">A 可以放心 {{cr.by.A}} · B 正常 {{cr.by.B}} · C 要盯 {{cr.by.C}} · D 只做现款 {{cr.by.D}}</view>
+          <view class="aline {{cr.bad_count?'warn':'ok'}}">{{cr.text}}</view>
+        </view>
+        <view class="box" wx:for="{{cr.rows}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.grade==='D'?'red':''}}">{{item.grade}} · {{item.score}} 分</text></view>
+          <view class="row2">{{item.label}} · 还欠 ¥{{item.unpaid}}{{item.oldest_days?' · 最老 '+item.oldest_days+' 天':''}}</view>
+          <view class="row2">{{item.why}}</view>
+          <view class="tip">怎么办：{{item.advice}}</view>
+        </view>
+        <view class="frow"><button class="btn ghost" size="mini" bindtap="closeCreditBook">收起</button></view>
+      </block>
       <view class="tip">📅 全年 × 客户（这一年从谁那儿赚的、谁在拖钱）</view>
       <view class="frow">
         <input class="inp half" placeholder="年份 YYYY（留空今年）" value="{{yc_year}}" bindinput="onYcYear" bindconfirm="loadYearCust"/>

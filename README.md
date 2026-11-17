@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 317 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 319 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -927,7 +927,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（175）
+**其它（单个接口）**（177）
 
 - `GET /`
 - `GET /access-guide`
@@ -961,6 +961,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /compare`
 - `GET /contact-detail`
 - `GET /contacts`
+- `GET /credit-book`
+- `GET /credit-grade`
 - `GET /credits`
 - `GET /customer-card`
 - `GET /dashboard`
@@ -1134,6 +1136,13 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 返回新增 `ok_n`/`hold_n`/`hold_amt`/`advice`：`hold_n>0` 时给「有 N 家（共 ¥X）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催」，`ok_n>0` 时给「这几家话术里写明了『您确认过』，催起来更硬气」；
    - 前端催款清单每行多一行回执标记：`✓ 对方 N 天前确认过对得上` / `⚠ 先别催钱 · 对方 N 天前说对不上（…）`，顶部把 `advice` 逐条渲染成提示条；
    - 实测：甲客户 ack=ok → 话术带「您确认过对得上」；乙客户 ack=doubt（差 ¥800，备注「6月那笔少了」）→ `hold=true`、话术转核对口径、`hold_amt=3000`、两条 advice 都对；伪造签名 POST → 403。
+222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
+   - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；
+   - 扣分规则：答应付款失约每次 −25（最多 −50）、兑现率<50% 且≥2 次 −10、最老一笔欠款>60 天 −10、超 90 天未收 −10、对方说对不上的对账单 −10；
+   - `GET /credit-grade?party=&type=` 单家；没记录的返回 `grade:'N'`（新单位）「建议先收定金或做现款」；
+   - **接单时就提醒**：`orderChecks` 新增两项——失约 ≥3 次且还欠钱 → `credit_bad`「这单建议只做现款，或者先收一半定金」；失约 ≥1 次且最老欠款 ≥30 天 → `credit_watch`「这单建议先收一部分定金」；
+   - 前端报表页「🎚 信用分档」（看客户/看供应商），每家显示档位、分数、还欠、扣分原因、「怎么办」；
+   - 员工口令访问 `/credit-book`、`/credit-grade` 一律 403。
 221. ✅ **付款承诺台账（答应哪天付、到底付没付）**：`dunning_log.promise_date` 以前只存不用——
    - `GET /promise-book?days=365&type=ar|ap`：每次承诺判三种结果——`kept`（承诺窗口 `[催款日, 承诺日+1]` 内有进账）、`broken`（日子过了、一分没付、还欠着）、`pending`（还没到日子）；每家汇总 `promises/kept/broken/pending/rate/last_promise/last_broken/broken_amt`，返回 `rows/parties/count/kept_n/broken_n/pending_n/rate/broken_amt/advice/text`；
    - 提醒规则：失约 ≥1 次 → 「别只听日子，让他先付一部分」；兑现率 ≥80% 且 ≥2 次 → 「这家说话算数，可以适当宽限」；

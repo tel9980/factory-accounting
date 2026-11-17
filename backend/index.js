@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -4844,6 +4844,95 @@ function lev(a, b) {
   }
   return dp[m][n]
 }
+// ===== 客户/供应商信用分档：失约几次、欠多久、有没有争议 =====
+async function creditBook(db, type) {
+  const isAr = type !== 'ap'
+  const tbl = isAr ? 'orders' : 'payables'
+  const who = isAr ? 'customer' : 'supplier'
+  const amt = isAr ? 'price' : 'amount'
+  const OPEN = `${amt}-COALESCE(paid,0)-COALESCE(written_off,0)`
+  const agg = (await db.prepare(`SELECT ${who} AS party, COUNT(*) n, COALESCE(SUM(${amt}),0) total,
+    COALESCE(SUM(CASE WHEN ${OPEN}>0.005 THEN ${OPEN} ELSE 0 END),0) unpaid,
+    MIN(substr(created_at,1,10)) first_day,
+    MIN(CASE WHEN ${OPEN}>0.005 THEN substr(created_at,1,10) END) oldest_open
+    FROM ${tbl} GROUP BY ${who}`).all().catch(() => ({ results: [] }))).results || []
+  const old = (await db.prepare(`SELECT ${who} AS party, COALESCE(SUM(${OPEN}),0) s FROM ${tbl}
+    WHERE ${OPEN}>0.005 AND substr(created_at,1,10)<? GROUP BY ${who}`).bind(dayAgo(90)).all().catch(() => ({ results: [] }))).results || []
+  const disp = (await db.prepare("SELECT party, COUNT(*) n FROM statement_log WHERE ack='doubt' AND COALESCE(resolved_at,'')='' GROUP BY party").all().catch(() => ({ results: [] }))).results || []
+  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
+  const om = {}, dm = {}, pm = {}
+  old.forEach((r) => { om[norm(r.party)] = round2(num(r.s)) })
+  disp.forEach((r) => { dm[norm(r.party)] = num(r.n) })
+  ;(pb.parties || []).forEach((r) => { pm[norm(r.party)] = r })
+  const rows = agg.map((r) => {
+    const k = norm(r.party)
+    const p = pm[k] || null
+    const unpaid = round2(num(r.unpaid))
+    const oldest = r.oldest_open ? daysSince(r.oldest_open) : 0
+    const over90 = round2(num(om[k]))
+    const doubt = num(dm[k])
+    const kept = p ? num(p.kept) : 0
+    const broken = p ? num(p.broken) : 0
+    const done = kept + broken
+    const rate = done ? Math.round((kept / done) * 100) : null
+    const why = []
+    let score = 100
+    if (broken) { const d = Math.min(50, broken * 25); score -= d; why.push(`答应付款失约 ${broken} 次`) }
+    if (rate != null && rate < 50 && done >= 2) { score -= 10; why.push(`答应的事只兑现 ${rate}%`) }
+    if (oldest > 60) { score -= 10; why.push(`最老一笔欠了 ${oldest} 天`) }
+    if (over90 > 0) { score -= 10; why.push(`超 90 天未${isAr ? '收' : '付'} ¥${over90}`) }
+    if (doubt) { score -= 10; why.push(`${doubt} 份对账单对方说对不上`) }
+    score = Math.max(0, Math.min(100, score))
+    const grade = score >= 85 ? 'A' : score >= 70 ? 'B' : score >= 50 ? 'C' : 'D'
+    const label = { A: '可以放心', B: '正常', C: '要盯一下', D: '只做现款' }[grade]
+    const advice = grade === 'A'
+      ? '老客户，偶尔晚几天不用紧张'
+      : grade === 'B'
+        ? (isAr ? '正常合作；超过 30 天没付就催一次' : '正常合作，按约定日子付款就行')
+        : grade === 'C'
+          ? (isAr ? '下次接单先收 30% 定金；把付款日期写进备注；别再加大额度' : '付款前先确认账上有没有这笔；别拖过约定日子')
+          : (isAr ? '只做现款（做完就结）；要接大单先收一半；旧账结清再谈账期' : '先付清旧账再下新单')
+    return {
+      party: r.party || '', grade, label, score, advice,
+      cnt: num(r.n), total: round2(num(r.total)), unpaid, oldest_days: oldest, over90,
+      first_day: String(r.first_day || '').slice(0, 10),
+      promises: p ? num(p.promises) : 0, kept, broken, rate,
+      last_broken: p ? String(p.last_broken || '') : '', doubt,
+      why: why.length ? why.join('、') : '没有不良记录',
+      bar: Math.max(4, Math.min(100, score))
+    }
+  })
+  rows.sort((a, b) => a.score - b.score || b.unpaid - a.unpaid)
+  const by = { A: 0, B: 0, C: 0, D: 0 }
+  rows.forEach((r) => { by[r.grade]++ })
+  const bad = rows.filter((r) => r.grade === 'C' || r.grade === 'D')
+  const text = !rows.length
+    ? `还没有${isAr ? '客户' : '供应商'}记录，记几笔单之后这里会自动分档。`
+    : bad.length
+      ? `${isAr ? '客户' : '供应商'}里 ${bad.length} 家要盯（${bad.map((r) => r.party + ' ' + r.grade).join('、')}）${isAr ? '，合计还欠 ¥' + round2(bad.reduce((a, r) => a + r.unpaid, 0)) : ''}。`
+      : `${rows.length} 家${isAr ? '客户' : '供应商'}都没有失约记录，信用都不错。`
+  return { ok: true, type: isAr ? 'ar' : 'ap', rows, count: rows.length, by, bad_count: bad.length, text }
+}
+
+app.get('/credit-book', async (c) => {
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  return c.json(await creditBook(c.env.DB, type))
+})
+
+app.get('/credit-grade', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const party = String(c.req.query('party') || '').trim()
+  if (!party) return c.json({ error: '要指定单位名' }, 400)
+  const all = await creditBook(db, type)
+  const hit = all.rows.find((r) => norm(r.party) === norm(party))
+  if (!hit) return c.json({ ok: true, party, found: false, grade: 'N', label: '新单位', score: 100,
+    advice: '第一次合作：建议先收定金或做现款，账期等做过一两次再给。',
+    text: `${party} 之前没有记录，是新单位。建议先收定金或做现款。` })
+  return c.json({ ok: true, party: hit.party, found: true, ...hit,
+    text: `${hit.party}：信用 ${hit.grade}（${hit.label}，${hit.score} 分）。${hit.why}。${hit.advice}。` })
+})
+
 async function orderChecks(db, o) {
   const out = []
   const amt = num(o.amount), c = num(o.cost)
@@ -4866,6 +4955,14 @@ async function orderChecks(db, o) {
         out.push({ k: 'typo', text: `「${o.party}」和已有的「${n}」只差一个字，是不是打错了？（打错会当成两家，欠款就分开了）` })
         break
       }
+    }
+    if (o.table === 'orders') {
+      const br = await db.prepare("SELECT COUNT(*) n FROM dunning_log WHERE party=? AND promise_date IS NOT NULL AND substr(promise_date,1,10) < ?").bind(o.party, todayIso()).first().catch(() => null)
+      const op = await db.prepare('SELECT COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) s, MIN(CASE WHEN price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 THEN substr(created_at,1,10) END) d FROM orders WHERE customer=?').bind(o.party).first().catch(() => null)
+      const bn = num(br && br.n), left = round2(num(op && op.s))
+      const od = op && op.d ? daysSince(op.d) : 0
+      if (bn >= 3 && left > 0.005) out.push({ k: 'credit_bad', text: `${o.party} 答应付款失约 ${bn} 次，现在还有 ¥${left} 没收回来。这单建议只做现款，或者先收一半定金。` })
+      else if (bn >= 1 && left > 0.005 && od >= 30) out.push({ k: 'credit_watch', text: `${o.party} 答应付款失约 ${bn} 次，还欠 ¥${left}（最老 ${od} 天）。这单建议先收一部分定金。` })
     }
     const mx = await db.prepare('SELECT COALESCE(MAX(' + o.amtcol + '),0) AS mx FROM ' + o.table + ' WHERE substr(created_at,1,10)>=?').bind(dayAgo(90)).first()
     const m = num(mx && mx.mx)
