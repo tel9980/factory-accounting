@@ -448,6 +448,8 @@ app.use('*', async (c, next) => {
       (/^\/run-(amort|accrual)$/.test(path)) ||
       (/^\/transfers/.test(path) && m !== 'GET') ||
       (/^\/writeoffs/.test(path) && m !== 'GET') ||
+      (/^\/recon-fix/.test(path) && m !== 'OPTIONS') ||
+      (/^\/recon-save/.test(path) && m !== 'OPTIONS') ||
       (/^\/assets/.test(path) && m !== 'GET') ||
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
@@ -1893,7 +1895,7 @@ app.post('/recon-fix', async (c) => {
   const type = b.type === 'ap' ? 'ap' : 'ar'
   const party = String(b.party || '').trim()
   const month = String(b.month || now().slice(0, 7)).slice(0, 7)
-  const mode = b.mode === 'ignore' ? 'ignore' : 'add'
+  const mode = b.mode === 'ignore' ? 'ignore' : (b.mode === 'cut' ? 'cut' : 'add')
   const amount = round2(num(b.amount))
   if (!party) return c.json({ error: '缺少单位名称' }, 400)
   const created = `${month}-01T00:00:00.000Z`
@@ -1912,11 +1914,44 @@ app.post('/recon-fix', async (c) => {
       newId = r.meta && r.meta.last_row_id
     }
     await logAudit(db, '对账补记', type, `${party} 补记 ${amount}`)
+  } else if (mode === 'cut') {
+    // 我多记了：对方对账单上没有这么多 → 把差额核销掉（不动现金，只抹往来）
+    const imported0 = round2(num(b.imported))
+    const system0 = round2(num(b.system))
+    const gap = round2(num(b.gap) > 0 ? num(b.gap) : system0 - imported0)
+    if (!(gap > 0)) return c.json({ error: '要核销的差额要大于 0（这个应该是「我少记」，用补记）' }, 400)
+    if (await isMonthLocked(db, month)) return c.json({ error: `${month} 已结账锁定，先解锁再核销` }, 403)
+    const isAp2 = type === 'ap'
+    const T2 = isAp2 ? 'payables' : 'orders'
+    const P2 = isAp2 ? 'supplier' : 'customer'
+    const A2 = isAp2 ? 'amount' : 'price'
+    const open = (await db.prepare(`SELECT id, ${A2} AS amt, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo, created_at FROM ${T2} WHERE ${P2}=? AND ${A2} - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005 ORDER BY created_at, id`).bind(party).all()).results || []
+    if (!open.length) return c.json({ error: '这家没有未结的单，核销不了' }, 400)
+    let leftCut = gap
+    let cutDone = 0
+    for (const o of open) {
+      if (leftCut <= 0.005) break
+      if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) continue
+      const can = round2(num(o.amt) - num(o.paid) - num(o.wo))
+      const use = round2(Math.min(can, leftCut))
+      if (!(use > 0.005)) continue
+      await db.batch([
+        db.prepare(`UPDATE ${T2} SET written_off=COALESCE(written_off,0)+?, rev=COALESCE(rev,0)+1 WHERE id=?`).bind(use, o.id),
+        db.prepare('INSERT INTO writeoffs (ref_type, ref_id, party, amount, reason, created_at) VALUES (?,?,?,?,?,?)')
+          .bind(isAp2 ? 'payable' : 'order', num(o.id), party, use, '对账差异：对方对账单上没有这笔', now())
+      ])
+      leftCut = round2(leftCut - use)
+      cutDone = round2(cutDone + use)
+    }
+    if (!(cutDone > 0)) return c.json({ error: '这些单都在已结账月份，先解锁再核销' }, 403)
+    await logAudit(db, isAp2 ? '核销应付差额' : '核销应收差额', party, `${party} 对账核销 ¥${cutDone}`)
+    b.cut_amount = cutDone
+    b.cut_left = leftCut
   }
   const imported = round2(num(b.imported))
   const system = round2(num(b.system))
-  const state = String(b.state || (mode === 'add' ? 'more' : 'match'))
-  const note = mode === 'add' ? `补记 ${amount} 元` : '核对过，不补记'
+  const state = String(b.state || (mode === 'add' ? 'more' : mode === 'cut' ? 'less' : 'match'))
+  const note = mode === 'add' ? `补记 ${amount} 元` : (mode === 'cut' ? `核销差额 ${round2(num(b.cut_amount))} 元（对方对账单上没有）` : '核对过，不补记')
   // 已经有这家待处理的核对记录就把它改成已处理，不重复堆一条
   const old = await db.prepare('SELECT id FROM recon_log WHERE month=? AND type=? AND party=? AND done=0 ORDER BY id DESC').bind(month, type, party).first()
   if (old) {
@@ -1926,7 +1961,96 @@ app.post('/recon-fix', async (c) => {
     await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)')
       .bind(month, type, party, imported, system, round2(imported - system), state, note, now()).run()
   }
-  return c.json({ ok: true, id: newId, mode, party, amount, month, type })
+  return c.json({ ok: true, id: newId, mode, party, amount, month, type, cut_amount: round2(num(b.cut_amount)), cut_left: round2(num(b.cut_left)) })
+})
+
+// 一次把整批差异处理完：我少记→补单，我多记→核销差额，不处理→留痕
+app.post('/recon-fix-batch', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const db = c.env.DB
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  const month = String(b.month || now().slice(0, 7)).slice(0, 7)
+  const rows = Array.isArray(b.rows) ? b.rows : []
+  if (!rows.length) return c.json({ error: '没有要处理的差异' }, 400)
+  if (await isMonthLocked(db, month)) return c.json({ error: `${month} 已结账锁定，先解锁再处理` }, 403)
+  const done = []
+  let added = 0; let cut = 0; let skipped = 0
+  for (const r of rows) {
+    const party = String(r.party || '').trim()
+    if (!party) { skipped++; continue }
+    const imported = round2(num(r.imported))
+    const system = round2(num(r.system))
+    const state = String(r.state || '')
+    const gap = round2(Math.abs(imported - system))
+    try {
+      if (state === 'more') {
+        if (!(gap > 0)) { skipped++; continue }
+        const due = await termDue(db, party, `${month}-01T00:00:00.000Z`)
+        const created = `${month}-01T00:00:00.000Z`
+        if (type === 'ar') {
+          await db.prepare('INSERT INTO orders (customer, item_name, price, cost, status, paid, created_at, due_date, operator) VALUES (?,?,?,0,0,0,?,?,?)')
+            .bind(party, '对账补记', gap, created, due, '对账').run()
+        } else {
+          await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at, due_date, operator) VALUES (?,?,0,?,?,?,?,?)')
+            .bind(party, gap, '对账', '对账补记', created, due, '对账').run()
+        }
+        added = round2(added + gap)
+        done.push({ party, state, mode: 'add', amount: gap })
+      } else if (state === 'less') {
+        const isAp2 = type === 'ap'
+        const T2 = isAp2 ? 'payables' : 'orders'
+        const P2 = isAp2 ? 'supplier' : 'customer'
+        const A2 = isAp2 ? 'amount' : 'price'
+        const open = (await db.prepare(`SELECT id, ${A2} AS amt, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo, created_at FROM ${T2} WHERE ${P2}=? AND ${A2} - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005 ORDER BY created_at, id`).bind(party).all()).results || []
+        let leftCut = gap
+        let cutDone = 0
+        for (const o of open) {
+          if (leftCut <= 0.005) break
+          if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) continue
+          const can = round2(num(o.amt) - num(o.paid) - num(o.wo))
+          const use = round2(Math.min(can, leftCut))
+          if (!(use > 0.005)) continue
+          await db.batch([
+            db.prepare(`UPDATE ${T2} SET written_off=COALESCE(written_off,0)+?, rev=COALESCE(rev,0)+1 WHERE id=?`).bind(use, o.id),
+            db.prepare('INSERT INTO writeoffs (ref_type, ref_id, party, amount, reason, created_at) VALUES (?,?,?,?,?,?)')
+              .bind(isAp2 ? 'payable' : 'order', num(o.id), party, use, '对账差异：对方对账单上没有这笔', now())
+          ])
+          leftCut = round2(leftCut - use)
+          cutDone = round2(cutDone + use)
+        }
+        cut = round2(cut + cutDone)
+        done.push({ party, state, mode: 'cut', amount: cutDone, left: leftCut })
+      } else if (state === 'new') {
+        const due = await termDue(db, party, `${month}-01T00:00:00.000Z`)
+        if (type === 'ar') {
+          await db.prepare('INSERT INTO orders (customer, item_name, price, cost, status, paid, created_at, due_date, operator) VALUES (?,?,?,0,0,0,?,?,?)')
+            .bind(party, '对账新建', imported, `${month}-01T00:00:00.000Z`, due, '对账').run()
+        } else {
+          await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, created_at, due_date, operator) VALUES (?,?,0,?,?,?,?,?)')
+            .bind(party, imported, '对账', '对账新建', `${month}-01T00:00:00.000Z`, due, '对账').run()
+        }
+        added = round2(added + imported)
+        done.push({ party, state, mode: 'new', amount: imported })
+      } else { skipped++; continue }
+      // 台账留痕
+      const note = state === 'less' ? `核销差额 ${gap} 元（对方对账单上没有）` : (state === 'new' ? `新建 ${imported} 元（系统里原来没这家）` : `补记 ${gap} 元`)
+      const old = await db.prepare('SELECT id FROM recon_log WHERE month=? AND type=? AND party=? AND done=0 ORDER BY id DESC').bind(month, type, party).first()
+      if (old) {
+        await db.prepare('UPDATE recon_log SET imported=?, system=?, diff=?, state=?, done=1, note=? WHERE id=?')
+          .bind(imported, system, round2(imported - system), state, note, old.id).run()
+      } else {
+        await db.prepare('INSERT INTO recon_log (month, type, party, imported, system, diff, state, done, note, created_at) VALUES (?,?,?,?,?,?,?,1,?,?)')
+          .bind(month, type, party, imported, system, round2(imported - system), state, note, now()).run()
+      }
+    } catch (e) {
+      done.push({ party, state, mode: 'error', error: String(e.message || e).slice(0, 80) })
+    }
+  }
+  await logAudit(db, '对账批量处理', type, `${month} 处理 ${done.length} 家，补记 ${added}，核销 ${cut}`)
+  const nAdd = done.filter((x) => x.mode === 'add' || x.mode === 'new').length
+  const nCut = done.filter((x) => x.mode === 'cut').length
+  const text = `对账处理完：补记 ${nAdd} 家（共 ¥${added}）` + (nCut ? `，核销差额 ${nCut} 家（共 ¥${cut}）` : '') + (skipped ? `，跳过 ${skipped} 家` : '') + '。'
+  return c.json({ ok: true, month, type, count: done.length, added, cut, skipped, n_add: nAdd, n_cut: nCut, rows: done, text })
 })
 
 // 月度对账小结：这个月和谁对过、差多少、补了几笔、还有谁没对，一页说清

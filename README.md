@@ -596,11 +596,17 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 预览面板点一行就能「不要这一行」（再点取消），确认时把不要的行号放进 `skip` 再真正导入；重复行会先问「一起导入 / 跳过这些」；
    - 表头自动识别（整行没数字且 ≥2 个表头关键词才跳过），所以「甲客户」这种名字不会被当表头吃掉；
    - 真正的写入仍走原来的 `importRows`，**ar 的到期日/经手人、ap 的备注/到期日等列一个都没丢**。
+209. ✅ **对账差异三种情况都能处理**：以前只会「补记」（我少记了），「我多记了」只能自己去找错单；现在按差异类型给不同按钮：
+   - **我少记**（对方单上多）→ `POST /recon-fix {mode:'add'}` 补一张单（记在核对那个月，到期日按账期自动算）；
+   - **我多记**（对方单上少）→ `POST /recon-fix {mode:'cut', gap}` **核销差额**：先老后新逐单 `written_off`，写 `writeoffs` 留痕（原因「对账差异：对方对账单上没有这笔」），**现金一分不动，只抹往来**；单子不够核销会返回还差多少；
+   - **系统里没这家** → 建一张新单；
+   - `POST /recon-fix-batch {type, month, rows}`：**一次把整批差异处理完**，返回「补记 N 家（共 ¥X）、核销 M 家（共 ¥Y）、跳过 K 家」并逐家写对账台账；
+   - 三种模式都受月结锁定保护（锁定月 403），员工口令不能做（`denyStaff` 加 `/recon-fix`、`/recon-save`）。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 288 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 289 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -857,7 +863,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（153）
+**其它（单个接口）**（154）
 
 - `GET /`
 - `GET /access-guide`
@@ -968,6 +974,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /recon-diff-text`
 - `GET /recon-dunning`
 - `POST /recon-fix`
+- `POST /recon-fix-batch`
 - `GET /recon-month`
 - `GET /recon-orders`
 - `GET /recon-progress`

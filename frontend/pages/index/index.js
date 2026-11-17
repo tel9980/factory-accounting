@@ -2761,6 +2761,35 @@ Page({
       }
     })
   },
+  // 我多记了：对方对账单上没有这么多 → 把差额核销掉（不动现金，只抹往来）
+  reconFixCut(e) {
+    const r = ((this.data.recon || {}).rows || [])[e.currentTarget.dataset.i]
+    if (!r) return
+    const type = this.reconType()
+    const gap = Math.abs(Number(r.system || 0) - Number(r.imported || 0))
+    const month = (this.data.recon || {}).month || ''
+    if (!(gap > 0)) return wx.showToast({ title: '这家没有差额', icon: 'none' })
+    wx.showModal({
+      title: '核销差额',
+      content: `我这边记 ${r.system} 元，对方单上只有 ${r.imported} 元，差 ${gap.toFixed(2)} 元。\n核销掉这 ${gap.toFixed(2)} 元（当作对方不认这笔），现金不动，只把「别人欠我」抹平。`,
+      confirmText: '核销差额',
+      success: (res) => {
+        if (!res.confirm) return
+        this.req({
+          url: API_BASE + '/recon-fix', method: 'POST',
+          data: { type, party: r.party, amount: 0, month, mode: 'cut', gap, imported: r.imported, system: r.system, state: r.state },
+          success: (res2) => {
+            const d = res2.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没核销成', icon: 'none' })
+            const msg = d.cut_left > 0.005 ? `核销了 ${d.cut_amount}，还差 ${d.cut_left} 没核销（单子不够）` : '已核销差额 ' + d.cut_amount
+            wx.showToast({ title: msg, icon: 'none' })
+            this.markRecon(e.currentTarget.dataset.i, '已核销差额 ' + d.cut_amount)
+            this.refresh()
+          }
+        })
+      }
+    })
+  },
   reconFixIgnore(e) {
     const r = ((this.data.recon || {}).rows || [])[e.currentTarget.dataset.i]
     if (!r) return
@@ -2777,35 +2806,42 @@ Page({
     })
   },
   reconFixAll() {
-    const rows = ((this.data.recon || {}).rows || []).filter((x) => x.state === 'more' || x.state === 'new')
-    if (!rows.length) return wx.showToast({ title: '没有「我少记」的差异', icon: 'none' })
-    const total = rows.reduce((a, x) => a + Math.abs(Number(x.imported || 0) - Number(x.system || 0)), 0)
+    const all = (this.data.recon || {}).rows || []
+    const rows = all.filter((x) => x.state === 'more' || x.state === 'less' || x.state === 'new')
+    if (!rows.length) return wx.showToast({ title: '没有要处理的差异', icon: 'none' })
     const type = this.reconType()
     const month = (this.data.recon || {}).month || ''
+    const nAdd = rows.filter((x) => x.state === 'more' || x.state === 'new').length
+    const nCut = rows.filter((x) => x.state === 'less').length
+    const addAmt = rows.filter((x) => x.state === 'more').reduce((a, x) => a + Math.abs(Number(x.imported || 0) - Number(x.system || 0)), 0)
+    const newAmt = rows.filter((x) => x.state === 'new').reduce((a, x) => a + Number(x.imported || 0), 0)
+    const cutAmt = rows.filter((x) => x.state === 'less').reduce((a, x) => a + Math.abs(Number(x.system || 0) - Number(x.imported || 0)), 0)
+    const lines = []
+    if (nAdd) lines.push(`补记 ${nAdd} 家（共 ¥${(addAmt + newAmt).toFixed(2)}）`)
+    if (nCut) lines.push(`核销差额 ${nCut} 家（共 ¥${cutAmt.toFixed(2)}）`)
     wx.showModal({
-      title: '全部补记',
-      content: `给 ${rows.length} 家补记${type === 'ap' ? '应付' : '应收'}，合计 ${total.toFixed(2)} 元，都记在 ${month} 月。补完可以逐单核对。`,
-      confirmText: '全部补记',
+      title: '一次处理完',
+      content: `给 ${rows.length} 家按差异处理：\n${lines.join('\n')}\n\n补记 = 我少记的补一张单；核销 = 我多记的把差额抹掉（现金不动）。都记在 ${month} 月。`,
+      confirmText: '开始处理',
       success: (res) => {
         if (!res.confirm) return
-        let i = 0
-        const next = () => {
-          if (i >= rows.length) {
-            wx.showToast({ title: '补记完 ' + rows.length + ' 家', icon: 'none' })
-            this.refresh()
-            return
-          }
-          const r = rows[i]
-          const amt = Math.abs(Number(r.imported || 0) - Number(r.system || 0))
-          i += 1
-          this.req({
-            url: API_BASE + '/recon-fix', method: 'POST',
-            data: { type, party: r.party, amount: amt, month, mode: 'add', imported: r.imported, system: r.system, state: r.state },
-            success: () => { r.state_text = '已补记 ' + amt; next() },
-            fail: () => next()
-          })
-        }
-        next()
+        wx.showLoading({ title: '处理中…' })
+        this.req({
+          url: API_BASE + '/recon-fix-batch', method: 'POST',
+          data: { type, month, rows },
+          success: (r2) => {
+            wx.hideLoading()
+            const d = r2.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没处理成', icon: 'none' })
+            wx.showModal({
+              title: '处理完了',
+              content: (d.text || '') + '\n台账已经记上了，单据可以在应收/应付里核对。',
+              showCancel: false,
+              success: () => { this.setData({ recon: null }); this.refresh(); this.loadReconLog() }
+            })
+          },
+          fail: () => wx.hideLoading()
+        })
       }
     })
   },
@@ -2813,7 +2849,7 @@ Page({
     const rc = this.data.recon || {}
     const rows = (rc.rows || []).slice()
     if (rows[i]) rows[i] = Object.assign({}, rows[i], { state: 'match', state_text: text, bad: false })
-    const left = rows.filter((x) => x.state === 'more' || x.state === 'new').length
+    const left = rows.filter((x) => x.state === 'more' || x.state === 'less' || x.state === 'new').length
     this.setData({ recon: Object.assign({}, rc, { rows, add_count: left }) })
   },
   // 把这次核对结果记进对账台账（月底能看谁对过、还差几家没处理）
