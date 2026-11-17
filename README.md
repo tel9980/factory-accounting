@@ -344,8 +344,69 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 9. **微信登录 + 权限分级**：目前是共享口令，绑定微信后能分清是谁记的；老板可看全部、员工只记账。
 10. ✅ **生产工序（基础版，已完成）**：订单可更新当前工序、查看工序历史（备料/加工/喷涂/包装）。
 11. ✅ **语音记账（已完成）**：一句话记账框支持键盘语音输入说话记账。
-12. ✅ **GitHub Actions 自动部署（已完成）**：push 代码自动 `wrangler deploy`，省手动部署。
+12. ✅ **GitHub Actions 自动部署（已完成）**：push 代码自动 `wrangler deploy`，省手动部署（注意：仓库要配 `CF_API_TOKEN`；没配时 CI 会跳过部署并挂 warning，见 DEPLOYMENT.md 1.4 节。当前线上是 DSH 本机用 `~/.dsh/cf-token` 手工部署的）。
 13. ✅ **赚没赚两口径（已完成）**：报表页可看「现金口径」（实收−实付）和「经营口径」（接单−赊购−现金成本），并解释两者差额。
+
+## 还有哪些优化空间（2026-11-18 审计，尚未实施）
+
+前面「优化路线图」1–278 项都已落地；下面这批是**接下来还能做的**，按「不做会出事 → 做了省钱 → 做了好用」排序。
+每条都标了源码位置（`backend/index.js` 简写为 `index.js`，`frontend/pages/index/index.js` 简写为 `ui.js`）和一句话修法，方便以后按图施工。
+**这不是待办清单的压力，而是「知道坑在哪」**——哪天真出了问题，照着这里找就行。
+
+### P0 · 资金安全与数据正确性（优先级最高）
+
+1. **恢复备份可能留下「半恢复」**：`index.js:13119-13123,13133-13185,13322` 的 `restoreCore` 先把核心三表按每 50 条一批 `db.batch` 串行写，附加表再逐表写，失败只记 `extra[t] = -1`，不回滚。第 2 批以后中断（D1 限流、单行超 2MB、断网）时前面已经落库，旧数据回不去、新数据不全，界面却可能显示成功。
+   → 修法：整次恢复放一个原子批次（或先写影子表、成功后原子切换）；附加表失败要让接口返回 `ok:false` 而不是吞掉。
+2. **预收/预付抵扣可以被「双花」**：`index.js:5061-5082` 与 `5094-5115` 是先 `SELECT` 可用余额、再 `UPDATE used=used+?`、再改单据写流水，三步不在同一事务，也没有条件扣减。两个设备同时给同一客户抵扣，会读到同一笔余额并各自全额累加 → `used` 超过 `amount`、欠款重复冲抵、流水重复入账。
+   → 修法：`UPDATE advances SET used=used+? WHERE id=? AND used+?<=amount` 条件扣减 + 单据/流水同批写入，按影响行数判定成功。
+3. **发工资和月结都能并发重复执行**：`index.js:1749-1762,2960-2966` 里 `/payroll/pay` 先算剩余再分别写 `ledger` 和 `wage_pays`；`/month-close` 的快照、归档、加锁是三次分离写入。重复点击（或前端双发）会工资双发、月结重复归档、归档成功但锁失败导致已归档月份仍可改。
+   → 修法：每个工人的「算剩余 + 写流水 + 写工资记录」合成一批；月结三步同事务并加幂等唯一约束。
+4. **库存超卖、脏数字、半截报价**：`index.js:1017-1053,7430-7433,7224-7246` 里材料出库是「先 `SELECT SUM` 看够不够、再 `INSERT`」（并发出库都能通过）；`price/qty` 只验 `>0`，`num()`（`index.js:72`）对 `1e309` 返回 `Infinity`，超大数字能入库；报价 `no` 在 `INSERT` 之后再 `UPDATE`，中间断掉就留一张没编号的报价。
+   → 修法：统一 `Number.isFinite` + 上限/小数位校验；库存改条件扣减；报价编号在插入前生成、同一批写入。
+
+### P1 · D1 用量与性能（省读省写，间接省钱）
+
+5. **定时任务每天 ×3 账套把全库读两遍**：`index.js:14892,14899` 的 `selfCheck`（`11875-11935`）用两条 `SELECT * FROM orders/payables` 读全部行进内存，只为数出两个 mismatch 数字（结果只写 `selfcheck_count/at`，明细根本没人看）；紧接着 `saveBackup`（`13085-13089`）又把 44 张表全量拼成 JSON 写库，没有「没变化就跳过」的开关。两个日常 cron（`0 16 * * *`、`0 1 * * *`）都走这里 → 3 账套 × 2 次/天 × 约 8000 行读取，外加约 56MB/天的全库 JSON 写入（按线上 9.4MB/份估算）。
+   → 修法：自检改成一条 `COUNT(*) WHERE paid != (...)` 的 SQL；备份加「当日无变化就跳过」的哨兵。
+6. **年报表三处漏网的 `LIKE` 让年份索引白建**：`index.js:11703,8554,8567,8582,8598` 用 `created_at LIKE '2025-%'`，EXPLAIN 实测是 `SCAN ledger`；改成项目里已经普遍采用的 `substr(created_at,1,4)=?` 就会变 `SEARCH ... USING INDEX idx_ledger_year`，本地 15001 行库从读 15001 行降到约 1250 行/月。
+   → 修法：把这 5 处统一替换为 `substr(created_at,1,4)=?` 并绑定年份。
+7. **首屏 `/reminders` 有 5 条全表扫**：`index.js:14451-14544` 虽已并发，但 `14460` 的 `paid+...<price` 过滤走 `SCAN orders`，`14475` 的 `statement_log` 按月过滤全表扫，`14478` 的 `NOT EXISTS` 对每个欠费客户各查一次（91 家 = 91 次），`14487` 又全表 `GROUP BY customer`。首屏每次 `refresh()` 都调它。
+   → 修法：加 `(paid<price)` 表达索引与 `statement_log(party, substr(created_at,1,7))` 复合索引；三条按客户汇总合成一条 `GROUP BY`。
+8. **批量导入按行串行 SQL**：`index.js:8687-8804` 的 `importRows` 每行 3–6 条串行 `await`（锁月、查重、账期、INSERT、默认账户…），500 行 Excel = 2000–3000 条 SQL；查重 SQL 只用到 `idx_orders_customer` 的首列，同客户历史越多越慢。`/import-xlsx` 的银行流水分支（`index.js:5728,5773-5777`）更直接，一行一条 `INSERT`，没有 `db.batch`。
+   → 修法：查重走 `(customer, 日期, price)` 联合索引；插入攒成每 100–200 条一批的 `db.batch`（项目里的 `/receive-batch` 已有现成写法）。
+9. **`/customer-card` 等只看一家，却把全库流水读进来**：`promiseBook`（`index.js:8941-9007`）的两条 JOIN `ledger` 和未付汇总都没有按 `party` 过滤，调用方 `/customer-card`(8297)、`/collect-list`(9035)、`/promise-book`(9012) 等至少 6 处都中招。本地 6003 单时还不慢，量上去线性放大。
+   → 修法：给 `promiseBook` 加可选 `party` 参数下推到 WHERE，或用已有 dunning 结果的 party 集合做 `IN (?)` 限定。
+10. **健康分每次首屏都全表 GROUP BY**：`healthScan`（`index.js:11938-12042`）的重复单检测按 `customer+price+日` 对全表 6003 单分组，三条 `DISTINCT ... LIMIT 300` 也扫全表；结果只用在首页那条分数条和每天一条历史，却每次 `refresh()`（前端 `ui.js:526`）都重算。
+    → 修法：按天缓存到 `settings`，首屏直接读；重复检测限定近 N 天。
+
+### P2 · 前端体验与可靠性
+
+11. **大列表一次塞给渲染层，越滚越卡**：`ui.js:1559,1655-1687` 的应收/应付/支出每次把累计数组整个 `setData`，`onReachBottom` 无上限累加；`/flows`（后端 `index.js:12814`）一次返回 300 条整包渲染；`/contacts`（`index.js:12896-12907`）SQL 连 `LIMIT` 都没有，WXML（`index.wxml:640,826,908,2912,3324`）对几千行做全量 `wx:for`。
+    → 修法：只把当前页/可见区交给 `setData`，全量数组留 JS 侧；长列表上虚拟列表或至少限制一次渲染条数。
+12. **每次写操作都全量 `refresh()`**：`ui.js:500-535,1700-1727` 里 `onShow()` 必跑 18 个 loader，保存/删除后普遍直接 `this.refresh()`；首页分支第 1726 行还和 528 行重复调 `loadMyDay()`，联系人页重复调 `loadAccounts()`。合批只是把请求并起来了，查询量和渲染量一点没省。
+    → 修法：写后按变更域只刷相关 loader；`onShow` 加时间间隔门控 + 同一 GET 的 in-flight 去重。
+13. **GET 缓存无 TTL，失败回放旧数据**：`ui.js:298-315,333-350,440,479-495` 里 `_cacheGet` 完全不校验时间戳；所有 GET 默认缓存；网络失败时把旧快照伪装成 `statusCode:200` 返回；`/batch` 成功路径对每个结果无条件缓存，**不检查 `opts.cache===false`**，缓存了带 `error` 的响应下次会被当数据渲染。
+    → 修法：缓存加 TTL/版本、只白名单静态数据；写操作相关的 GET 显式 `cache:false`；缓存前校验 `ok/statusCode`。
+14. **关键失败被静默吞掉**：`ui.js:353,406-437,1612-1624,2519-2528,6099-6106` 里 `loadPartyItems/loadEditReqs/loadSeal/loadAttach` 失败只留空；`loadAccounts/loadCategories/loadAdvances` 甚至显式 `fail:()=>{}`。弱网时客户分组展开为空、审批提醒显示 0、账本封存失败却显示「未封存」、单据照片为空——用户完全不知道出错了。
+    → 修法：用户主动触发的加载失败给行内「加载失败/重试」；封存/审批等状态失败保留上次已知值并显示「状态未知」。
+15. **单据明细白传一份没人用的大字符串**：`ui.js:7738-7765` 把同一批内容既拼成 `detail_rows` 又拼成 `detail_text` 一起 `setData`，而 WXML（`index.wxml:3358-3359`）只渲染 `detail_rows`；`grep` 未发现 `detail_text` 的使用。
+    → 修法：把这行 `setData` 里的 `detail_text` 去掉。
+
+### P2 · 基建与可观测性
+
+16. **CI 不查线上表结构，也不防并发部署**：`.github/workflows/deploy.yml` 只在本地用 schema.sql 建一遍新库，部署前没有对 DB/DB2/DB3 做只读 `--remote` 结构对比（线上老库缺列不会被发现），部署后也没有 `/health-check` 冒烟；workflow 没有 `concurrency` 组，push 和手动触发可能同时部署造成版本回退。
+    → 修法：部署前加只读远程结构检查；deploy job 加 `concurrency: group`；部署后打一次 `/health-check`，失败通知到现有告警渠道。
+17. **静默失败不进错误日志**：`index.js:39-56,78-85,14825-14831` 里 `noteFail` 只在 500 时落 `error_log`；`scheduled()` 的自愈失败被 `catch(e){}` 完全吞掉，只 `console.error`；账套 2/3 的定时备份/自愈失败时 `/error-log` 里查不到，用户只看到数字为 0 或「没备份」。
+    → 修法：把 `noteFail` 和 scheduled 的 catch 统一写 `error_log`（带 book/cron 标签），恢复失败同时记审计/通知。
+
+### P3 · 结构性欠账（知道，但暂不动）
+
+- **微信登录 + 权限分级**（原路线图 P2 第 9 项）：现在是共享口令 + 员工 PIN，要做到「谁记的分得清、扫码登录」需要小程序主体资质和后端改造，不是几天能收口的。
+- **前端单文件拆分**：`ui.js` 已 7830 行、`index.wxml` 3437 行，拆 component 收益大但回归风险更大，而目前只有静态绑定检查和合批回归，**没有 UI 自动化测试网**——拆之前先把测试补起来。
+- **README 编年史**：已 1700 多行、279 条迭代记录，是本项目唯一记录「为什么这么改」的地方，整理成独立 CHANGELOG 有丢信息的风险，先保留。
+- **PRAGMA 级数据约束**：库存、金额上限、唯一约束目前全靠应用层校验，SQLite 层几乎没有 `CHECK`/`UNIQUE` 兜底；等 P0 的事务改完再统一补。
+
+> 审计方法：只读源码 + `node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN` 验证索引是否命中；行号对应 2026-11-18 的 `backend/index.js`（15164 行）版本。
 
 ## 说明
 
@@ -1061,6 +1122,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 后果不是「部署偶尔失败」，而是「线上从来没被 CI 更新过」——线上的 Worker 一直是人手 `wrangler deploy` 上去的。红叉挂在那里，谁也不会点开看，所以这事一直没人发现。
    - 改法：先加一步「有没有 Cloudflare token」，用 `${{ secrets.CF_API_TOKEN }}` 走 env 传进去（不写进脚本里，避免脚本注入），空的就 `::warning title=部署这一步跳过了::…` 并跳过部署，配了才照常 `wrangler deploy`。这样绿勾表示「自检+冒烟过了」，线上有没有更新看那条 warning。
    - `DEPLOYMENT.md` 1.4 节补了「怎么建 token」和「没配会怎样」，并写明看到绿勾不等于线上更新了。
+
+279. ✅ **「还有哪些优化空间」审计写进 README（本次）**：三线并行只读审计——后端性能、前端体验、基建可靠性——共找出 17 个**有源码行号 / EXPLAIN 证据**的剩余优化点，按 P0 资金安全（恢复半状态、预收双花、工资月结并发、库存超卖）→ P1 D1 用量（每日全库扫+全库备份、5 处 `LIKE` 漏网、reminders 五条全表扫、导入 N+1、promiseBook 全库 JOIN、健康分全表 GROUP BY）→ P2 前端（大列表整包 setData、写后全量 refresh、缓存无 TTL、失败静默、detail_text 白传）→ P2 基建（CI 不查线上结构/无并发组、静默失败不进 error_log）→ P3 结构性欠账（微信登录、前端拆 component、README 编年史、SQLite 约束），全部写进「优化路线图」之后的新章节。
+   - **验证方法**：`node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN`——年报表 3 处 `LIKE` 确认是 `SCAN ledger`、换 `substr(...,1,4)=?` 变 `SEARCH ... USING INDEX idx_ledger_year`；`selfCheck` 的两条 `SELECT *`、restoreCore 的 `slice(i,i+50)` 分批、healthScan 的全表 GROUP BY、importRows 的逐行 await 均逐处读源码核对。
+   - 顺手把路线图第 12 项「GitHub Actions 自动部署」的注记改成实话：仓库没配 `CF_API_TOKEN` 时 CI 只会自检 + warning，线上当前是用 DSH 本机 `~/.dsh/cf-token` 手工部署的（Version ID `3dd048b2-f7f6-482c-839e-2ccd967a8ea5`）。
 
 <!-- API-LIST:BEGIN -->
 
