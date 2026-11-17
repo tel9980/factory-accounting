@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check|year-open)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -7424,6 +7424,137 @@ app.get('/year-book', async (c) => {
 
 // 年度总账打印链接（签名，免口令）
 // ===== 一键结账全年：逐月自检 → 批量归档 → 年度封账单 =====
+// ===== 老账搬家：把别的本子（Excel / 纸本 / 别的软件）上的欠款一次性搬进来 =====
+// 一行一笔：客户名,金额[,成本][,开单日期]；日期留空就用「统一日期」
+const MIG_ITEM = '期初搬入'
+function migParse(text) {
+  const out = []
+  String(text || '').split(/\r?\n/).forEach((ln, idx) => {
+    const raw = ln.trim()
+    if (!raw) return
+    if (/^(客户|供应商|单位|名字|合计)/.test(raw)) return // 表头行跳过
+    let parts = raw.split(/[,，\t|]/).map((x) => x.trim())
+    if (parts.length < 2) parts = raw.split(/\s+/).filter((x) => x !== '')
+    if (parts.length < 2) { out.push({ i: idx + 1, party: raw, amount: 0, cost: null, date: '', raw }); return }
+    const money = (v) => num(String(v == null ? '' : v).replace(/[¥￥,，\s元]/g, ''))
+    const pick = (k) => (parts[k] === undefined || parts[k] === null || parts[k] === '' ? null : parts[k])
+    const party = parts[0] || ''
+    const amount = pick(1) === null ? 0 : money(parts[1])
+    // 第 3 格可能是成本，也可能是日期（客户只写了名字、金额、日期）
+    let cost = null
+    let date = ''
+    const f2 = pick(2)
+    const f3 = pick(3)
+    if (f2 !== null) { if (toIsoDate(f2)) date = toIsoDate(f2); else cost = money(f2) }
+    if (f3 !== null) date = toIsoDate(f3) || date
+    out.push({ i: idx + 1, party, amount, cost, date, raw })
+  })
+  return out
+}
+
+async function migPreview(db, body) {
+  const type = String(body.type || 'ar') === 'ap' ? 'ap' : 'ar'
+  const gDate = toIsoDate(body.date) || ''
+  const mode = String(body.cost_mode || 'none')
+  const margin = num(body.margin_pct) || 30
+  let rows = []
+  if (Array.isArray(body.rows) && body.rows.length) {
+    rows = body.rows.map((r, i) => ({
+      i: i + 1, party: String((r && r.party) || '').trim(), amount: num(r && r.amount),
+      cost: (r && r.cost !== undefined && r.cost !== null && r.cost !== '') ? num(r.cost) : null,
+      date: toIsoDate(r && r.date) || '', raw: ''
+    }))
+  } else {
+    rows = migParse(body.text)
+  }
+  const partyCol = type === 'ar' ? 'customer' : 'supplier'
+  const table = type === 'ar' ? 'orders' : 'payables'
+  const amtCol = type === 'ar' ? 'price' : 'amount'
+  const seen = new Set()
+  const out = []
+  for (const r of rows) {
+    const row = { i: r.i, party: r.party, amount: round2(r.amount), cost: r.cost, date: (r.date || gDate).slice(0, 10), type, ok: true, error: '', dup: false, dup_text: '', known: false }
+    if (!row.party) { row.ok = false; row.error = '没写名字' }
+    else if (!(row.amount > 0)) { row.ok = false; row.error = '金额要大于 0' }
+    else if (!row.date) { row.ok = false; row.error = '没写日期，也没选统一日期' }
+    if (row.ok) {
+      row.cost = row.type === 'ar' ? (r.cost !== null && r.cost !== undefined ? round2(r.cost) : (mode === 'pct' ? round2(row.amount * (1 - margin / 100)) : null)) : null
+      if (row.cost !== null && row.cost < 0) row.cost = 0
+      const key = row.party + '|' + row.amount + '|' + row.date
+      if (seen.has(key)) { row.dup = true; row.dup_text = '这一批里前面已经有一笔一样的' }
+      seen.add(key)
+      if (!row.dup) {
+        const hit = await db.prepare(`SELECT id FROM ${table} WHERE ${partyCol}=? AND ${amtCol}=? AND substr(created_at,1,10)=? LIMIT 1`).bind(row.party, row.amount, row.date).first()
+        if (hit) { row.dup = true; row.dup_text = '账上已经有一笔一样的（' + row.date + ' ¥' + row.amount + '）' }
+      }
+      const known = await db.prepare(`SELECT 1 AS x FROM ${table} WHERE ${partyCol}=? LIMIT 1`).bind(row.party).first()
+      row.known = !!known
+    }
+    out.push(row)
+  }
+  const good = out.filter((x) => x.ok)
+  const arTotal = round2(good.reduce((s, x) => s + (x.type === 'ar' ? x.amount : 0), 0))
+  const apTotal = round2(good.reduce((s, x) => s + (x.type === 'ap' ? x.amount : 0), 0))
+  const dupN = good.filter((x) => x.dup).length
+  const badN = out.filter((x) => !x.ok).length
+  const parties = [...new Set(good.map((x) => x.party))]
+  const total = round2(good.reduce((s, x) => s + x.amount, 0))
+  const label = type === 'ar' ? '客户还欠' : '我欠供应商'
+  const text = !out.length
+    ? '还没输入内容。一行写一笔，比如：兴旺五金,5000'
+    : (good.length
+      ? `认出 ${good.length} 笔${label}，共 ¥${total}（${parties.length} 家）${dupN ? `，其中 ${dupN} 笔账上已经有了` : ''}${badN ? `，${badN} 行有问题要改` : ''}。`
+      : `这 ${badN} 行都有问题，改好再来。`)
+  return { ok: true, type, rows: out, count: out.length, ok_count: good.length, dup_count: dupN, bad_count: badN,
+    ar_total: arTotal, ap_total: apTotal, total, parties: parties.length, party_list: parties.slice(0, 30),
+    date: gDate ? gDate.slice(0, 10) : '', cost_mode: mode, margin_pct: margin, text }
+}
+
+app.post('/migrate-preview', async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  return c.json(await migPreview(c.env.DB, body))
+})
+
+app.post('/migrate-apply', async (c) => {
+  const db = c.env.DB
+  const body = await c.req.json().catch(() => ({}))
+  const pv = await migPreview(db, body)
+  if (!pv.ok_count) return c.json({ error: pv.text || '没有可以搬的行' }, 400)
+  if (pv.bad_count) return c.json({ error: `还有 ${pv.bad_count} 行有问题，先改好（${pv.rows.filter((x) => !x.ok).slice(0, 3).map((x) => `第 ${x.i} 行：${x.error}`).join('；')}）` }, 400)
+  const months = [...new Set(pv.rows.filter((x) => x.ok).map((x) => x.date.slice(0, 7)))]
+  for (const mm of months) {
+    if (await isMonthLocked(db, mm)) return c.json({ error: `${mm} 已结账锁定，先解锁再搬（报表 → 月结归档 → 解锁）` }, 403)
+  }
+  const confirmDup = !!body.confirm_dup
+  let added = 0
+  let skipped = 0
+  const addedRows = []
+  for (const r of pv.rows) {
+    if (!r.ok) continue
+    if (r.dup && !confirmDup) { skipped++; continue }
+    const created = r.date + 'T00:00:00.000Z'
+    if (r.type === 'ar') {
+      const due = (await termDue(db, r.party, created)) || addDaysIso(r.date, 30)
+      const ins = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at) VALUES (?,?,?,0,0,?,?,?,?)')
+        .bind(r.party, MIG_ITEM, r.amount, due || null, '期初搬入', r.cost, created).run()
+      addedRows.push({ type: 'ar', id: ins.meta && ins.meta.last_row_id, party: r.party, amount: r.amount })
+    } else {
+      const due = (await termDue(db, r.party, created)) || addDaysIso(r.date, 30)
+      const ins = await db.prepare('INSERT INTO payables (supplier, amount, remark, due_date, operator, paid, created_at) VALUES (?,?,?,?,?,0,?)')
+        .bind(r.party, r.amount, MIG_ITEM, due || null, '期初搬入', created).run()
+      addedRows.push({ type: 'ap', id: ins.meta && ins.meta.last_row_id, party: r.party, amount: r.amount })
+    }
+    added++
+  }
+  await logAudit(db, '老账搬入', pv.type === 'ar' ? '应收' : '应付', `搬入 ${added} 笔${skipped ? `（跳过重复 ${skipped} 笔）` : ''}，合计 ¥${pv.total}`, '', act(c))
+  const addedTotal = round2(addedRows.reduce((s, x) => s + x.amount, 0))
+  const text = added
+    ? `搬进来 ${added} 笔${pv.type === 'ar' ? '客户欠款' : '供应商欠款'}，共 ¥${addedTotal}${skipped ? `；${skipped} 笔账上已经有了，没重复搬` : ''}。到期日按账期算好了（没设账期的按 30 天），这些单子已经能催款、能对账、能算账龄了。`
+    : `这 ${skipped} 笔账上都已经有了，没有重复搬（确实要再记一遍的话，在「应收/应付」里手工录）。`
+  return c.json({ ok: true, added, skipped, rows: addedRows, total: round2(addedRows.reduce((s, x) => s + x.amount, 0)), text,
+    tip: pv.type === 'ar' && pv.rows.some((x) => x.ok && x.cost === null) ? '有些行没填成本：这些单子的毛利会偏高，方便时补一下成本（点开单子改成本）。' : '' })
+})
+
 const BC_LABEL = { recon_diff: '对账差异还没处理完', summary: '还没出本月小结' }
 async function yearCloseScan(db, y) {
   const [om, pm, lm, ar, rc] = await Promise.all([

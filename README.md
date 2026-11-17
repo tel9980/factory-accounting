@@ -654,7 +654,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 310 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 312 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -922,7 +922,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（170）
+**其它（单个接口）**（172）
 
 - `GET /`
 - `GET /access-guide`
@@ -1001,6 +1001,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /loss-book`
 - `GET /margin-by`
 - `GET /me`
+- `POST /migrate-apply`
+- `POST /migrate-preview`
 - `GET /month-archives`
 - `GET /month-brief`
 - `POST /month-close`
@@ -1096,3 +1098,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /year-summary`
 
 <!-- API-LIST:END -->
+
+217. ✅ **老账搬家（把别的本子上的欠款一次搬进来）**：从 Excel / 纸本 / 别的软件转过来时，不用一笔笔录——
+   - `POST /migrate-preview {type:'ar'|'ap', text|rows, date, cost_mode:'none'|'pct', margin_pct}`：服务端解析文本（一行一笔：`名字,金额[,成本][,日期]`，逗号/制表符/空格都认，表头行自动跳过，第 3 格填日期也认），逐行给 `ok/error/dup/dup_text/known`，返回 `ar_total`/`ap_total`/`bad_count`/`dup_count`/`party_list` 与人话结论（「认出 3 笔客户还欠，共 ¥9800（3 家），其中 1 笔账上已经有了」）；**只读，不写库**；
+   - 判重两道：批内重复（同一批里前面已有同名同额同日）+ 账上重复（`${table} 同名同额同日` 已存在）；
+   - 成本处理：`cost_mode='none'` 不填（毛利偏高，返回 `tip` 提醒以后补）、`'pct'` 按毛利率估（`amount*(1-margin/100)`）；
+   - `POST /migrate-apply`：仍有坏行返回 400 并点名「第 3 行：金额要大于 0」；跨月先查 `isMonthLocked` → 403；重复行默认跳过（`confirm_dup` 才真重复记）；插入 `orders(item_name='期初搬入', operator='期初搬入')` / `payables(remark='期初搬入')`，**到期日按账期算，没设账期按 30 天**；写审计「老账搬入」；
+   - 前端「导入」页顶部「📥 老账搬家」：客户欠我 / 我欠供应商 切换、多行文本框、统一日期、成本不填或按毛利率估、「先看看（不写入）」逐行 ✓/✗、「确认搬进来（N 笔）」；有重复先弹「默认跳过」；
+   - 员工口令访问 `/migrate-*` 一律 403。

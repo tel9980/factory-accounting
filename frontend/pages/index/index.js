@@ -69,6 +69,7 @@ const FEATS = [
 
 Page({
   data: {
+    mg: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
     tab: 'home', group: 'home',
     ar_total: 0, ap_total: 0,
     month_income: 0, month_outcome: 0, month_profit: 0,
@@ -5569,6 +5570,60 @@ Page({
       },
       fail: () => wx.hideLoading()
     })
+  },
+  // 老账搬家
+  openMigrate() { this.setData({ mg: !this.data.mg, mgp: this.data.mg ? null : this.data.mgp }) },
+  migType(e) { this.setData({ mg_type: e.currentTarget.dataset.t, mgp: null }) },
+  onMigText(e) { this.setData({ mg_text: e.detail.value }) },
+  onMigDate(e) { this.setData({ mg_date: e.detail.value }) },
+  migCostMode(e) { this.setData({ mg_cost_mode: e.currentTarget.dataset.m, mgp: null }) },
+  _migBody() {
+    return { type: this.data.mg_type, text: this.data.mg_text, date: this.data.mg_date, cost_mode: this.data.mg_cost_mode, margin_pct: this.data.mg_margin }
+  },
+  migPreview() {
+    const b = this._migBody()
+    if (!String(b.text || '').trim()) return wx.showToast({ title: '先写几行，比如「兴旺五金,5000」', icon: 'none' })
+    wx.showLoading({ title: '看看…' })
+    this.req({
+      url: API_BASE + '/migrate-preview', method: 'POST', data: b,
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ mgp: d })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  migApply() {
+    const mgp = this.data.mgp || {}
+    if (!mgp.ok_count) return
+    const b = this._migBody()
+    const go = (confirmDup) => {
+      wx.showLoading({ title: '搬入中…' })
+      this.req({
+        url: API_BASE + '/migrate-apply', method: 'POST', data: { ...b, confirm_dup: !!confirmDup },
+        success: (res) => {
+          wx.hideLoading()
+          const d = res.data || {}
+          if (d.error) return wx.showModal({ title: '没搬成', content: d.error, showCancel: false })
+          wx.showModal({ title: '搬好了', content: (d.text || '') + (d.tip ? '\n\n' + d.tip : ''), showCancel: false })
+          this.setData({ mgp: null, mg_text: '' })
+          this.loadOrders && this.loadOrders()
+          this.loadPayables && this.loadPayables()
+          this.refresh && this.refresh()
+        },
+        fail: () => wx.hideLoading()
+      })
+    }
+    if (mgp.dup_count) {
+      wx.showModal({
+        title: '有几笔账上已经有',
+        content: `这 ${mgp.dup_count} 笔账上已经有一笔一样的，默认跳过不重复搬。`,
+        confirmText: '跳过搬其余', cancelText: '取消',
+        success: (r) => { if (r.confirm) go(false) }
+      })
+    } else go(false)
   },
   closeYearClose() { this.setData({ ycl: null }) },
   openYearClosePrint() {
