@@ -794,6 +794,24 @@
         </view>
       </view>
 
+      <view class="prev" wx:if="{{xp_open && xp}}">
+        <view class="prev-h">先看一眼：{{xp.type_name}}　认出 {{xp.count}} 行，合计 {{xp.total}} 元</view>
+        <view class="tip" wx:if="{{xp.header_skipped}}">第一行是表头，已自动跳过</view>
+        <view class="tip" wx:if="{{xp.dup_count}}">有 {{xp.dup_count}} 行系统里已经有一样的（黄标），确认时问你要不要一起导</view>
+        <view class="tip" wx:if="{{xp.locked_count}}">有 {{xp.locked_count}} 行落在已结账的月份，导不进去（灰标）</view>
+        <view class="tip" wx:if="{{xp.bad_count}}">有 {{xp.bad_count}} 行没看懂（红标），这些不会导</view>
+        <view class="xp-row {{item.drop?'dropped':''}}" wx:for="{{xp.rows}}" wx:key="i" data-i="{{index}}" bindtap="dropXpRow">
+          <text class="prev-ok {{item.locked?'gray':(item.ok?'ok':'red')}}">{{item.drop ? '✕' : (item.locked ? '锁' : (item.ok ? (item.dup ? '≈' : '✓') : '✗'))}}</text>
+          <text class="prev-t">{{item.party || '（没写单位）'}}{{item.item ? ' · ' + item.item : ''}}{{item.category ? ' · ' + item.category : ''}}{{item.date ? ' · ' + item.date : ''}}</text>
+          <text class="prev-n">{{item.ok ? item.amount : item.error}}</text>
+        </view>
+        <view class="tip">点一行可以「不要这一行」，再点一次取消</view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="confirmXlsx">确认导入</button>
+          <button class="btn ghost" size="mini" bindtap="closeXlsxPreview">取消</button>
+        </view>
+      </view>
+
       <view class="prev" wx:if="{{recon}}">
         <view class="prev-h">对账结果：{{recon.count}} 家　一致 {{recon.match_count}}　有差异 {{recon.diff_count}}</view>
         <view class="prev-row" wx:for="{{recon.rows}}" wx:key="party">

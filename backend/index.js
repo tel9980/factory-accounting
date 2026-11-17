@@ -3359,6 +3359,94 @@ app.get('/import-template-xlsx', async (c) => {
 })
 
 // 直接上传 Excel 文件导入
+// 表头判定（与 importRows 内部规则一致，抽出来给预览用）
+function stripHeader(rows) {
+  if (rows.length && rows[0] && rows[0].length) {
+    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要/
+    const first = rows[0]
+    const numish = first.filter((x) => /^[\d.,%\-\s]*$/.test(String(x === null || x === undefined ? '' : x).trim()) && String(x === null || x === undefined ? '' : x).trim() !== '').length
+    const wordy = first.filter((x) => KW.test(String(x === null || x === undefined ? '' : x))).length
+    if (numish === 0 && wordy >= 2) return { rows: rows.slice(1), skipped: true }
+  }
+  return { rows, skipped: false }
+}
+
+// 导入预览：先看清楚要导什么、哪行有问题、哪行像重复，再决定导不导
+async function previewImport(db, type, rawRows) {
+  const st = stripHeader(rawRows)
+  const rows = st.rows
+  const t = now()
+  const parsed = []
+  for (const row of rows) {
+    const p = row.slice()
+    let d = t
+    let dateGiven = false
+    if (p.length > 1 && looksLikeDate(p[p.length - 1])) { d = toIsoDate(p.pop()); dateGiven = true }
+    else if (type === 'ar_init' || type === 'ap_init') d = `${todayIso().slice(0, 4)}-01-01T00:00:00.000Z`
+    let party = '', item = '', amount = 0, cost = 0, category = '', extra = ''
+    if (type === 'ar') { const [c, it, pr, co, dueC, operC] = p; party = c || ''; item = it || ''; amount = num(pr); cost = num(co); extra = [dueC ? '到期 ' + dueC : '', operC ? '经手 ' + operC : ''].filter(Boolean).join(' ') }
+    else if (type === 'ar_init' || type === 'ap_init') { const [c, pr] = p; party = c || ''; amount = num(pr) }
+    else if (type === 'ap') { const [sp2, am, rm, dueP, operP] = p; party = sp2 || ''; item = rm || ''; amount = num(am); extra = [dueP ? '到期 ' + dueP : '', operP ? '经手 ' + operP : ''].filter(Boolean).join(' ') }
+    else if (type === 'expense') { const [am, cat, rm, operE] = p; amount = num(am); category = cat || ''; item = rm || ''; extra = operE ? '经手 ' + operE : '' }
+    else if (type === 'loan') { const [sf, am, rm] = p; party = sf || ''; item = rm || ''; amount = num(am) }
+    else if (type === 'reimb') { const [sf, am, cat, rm] = p; party = sf || ''; amount = num(am); category = cat || ''; item = rm || '' }
+    parsed.push({ party: String(party).trim(), item: String(item).trim(), amount: round2(amount), cost: round2(cost), category: String(category).trim(), date: (d || t).slice(0, 10), date_given: dateGiven, extra })
+  }
+  // 一次把 7 天窗口内的老单据捞出来，避免逐行查库
+  const dates = parsed.map((x) => x.date).filter(Boolean).sort()
+  const from = dates.length ? addDaysIso(dates[0], -7) : todayIso()
+  const to = dates.length ? dates[dates.length - 1] : todayIso()
+  const [arOld, apOld, exOld, locks] = await Promise.all([
+    db.prepare("SELECT customer p, price a, substr(created_at,1,10) d FROM orders WHERE substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(from, to).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT supplier p, amount a, substr(created_at,1,10) d FROM payables WHERE substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(from, to).all().catch(() => ({ results: [] })),
+    db.prepare("SELECT category p, amount a, substr(created_at,1,10) d FROM ledger WHERE ref_type='expense' AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(from, to).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT month FROM month_lock').all().catch(() => ({ results: [] }))
+  ])
+  const lockSet = new Set((locks.results || []).map((x) => x.month))
+  const idx = (arr) => {
+    const m = {}
+    for (const x of (arr.results || [])) { const k = norm(x.p) + '|' + round2(num(x.a)); (m[k] = m[k] || []).push(x.d) }
+    return m
+  }
+  const iAr = idx(arOld), iAp = idx(apOld), iEx = idx(exOld)
+  const seen = new Map()
+  const out = parsed.map((x, i) => {
+    const r = { i: i + 1, ...x, ok: true, error: '', dup: false, dup_text: '', locked: false }
+    if (type === 'expense') { if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' } }
+    else if (!x.party) { r.ok = false; r.error = '没写单位名' }
+    else if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' }
+    const m = x.date.slice(0, 7)
+    if (lockSet.has(m)) { r.locked = true; r.error = m + ' 已结账锁定，这一行导不进去' }
+    if (r.ok && !r.locked) {
+      const k = norm(x.party) + '|' + x.amount
+      const src = type === 'ar' ? iAr : type === 'ap' ? iAp : type === 'expense' ? iEx : null
+      if (src) {
+        const hit = (src[type === 'expense' ? norm(x.category) + '|' + x.amount : k] || []).find((d) => d >= addDaysIso(x.date, -7) && d <= x.date)
+        if (hit) { r.dup = true; r.dup_text = `系统里 ${hit} 已经有一笔一样的（¥${x.amount}）` }
+      }
+      // 这一批自己里面重了（同一个表里抄了两遍）
+      const bk = (type === 'expense' ? norm(x.category) : norm(x.party)) + '|' + x.amount + '|' + x.date
+      if (!r.dup) {
+        if (seen.has(bk)) { r.dup = true; r.dup_text = `这一批里第 ${seen.get(bk)} 行跟它一模一样` }
+        else seen.set(bk, i + 1)
+      }
+    }
+    return r
+  })
+  const okCnt = out.filter((x) => x.ok && !x.locked).length
+  const dupCnt = out.filter((x) => x.ok && !x.locked && x.dup).length
+  const badCnt = out.filter((x) => !x.ok).length
+  const lockCnt = out.filter((x) => x.locked).length
+  const total = round2(out.filter((x) => x.ok && !x.locked).reduce((a, x) => a + x.amount, 0))
+  const parts = [`认出 ${out.length} 行`]
+  if (okCnt) parts.push(`能导 ${okCnt} 行（合计 ¥${total}）`)
+  if (dupCnt) parts.push(`${dupCnt} 行像重复`)
+  if (badCnt) parts.push(`${badCnt} 行有问题`)
+  if (lockCnt) parts.push(`${lockCnt} 行在已结账月份`)
+  return { header_skipped: st.skipped, rows: out, count: out.length, ok_count: okCnt, dup_count: dupCnt, bad_count: badCnt, locked_count: lockCnt, total,
+    text: parts.join('，') + '。确认没问题再点「确认导入」。' }
+}
+
 app.post('/import-xlsx', async (c) => {
   const body = await c.req.json()
   const type = String(body.type || 'ar')
@@ -3379,7 +3467,15 @@ app.post('/import-xlsx', async (c) => {
     if (!list.length) return c.json({ error: '这个表格里没认出「单位 + 金额」两列' }, 400)
     return c.json({ ok: true, recon: await reconcileCore(c.env.DB, type === 'recon_ap' ? 'ap' : 'ar', list) })
   }
-  const r = await importRows(c.env.DB, type, rows, { confirmDup: !!body.confirm_dup, by: act(c) })
+  if (body.preview === true) {
+    return c.json({ ok: true, preview: true, type, ...(await previewImport(c.env.DB, type, rows)) })
+  }
+  // 预览里删掉的行：按「表头之后的第几行」传 skip
+  const skipSet = new Set((Array.isArray(body.skip) ? body.skip : []).map((x) => Math.round(Number(x)) || 0))
+  let dataRows = stripHeader(rows).rows
+  if (skipSet.size) dataRows = dataRows.filter((_, i) => !skipSet.has(i + 1))
+  if (!dataRows.length) return c.json({ error: '这一批的行都被你删掉了，没东西可导' }, 400)
+  const r = await importRows(c.env.DB, type, dataRows, { confirmDup: !!body.confirm_dup, by: act(c) })
   const dup = (r && Array.isArray(r.dup)) ? r.dup : []
   await logImport(c.env.DB, type, r, 'excel')
   return c.json({ ok: true, imported: num(r && r.imported), skipped_locked: num(r && r.skipped_locked), dup, dup_count: dup.length, total: num(r && r.total) })

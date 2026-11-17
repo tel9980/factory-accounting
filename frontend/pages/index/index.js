@@ -84,6 +84,7 @@ Page({
     mb_type: 'customer', mb_month: '', mb: null, ns: null,
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
+    xp: null, xp_open: false,
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0, e_date: '',
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
@@ -1073,13 +1074,13 @@ Page({
                     title: '这个表看着是「' + (names[d.type] || d.type) + '」',
                     content: (d.why || '') + '，共 ' + (d.rows_count || 0) + ' 行。\n按它说的导，还是按你选的「' + (names[t] || t) + '」导？',
                     confirmText: '按它说的', cancelText: '按我选的',
-                    success: (m) => { wx.showLoading({ title: '导入中…' }); this.postXlsx(m.confirm ? d.type : t, fr.data, false) }
+                    success: (m) => { wx.showLoading({ title: '先看一眼…' }); this.previewXlsx(m.confirm ? d.type : t, fr.data) }
                   })
                 }
-                wx.showLoading({ title: '导入中…' })
-                this.postXlsx(t, fr.data, false)
+                wx.showLoading({ title: '先看一眼…' })
+                this.previewXlsx(t, fr.data)
               },
-              fail: () => { wx.hideLoading(); wx.showLoading({ title: '导入中…' }); this.postXlsx(t, fr.data, false) }
+              fail: () => { wx.hideLoading(); wx.showLoading({ title: '先看一眼…' }); this.previewXlsx(t, fr.data) }
             })
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) }
@@ -2609,10 +2610,72 @@ Page({
     this.postImportRows(good, false)
   },
   // Excel 文件入账；命中「同家同额 7 天内已记过」时先问一句
-  postXlsx(type, b64, force) {
+  // 导入前先看一眼：这个表认出了什么、哪几行有问题、哪几行像重复
+  previewXlsx(type, b64) {
+    const names = { ar: '应收（客户欠我）', ap: '应付（我欠别人）', expense: '支出', loan: '员工借支', reimb: '报销', ar_init: '期初应收', ap_init: '期初应付' }
+    this._xb64 = b64
     this.req({
       url: API_BASE + '/import-xlsx', method: 'POST',
-      data: { type, b64, confirm_dup: !!force },
+      data: { type, b64, preview: true },
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        const rows = (d.rows || []).map((r) => Object.assign({}, r, { drop: false }))
+        this.setData({
+          xp: {
+            type, type_name: names[type] || type, rows,
+            count: d.count || 0, ok_count: d.ok_count || 0, bad_count: d.bad_count || 0,
+            dup_count: d.dup_count || 0, locked_count: d.locked_count || 0,
+            total: d.total || 0, text: d.text || '', header_skipped: d.header_skipped
+          },
+          xp_open: true
+        })
+        if (!rows.length) wx.showToast({ title: '这个表里没认出数据行', icon: 'none' })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  dropXpRow(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const rows = (this.data.xp && this.data.xp.rows) || []
+    if (!rows[i]) return
+    rows[i].drop = !rows[i].drop
+    this.setData({ 'xp.rows': rows })
+  },
+  closeXlsxPreview() { this.setData({ xp_open: false, xp: null }) },
+  confirmXlsx() {
+    const xp = this.data.xp || {}
+    const rows = xp.rows || []
+    const keep = rows.filter((r) => !r.drop && r.ok && !r.locked)
+    if (!keep.length) return wx.showToast({ title: '没有可以导入的行', icon: 'none' })
+    const skip = rows.filter((r) => r.drop).map((r) => r.i)
+    const dupKeep = keep.filter((r) => r.dup).length
+    const go = (force) => {
+      wx.showLoading({ title: '导入中…' })
+      this.setData({ xp_open: false })
+      this.postXlsx(xp.type, this._xb64, force, skip)
+    }
+    if (dupKeep) {
+      return wx.showModal({
+        title: '这 ' + dupKeep + ' 条系统里已经有一样的',
+        content: '同一家、同一金额、7 天内已经记过。多半是重复导入，建议这次跳过；确实还没记过就点「一起导入」。',
+        confirmText: '一起导入', cancelText: '跳过这些',
+        success: (m) => {
+          if (m.confirm) return go(true)
+          const skip2 = skip.concat(keep.filter((r) => r.dup).map((r) => r.i))
+          wx.showLoading({ title: '导入中…' })
+          this.setData({ xp_open: false })
+          this.postXlsx(xp.type, this._xb64, false, skip2)
+        }
+      })
+    }
+    go(false)
+  },
+  postXlsx(type, b64, force, skip) {
+    this.req({
+      url: API_BASE + '/import-xlsx', method: 'POST',
+      data: { type, b64, confirm_dup: !!force, skip: skip || [] },
       success: (res) => {
         wx.hideLoading()
         const d = res.data || {}
@@ -2624,7 +2687,7 @@ Page({
             title: '导入 ' + (d.imported || 0) + ' 条，' + dup.length + ' 条像重复',
             content: lines + '\n\n这些先没进账。确实还没记过就点「仍然导入」。',
             confirmText: '仍然导入', cancelText: '先不导',
-            success: (m) => { if (m.confirm) this.postXlsx(type, b64, true); else this.refresh() }
+            success: (m) => { if (m.confirm) this.postXlsx(type, b64, true, skip); else this.refresh() }
           })
         }
         wx.showModal({
