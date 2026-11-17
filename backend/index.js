@@ -476,7 +476,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -514,6 +514,7 @@ app.use('*', async (c, next) => {
       (/^\/fixed/.test(path) && m !== 'GET' && path !== '/run-fixed') ||
       ((/^\/debts/.test(path) || /^\/credit-limits/.test(path)) && m !== 'OPTIONS') ||
       (/^\/prepaids/.test(path) && m !== 'GET') ||
+      (/^\/(payroll|wage-)/.test(path) && m !== 'OPTIONS') ||
       (/^\/run-(amort|accrual)$/.test(path)) ||
       (/^\/transfers/.test(path) && m !== 'GET') ||
       (/^\/writeoffs/.test(path) && m !== 'GET') ||
@@ -781,6 +782,274 @@ app.post('/assets/:id/maint', async (c) => {
   await db.prepare('UPDATE assets SET maint_last=?, maint_months=? WHERE id=?').bind(day, months, id).run()
   await logAudit(db, '设备保养', '设备', a.name + ' 保养了（' + day + '），下次 ' + (months ? months + ' 个月后' : '不提醒'), '', act(c))
   return c.json({ ok: true, name: a.name, date: day, months })
+})
+
+// ===== 计件工资：先记工，月底算钱，发工资，打工资单 =====
+// 为什么这么做：小厂工人按件拿钱，平时记「谁哪天干了多少件」，月底一算就知道该发多少；
+// 直接记「工资 8000」只知道花了多少，不知道贵在哪、谁干得多。
+const WAGE_UNITS = ['件', '米', '平方', '套', '小时', '单']
+
+async function wageTable(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS wage_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker TEXT NOT NULL DEFAULT '',
+    item TEXT DEFAULT '',
+    process TEXT DEFAULT '',
+    rate REAL NOT NULL DEFAULT 0,
+    unit TEXT DEFAULT '件',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS wage_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL,
+    month TEXT,
+    order_id INTEGER DEFAULT 0,
+    item TEXT DEFAULT '',
+    process TEXT DEFAULT '',
+    qty REAL NOT NULL DEFAULT 0,
+    rate REAL NOT NULL DEFAULT 0,
+    amount REAL NOT NULL DEFAULT 0,
+    note TEXT DEFAULT '',
+    by TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare(`CREATE TABLE IF NOT EXISTS wage_pays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    month TEXT NOT NULL,
+    worker TEXT NOT NULL DEFAULT '',
+    amount REAL NOT NULL DEFAULT 0,
+    account_id INTEGER DEFAULT 0,
+    note TEXT DEFAULT '',
+    by TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_rec_month ON wage_records(month)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_rec_worker ON wage_records(worker)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_rate_worker ON wage_rates(worker)').run()
+}
+
+// 找这个工人这道活该按什么单价算：工人+产品+工序 全对最优先，其次退到通用
+async function wageRateOf(db, worker, item, process) {
+  const { results } = await db.prepare("SELECT * FROM wage_rates WHERE COALESCE(active,1)<>0 AND (worker=? OR worker='*')").bind(String(worker || '')).all()
+  let best = null
+  let bestScore = -1
+  for (const r of results || []) {
+    let s = 0
+    if (r.worker === String(worker || '')) s += 4
+    else if (r.worker === '*') s += 1
+    else continue
+    const ri = String(r.item || '')
+    if (item && ri === String(item)) s += 2
+    else if (ri === '' || ri === '*') s += 0
+    else continue
+    const rp = String(r.process || '')
+    if (process && rp === String(process)) s += 1
+    else if (rp === '' || rp === '*') s += 0
+    else continue
+    if (s > bestScore) { bestScore = s; best = r }
+  }
+  return best
+}
+
+// 单价表：谁、干什么活、一件多少钱
+app.get('/wage-rates', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  const { results } = await db.prepare('SELECT * FROM wage_rates ORDER BY worker, item, process').all()
+  const rows = (results || []).map((r) => ({
+    id: r.id, worker: r.worker || '', item: r.item || '', process: r.process || '',
+    rate: num(r.rate), unit: r.unit || '件', active: num(r.active, 1),
+    text: `${r.worker || '（通用）'}${r.item ? ' · ' + r.item : ''}${r.process ? ' · ' + r.process : ''}：${num(r.rate)} 元/${r.unit || '件'}`
+  }))
+  return c.json({ ok: true, rows, count: rows.length, units: WAGE_UNITS, text: rows.length ? `一共 ${rows.length} 条单价` : '还没设单价，先加一条「谁·干什么活·一件多少钱」' })
+})
+
+app.post('/wage-rates', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await wageTable(db)
+  const worker = String(body.worker || '').trim()
+  if (!worker) return c.json({ error: '要填工人名字（通用单价写 *）' }, 400)
+  if (num(body.rate) <= 0) return c.json({ error: '一件多少钱要大于 0' }, 400)
+  await db.prepare('INSERT INTO wage_rates (worker, item, process, rate, unit, active, created_at) VALUES (?,?,?,?,?,1,?)')
+    .bind(worker, String(body.item || '').trim(), String(body.process || '').trim(), num(body.rate), String(body.unit || '件'), now()).run()
+  await logAudit(db, '设计件单价', worker, `${worker} ${body.item || ''} ${body.process || ''} ¥${num(body.rate)}/${body.unit || '件'}`, '', act(c))
+  return c.json({ ok: true })
+})
+
+app.delete('/wage-rates/:id', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  await db.prepare('DELETE FROM wage_rates WHERE id=?').bind(num(c.req.param('id'))).run()
+  return c.json({ ok: true })
+})
+
+// 记工：今天谁干了多少件（单价没填就按单价表自动找）
+app.get('/wage-records', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  const mm = String(c.req.query('month') || now().slice(0, 7))
+  const worker = String(c.req.query('worker') || '')
+  const conds = ['month=?']
+  const b = [mm]
+  if (worker) { conds.push('worker=?'); b.push(worker) }
+  const { results } = await db.prepare(`SELECT * FROM wage_records WHERE ${conds.join(' AND ')} ORDER BY date DESC, id DESC LIMIT 500`).bind(...b).all()
+  const rows = (results || []).map((r) => ({
+    id: r.id, worker: r.worker, date: String(r.date || '').slice(0, 10), order_id: num(r.order_id),
+    item: r.item || '', process: r.process || '', qty: num(r.qty), rate: num(r.rate),
+    amount: num(r.amount), note: r.note || '', by: r.by || ''
+  }))
+  const total = rows.reduce((s, r) => s + r.amount, 0)
+  return c.json({ ok: true, month: mm, rows, count: rows.length, total: Math.round(total * 100) / 100, text: rows.length ? `${mm} 记了 ${rows.length} 笔工，合计 ¥${Math.round(total * 100) / 100}` : `${mm} 还没记工` })
+})
+
+app.post('/wage-records', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await wageTable(db)
+  const list = Array.isArray(body.rows) && body.rows.length ? body.rows : [body]
+  if (list.length > 60) return c.json({ error: '一次最多记 60 条，多了分两次' }, 400)
+  const okList = []
+  const errs = []
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i] || {}
+    const worker = String(it.worker || '').trim()
+    if (!worker) { errs.push(`第 ${i + 1} 条没填工人`); continue }
+    const day = String(it.date || todayIso()).slice(0, 10)
+    const mm = day.slice(0, 7)
+    if (await isMonthLocked(db, mm)) { errs.push(`第 ${i + 1} 条：${mm} 已结账锁定，先解锁`); continue }
+    const qty = num(it.qty, 1)
+    if (qty <= 0) { errs.push(`第 ${i + 1} 条件数要大于 0`); continue }
+    let rate = num(it.rate)
+    if (!rate) {
+      const rt = await wageRateOf(db, worker, String(it.item || ''), String(it.process || ''))
+      rate = rt ? num(rt.rate) : 0
+    }
+    if (!rate) { errs.push(`第 ${i + 1} 条：没填单价，也找不到 ${worker} 的单价，去「单价表」加一条`); continue }
+    const amount = Math.round(qty * rate * 100) / 100
+    await db.prepare('INSERT INTO wage_records (worker, date, month, order_id, item, process, qty, rate, amount, note, by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(worker, day, mm, num(it.order_id), String(it.item || ''), String(it.process || ''), qty, rate, amount, String(it.note || ''), act(c), now()).run()
+    okList.push({ worker, date: day, amount })
+  }
+  if (!okList.length) return c.json({ error: errs.join('；') || '没记上' }, 400)
+  const sum = okList.reduce((s, r) => s + r.amount, 0)
+  await logAudit(db, '记工', okList[0].worker, `${okList.length} 条，合计 ¥${Math.round(sum * 100) / 100}`, '', act(c))
+  return c.json({ ok: true, added: okList.length, total: Math.round(sum * 100) / 100, errors: errs })
+})
+
+app.delete('/wage-records/:id', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  const id = num(c.req.param('id'))
+  const row = await db.prepare('SELECT * FROM wage_records WHERE id=?').bind(id).first()
+  if (!row) return c.json({ error: '这条记工找不到了' }, 404)
+  if (await isMonthLocked(db, String(row.month || ''))) return c.json({ error: '该月份已结账锁定，先解锁再改' }, 403)
+  await db.prepare('DELETE FROM wage_records WHERE id=?').bind(id).run()
+  await logAudit(db, '删记工', row.worker, `${row.date} ${row.qty}×${row.rate}=${row.amount}`, '', act(c))
+  return c.json({ ok: true })
+})
+
+// 月底工资表：每人应发多少、已发多少、还差多少
+async function payrollOf(db, mm) {
+  const { results: recs } = await db.prepare('SELECT worker, SUM(qty) q, SUM(amount) a, COUNT(*) n FROM wage_records WHERE month=? GROUP BY worker ORDER BY a DESC').bind(mm).all()
+  const { results: pays } = await db.prepare('SELECT worker, SUM(amount) a FROM wage_pays WHERE month=? GROUP BY worker').bind(mm).all()
+  const payMap = {}
+  for (const p of pays || []) payMap[p.worker] = num(p.a)
+  const { results: loans } = await db.prepare('SELECT staff, SUM(amount-COALESCE(used,0)-COALESCE(returned,0)) a FROM loans GROUP BY staff').all()
+  const loanMap = {}
+  for (const l of loans || []) if (num(l.a) > 0.005) loanMap[l.staff] = num(l.a)
+  const rows = (recs || []).map((r) => {
+    const due = Math.round(num(r.a) * 100) / 100
+    const paid = Math.round((payMap[r.worker] || 0) * 100) / 100
+    return {
+      worker: r.worker, qty: num(r.q), cnt: num(r.n), due,
+      paid, left: Math.round((due - paid) * 100) / 100,
+      advance: Math.round((loanMap[r.worker] || 0) * 100) / 100
+    }
+  })
+  const total = rows.reduce((s, r) => s + r.due, 0)
+  const paidTotal = rows.reduce((s, r) => s + r.paid, 0)
+  return { month: mm, rows, total: Math.round(total * 100) / 100, paid_total: Math.round(paidTotal * 100) / 100, left_total: Math.round((total - paidTotal) * 100) / 100, people: rows.length }
+}
+
+app.get('/payroll', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  const mm = String(c.req.query('month') || now().slice(0, 7))
+  const p = await payrollOf(db, mm)
+  const locked = await isMonthLocked(db, mm)
+  const unpaid = p.rows.filter((r) => r.left > 0.005)
+  const text = !p.rows.length
+    ? `${mm} 还没有记工记录。先在下面「记一笔工」填：今天谁、干了什么活、多少件。`
+    : `${mm} ${p.people} 人记工，应发 ¥${p.total}，已发 ¥${p.paid_total}，还差 ¥${p.left_total}` + (unpaid.length ? `（${unpaid.map((r) => r.worker).join('、')} 还没发完）` : '，都发完了 ✓')
+  return c.json({ ok: true, ...p, locked, unpaid_cnt: unpaid.length, text })
+})
+
+// 发工资：写一笔现金支出（ref_type='wage'），并记到工资表
+app.post('/payroll/pay', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await wageTable(db)
+  const mm = String(body.month || now().slice(0, 7))
+  if (await isMonthLocked(db, mm)) return c.json({ error: `${mm} 已结账锁定，先解锁再发工资` }, 403)
+  const workers = Array.isArray(body.workers) && body.workers.length ? body.workers.map(String) : (body.worker ? [String(body.worker)] : [])
+  if (!workers.length) return c.json({ error: '要发谁的工资' }, 400)
+  const day = String(body.date || todayIso()).slice(0, 10)
+  const acc = num(body.account_id) || (await defaultAccountId(db))
+  const done = []
+  for (const w of workers) {
+    const { results: recs } = await db.prepare('SELECT SUM(amount) a FROM wage_records WHERE month=? AND worker=?').bind(mm, w).all()
+    const due = Math.round(num(recs && recs[0] && recs[0].a) * 100) / 100
+    const { results: pays } = await db.prepare('SELECT SUM(amount) a FROM wage_pays WHERE month=? AND worker=?').bind(mm, w).all()
+    const paid = num(pays && pays[0] && pays[0].a)
+    const left = Math.round((due - paid) * 100) / 100
+    if (left <= 0.005) continue
+    const amt = body.amount && workers.length === 1 ? Math.min(num(body.amount), left) : left
+    if (amt <= 0) continue
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,'工资',?,?,?,1,?)")
+      .bind(amt, `${w} ${mm} 计件工资`, act(c), acc, stampOf(day)).run()
+    await db.prepare('INSERT INTO wage_pays (month, worker, amount, account_id, note, by, created_at) VALUES (?,?,?,?,?,?,?)')
+      .bind(mm, w, amt, acc, String(body.note || ''), act(c), stampOf(day)).run()
+    done.push({ worker: w, amount: amt })
+  }
+  if (!done.length) return c.json({ error: '这几个人这个月的工资都已经发过了' }, 400)
+  const sum = done.reduce((s, d) => s + d.amount, 0)
+  await logAudit(db, '发工资', done.map((d) => d.worker).join('、'), `${mm} 共 ¥${Math.round(sum * 100) / 100}`, '', act(c))
+  return c.json({ ok: true, paid: done, total: Math.round(sum * 100) / 100 })
+})
+
+app.get('/payroll-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const mm = String(c.req.query('month') || now().slice(0, 7))
+  const base = new URL(c.req.url).origin
+  const t = await sigOf(saved, 'payroll', 'wage:' + mm)
+  return c.json({ ok: true, month: mm, url: `${base}/payroll-print?month=${mm}&t=${t}` })
+})
+
+app.get('/payroll-print', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  const mm = String(c.req.query('month') || now().slice(0, 7))
+  const t = String(c.req.query('t') || '')
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const good = t && t === (await sigOf(saved, 'payroll', 'wage:' + mm))
+  if (!good) return c.html(a4Page({ title: '链接已失效', body: '<h1>链接已失效</h1><p>工资单链接是绑月份的，月份变了或链接被改过就打不开了。回小程序重新点「打工资单」。</p>' }))
+  const p = await payrollOf(db, mm)
+  const head = await getTitle(db)
+  const money = (n) => Number(n || 0).toFixed(2)
+  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n">${r.cnt}</td><td class="n">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${money(r.advance)}</td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell"></td></tr>`).join('')
+  const pageBody = `<h1>计件工资表</h1>
+<div class="meta"><span>${escHtml(head.title || '')}</span><span>月份：${mm}</span><span>人数：${p.people}</span></div>
+<table><thead><tr><th>工人</th><th class="n">笔数</th><th class="n">件数</th><th class="n">应发</th><th class="n">未还借支</th><th class="n">已发</th><th class="n">还差</th><th>签字</th></tr></thead>
+<tbody>${trs || '<tr><td colspan="8">这个月没有记工记录</td></tr>'}</tbody>
+<tfoot><tr class="total"><td>合计</td><td class="n">${p.rows.reduce((s, r) => s + r.cnt, 0)}</td><td class="n">${p.rows.reduce((s, r) => s + r.qty, 0)}</td><td class="n">${money(p.total)}</td><td></td><td class="n">${money(p.paid_total)}</td><td class="n">${money(p.left_total)}</td><td></td></tr></tfoot></table>
+<p class="tip">算法：应发 = 本月每笔记工（件数 × 单价）之和；已发 = 本月发工资记的支出；还差 = 应发 − 已发。未还借支另列，发工资时可商量从里面扣。</p>`
+  return c.html(a4Page({ title: `${mm} 计件工资表`, body: pageBody, sign: '<span>制表人</span><span>发款人</span><span>日期</span>' }))
 })
 
 // 这周的钱够不够付：未来 N 天要付的 vs 账上现金 + 该收的

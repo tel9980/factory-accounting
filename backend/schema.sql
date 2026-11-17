@@ -425,3 +425,46 @@ CREATE TABLE IF NOT EXISTS quotes (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status, created_at);
+
+-- 计件工资：单价表 / 记工 / 发放
+CREATE TABLE IF NOT EXISTS wage_rates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  worker TEXT NOT NULL DEFAULT '',
+  item TEXT DEFAULT '',
+  process TEXT DEFAULT '',
+  rate REAL NOT NULL DEFAULT 0,
+  unit TEXT DEFAULT '件',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wage_rate_worker ON wage_rates(worker);
+
+CREATE TABLE IF NOT EXISTS wage_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  worker TEXT NOT NULL DEFAULT '',
+  date TEXT NOT NULL,
+  month TEXT,
+  order_id INTEGER DEFAULT 0,
+  item TEXT DEFAULT '',
+  process TEXT DEFAULT '',
+  qty REAL NOT NULL DEFAULT 0,
+  rate REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL DEFAULT 0,
+  note TEXT DEFAULT '',
+  by TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wage_rec_month ON wage_records(month);
+CREATE INDEX IF NOT EXISTS idx_wage_rec_worker ON wage_records(worker);
+
+CREATE TABLE IF NOT EXISTS wage_pays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT NOT NULL,
+  worker TEXT NOT NULL DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  account_id INTEGER DEFAULT 0,
+  note TEXT DEFAULT '',
+  by TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);

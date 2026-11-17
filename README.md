@@ -851,11 +851,20 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 247. ✅ **供应商比价**：`GET /supply-price?party=&amount=&kw=`——不传 party 出「各供应商采购额排行」（笔数/合计/平均/最高/最低/最近哪天）；传 party 出这家历史 30 笔，并按「除本笔外的历史均价」算这次偏高偏低：偏差 <10% 说「和平时差不多」，否则说「比平时贵 50%（平均 ¥4000）——是不是涨了价，或者这批料好一点？」或「便宜 12%，可以问一句为什么」。前端：应付录单时供应商/金额离开输入框就提示（`🏷` 一行），报表页「🏷 供应商比价」看全量。
 248. ✅ **员工只看自己录的单**：`orders`/`payables` 加 `created_by`（录单时写 `act(c)`，即「老板」/「员工·小王」）；设置 → 员工权限 加开关「员工只看自己录的单」（`settings.staff_self_only`），开了以后员工在 `/ar` `/ap` 列表里只看到 `created_by` 等于自己的单据（`selfOnly(c)` 统一判定，`GET /staff-perms` 返回 `self_only/self_note`）；汇总与报表仍是整本账，利润相关接口本来就对员工 403。**已知取舍**：开关打开后，员工看不到启用前录的单（那些行 `created_by` 为空），适合「新来的业务员只跑自己的客户」这种用法。实测：老板记 2 单、员工记 1 单 → 员工列表 1 条、老板 4 条；关掉开关员工立刻恢复看全部。
 
+249. ✅ **计件工资：先记工，月底算钱，发工资，打工资单**：以前只能记一笔「工资 8000」的支出——知道花了多少，不知道钱花在谁身上、贵在哪。现在多了一条完整链路：
+   - **单价表**（`wage_rates`）：谁 + 什么活（产品/工序，可空=通用）+ 一件多少钱 + 单位（件/米/平方/套/小时/单）。工人写 `*` 就是所有人的通用单价。
+   - **记工**（`wage_records`）：`POST /wage-records` 支持单条或批量（一次最多 60 条），只填「工人 + 件数」时单价自动按单价表找（工人+产品+工序 全对 > 工人+产品 > 工人通用 > 通用），算不准会明确说「找不到 小王 的单价，去单价表加一条」。记工受月结锁定限制。
+   - **工资表**（`GET /payroll?month=`）：按人汇总 笔数/件数/应发/已发/还差，顺便列出**未还借支**（`loans` 的 `amount-used-returned`），提醒「可以从这次工资里扣」。
+   - **发工资**（`POST /payroll/pay`）：可以单个发也可以「全部发完」，写一笔现金支出（`ref_type='expense'`、分类「工资」、备注「小王 2026-11 计件工资」），**所以净利、现金流、支出结构里都算得进去**，同时记 `wage_pays` 便于对账；已发完的再点会提示「这几个人这个月的工资都已经发过了」。
+   - **工资单**（`GET /payroll-link` → `/payroll-print?month=&t=`）：A4 计件工资表，每人一行含件数/应发/未还借支/已发/还差 + 签字栏，签名绑月份（改月份或改链接即失效）。
+   - 员工口令看不到工资（`denyStaff` 已加 `/^\/(payroll|wage-)/`）。
+   - 实测：单价 小王·切割 2.5 元/件、通用 1 元/件 → 小王 40 件 = 100 元、小李 30 件 = 30 元（自动走通用价）→ 工资表 130；「全部发完」后写两条工资支出，工资表变成「已发 130，都发完了 ✓」；再点发工资 400「都已经发过了」；接着记一单 10000/成本 4000，`/month-report`、`/kpi`、`/dashboard` 的净利全部 = 5900（=10000−4000−100 工资），证明工资真的进了成本口径。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 362 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 372 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1068,6 +1077,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /trash`
 - `POST /trash/:id/restore`
 
+**wage-rates**（3）
+
+- `DELETE /wage-rates/:id`
+- `GET /wage-rates`
+- `POST /wage-rates`
+
+**wage-records**（3）
+
+- `DELETE /wage-records/:id`
+- `GET /wage-records`
+- `POST /wage-records`
+
 **writeoffs**（2）
 
 - `DELETE /writeoffs/:id`
@@ -1115,6 +1136,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 - `GET /onboarding`
 - `POST /onboarding/dismiss`
+
+**payroll**（2）
+
+- `GET /payroll`
+- `POST /payroll/pay`
 
 **recon-confirm**（2）
 
@@ -1171,7 +1197,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（198）
+**其它（单个接口）**（200）
 
 - `GET /`
 - `GET /access-guide`
@@ -1288,6 +1314,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /party-merge`
 - `POST /pay-batch`
 - `GET /pay-speed`
+- `GET /payroll-link`
+- `GET /payroll-print`
 - `GET /pipeline`
 - `POST /pipeline-summary`
 - `GET /price-anomaly`

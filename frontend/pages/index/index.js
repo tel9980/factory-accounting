@@ -72,6 +72,8 @@ const FEATS = [
 
 Page({
   data: {
+    pw: null, pw_month: '', pw_recs: [], pw_rates: null, pw_worker: '', pw_date: '', pw_item: '', pw_process: '', pw_qty: '', pw_rate: '',
+    wr_worker: '', wr_item: '', wr_rate: '', wr_unit: '件',
     bank_layout: '', bank_skip: 0,
     bv: null,
     mg: null, mg_month: '',
@@ -6656,6 +6658,101 @@ Page({
     this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
   },
   closeSupplyBook() { this.setData({ spb: null }) },
+  // ===== 计件工资：记工 → 工资表 → 发工资 → 工资单 =====
+  loadPayroll() {
+    const mm = String(this.data.pw_month || '').trim() || dayOf().slice(0, 7)
+    this.req({ url: API_BASE + '/payroll?month=' + mm, success: (r) => {
+      const d = r.data || {}
+      if (!d.ok) return wx.showToast({ title: d.error || '没取到工资表', icon: 'none' })
+      this.setData({ pw: d, pw_month: d.month })
+      this.loadWageRecs(d.month)
+    } })
+  },
+  closePayroll() { this.setData({ pw: null, pw_recs: [] }) },
+  onPwMonth(e) { this.setData({ pw_month: e.detail.value }) },
+  onPwField(e) { this.setData({ [e.currentTarget.dataset.k]: e.detail.value }) },
+  loadWageRecs(mm) {
+    const m = mm || this.data.pw_month || dayOf().slice(0, 7)
+    this.req({ url: API_BASE + '/wage-records?month=' + m, silent: true, success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ pw_recs: d.rows || [] }) } })
+  },
+  addWageRec() {
+    const d = this.data
+    const worker = String(d.pw_worker || '').trim()
+    if (!worker) return wx.showToast({ title: '先填工人姓名', icon: 'none' })
+    const body = {
+      worker, date: String(d.pw_date || '').trim() || dayOf(),
+      item: String(d.pw_item || ''), process: String(d.pw_process || ''),
+      qty: Number(d.pw_qty) || 1, rate: Number(d.pw_rate) || 0
+    }
+    this.req({ url: API_BASE + '/wage-records', method: 'POST', data: body, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showModal({ title: '没记上', content: x.error || '', showCancel: false })
+      wx.showToast({ title: '记上了 ¥' + x.total })
+      this.setData({ pw_worker: '', pw_item: '', pw_process: '', pw_qty: '', pw_rate: '' })
+      this.loadPayroll()
+    } })
+  },
+  delWageRec(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({ title: '删掉这条记工？', content: '删了工资表会跟着变。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/wage-records/' + id, method: 'DELETE', success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没删掉', icon: 'none' })
+        this.loadPayroll()
+      } })
+    } })
+  },
+  payWorker(e) { this._payWage([e.currentTarget.dataset.w]) },
+  payAllWorkers() {
+    const p = this.data.pw
+    if (!p) return
+    const list = (p.rows || []).filter((r) => r.left > 0.005).map((r) => r.worker)
+    if (!list.length) return wx.showToast({ title: '这个月都发完了', icon: 'none' })
+    this._payWage(list)
+  },
+  _payWage(workers) {
+    const mm = this.data.pw_month
+    wx.showModal({ title: '发工资', content: '给 ' + workers.join('、') + ' 发 ' + mm + ' 的工资？会记一笔现金支出（分类「工资」）。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/payroll/pay', method: 'POST', data: { month: mm, workers }, success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showModal({ title: '没发成', content: d.error || '', showCancel: false })
+        wx.showToast({ title: '发了 ¥' + d.total })
+        this.loadPayroll()
+        if (this.loadHomeData) this.loadHomeData()
+      } })
+    } })
+  },
+  printPayroll() {
+    const mm = this.data.pw_month || dayOf().slice(0, 7)
+    this.req({ url: API_BASE + '/payroll-link?month=' + mm, success: (r) => {
+      const d = r.data || {}
+      if (!d.ok || !d.url) return wx.showToast({ title: '没生成链接', icon: 'none' })
+      wx.setClipboardData({ data: d.url, success: () => wx.showModal({ title: '工资单链接已复制', content: '发到电脑上打开就能打印或存 PDF（' + mm + '）。', showCancel: false }) })
+    } })
+  },
+  loadWageRates() {
+    this.req({ url: API_BASE + '/wage-rates', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ pw_rates: d }) } })
+  },
+  closeWageRates() { this.setData({ pw_rates: null }) },
+  onWrField(e) { this.setData({ [e.currentTarget.dataset.k]: e.detail.value }) },
+  addWageRate() {
+    const d = this.data
+    const worker = String(d.wr_worker || '').trim()
+    const rate = Number(d.wr_rate) || 0
+    if (!worker) return wx.showToast({ title: '填工人姓名（通用写 *）', icon: 'none' })
+    if (rate <= 0) return wx.showToast({ title: '一件多少钱要大于 0', icon: 'none' })
+    this.req({ url: API_BASE + '/wage-rates', method: 'POST', data: { worker, item: String(d.wr_item || ''), rate, unit: String(d.wr_unit || '件') }, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showToast({ title: x.error || '没加上', icon: 'none' })
+      this.setData({ wr_item: '', wr_rate: '' })
+      this.loadWageRates()
+    } })
+  },
+  delWageRate(e) {
+    this.req({ url: API_BASE + '/wage-rates/' + e.currentTarget.dataset.id, method: 'DELETE', success: () => this.loadWageRates() })
+  },
   copySupplyBook() {
     const d = this.data.spb
     if (!d) return

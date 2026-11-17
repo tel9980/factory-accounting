@@ -2149,6 +2149,72 @@
           <button class="btn ghost" size="mini" bindtap="closeSupplyBook">收起</button>
         </view>
       </block>
+      <view class="tip">🧮 计件工资（记工 → 月底算钱 → 发工资 → 打工资单）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="月份 YYYY-MM（留空本月）" value="{{pw_month}}" bindinput="onPwMonth" bindconfirm="loadPayroll"/>
+        <button class="btn half" size="mini" bindtap="loadPayroll">看工资表</button>
+      </view>
+      <block wx:if="{{pw}}">
+        <view class="box">
+          <view class="row1"><text class="nm">{{pw.month}} 应发合计</text><text class="amt">¥{{pw.total}}</text></view>
+          <view class="row2">{{pw.text}}</view>
+          <view class="row2" wx:if="{{pw.locked}}">🔒 这个月已结账锁定，记工和发工资要先解锁</view>
+        </view>
+        <view class="item" wx:for="{{pw.rows}}" wx:key="worker">
+          <view class="row1"><text class="nm">{{item.worker}}</text><text class="amt {{item.left>0?'red':''}}">应发 ¥{{item.due}}</text></view>
+          <view class="row2">{{item.cnt}} 笔 · {{item.qty}} 件 · 已发 ¥{{item.paid}}{{item.left>0?' · 还差 ¥'+item.left:' · 发完了 ✓'}}</view>
+          <view class="row2" wx:if="{{item.advance>0}}">另外还欠借支 ¥{{item.advance}}（可以从这次工资里扣）</view>
+          <view class="btns"><button size="mini" wx:if="{{item.left>0}}" bindtap="payWorker" data-w="{{item.worker}}">发工资</button></view>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="payAllWorkers">💰 全部发完</button>
+          <button class="btn ghost" size="mini" bindtap="printPayroll">🖨 打工资单</button>
+          <button class="btn ghost" size="mini" bindtap="closePayroll">收起</button>
+        </view>
+        <view class="box">
+          <view class="row1"><text class="nm">记一笔工</text><text class="amt">{{pw.month}}</text></view>
+          <view class="frow">
+            <input class="inp half" placeholder="工人姓名" value="{{pw_worker}}" bindinput="onPwField" data-k="pw_worker"/>
+            <input class="inp half" placeholder="日期（留空今天）" value="{{pw_date}}" bindinput="onPwField" data-k="pw_date"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" placeholder="产品 / 什么活（可空）" value="{{pw_item}}" bindinput="onPwField" data-k="pw_item"/>
+            <input class="inp half" placeholder="工序（可空）" value="{{pw_process}}" bindinput="onPwField" data-k="pw_process"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" type="digit" placeholder="件数" value="{{pw_qty}}" bindinput="onPwField" data-k="pw_qty"/>
+            <input class="inp half" type="digit" placeholder="单价（留空按单价表）" value="{{pw_rate}}" bindinput="onPwField" data-k="pw_rate"/>
+          </view>
+          <view class="frow">
+            <button class="btn" size="mini" bindtap="addWageRec">＋ 记上</button>
+            <button class="btn ghost half" size="mini" bindtap="loadWageRates">单价表</button>
+          </view>
+        </view>
+        <view class="item" wx:for="{{pw_recs}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.worker}}{{item.item?' · '+item.item:''}}{{item.process?' · '+item.process:''}}</text><text class="amt">¥{{item.amount}}</text></view>
+          <view class="row2">{{item.date}} · {{item.qty}} × {{item.rate}} 元</view>
+          <view class="btns"><button size="mini" class="ghost" bindtap="delWageRec" data-id="{{item.id}}">删</button></view>
+        </view>
+      </block>
+      <block wx:if="{{pw_rates}}">
+        <view class="box"><view class="row2">{{pw_rates.text}}</view></view>
+        <view class="item" wx:for="{{pw_rates.rows}}" wx:key="id">
+          <view class="row1"><text class="nm">{{item.worker}}{{item.item?' · '+item.item:''}}{{item.process?' · '+item.process:''}}</text><text class="amt">{{item.rate}} 元/{{item.unit}}</text></view>
+          <view class="btns"><button size="mini" class="ghost" bindtap="delWageRate" data-id="{{item.id}}">删</button></view>
+        </view>
+        <view class="frow">
+          <input class="inp half" placeholder="工人（* = 通用）" value="{{wr_worker}}" bindinput="onWrField" data-k="wr_worker"/>
+          <input class="inp half" placeholder="产品（可空）" value="{{wr_item}}" bindinput="onWrField" data-k="wr_item"/>
+        </view>
+        <view class="frow">
+          <input class="inp half" type="digit" placeholder="一件多少钱" value="{{wr_rate}}" bindinput="onWrField" data-k="wr_rate"/>
+          <input class="inp half" placeholder="单位（件 / 米 / 平方）" value="{{wr_unit}}" bindinput="onWrField" data-k="wr_unit"/>
+        </view>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="addWageRate">＋ 加单价</button>
+          <button class="btn ghost half" size="mini" bindtap="closeWageRates">收起单价表</button>
+        </view>
+      </block>
       <view class="tip">🎚 信用分档（谁可以宽限、谁只做现款）</view>
       <view class="frow">
         <button class="btn half" size="mini" bindtap="loadCreditBook" data-type="ar">看客户</button>
