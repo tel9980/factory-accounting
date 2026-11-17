@@ -5257,6 +5257,155 @@ async function previewImport(db, type, rawRows) {
     text: parts.join('，') + '。确认没问题再点「确认导入」。' }
 }
 
+// ===== Excel 改完再导回来：先逐行对比，你勾选要改的，才写库 =====
+const RI_FIELDS = {
+  ar: { table: 'orders', party: 'customer', label: { customer: '客户', item_name: '产品/项目', price: '金额', cost: '成本', due_date: '约定收款日', operator: '经手人' } },
+  ap: { table: 'payables', party: 'supplier', label: { supplier: '供应商', amount: '金额', remark: '备注', due_date: '约定付款日', operator: '经手人', category: '分类' } }
+}
+const RI_HEAD = {
+  id: /^(单号|编号|id|单据号)$/i,
+  customer: /^(客户|客户名)$/, supplier: /^(供应商|单位)$/, item_name: /^(产品|产品\/项目|项目|品名)$/,
+  price: /^(金额|应收金额)$/, amount: /^(金额|应付金额)$/, cost: /^(成本|材料·外协|材料外协成本)$/,
+  due_date: /^(到期日|约定收款日|约定付款日|收付款日)$/, operator: /^(经手人|业务员)$/,
+  remark: /^(备注|说明)$/, category: /^(分类|类别)$/
+}
+function riNormDay(v) {
+  const s = String(v == null ? '' : v).trim()
+  if (!s) return ''
+  const m = s.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/) || s.match(/^(\d{1,2})[-/.](\d{1,2})$/)
+  if (m && m[3]) return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`
+  return s.slice(0, 10)
+}
+// 把导回来的表解析成 {changes, head_map, skipped}
+async function reimportPlan(db, type, rows) {
+  const conf = RI_FIELDS[type]
+  if (!conf) return { error: '只支持 ar / ap' }
+  const all = (rows || []).map((r) => (r || []).map((c) => String(c == null ? '' : c).trim()))
+  // 找表头：前 3 行里出现「单号/客户/供应商/金额」这类列名
+  let hIdx = -1
+  for (let i = 0; i < Math.min(3, all.length); i++) {
+    const cells = all[i]
+    const hits = cells.filter((x) => Object.values(RI_HEAD).some((re) => re.test(x))).length
+    if (hits >= 2) { hIdx = i; break }
+  }
+  let map = null
+  let data = all
+  if (hIdx >= 0) {
+    map = {}
+    all[hIdx].forEach((h, i) => {
+      for (const [k, re] of Object.entries(RI_HEAD)) if (map[k] == null && re.test(h)) map[k] = i
+    })
+    data = all.slice(hIdx + 1)
+  } else {
+    // 没表头就按导出顺序：单号, 日期, 客户/供应商, 产品, 金额, 已收/已付, 未收/未付, 状态, 进度, 到期日, 经手人
+    map = { id: 0, customer: 2, supplier: 2, item_name: 3, price: 4, amount: 4, due_date: 8, operator: 9 }
+  }
+  if (map.id == null) return { error: '这个表里没有「单号」列。请先在「导出」里导出带单号的表，改完再导回来（不要另建新表）' }
+  const changes = []
+  const skipped = []
+  const ids = []
+  for (const r of data) {
+    const id = num(r[map.id])
+    if (!id) { if (r.join('').trim()) skipped.push({ reason: '没有单号', row: r.slice(0, 4).join(' / ') }); continue }
+    ids.push(id)
+  }
+  if (!ids.length) return { error: '这个表里没认出任何单据号。请用「导出」下载的表改，第一列是单号' }
+  const uniq = [...new Set(ids)]
+  const ph = uniq.map(() => '?').join(',')
+  const q = await db.prepare(`SELECT * FROM ${conf.table} WHERE id IN (${ph})`).bind(...uniq).all()
+  const byId = {}
+  for (const row of (q.results || [])) byId[num(row.id)] = row
+  const today = todayIso()
+  for (const r of data) {
+    const id = num(r[map.id])
+    if (!id) continue
+    const row = byId[id]
+    if (!row) { changes.push({ id, party: '', state: 'err', err: `单号 ${id} 在账上找不到`, diffs: [] }); continue }
+    const set = {}
+    const diffs = []
+    const pushIf = (f, raw, cast) => {
+      if (map[f] == null) return
+      const to = cast(String(r[map[f]] == null ? '' : r[map[f]]))
+      const from = cast(row[f] == null ? '' : row[f])
+      if (String(to) !== String(from)) { set[f] = to; diffs.push({ f, label: conf.label[f] || f, from, to }) }
+    }
+    const asNum = (v) => round2(num(v))
+    const asText = (v) => String(v == null ? '' : v).trim()
+    const asDay = (v) => riNormDay(v)
+    if (type === 'ar') {
+      pushIf('customer', r[map.customer], asText)
+      pushIf('item_name', r[map.item_name], asText)
+      pushIf('price', r[map.price], asNum)
+      if (map.cost != null) pushIf('cost', r[map.cost], asNum)
+      pushIf('due_date', r[map.due_date], asDay)
+      pushIf('operator', r[map.operator], asText)
+    } else {
+      pushIf('supplier', r[map.supplier], asText)
+      pushIf('amount', r[map.amount], asNum)
+      pushIf('remark', r[map.remark], asText)
+      pushIf('due_date', r[map.due_date], asDay)
+      pushIf('operator', r[map.operator], asText)
+      if (map.category != null) pushIf('category', r[map.category], asText)
+    }
+    const mon = String((row.created_at || '').slice(0, 7))
+    const locked = await isMonthLocked(db, mon)
+    const paid = round2(num(row.paid) + num(row.written_off))
+    let state = 'ok'
+    let err = ''
+    if (!diffs.length) state = 'same'
+    else if (locked) { state = 'locked'; err = `${mon} 已结账锁定，先解锁再改` }
+    else {
+      const newAmt = set.price != null ? num(set.price) : set.amount != null ? num(set.amount) : num(type === 'ar' ? row.price : row.amount)
+      if (newAmt < paid - 0.005) { state = 'err'; err = `金额不能低于已收(付) ${round2(paid)}` }
+      else if (newAmt < 0) { state = 'err'; err = '金额不能是负数' }
+      else if (Object.keys(set).some((k) => (k === 'customer' || k === 'supplier') && !set[k])) { state = 'err'; err = '客户/供应商不能改成空' }
+    }
+    changes.push({ id, party: type === 'ar' ? row.customer : row.supplier, item: type === 'ar' ? row.item_name : (row.remark || ''), day: today, state, err, diffs, set })
+  }
+  const cnt = (s) => changes.filter((x) => x.state === s).length
+  const out = {
+    ok: true, type, rows: changes.length, change_cnt: cnt('ok'), same_cnt: cnt('same'),
+    locked_cnt: cnt('locked'), err_cnt: cnt('err'), skipped,
+    changes: changes.filter((x) => x.state !== 'same').slice(0, 300),
+    head_map: map
+  }
+  out.text = changes.length === 0 ? '这个表里没有可对比的行'
+    : out.change_cnt === 0 && out.locked_cnt === 0 && out.err_cnt === 0 ? `共 ${out.rows} 行，都和账上一样，没有要改的。`
+      : `共 ${out.rows} 行：${out.change_cnt} 行有变化、${out.same_cnt} 行没变${out.locked_cnt ? `、${out.locked_cnt} 行被结账锁住` : ''}${out.err_cnt ? `、${out.err_cnt} 行有问题` : ''}。`
+  return out
+}
+async function reimportApply(db, type, changes, by) {
+  const conf = RI_FIELDS[type]
+  let done = 0
+  const fails = []
+  for (const ch of changes || []) {
+    if (!ch || !num(ch.id)) continue
+    const set = ch.set || {}
+    const keys = Object.keys(set).filter((k) => conf.label[k])
+    if (!keys.length) continue
+    const row = await db.prepare(`SELECT * FROM ${conf.table} WHERE id=?`).bind(ch.id).first()
+    if (!row) { fails.push({ id: ch.id, err: '单号不存在' }); continue }
+    const mon = String((row.created_at || '').slice(0, 7))
+    if (await isMonthLocked(db, mon)) { fails.push({ id: ch.id, err: `${mon} 已结账锁定` }); continue }
+    const paid = round2(num(row.paid) + num(row.written_off))
+    const newAmt = set.price != null ? num(set.price) : set.amount != null ? num(set.amount) : num(type === 'ar' ? row.price : row.amount)
+    if (newAmt < paid - 0.005) { fails.push({ id: ch.id, err: `金额不能低于已收(付) ${paid}` }); continue }
+    const sets = []
+    const binds = []
+    const diffTxt = []
+    for (const k of keys) {
+      sets.push(`${k}=?`); binds.push(set[k])
+      diffTxt.push(`${conf.label[k]} ${row[k] == null ? '' : row[k]} → ${set[k]}`)
+    }
+    sets.push('rev=COALESCE(rev,0)+1')
+    binds.push(ch.id)
+    await db.prepare(`UPDATE ${conf.table} SET ${sets.join(', ')} WHERE id=?`).bind(...binds).run()
+    await logAudit(db, 'Excel 回改' + (type === 'ar' ? '应收' : '应付'), String(ch.id), diffTxt.join('；'), { ref_type: conf.table === 'orders' ? 'order' : 'payable', ref_id: num(ch.id) }, by)
+    done++
+  }
+  return { done, fails }
+}
+
 app.post('/import-xlsx', async (c) => {
   const body = await c.req.json()
   const type = String(body.type || 'ar')
@@ -5269,6 +5418,16 @@ app.post('/import-xlsx', async (c) => {
     return c.json({ error: '读不了这个 Excel：' + String(e.message || e) }, 400)
   }
   if (!rows.length) return c.json({ error: 'Excel 里没有数据行' }, 400)
+  // 导出表改完再导回来：先对比，用户勾选后才写库
+  if (type === 'ar_update' || type === 'ap_update') {
+    const t = type === 'ar_update' ? 'ar' : 'ap'
+    const plan = await reimportPlan(c.env.DB, t, rows)
+    if (plan.error) return c.json({ error: plan.error }, 400)
+    if (body.apply !== true) return c.json(plan)
+    const useList = Array.isArray(body.changes) && body.changes.length ? body.changes : plan.changes.filter((x) => x.state === 'ok')
+    const r = await reimportApply(c.env.DB, t, useList, act(c))
+    return c.json({ ok: true, type: t, rows: plan.rows, same_cnt: plan.same_cnt, locked_cnt: plan.locked_cnt, err_cnt: plan.err_cnt, applied: r.done, fails: r.fails, changes: plan.changes, skipped: plan.skipped, text: `改好了 ${r.done} 行${r.fails.length ? `，${r.fails.length} 行没改成` : ''}。` })
+  }
   // 对账：只核对不入账
   if (type === 'recon' || type === 'recon_ap') {
     let body2 = rows.slice()
@@ -11167,14 +11326,14 @@ app.get('/export', async (c) => {
   const db = c.env.DB
   const rows = []
   if (type === 'orders') {
-    rows.push(['日期', '客户', '产品/项目', '金额', '已收', '未收', '状态', '进度', '到期日', '经手人'])
+    rows.push(['单号', '日期', '客户', '产品/项目', '金额', '已收', '未收', '状态', '进度', '到期日', '经手人'])
     const { results } = await db.prepare('SELECT * FROM orders ORDER BY id').all()
     const st = (s) => (s == 2 ? '已交付' : s == 1 ? '加工中' : '待加工')
-    for (const o of results) rows.push([o.created_at.slice(0, 10), o.customer, o.item_name, o.price, o.paid, round2(o.price - o.paid), st(o.status), o.progress || '', (o.due_date || '').slice(0, 10), o.operator || ''])
+    for (const o of results) rows.push([o.id, o.created_at.slice(0, 10), o.customer, o.item_name, o.price, o.paid, round2(o.price - o.paid), st(o.status), o.progress || '', (o.due_date || '').slice(0, 10), o.operator || ''])
   } else if (type === 'payables') {
-    rows.push(['日期', '供应商', '金额', '已付', '未付', '分类', '备注', '约定付款日', '经手人'])
+    rows.push(['单号', '日期', '供应商', '金额', '已付', '未付', '分类', '备注', '约定付款日', '经手人'])
     const { results } = await db.prepare('SELECT * FROM payables ORDER BY id').all()
-    for (const p of results) rows.push([p.created_at.slice(0, 10), p.supplier, p.amount, p.paid, round2(p.amount - p.paid), p.category, p.remark, (p.due_date || '').slice(0, 10), p.operator || ''])
+    for (const p of results) rows.push([p.id, p.created_at.slice(0, 10), p.supplier, p.amount, p.paid, round2(p.amount - p.paid), p.category, p.remark, (p.due_date || '').slice(0, 10), p.operator || ''])
   } else {
     rows.push(['日期', '方向', '金额', '分类', '备注', '账户', '经手人'])
     const { results } = await db.prepare('SELECT * FROM ledger WHERE cash=1 ORDER BY id').all()

@@ -945,6 +945,25 @@
 
   <block wx:if="{{tab=='import'}}">
     <view class="form">
+      <view class="prev-h">📤 Excel 改完再导回来（批量改单，先对比再写库）</view>
+      <view class="tip">先在「报表 → 导出」下载带单号的表，在电脑上把金额、成本、到期日、经手人、备注改好，再传回来。系统只改有变化的行，而且会先把清单给你看。</view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="chooseReimport" data-t="ar">传应收表</button>
+        <button class="btn ghost" size="mini" bindtap="chooseReimport" data-t="ap">传应付表</button>
+      </view>
+      <block wx:if="{{ri}}">
+        <view class="tip">{{ri.text}}</view>
+        <view class="item" wx:for="{{ri.changes}}" wx:key="id" bindtap="toggleRi" data-i="{{index}}">
+          <view class="row1"><text class="nm">{{item.pick?'☑':'☐'}} 单号 {{item.id}} · {{item.party}}</text><text class="amt {{item.state=='ok'?'':'red'}}">{{item.state=='ok'?'要改':(item.state=='locked'?'锁着':(item.state=='err'?'有问题':'没变'))}}</text></view>
+          <view class="row2" wx:if="{{item.diffs.length}}"><text wx:for="{{item.diffs}}" wx:for-item="df" wx:key="f" class="ri-d">{{df.label}} {{df.from||'空'}} → {{df.to||'空'}}；</text></view>
+          <view class="row2 red" wx:if="{{item.err}}">{{item.err}}</view>
+        </view>
+        <view class="btns"><button class="btn" size="mini" bindtap="applyRi">把勾上的改掉</button><button class="btn ghost" size="mini" bindtap="closeRi">不改了</button></view>
+      </block>
+    </view>
+  </block>
+  <block wx:if="{{tab=='import'}}">
+    <view class="form">
       <view class="prev-h">📥 老账搬家（第一次用：把别的本子上的欠款一次搬进来）</view>
       <view class="tip">一行一笔：名字,金额[,成本][,开单日期]。日期留空就用下面填的统一日期；成本可以不填（毛利会偏高，之后能补）。</view>
       <button class="btn ghost" size="mini" bindtap="openMigrate">{{mg? '收起' : '开始搬'}}</button>

@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    ri: null, ri_type: 'ar_update', ri_b64: '',
     mat: null, mv: [], mv_open: '', mats_names: [], mt_name: '', mt_kind: 0, mt_qty: '', mt_price: '', mt_date: '', mt_note: '', mat_new: false, mat_unit: '个', mat_min: '',
     big: false,
     psv: null,
@@ -1330,6 +1331,55 @@ Page({
     })
   },
   // 直接选 .xlsx 文件导入（不用管编码，Excel 存什么都能读）
+  // ===== Excel 改完再导回来（批量改单：先对比，勾选后才写库）=====
+  chooseReimport(e) {
+    const t = e.currentTarget.dataset.t === 'ap' ? 'ap_update' : 'ar_update'
+    if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，用不了这个', icon: 'none' })
+    wx.chooseMessageFile({ count: 1, type: 'file', extension: ['xlsx', 'XLSX'], success: (r) => {
+      const f = (r.tempFiles || [])[0]
+      if (!f) return
+      if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+      wx.showLoading({ title: '对比中…' })
+      wx.getFileSystemManager().readFile({ filePath: f.path, encoding: 'base64', success: (fr) => {
+        this.req({ url: API_BASE + '/import-xlsx', method: 'POST', data: { type: t, b64: fr.data },
+          success: (res) => {
+            wx.hideLoading()
+            const d = res.data || {}
+            if (!d.ok) return wx.showModal({ title: '读不了这个表', content: d.error || '稍后再试', showCancel: false })
+            const rows = (d.changes || []).map((x) => Object.assign({}, x, { pick: x.state === 'ok' }))
+            this.setData({ ri: Object.assign({}, d, { changes: rows }), ri_type: t, ri_b64: fr.data })
+            if (!rows.length) wx.showToast({ title: '都和账上一样，不用改', icon: 'none' })
+          },
+          fail: () => wx.hideLoading() })
+      } })
+    } })
+  },
+  toggleRi(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const rows = (this.data.ri && this.data.ri.changes || []).slice()
+    if (!rows[i] || rows[i].state !== 'ok') return
+    rows[i].pick = !rows[i].pick
+    this.setData({ 'ri.changes': rows })
+  },
+  closeRi() { this.setData({ ri: null, ri_b64: '' }) },
+  applyRi() {
+    const d = this.data.ri
+    if (!d) return
+    const pick = (d.changes || []).filter((x) => x.pick && x.state === 'ok')
+    if (!pick.length) return wx.showToast({ title: '没勾要改的行', icon: 'none' })
+    wx.showModal({ title: '确认改这 ' + pick.length + ' 行？', content: '只改勾上的，别的行一分不动；改完在「编辑留痕」里能看到改了哪几处。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/import-xlsx', method: 'POST', once: 'applyRi',
+        data: { type: this.data.ri_type, b64: this.data.ri_b64, apply: true, changes: pick.map((x) => ({ id: x.id, set: x.set })) },
+        success: (res) => {
+          const x = res.data || {}
+          if (!x.ok) return wx.showModal({ title: '没改成', content: x.error || '稍后再试', showCancel: false })
+          wx.showToast({ title: x.text || '改好了', icon: 'success' })
+          this.setData({ ri: null })
+          this.loadAr(); this.loadAp(); this.loadArSummary()
+        } })
+    } })
+  },
   chooseXlsxFile() {
     const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
     const t = types[this.data.import_type] || 'ar'
