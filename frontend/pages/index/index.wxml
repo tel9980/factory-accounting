@@ -2315,18 +2315,21 @@
       <button class="btn" size="mini" bindtap="saveTerm">保存账期</button>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadReconCal">📅 对账日历</button>
-        <text class="tip" wx:if="{{rc}}">{{rc.advice}}</text>
+        <button class="btn ghost" size="mini" bindtap="rcAll" wx:if="{{rc && (rc.today_count || rc.overdue_count)}}">一键复制 {{rc.today_count + rc.overdue_count}} 家话术</button>
       </view>
+      <view class="aline {{rc && (rc.today_count || rc.overdue_count) ? 'warn' : 'ok'}}" wx:if="{{rc}}">{{rc.text}}</view>
       <view wx:if="{{rc}}">
         <view class="item" wx:for="{{rc.rows}}" wx:key="party">
           <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.state==='sent'?'ok':(item.state==='today'?'red':'warn')}}">{{item.state_text}}</text></view>
           <view class="row2">约定每月 {{item.day}} 号 · 现在欠 ¥{{item.left}}{{item.sent_at ? ' · 本月已发 ' + item.sent_at.slice(5) : ''}}</view>
-          <view class="btns" wx:if="{{item.state!=='sent'}}">
-            <button size="mini" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 发好了，记一笔</button>
+          <view class="btns">
+            <button size="mini" bindtap="copyRcText" data-t="{{item.send_text}}">复制话术</button>
+            <button size="mini" class="ghost" bindtap="openRcUrl" data-u="{{item.url}}">打印页</button>
+            <button size="mini" wx:if="{{item.state!=='sent'}}" bindtap="logStatementManual" data-p="{{item.party}}" data-k="{{item.kind}}">📄 发好了，记一笔</button>
           </view>
         </view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeReconCal">收起</button></view>
-        <view class="tip">到点没发的首页会提醒；发完用「📄 发好了，记一笔」登记，日历上就变成本月已发。</view>
+        <view class="tip">到点没发的首页会提醒；发完用「📄 发好了，记一笔」登记，日历上就变成本月已发。日历每进一次「单位」页自动刷新，不用手动点。</view>
       </view>
       <view class="item" wx:for="{{terms}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.recon_due?'red':''}}">{{item.due_text}}</text></view>

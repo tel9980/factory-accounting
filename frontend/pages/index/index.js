@@ -1360,7 +1360,7 @@ Page({
     } else if (t === 'flows') {
       this.loadFlows()
     } else if (t === 'contact') {
-      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTermGap(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal()
+      this.loadContacts(); this.loadProfiles(); this.loadPartyTerms(); this.loadTermGap(); this.loadTransfers(); this.loadAccounts(); this.loadTermDefault(); this.loadBackupTimeline(); this.loadPartyDups(); this.loadSeal(); this.loadReconCal()
       this.loadEditReqs()
     } else if (t === 'me') {
       this.loadHelpKw()
@@ -2436,6 +2436,37 @@ Page({
     })
   },
   closeStLog() { this.setData({ st_log: null }) },
+  copyRcText(e) {
+    const t = String(e.currentTarget.dataset.t || '')
+    if (!t) return wx.showToast({ title: '没有话术', icon: 'none' })
+    wx.setClipboardData({ data: t, success: () => wx.showToast({ title: '话术已复制', icon: 'none' }) })
+  },
+  openRcUrl(e) {
+    const u = String(e.currentTarget.dataset.u || '')
+    if (!u) return wx.showToast({ title: '链接没生成', icon: 'none' })
+    wx.setClipboardData({
+      data: u,
+      success: () => wx.showModal({
+        title: '打印链接已复制',
+        content: '在电脑浏览器里粘贴打开，就能打印或存 PDF 发给对方。',
+        showCancel: false
+      })
+    })
+  },
+  rcAll() {
+    const rc = this.data.rc || {}
+    const list = (rc.overdue_list || []).concat(rc.today_list || [])
+    if (!list.length) return wx.showToast({ title: '今天没有到点的', icon: 'none' })
+    const txt = list.map((r) => `【${r.party}】${r.left > 0 ? '欠 ¥' + r.left : '已结清'}\n${r.send_text}`).join('\n\n')
+    wx.setClipboardData({
+      data: txt,
+      success: () => wx.showModal({
+        title: '这 ' + list.length + ' 家的话术都复制了',
+        content: '在微信里按顺序粘贴发出去。发完回到这里点「发好了，记一笔」，日历就变成本月已发。',
+        showCancel: false
+      })
+    })
+  },
   logStatementManual(e) {
     const party = e.currentTarget.dataset.p
     const type = e.currentTarget.dataset.k === 'ap' ? 'ap' : 'ar'

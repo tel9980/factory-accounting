@@ -6316,16 +6316,39 @@ app.get('/recon-calendar', async (c) => {
       days_late: st === 'overdue' ? late : 0
     }
   })
+  // 每家现成的话术 + 签名打印链接（点一下就能发，不用再翻对账单页）
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const base = new URL(c.req.url).origin
+  const cntMap = {}
+  for (const x of ((await db.prepare("SELECT customer party, COUNT(*) n FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0) > 0 GROUP BY customer").all()).results || [])) cntMap['ar|' + norm(x.party)] = num(x.n)
+  for (const x of ((await db.prepare("SELECT supplier party, COUNT(*) n FROM payables WHERE amount-COALESCE(paid,0)-COALESCE(written_off,0) > 0 GROUP BY supplier").all()).results || [])) cntMap['ap|' + norm(x.party)] = num(x.n)
+  for (const r of rows) {
+    const n = num(cntMap[r.kind + '|' + norm(r.party)])
+    r.open_cnt = n
+    r.send_text = r.left > 0
+      ? `${r.party}，对一下账：到 ${today}，还有 ${n} 笔${r.kind === 'ap' ? '货款' : '加工费'}没结，共 ${r.left} 元。明细我发你对账单，方便的话今天核一下，有出入随时说。`
+      : `${r.party}，${today} 对一下账：这边账上你这边的款都结清了，你看有没有对不上的地方。`
+    const t = saved ? await sigOf(saved, r.party, r.kind) : ''
+    r.url = t ? `${base}/statement-print?type=${r.kind}&party=${encodeURIComponent(r.party)}&t=${t}` : ''
+  }
   const pick = (st) => rows.filter((r) => r.state === st)
   const todayList = pick('today'), over = pick('overdue'), soon = pick('upcoming')
   const pend = over.concat(todayList)
   const advice = pend.length
     ? '有 ' + pend.length + ' 家到点没发对账单（涉及欠款 ¥' + round2(pend.reduce((a, r) => a + r.left, 0)) + '），先发单再催，效果最好。'
     : (soon.length ? '今天没有到期的，最近 ' + soon.length + ' 家在这几天发单。' : '该发的对账单都发过了，节奏稳。')
+  const sumLeft = round2(pend.reduce((a, r) => a + r.left, 0))
+  const text = !rows.length
+    ? '还没有单位约好「每月几号发对账单」。在下面「账期」里给常来往的几家填个日子（比如每月 5 号），到日子这里就会列出来。'
+    : (pend.length
+      ? `今天该发对账单的有 ${todayList.length} 家、晚了的有 ${over.length} 家（涉及欠款 ¥${sumLeft}）。先发单再催，对方更容易认账。`
+      : `今天没有到点的，最近 ${soon.length} 家在这几天发单。`)
   return c.json({
     ok: true, today, rows, today_count: todayList.length, overdue_count: over.length,
-    upcoming_count: soon.length, pending_total: round2(pend.reduce((a, r) => a + r.left, 0)),
-    today_list: todayList, overdue_list: over, upcoming_list: soon, advice
+    upcoming_count: soon.length, pending_total: sumLeft,
+    today_list: todayList, overdue_list: over, upcoming_list: soon, advice, text,
+    count: rows.length, sent_count: rows.filter((r) => r.state === 'sent').length
   })
 })
 app.delete('/party-terms/:id', async (c) => {

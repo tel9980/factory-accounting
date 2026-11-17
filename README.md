@@ -1100,6 +1100,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 <!-- API-LIST:END -->
 
 217. ✅ **老账搬家（把别的本子上的欠款一次搬进来）**：从 Excel / 纸本 / 别的软件转过来时，不用一笔笔录——
+218. ✅ **对账日历真正接上了（每月几号发对账单）**：`party_terms.recon_day` 一直存在但日历面板只靠按钮手动点、从没自动出现——
+   - `/recon-calendar` 每行补齐 `open_cnt`（还欠几笔）、`send_text`（现成微信话术：「兴旺五金，对一下账：到 2026-11-17，还有 1 笔加工费没结，共 6000 元…」；已结清时改说「这边账上你这边的款都结清了」）、`url`（`sigOf(saved, party, kind)` 签名的 `/statement-print` 打印页）；顶部加 `text`（「今天该发对账单的有 1 家、晚了的有 1 家（涉及欠款 ¥9000）」/「还没有单位约好每月几号发对账单」）、`count`、`sent_count`；
+   - 前端「单位」页进入时自动 `loadReconCal()`（不用再点按钮），面板顶部一行结论、每家「复制话术 / 打印页 / 📄 发好了，记一笔」，到点未发的两家以上给「一键复制 N 家话术」（按 欠款+话术 拼好，依次粘贴即可）；
+   - 「记一笔」走 `POST /statement-log`（channel=对账日），同家同日同月只记一条，记完日历立刻变「本月已发」；首页提醒「N 家到点该发对账单了」沿用同一批数据。
    - `POST /migrate-preview {type:'ar'|'ap', text|rows, date, cost_mode:'none'|'pct', margin_pct}`：服务端解析文本（一行一笔：`名字,金额[,成本][,日期]`，逗号/制表符/空格都认，表头行自动跳过，第 3 格填日期也认），逐行给 `ok/error/dup/dup_text/known`，返回 `ar_total`/`ap_total`/`bad_count`/`dup_count`/`party_list` 与人话结论（「认出 3 笔客户还欠，共 ¥9800（3 家），其中 1 笔账上已经有了」）；**只读，不写库**；
    - 判重两道：批内重复（同一批里前面已有同名同额同日）+ 账上重复（`${table} 同名同额同日` 已存在）；
    - 成本处理：`cost_mode='none'` 不填（毛利偏高，返回 `tip` 提醒以后补）、`'pct'` 按毛利率估（`amount*(1-margin/100)`）；
