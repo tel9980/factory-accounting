@@ -900,11 +900,19 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - `/cash-bridge`（利润→现金桥接）在批量把 `substr(created_at,1,7)` 换成 `month` 列时，误伤了两条查询：`advances` 与 `writeoffs` 这两张表**没有** `month` 列，结果只要账上有预收款或核销过，打开这张桥接表就报 `D1_ERROR: no such column: month`（接口 500）。已改回 `substr(created_at,1,7)=?`，并写了个静态扫描脚本按「语句里出现的表是否有 month 列」复查了全库 `month` 用法，其余命中（`targets`/`wage_pays`/`month_report`）都是本来就有该列的表，无误。
    - 全站 89 个主要 GET 接口冒烟：除 3 个「本来就不存在、前端也没用」的名字（`/ap-summary`、`/ledger`、`/targets`，实际用的是 `/ar-summary`、`/expenses`、`/budgets`）之外全部 200；`/cash-bridge` 修好后 residual 归零（净利 13100 → 现金 2000，中间 9 项差额全部解释得清）。
 
+256. ✅ **员工只看自己负责的客户**：之前员工虽然有模块权限，但进应收/应付能看到**所有客户**欠多少钱、欠了多久——小厂里这属于敏感信息（谁欠钱、欠多少，往往是老板心里的事）。现在可以「分客户」：
+   - 新表 `party_staff(party PRIMARY KEY, staff, updated_at)`，`GET /party-staff`（列已分的 + 还没分的家数 + 可选的员工名）、`POST /party-staff {party, staff}`（`staff` 传空 = 取消分配）。写操作员工 403。
+   - 设置里多一个开关 `settings.staff_scope = 'all' | 'own'`（`POST /staff-perms` 收 `scope`，`GET /staff-perms` 回 `scope`/`scope_note`/`scope_count`）。开着且是员工口令时：`/ar`、`/ap`、`/party-groups` 自动加 `IN (SELECT party FROM party_staff WHERE staff=?)` 过滤（`scopeOwn(c)`，未登录/老板返回 `{on:false}`），员工只看得到分给他的那几家；老板和管理口径的汇总数字不变。
+   - 员工侧 `GET /party-staff` 只回自己负责的名单与一句「你负责 2 家：甲客户、钢材厂」；没分到任何客户时提示「老板还没给你分客户，你只能看到自己录的单」。
+   - 和上一批的「员工只看自己录的单」（`staff_self_only`，按 `created_by` 过滤）可以叠加：两个开关都开 = 只看自己录的、且是自己负责的客户的单。
+   - 前端：单位页「👤 客户分给员工」面板（已分的可换人 / 取消，没分的直接挑人）；设置 → 员工权限里多一行「☑ 员工只看自己负责的客户」。
+   - 实测：老板记甲客户 3000、乙客户 4000、钢材厂应付 2000 → 分甲客户和钢材厂给「小王」→ 开 scope → 员工口令访问 `/ar` 只有甲客户、`/ap` 只有钢材厂、`/party-groups` 只列甲客户；关掉 scope 立刻恢复看到两家；员工调 `POST /party-staff` 返回 403「这是老板才能用的功能」。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 384 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 386 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -1193,6 +1201,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 - `GET /onboarding`
 - `POST /onboarding/dismiss`
+
+**party-staff**（2）
+
+- `GET /party-staff`
+- `POST /party-staff`
 
 **payroll**（2）
 

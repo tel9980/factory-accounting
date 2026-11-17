@@ -1618,6 +1618,10 @@
             <view class="row1"><text class="nm">{{spm_self?'☑':'☐'}} 员工只看自己录的单</text><text class="amt">{{spm_self?'开着':'关着'}}</text></view>
             <view class="row2">开了以后，员工在应收/应付里只看得到自己录的单（汇总和报表仍是整本账）。</view>
           </view>
+          <view class="item" bindtap="toggleScopeOwn">
+            <view class="row1"><text class="nm">{{spm_scope=='own'?'☑':'☐'}} 员工只看自己负责的客户</text><text class="amt">{{spm_scope=='own'?'开着':'关着'}}</text></view>
+            <view class="row2">{{spm.scope_note||''}}（在哪家分给谁：单位页 → 👤 客户分给员工）</view>
+          </view>
           <view class="frow">
             <button class="btn" size="mini" bindtap="saveStaffPerms">存下来</button>
             <button class="btn ghost" size="mini" bindtap="closeStaffPerms">收起</button>
@@ -2906,6 +2910,36 @@
       <view class="tip">「补到期日」= 给这家现有还没结完的单，按账期天数补上到期日（这样首页 7 天内到期提醒才准）。</view>
     </view>
     <view class="form">
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="loadPartyStaff">👤 客户分给员工</button>
+      </view>
+      <block wx:if="{{psv}}">
+        <view class="box">
+          <view class="row1"><text class="nm">谁负责哪几家</text><text class="amt">{{psv.count}} 家已分</text></view>
+          <view class="row2">{{psv.text}}</view>
+          <view class="row2">开了「员工只看自己负责的客户」之后，员工登录只看到分给他的那几家。</view>
+        </view>
+        <view class="item" wx:for="{{psv.rows}}" wx:key="party">
+          <view class="row1"><text class="nm">{{item.party}}</text><text class="amt">{{item.staff}}</text></view>
+          <view class="btns">
+            <picker mode="selector" range="{{psv.staff}}" data-party="{{item.party}}" bindchange="assignPartyStaff">
+              <button size="mini" class="ghost">换人</button>
+            </picker>
+            <button size="mini" class="ghost" bindtap="unassignPartyStaff" data-party="{{item.party}}">取消</button>
+          </view>
+        </view>
+        <view class="box" wx:if="{{psv.free_count>0}}">
+          <view class="row1"><text class="nm">还没分的 {{psv.free_count}} 家</text><text class="amt">点右边挑人</text></view>
+          <view class="item" wx:for="{{psv.free}}" wx:key="*this">
+            <view class="row1"><text class="nm">{{item}}</text>
+              <picker mode="selector" range="{{psv.staff}}" data-party="{{item}}" bindchange="assignPartyStaff">
+                <view class="btn ghost" size="mini">分给谁</view>
+              </picker>
+            </view>
+          </view>
+        </view>
+        <view class="frow"><button class="btn ghost half" size="mini" bindtap="closePartyStaff">收起</button></view>
+      </block>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadFramePrices">📝 合同价 / 框架价</button>
       </view>

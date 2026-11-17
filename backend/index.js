@@ -525,6 +525,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/(staff-activity|staff-perms|staff-users|backup-verify)/.test(path)
       || /^\/party-merge/.test(path)
+      || (/^\/party-staff$/.test(path) && m !== 'GET')
       || /^\/(schema-check|books-check|merge-summary|year-open|migrate-)/.test(path) || /^\/customer-card/.test(path) || /^\/credit-(book|grade)/.test(path) || /^\/collect-plan/.test(path) || /^\/recon-board/.test(path) || /^\/dunning-report/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
@@ -626,6 +627,61 @@ async function selfOnly(c) {
   const nm = (c.get && c.get('staff_name')) || ''
   return { on: true, who: nm ? '员工·' + nm : '员工' }
 }
+
+// ===== 员工负责的客户：员工只看自己负责的那几家（老板可关） =====
+async function partyStaffTable(db) {
+  await db.prepare(`CREATE TABLE IF NOT EXISTS party_staff (
+    party TEXT PRIMARY KEY, staff TEXT NOT NULL DEFAULT '', updated_at TEXT
+  )`).run()
+}
+// 员工 + 开了「只看自己负责的客户」时返回 {on, name}（name = 员工名，用于过滤）
+async function scopeOwn(c) {
+  if (!c.get || c.get('role') !== 'staff') return { on: false, name: '' }
+  const main = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const row = await main.prepare("SELECT value FROM settings WHERE key='staff_scope'").first().catch(() => null)
+  if (!row || String(row.value) !== 'own') return { on: false, name: '' }
+  const nm = String((c.get && c.get('staff_name')) || '').trim()
+  return { on: true, name: nm }
+}
+app.get('/party-staff', async (c) => {
+  const db = c.env.DB
+  await partyStaffTable(db)
+  const q = await db.prepare('SELECT party, staff, updated_at FROM party_staff ORDER BY party LIMIT 500').all().catch(() => ({ results: [] }))
+  const rows = ((q && q.results) || []).map((r) => ({ party: r.party || '', staff: r.staff || '', updated_at: r.updated_at || '' }))
+  const staffQ = await db.prepare('SELECT name FROM staff_users WHERE COALESCE(active,1)=1 ORDER BY name').all().catch(() => ({ results: [] }))
+  const names = ((staffQ && staffQ.results) || []).map((r) => r.name).filter(Boolean)
+  const unassigned = await db.prepare("SELECT DISTINCT customer AS p FROM orders UNION SELECT DISTINCT supplier FROM payables").all().catch(() => ({ results: [] }))
+  const assigned = new Set(rows.map((r) => norm(r.party)))
+  const free = ((unassigned && unassigned.results) || []).map((r) => r.p || '').filter((p) => p && !assigned.has(norm(p)))
+  const mine = await scopeOwn(c)
+  if (mine.on) {
+    const only = rows.filter((r) => norm(r.staff) === norm(mine.name))
+    return c.json({ ok: true, role: 'staff', scope: 'own', count: only.length, rows: only, staff: names, free_count: 0, text: only.length ? `你负责 ${only.length} 家：${only.slice(0, 8).map((r) => r.party).join('、')}${only.length > 8 ? ' 等' : ''}` : '老板还没给你分客户，你只能看到自己录的单' })
+  }
+  return c.json({
+    ok: true, count: rows.length, rows, staff: names, free_count: free.length, free: free.slice(0, 30),
+    text: rows.length === 0
+      ? '还没有给员工分过客户。分完之后，员工只能看到自己负责的那几家。'
+      : `已给 ${new Set(rows.map((r) => r.staff)).size} 个员工分了 ${rows.length} 家客户${free.length ? `，还有 ${free.length} 家没分` : '，都分完了'}`
+  })
+})
+app.post('/party-staff', async (c) => {
+  const body = await c.req.json()
+  const db = c.env.DB
+  await partyStaffTable(db)
+  const party = String(body.party || '').trim()
+  const staff = String(body.staff || '').trim()
+  if (!party) return c.json({ error: '要写是哪一家（客户 / 供应商名）' }, 400)
+  if (!staff) {
+    await db.prepare('DELETE FROM party_staff WHERE party=?').bind(party).run()
+    await logAudit(db, '取消客户负责人', party, party, '', act(c))
+    return c.json({ ok: true, cleared: true })
+  }
+  await db.prepare('INSERT INTO party_staff (party, staff, updated_at) VALUES (?,?,?) ON CONFLICT(party) DO UPDATE SET staff=excluded.staff, updated_at=excluded.updated_at')
+    .bind(party, staff, now()).run()
+  await logAudit(db, '指定客户负责人', party, `${party} → ${staff}`, '', act(c))
+  return c.json({ ok: true, party, staff })
+})
 
 // 供应商比价：这家平时多少钱一笔，这次记的偏高还是偏低
 app.get('/supply-price', async (c) => {
@@ -3893,7 +3949,11 @@ app.get('/staff-perms', async (c) => {
   const off = rows.filter((r) => !r.on).map((r) => r.label)
   const so = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_self_only'").first()
   const selfOn = !!(so && String(so.value) === '1')
-  return c.json({ ok: true, rows, on: mods, count: mods.length, self_only: selfOn,
+  const sp2 = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_scope'").first().catch(() => null)
+  const scope = String((sp2 && sp2.value) || 'all') === 'own' ? 'own' : 'all'
+  const scCnt = await c.env.DB.prepare('SELECT COUNT(*) n FROM party_staff').first().catch(() => ({ n: 0 }))
+  return c.json({ ok: true, rows, on: mods, count: mods.length, self_only: selfOn, scope, scope_count: num(scCnt && scCnt.n),
+    scope_note: scope === 'own' ? `员工只看自己负责的客户（已分 ${num(scCnt && scCnt.n)} 家；没分的客户他看不到）` : '员工能看到所有客户的单据（按模块权限）',
     self_note: selfOn ? '员工现在只能看到自己录的单（应收/应付列表），汇总和报表仍是整本账。' : '员工能看到全部单据（按模块权限）。',
     text: off.length ? '员工现在能用的：' + rows.filter((r) => r.on).map((r) => r.label).join('、') + '。不能用的：' + off.join('、') + '。' : '员工现在什么模块都能用（除了删改单、看毛利）。' })
 })
@@ -3907,6 +3967,12 @@ app.post('/staff-perms', async (c) => {
   const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_modules'").first()
   if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_modules'").bind(v).run()
   else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_modules', ?)").bind(v).run()
+  if (body.scope != null) {
+    const sv2 = String(body.scope) === 'own' ? 'own' : 'all'
+    const old3 = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_scope'").first().catch(() => null)
+    if (old3) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_scope'").bind(sv2).run()
+    else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_scope', ?)").bind(sv2).run()
+  }
   if (body.self_only != null) {
     const sv = body.self_only ? '1' : '0'
     const old2 = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_self_only'").first()
@@ -3914,7 +3980,7 @@ app.post('/staff-perms', async (c) => {
     else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_self_only', ?)").bind(sv).run()
   }
   await logAudit(mainDb, '改员工权限', '员工权限', mods.map((m) => STAFF_MOD_LABEL[m]).join('、') + (body.self_only != null ? (body.self_only ? '；只给看自己录的单' : '；可看全部单据') : ''))
-  return c.json({ ok: true, modules: mods, self_only: body.self_only != null ? !!body.self_only : undefined })
+  return c.json({ ok: true, modules: mods, self_only: body.self_only != null ? !!body.self_only : undefined, scope: body.scope != null ? (String(body.scope) === 'own' ? 'own' : 'all') : undefined })
 })
 
 app.get('/me', async (c) => {
@@ -5836,6 +5902,8 @@ app.get('/ar', async (c) => {
   }
   const selfAr = await selfOnly(c)
   if (selfAr.on) { conds.push('created_by = ?'); b.push(selfAr.who) }
+  const scAr = await scopeOwn(c)
+  if (scAr.on) { conds.push('customer IN (SELECT party FROM party_staff WHERE staff = ?)'); b.push(scAr.name) }
   if (kw) {
     conds.push('(customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,\'\') LIKE ?)')
     b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
@@ -6100,6 +6168,8 @@ app.get('/ap', async (c) => {
   else conds.push('paid + COALESCE(written_off,0) < amount')
   const selfAp = await selfOnly(c)
   if (selfAp.on) { conds.push('created_by = ?'); b.push(selfAp.who) }
+  const scAp = await scopeOwn(c)
+  if (scAp.on) { conds.push('supplier IN (SELECT party FROM party_staff WHERE staff = ?)'); b.push(scAp.name) }
   if (status === 'overdue') { conds.push('substr(created_at,1,10) <= ?'); b.push(dayAgo(30)) }
   if (status === 'due') {
     conds.push("due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) <= ?"); b.push(dayAfter(7))
@@ -6137,6 +6207,8 @@ app.get('/party-groups', async (c) => {
     conds.push("due_date IS NOT NULL AND due_date != '' AND date(due_date) >= date('" + today + "') AND date(due_date) <= date('" + d7 + "')")
   }
   if (kw) { conds.push(NAME + " LIKE ?"); binds.push('%' + kw + '%') }
+  const scG = await scopeOwn(c)
+  if (scG.on) { conds.push(NAME + ' IN (SELECT party FROM party_staff WHERE staff = ?)'); binds.push(scG.name) }
   const AMTEXP = '(COALESCE(' + AMT + ',0) - COALESCE(paid,0) - COALESCE(written_off,0))'
   const AGE = "CAST(julianday('now') - julianday(substr(created_at,1,10)) AS INTEGER)"
   const sql = 'SELECT ' + NAME + ' AS name, COUNT(*) AS cnt, SUM(' + AMTEXP + ') AS unpaid, MAX(' + AGE + ') AS oldest_days, ' +

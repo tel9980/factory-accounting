@@ -471,6 +471,13 @@ CREATE TABLE IF NOT EXISTS wage_pays (
 );
 CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);
 
+-- 员工负责的客户：员工只看自己负责的那几家（老板在设置里可关）
+CREATE TABLE IF NOT EXISTS party_staff (
+  party TEXT PRIMARY KEY,
+  staff TEXT NOT NULL DEFAULT '',
+  updated_at TEXT
+);
+
 -- 合同 / 框架价：约定好的单价，下单低于它当场提醒（不拦）
 CREATE TABLE IF NOT EXISTS frame_prices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

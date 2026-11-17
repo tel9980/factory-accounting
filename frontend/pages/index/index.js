@@ -72,6 +72,7 @@ const FEATS = [
 
 Page({
   data: {
+    psv: null,
     fp: null, fr_party: '', fr_party_kw: '', fr_item: '', fr_price: '', fr_unit: '件', fr_note: '',
     os: null, os_party: '', os_item: '', os_qty: '', os_price: '', os_due: '',
     dp: null, dp_days: 7,
@@ -4159,7 +4160,7 @@ Page({
   },
   // 员工权限：老板勾哪些模块给员工用
   loadStaffPerms() {
-    this.req({ url: API_BASE + '/staff-perms', success: (res) => { const d = res.data || {}; this.setData({ spm: d, spm_self: !!d.self_only }) } })
+    this.req({ url: API_BASE + '/staff-perms', success: (res) => { const d = res.data || {}; this.setData({ spm: d, spm_self: !!d.self_only, spm_scope: d.scope || 'all' }) } })
   },
   toggleStaffMod(e) {
     const k = e.currentTarget.dataset.k
@@ -4169,13 +4170,14 @@ Page({
     this.setData({ spm: Object.assign({}, d, { rows }) })
   },
   toggleSelfOnly() { this.setData({ spm_self: !this.data.spm_self }) },
+  toggleScopeOwn() { this.setData({ spm_scope: this.data.spm_scope === 'own' ? 'all' : 'own' }) },
   saveStaffPerms() {
     const d = this.data.spm
     if (!d) return
     const modules = (d.rows || []).filter((r) => r.on).map((r) => r.k)
     if (!modules.length) return wx.showToast({ title: '至少留一个模块', icon: 'none' })
     this.req({
-      url: API_BASE + '/staff-perms', method: 'POST', data: { modules, self_only: !!this.data.spm_self },
+      url: API_BASE + '/staff-perms', method: 'POST', data: { modules, self_only: !!this.data.spm_self, scope: this.data.spm_scope || 'all' },
       success: () => { wx.showToast({ title: '存好了', icon: 'success' }); this.loadStaffPerms() }
     })
   },
@@ -6664,6 +6666,34 @@ Page({
     this.req({ url: API_BASE + '/supply-price', success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ spb: d }) } })
   },
   closeSupplyBook() { this.setData({ spb: null }) },
+  // ===== 客户分给员工（员工只看自己负责的那几家） =====
+  loadPartyStaff() {
+    this.req({ url: API_BASE + '/party-staff', success: (r) => {
+      const d = r.data || {}
+      if (!d.ok) return wx.showToast({ title: d.error || '没取到', icon: 'none' })
+      this.setData({ psv: d })
+    } })
+  },
+  closePartyStaff() { this.setData({ psv: null }) },
+  assignPartyStaff(e) {
+    const party = e.currentTarget.dataset.party || ''
+    const names = (this.data.psv && this.data.psv.staff) || []
+    const staff = names[Number(e.detail.value)] || ''
+    if (!party || !staff) return
+    this.req({ url: API_BASE + '/party-staff', method: 'POST', data: { party, staff }, success: (r) => {
+      const x = r.data || {}
+      if (!x.ok) return wx.showModal({ title: '没分上', content: x.error || '', showCancel: false })
+      wx.showToast({ title: party + ' → ' + staff })
+      this.loadPartyStaff()
+    } })
+  },
+  unassignPartyStaff(e) {
+    const party = e.currentTarget.dataset.party || ''
+    this.req({ url: API_BASE + '/party-staff', method: 'POST', data: { party, staff: '' }, success: () => {
+      wx.showToast({ title: '取消了' })
+      this.loadPartyStaff()
+    } })
+  },
   // ===== 合同 / 框架价 =====
   loadFramePrices() {
     const party = String(this.data.fr_party_kw || '').trim()
