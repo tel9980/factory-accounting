@@ -205,6 +205,11 @@
         <text class="mwmain">{{item.party}} · {{item.item || '货款'}}　还差 ¥{{item.left_amt}}</text>
         <text class="mwside {{item.late?'red':''}}">{{item.late ? '超 '+item.days+' 天' : '今天/3天内'}} ›</text>
       </view>
+      <view class="mwrow" wx:if="{{mw.wip && mw.wip.cnt>0}}" bindtap="openWipFromHome">
+        <text class="mwdot">厂</text>
+        <text class="mwmain">车间压着 ¥{{mw.wip.cost}}（{{mw.wip.cnt}} 张没交完，最久 {{mw.wip.max_idle}} 天没动）</text>
+        <text class="mwside {{mw.wip.max_idle>=14?'red':''}}">看明细 ›</text>
+      </view>
       <view class="mwrow" wx:if="{{mw.no_due_count>0}}" bindtap="setTab" data-t="contact">
         <text class="mwdot">期</text>
         <text class="mwmain">还有 {{mw.no_due_count}} 笔没约定收付款日（¥{{mw.no_due_amount}}）</text>
@@ -2268,8 +2273,9 @@
         <button class="btn ghost" size="mini" bindtap="closeWip" wx:if="{{wip}}">收起</button>
       </view>
       <view class="prev" wx:if="{{wip}}">
-        <view class="prev-h">在制：{{wip.count}} 张没交完 · 材料成本 ¥{{wip.cost}}</view>
-        <view class="prev-row"><text class="prev-t">能收 ¥{{wip.price}}</text><text class="prev-n">还没收到 ¥{{wip.left}}</text><text>平均压 {{wip.avg_idle}} 天</text></view>
+        <view class="prev-h">在制：{{wip.count}} 张没交完 · 压着 ¥{{wip.total_cost}}</view>
+        <view class="prev-row"><text class="prev-t">材料 ¥{{wip.cost}}</text><text class="prev-n">{{wip.wage_total > 0 ? '＋已记工钱 ¥' + wip.wage_total : '工钱还没记'}}</text><text>能收 ¥{{wip.price}}</text></view>
+        <view class="prev-row"><text class="prev-t">还没收到 ¥{{wip.left}}</text><text class="prev-n">平均压 {{wip.avg_idle}} 天</text><text></text></view>
         <view class="prev-row red" wx:if="{{wip.stuck_cnt}}"><text class="prev-t">超过 14 天没动 {{wip.stuck_cnt}} 张</text><text class="prev-n">押着材料 ¥{{wip.stuck_cost}}</text><text bindtap="copyWip">复制</text></view>
         <view class="prev-row" wx:for="{{wip.by_progress}}" wx:key="k">
           <text class="prev-t">{{item.k}}</text><text class="prev-n">{{item.cnt}} 张</text><text>材料 ¥{{item.cost}}</text>
@@ -2278,8 +2284,8 @@
         <view class="tip" wx:if="{{wip.count}}">明细（按下料成本排，点开看单）：</view>
         <view class="prev-row" wx:for="{{wip.rows}}" wx:key="id" bindtap="goWipOrder" data-id="{{item.id}}" wx:if="{{index < 8}}">
           <text class="prev-t">{{item.party}} {{item.item}}</text>
-          <text class="prev-n">{{item.status_text}}{{item.progress ? '·' + item.progress : ''}}</text>
-          <text class="{{item.idle>=14?'red':'ok'}}">压 {{item.idle}} 天</text>
+          <text class="prev-n">{{item.status_text}}{{item.progress ? '·' + item.progress : ''}}{{item.wage > 0 ? '·工¥' + item.wage : ''}}</text>
+          <text class="{{item.idle>=14?'red':'ok'}}">¥{{item.total_cost}} · 压 {{item.idle}} 天</text>
         </view>
       </view>
       <view class="prev" wx:if="{{ot}}">

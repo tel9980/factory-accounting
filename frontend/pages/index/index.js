@@ -7037,6 +7037,13 @@ Page({
   loadOntime() {
     this.req({ url: API_BASE + '/ontime?months=6', success: (res) => { const d = res.data || {}; if (d.ok !== false) this.setData({ ot: d }) } })
   },
+  openWipFromHome() {
+    // 从首页「车间压着」点进来：切到报表页并直接展开面板
+    this.setData({ tab: 'stat' })
+    this.enterTab('stat')
+    this.openWip()
+    wx.pageScrollTo({ scrollTop: 0, duration: 0 })
+  },
   openWip() { this.loadWip(); this.loadOntime() },
   closeWip() { this.setData({ wip: null, ot: null }) },
   copyWip() {

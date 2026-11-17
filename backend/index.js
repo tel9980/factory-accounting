@@ -3976,7 +3976,11 @@ app.get('/next-step', async (c) => {
         (SELECT COUNT(*) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price) AS ar_open_n,
         (SELECT COUNT(*) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount) AS ap_open_n,
         (SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) >= ? AND substr(due_date,1,10) <= ?) AS ar_soon_amt,
-        (SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) >= ? AND substr(due_date,1,10) <= ?) AS ap_soon_amt
+        (SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) >= ? AND substr(due_date,1,10) <= ?) AS ap_soon_amt,
+        (SELECT COUNT(*) FROM orders WHERE COALESCE(status,0) < 2) AS wip_cnt,
+        (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE COALESCE(status,0) < 2) AS wip_cost,
+        (SELECT COUNT(*) FROM orders o WHERE COALESCE(o.status,0) < 2
+           AND CAST(julianday('now','+8 hours') - julianday(COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=o.id), o.created_at)) AS INTEGER) >= 14) AS wip_stuck
 `, today, soon, today, soon, m, today, soon, today, soon),
     P(`SELECT
         (SELECT COUNT(*) FROM (SELECT DISTINCT customer p FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price) x
@@ -4000,6 +4004,9 @@ app.get('/next-step', async (c) => {
   if (num(c0.recon_open) > 0) push(90 + Math.min(num(c0.recon_open), 9), 'recon', '把对账差异处理掉', `有 ${num(c0.recon_open)} 条差异还没处理，拖着结账会被拦`, 'report:bill', 0)
   if (num(c0.ar_soon) + num(c0.ap_soon) > 0) push(70 + num(c0.ar_soon) + num(c0.ap_soon), 'soon', '把 7 天内到期的钱过一遍', `这周有 ${num(c0.ar_soon)} 笔要收、${num(c0.ap_soon)} 笔要付`, 'home:home', 0)
   if (num(c0.no_cost) > 0) push(62 + Math.min(num(c0.no_cost), 20), 'cost', '给没填成本的单补上成本', `${num(c0.no_cost)} 张单没填材料/外协成本，毛利算不准`, 'bill:ar', 0)
+  // 车间压着的活：卡太久、或者押的钱明显多，就提醒一句（钱在车间里等于压着现金）
+  if (num(c0.wip_stuck) > 0) push(64 + Math.min(num(c0.wip_stuck), 30), 'wipstuck', `去车间问一句：${num(c0.wip_stuck)} 张单卡住了`, `有 ${num(c0.wip_stuck)} 张单超过 14 天没动，押着材料 ¥${round2(num(c0.wip_cost))}`, 'report:stat', c0.wip_cost)
+  else if (num(c0.wip_cnt) >= 5 && num(c0.wip_cost) >= 5000) push(45, 'wip', '看一眼车间里压了多少钱', `${num(c0.wip_cnt)} 张没交完，押着材料 ¥${round2(num(c0.wip_cost))}`, 'report:stat', c0.wip_cost)
   // 钱够不够付：现金 + 这周该收 vs 这周该付
   try {
     const accList = await accountBalances(db).catch(() => [])
@@ -4065,6 +4072,14 @@ app.get('/my-work', async (c) => {
             (SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM orders WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price AND (due_date IS NULL OR due_date='')) AS ar_amt,
             (SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) FROM payables WHERE COALESCE(paid,0)+COALESCE(written_off,0) < amount AND (due_date IS NULL OR due_date='')) AS ap_amt`
   ).all()
+  // 车间压着多少（在制）：首页「今天的活」里显示一行，点进去看明细
+  const wipRow = await db.prepare(`SELECT COUNT(*) cnt, COALESCE(SUM(COALESCE(cost,0)),0) cost,
+      COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) left_amt,
+      COALESCE(MAX(CAST(julianday(?) - julianday(COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=orders.id), created_at)) AS INTEGER)),0) mx
+    FROM orders WHERE COALESCE(status,0) < 2`).bind(today).first().catch((e) => { noteFail(e, '首页在制'); return null })
+  const wipCnt = num(wipRow && wipRow.cnt), wipCost = round2(num(wipRow && wipRow.cost)),
+    wipLeft = round2(num(wipRow && wipRow.left_amt)), wipMx = num(wipRow && wipRow.mx)
+  const wip = { cnt: wipCnt, cost: wipCost, left: wipLeft, max_idle: wipMx }
   const noDueCnt = num(nd && nd[0] && nd[0].cnt),
     noDueAmt = round2(num(nd && nd[0] && nd[0].ar_amt) + num(nd && nd[0] && nd[0].ap_amt))
   const todo = R.length + P.length + G.filter(g => g.no_progress).length
@@ -4075,7 +4090,7 @@ app.get('/my-work', async (c) => {
   if (!text) text = '今天没有非办不可的事 👍'
   return c.json({
     ok: true, role, today,
-    recv: R, pay: P, prog: G,
+    recv: R, pay: P, prog: G, wip,
     recv_total: round2(R.reduce((a, r) => a + num(r.left_amt), 0)),
     pay_total: round2(P.reduce((a, r) => a + num(r.left_amt), 0)),
     no_due_count: noDueCnt, no_due_amount: noDueAmt,
@@ -12093,12 +12108,20 @@ app.get('/wip', async (c) => {
       COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=orders.id), created_at) AS last_move
     FROM orders WHERE COALESCE(status,0) < 2 ORDER BY id`)
     .all().catch((e) => { noteFail(e, '在制'); return { results: [] } })).results || []
+  // 这张单上已经记了多少计件工钱（人工成本），材料 + 人工才是这张单真实压在里面的钱
+  const wmap = {}
+  try {
+    const wr = (await db.prepare("SELECT order_id, ROUND(SUM(amount),2) amt, ROUND(SUM(qty),2) qty FROM wage_records WHERE COALESCE(order_id,0) > 0 GROUP BY order_id").all()).results || []
+    for (const x of wr) wmap[num(x.order_id)] = { amt: num(x.amt), qty: num(x.qty) }
+  } catch (e) { noteFail(e, '在制人工') }
   const rows = rows0.map((r) => {
     const last = String(r.last_move || r.created_at || '').slice(0, 10)
     const idle = daysSince(last)
+    const w = wmap[num(r.id)] || { amt: 0, qty: 0 }
     return {
       id: num(r.id), party: r.customer || '', item: r.item_name || '',
       price: round2(num(r.price)), cost: round2(num(r.cost)),
+      wage: round2(w.amt), wage_qty: round2(w.qty), total_cost: round2(num(r.cost) + w.amt),
       left: round2(num(r.price) - num(r.paid) - num(r.wo)),
       status: num(r.st), status_text: ['待加工', '加工中', '已交付'][num(r.st)] || '待加工',
       progress: r.progress || '', deliver_date: (r.deliver_date || '').slice(0, 10),
@@ -12110,6 +12133,8 @@ app.get('/wip', async (c) => {
   const price = round2(rows.reduce((a, x) => a + x.price, 0))
   const left = round2(rows.reduce((a, x) => a + x.left, 0))
   const avgIdle = count ? Math.round(rows.reduce((a, x) => a + x.idle, 0) / count) : 0
+  const wageTotal = round2(rows.reduce((a, x) => a + x.wage, 0))
+  const totalCost = round2(rows.reduce((a, x) => a + x.total_cost, 0))
   const byStatus = [0, 1].map((k) => ({ k, label: ['待加工', '加工中'][k], cnt: rows.filter((x) => x.status === k).length, cost: round2(rows.filter((x) => x.status === k).reduce((a, x) => a + x.cost, 0)) }))
   const pmap = {}
   rows.forEach((x) => { const k = x.progress || '（还没写工序）'; const e = pmap[k] || (pmap[k] = { k, cnt: 0, cost: 0 }); e.cnt++; e.cost += x.cost })
@@ -12120,16 +12145,16 @@ app.get('/wip', async (c) => {
   const advice = []
   if (!count) advice.push('车间里没有压着的单子，都交完了。')
   else {
-    advice.push(`还有 ${count} 张没交付，占着材料成本 ¥${cost}、能收 ¥${left}。`)
+    advice.push(`还有 ${count} 张没交付，占着材料 ¥${cost}${wageTotal > 0 ? `＋已记工钱 ¥${wageTotal}（合计 ¥${totalCost}）` : ''}、能收 ¥${price}，还没收到的 ¥${left}。`)
     if (stuck.length) advice.push(`其中 ${stuck.length} 张超过 14 天没动（最久 ${oldest[0].idle} 天），先去车间问一句卡在哪。`)
     if (overdue.length) advice.push(`${overdue.length} 张已经过了约定交货日，最久的拖了 ${Math.abs(Math.min(...overdue.map((x) => x.late_deliver)))} 天，客户那边最好主动说一声。`)
     const big = byProgress[0]
     if (big && big.cost > 0 && count >= 3) advice.push(`压在「${big.k}」上的最值钱（${big.cnt} 张、材料 ¥${big.cost}），先把这个工序理顺。`)
   }
   const text = count
-    ? `车间还有 ${count} 张没交完，材料成本 ¥${cost}（能收 ¥${price}，还没收到的 ¥${left}）；平均压了 ${avgIdle} 天。`
+    ? `车间还有 ${count} 张没交完，占着材料 ¥${cost}${wageTotal > 0 ? `＋工钱 ¥${wageTotal}` : ''}（能收 ¥${price}，还没收到的 ¥${left}）；平均压了 ${avgIdle} 天。`
     : '车间里没有压着的单子。'
-  return c.json({ ok: true, count, cost, price, left, avg_idle: avgIdle, by_status: byStatus, by_progress: byProgress,
+  return c.json({ ok: true, count, cost, wage_total: wageTotal, total_cost: totalCost, price, left, avg_idle: avgIdle, by_status: byStatus, by_progress: byProgress,
     stuck_cnt: stuck.length, stuck_cost: round2(stuck.reduce((a, x) => a + x.cost, 0)),
     overdue_cnt: overdue.length, rows: rows.slice().sort((a, b) => b.cost - a.cost).slice(0, 20), oldest, advice, text })
 })
