@@ -637,11 +637,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 应收/应付只取该年开单，流水只取该年现金流水，发票按开票日期归属，固定资产按购入月份起算折旧；
    - 导出一律留痕（审计「导出资料包」）；前端报表页年度总账面板「📦 给会计的资料包」，生成后直接转发给会计或存到手机；
    - 员工口令请求 `/tax-pack` 返回 403（里面有毛利与利润表）。
+215. ✅ **一键结账全年 + 年度封账单**：不用一个月一个月点——
+   - `GET /year-close-check?year=` 先体检 12 个月：每月有没有账、结没结、有没有没处理的对账差异，返回 `months[{m,label,has_data,orders,income,closed,recon_open,ok,issues}]`、`todo_count`/`empty_count`/`closed_count` 与人话结论（「还有 3 个月没结账」「有账的月份都结完了（9 个月没记账）」）；
+   - `POST /year-close {year, confirm}` 逐月走结账自检 → 出快照 → 写归档 → 锁定 → 留痕（审计「年结归档」）；没账的月份自动跳过；有月份被拦时返回 **409 `need_confirm`**，逐月列出拦的原因（`BC_LABEL`：对账差异没处理完 / 还没出本月小结），带 `confirm:true` 照样结；
+   - 返回 `closed[{m,label,profit,income}]`、`total_profit`、`skipped`、`lock_note`/`unlock_how`；
+   - `GET /year-close-print-link?year=` → `GET /year-close-print?t=`（签名 A4 年度封账单：12 行月度表 + 结账状态列 + 全年合计 + 年底结存 + 封账说明 + 制表/老板/会计/日期四个签字位），改字符即「链接已失效」；
+   - 前端报表页月结归档区「📅 一键结账全年」：先逐月列 ✓/○ 与原因，再「一键结完这 N 个月」；结完弹「结过了哪几个月 + 合计净利 + 锁住了什么 + 怎么解锁」；旁边「打印年度封账单」；
+   - 员工口令访问 `/year-close*` 一律 403。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 301 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 305 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -903,7 +910,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（164）
+**其它（单个接口）**（168）
 
 - `GET /`
 - `GET /access-guide`
@@ -1065,6 +1072,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /wx-subscribed`
 - `POST /wx-test`
 - `GET /year-book`
+- `POST /year-close`
+- `GET /year-close-check`
+- `GET /year-close-print`
+- `GET /year-close-print-link`
 - `GET /year-customers`
 - `GET /year-print`
 - `GET /year-print-link`

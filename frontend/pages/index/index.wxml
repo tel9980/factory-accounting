@@ -1500,6 +1500,26 @@
         <button class="btn" size="mini" bindtap="loadMonthEnd">🗓 月底收尾（一屏看完）</button>
         <button class="btn" size="mini" bindtap="closeMonth">结转归档（出报表 + 锁定）</button>
       </view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="yearCloseCheck">📅 一键结账全年</button>
+        <button class="btn ghost" size="mini" bindtap="openYearClosePrint">打印年度封账单</button>
+      </view>
+      <view wx:if="{{ycl}}">
+        <view class="prev-h">{{ycl.year}} 年 · 已结 {{ycl.closed_count}} 个月 · 待结 {{ycl.todo_count}} 个月</view>
+        <view class="aline {{ycl.todo_count?'warn':'ok'}}">{{ycl.text}}</view>
+        <block wx:for="{{ycl.months}}" wx:key="m">
+          <view class="hk-row" wx:if="{{item.has_data}}">
+            <view class="hk-main">
+              <view class="hk-t {{item.closed?'ok':''}}">{{item.closed?'✓':'○'}} {{item.label}} · {{item.orders}} 单 · 接单 {{item.income}}</view>
+              <view class="hk-d" wx:if="{{item.issue_text}}">{{item.issue_text}}</view>
+            </view>
+          </view>
+        </block>
+        <view class="frow">
+          <button class="btn" size="mini" bindtap="doYearClose" wx:if="{{ycl.todo_count}}">一键结完这 {{ycl.todo_count}} 个月</button>
+          <button class="btn ghost" size="mini" bindtap="closeYearClose">收起</button>
+        </view>
+      </view>
       <view wx:if="{{me}}">
         <view class="prev-h">{{me.month}} · {{me.total}} 件事办了 {{me.done_count}}/{{me.total}}</view>
         <view class="tip" wx:if="{{me.locked}}">🔒 这个月已经结账锁定了，不能再增删改；要改就在下面归档区点「解锁」，改完重新结一次。</view>

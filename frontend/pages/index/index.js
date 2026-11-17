@@ -5469,6 +5469,75 @@ Page({
       }
     })
   },
+  // 一键结账全年
+  yearCloseCheck() {
+    const y = (this.data.lock_month || '').slice(0, 4) || ''
+    wx.showLoading({ title: '检查中…' })
+    this.req({
+      url: API_BASE + '/year-close-check' + (y ? '?year=' + y : ''),
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        const months = (d.months || []).map((m) => ({ ...m, issue_text: (m.issues || []).join('、') }))
+        this.setData({ ycl: { ...d, months } })
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  doYearClose() {
+    const ycl = this.data.ycl || {}
+    if (!ycl.year) return wx.showToast({ title: '先检查一下', icon: 'none' })
+    const ask = (msg) => wx.showModal({
+      title: '结账前再确认一下', content: msg, showCancel: false,
+      success: () => this._doYearClose(ycl.year, true)
+    })
+    this._doYearClose(ycl.year, false, ask)
+  },
+  _doYearClose(year, confirmed, ask) {
+    wx.showLoading({ title: '结账中…' })
+    this.req({
+      url: API_BASE + '/year-close',
+      method: 'POST',
+      data: { year: Number(year), confirm: !!confirmed },
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (d.code === 'need_confirm') {
+          return ask((d.text || '') + '\n\n照样结账也行——结完这几个月就锁住了，要改得先去「月结归档」解锁。')
+        }
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        wx.showModal({
+          title: '结完了',
+          content: (d.text || '') + '\n\n' + (d.lock_note || '') + '\n' + (d.unlock_how || ''),
+          showCancel: false
+        })
+        this.yearCloseCheck()
+        this.loadArchives && this.loadArchives()
+      },
+      fail: () => wx.hideLoading()
+    })
+  },
+  closeYearClose() { this.setData({ ycl: null }) },
+  openYearClosePrint() {
+    const y = (this.data.ycl || {}).year || (this.data.lock_month || '').slice(0, 4)
+    if (!y) return wx.showToast({ title: '先在月份框填年份，如 2026-11', icon: 'none' })
+    this.req({
+      url: API_BASE + '/year-close-print-link?year=' + y,
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '生成不了链接', icon: 'none' })
+        wx.setClipboardData({
+          data: u,
+          success: () => wx.showModal({
+            title: '打印链接已复制',
+            content: '在电脑浏览器里粘贴打开，就能打印或存 PDF。\n链接带签名，改字符就失效。',
+            showCancel: false
+          })
+        })
+      }
+    })
+  },
   closeMonthEnd() { this.setData({ me: null }) },
   meGo(e) {
     const t = e.currentTarget.dataset.tab || 'report'

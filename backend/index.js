@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -459,7 +459,7 @@ app.use('*', async (c, next) => {
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
       || /^\/edit-requests?\/\d+\/(approve|reject)$/.test(path)
-      || (/^\/tax-pack/.test(path))
+      || (/^\/(tax-pack|year-close)/.test(path))
       || (/^\/bank-(import|auto-match)/.test(path) && m !== 'GET')
       || (/^\/bank-flows\/\d+\/match$/.test(path))
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
@@ -7423,6 +7423,145 @@ app.get('/year-book', async (c) => {
 })
 
 // 年度总账打印链接（签名，免口令）
+// ===== 一键结账全年：逐月自检 → 批量归档 → 年度封账单 =====
+const BC_LABEL = { recon_diff: '对账差异还没处理完', summary: '还没出本月小结' }
+async function yearCloseScan(db, y) {
+  const [om, pm, lm, ar, rc] = await Promise.all([
+    db.prepare("SELECT substr(created_at,1,7) m, COUNT(*) n, COALESCE(SUM(COALESCE(price,0)),0) s FROM orders WHERE substr(created_at,1,4)=? GROUP BY m").bind(y).all(),
+    db.prepare("SELECT substr(created_at,1,7) m, COUNT(*) n FROM payables WHERE substr(created_at,1,4)=? GROUP BY m").bind(y).all(),
+    db.prepare("SELECT substr(created_at,1,7) m, COUNT(*) n FROM ledger WHERE cash=1 AND substr(created_at,1,4)=? GROUP BY m").bind(y).all(),
+    db.prepare("SELECT month FROM month_archive WHERE substr(month,1,4)=?").bind(y).all(),
+    db.prepare("SELECT substr(month,1,7) m, COUNT(*) n FROM recon_log WHERE done=0 AND COALESCE(state,'')<>'match' AND substr(month,1,4)=? GROUP BY m").bind(y).all()
+  ])
+  const map = (r) => { const o = {}; ((r && r.results) || []).forEach((x) => { o[x.m] = x }); return o }
+  const O = map(om), P = map(pm), L = map(lm), R = map(rc)
+  const closedSet = new Set(((ar && ar.results) || []).map((x) => x.month))
+  const months = []
+  for (let i = 1; i <= 12; i++) {
+    const mm = y + '-' + String(i).padStart(2, '0')
+    const o = O[mm] || { n: 0, s: 0 }
+    const nOrders = num(o.n), nPay = num((P[mm] || {}).n), nLed = num((L[mm] || {}).n)
+    const has = nOrders + nPay + nLed > 0
+    const reconOpen = num((R[mm] || {}).n)
+    const isClosed = closedSet.has(mm)
+    const issues = []
+    if (has && !isClosed) issues.push('还没结账')
+    if (reconOpen > 0) issues.push(reconOpen + ' 处对账差异没处理')
+    months.push({
+      m: mm, label: i + '月', has_data: has, orders: nOrders, income: round2(num(o.s)),
+      closed: isClosed, recon_open: reconOpen,
+      ok: has ? (isClosed && reconOpen === 0) : true, issues
+    })
+  }
+  const todo = months.filter((x) => x.has_data && !x.closed)
+  const empties = months.filter((x) => !x.has_data)
+  return {
+    months, todo_count: todo.length, empty_count: empties.length,
+    closed_count: months.filter((x) => x.closed).length, todo, empties
+  }
+}
+
+app.get('/year-close-check', async (c) => {
+  const db = c.env.DB
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const s = await yearCloseScan(db, y)
+  const bad = s.months.filter((x) => x.recon_open > 0)
+  const text = s.todo_count === 0 && bad.length === 0
+    ? `${y} 年有账的月份都结完了${s.empty_count ? `（${s.empty_count} 个月没记账）` : ''}，可以直接打年度封账单。`
+    : `${y} 年还有 ${s.todo_count} 个月没结账${bad.length ? `、${bad.length} 个月有对账差异没处理` : ''}。结账会把每个月锁住，之后要改得先解锁。`
+  return c.json({
+    ok: true, year: y, months: s.months, todo_count: s.todo_count, empty_count: s.empty_count,
+    closed_count: s.closed_count, can_close: s.todo_count > 0, recon_bad: bad.map((x) => x.m), text,
+    todo_list: s.todo.map((x) => x.label)
+  })
+})
+
+app.post('/year-close', async (c) => {
+  const db = c.env.DB
+  const body = await c.req.json().catch(() => ({}))
+  const y = String(body.year || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const confirmed = !!body.confirm
+  const s = await yearCloseScan(db, y)
+  const todo = s.todo
+  if (!todo.length) {
+    return c.json({ ok: true, year: y, closed: [], skipped: s.empties.map((x) => x.label), blocked: [],
+      text: `${y} 年有账的月份都已经结过了，没有要结的。` })
+  }
+  const blocked = []
+  const done = []
+  for (const it of todo) {
+    const pc = await closePrecheck(db, it.m)
+    if (pc.blockers.length && !confirmed) { blocked.push({ m: it.m, label: it.label, blockers: pc.blockers, labels: pc.blockers.map((k) => BC_LABEL[k] || k), text: pc.text }); continue }
+    const snap = await monthSnapshot(db, it.m)
+    snap.closed_at = now()
+    await saveArchive(db, snap)
+    await db.prepare('INSERT OR IGNORE INTO month_lock (month, locked_at) VALUES (?,?)').bind(it.m, now()).run()
+    await logAudit(db, '年结归档', it.m, `年结 ${it.m}：净利 ${snap.profit}`)
+    done.push({ m: it.m, label: it.label, profit: snap.profit, income: snap.order_add })
+  }
+  if (blocked.length && !confirmed) {
+    return c.json({
+      error: '有 ' + blocked.length + ' 个月结账前还有事没做完', code: 'need_confirm',
+      blocked, closed: done.map((x) => x.label),
+      text: blocked.map((b) => `${b.label}：${b.labels.join('、')}`).join('\n')
+    }, 409)
+  }
+  const total = round2(done.reduce((a2, x) => a2 + num(x.profit), 0))
+  return c.json({
+    ok: true, year: y, closed: done, blocked, skipped: s.empties.map((x) => x.label),
+    total_profit: total,
+    text: `结完 ${done.length} 个月（${done.map((x) => x.label).join('、') || '无'}），这几个月合计净利 ¥${total}。${s.empties.length ? `另有 ${s.empties.length} 个月没记账，跳过。` : ''}`,
+    lock_note: '结过的月份已经锁住：不能再新增、修改、删除单据，也不能再收付款、批量导入。',
+    unlock_how: '要改某个月：报表 → 月结归档 → 点这个月旁边的「解锁」，改完再结一次。'
+  })
+})
+
+app.get('/year-close-print-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '还没设访问口令' }, 400)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const t = await sigOf(saved, 'year', 'yc:' + y)
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/year-close-print?year=' + y + '&t=' + t })
+})
+
+app.get('/year-close-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'year', 'yc:' + y) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度封账单。</h3>')
+  const d = await yearBook(db, y)
+  const s = await yearCloseScan(db, y)
+  const t = await getTitle(db)
+  const stMap = {}
+  s.months.forEach((x) => { stMap[x.m] = x })
+  const rows = d.months.map((m) => {
+    const st = stMap[m.m] || {}
+    const state = !st.has_data ? '没记账' : (st.closed ? '已结账' : '未结账')
+    return `<tr><td>${escHtml(m.label)}</td><td class="n">${m.cnt || ''}</td><td class="n">${m.income || ''}</td><td class="n">${m.mat || ''}</td><td class="n b ${m.profit < 0 ? 'red' : ''}">${m.profit || ''}</td><td class="n">${m.recv || ''}</td><td class="n">${m.pay || ''}</td><td class="${st.closed ? 'green' : ''}">${state}</td></tr>`
+  }).join('')
+  const body = `<h1>${escHtml(y)} 年度封账单</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}　制表日期 ${now().slice(0, 10)}</div>
+<table><tr><th>月份</th><th>单数</th><th>接单额</th><th>材料外协</th><th>净利</th><th>实收</th><th>实付</th><th>结账状态</th></tr>${rows}
+<tr class="total"><td>全年</td><td class="n">${d.totals.cnt}</td><td class="n">${d.totals.income}</td><td class="n">${d.totals.mat}</td><td class="n">${d.totals.profit}</td><td class="n">${d.totals.recv}</td><td class="n">${d.totals.pay}</td><td>${s.closed_count} 个月已结</td></tr></table>
+<h2>年底结存</h2>
+<table><tr><td>现金（各账户合计）</td><td class="n">${d.cash.end}</td></tr><tr><td>客户还欠（应收）</td><td class="n">${d.ar_end}</td></tr><tr><td>欠供应商（应付）</td><td class="n">-${d.ap_end}</td></tr><tr><td>欠借款</td><td class="n">-${d.debt_end}</td></tr><tr class="total"><td>家底（净资产）</td><td class="n">${d.net_worth}</td></tr></table>
+<h2>封账说明</h2><div class="sub" style="text-align:left">本年有账的 ${12 - s.empty_count} 个月中，已结账 ${s.closed_count} 个月${s.todo_count ? `，还有 ${s.todo_count} 个月未结（${escHtml(s.todo.map((x) => x.label).join('、'))}）` : '，全部结完'}。结账即锁定该月账目，之后如需修改须先解锁、改完重新结账。净利口径：接单额 − 材料·外协成本 − 现金费用 − 摊销 − 折旧 − 预提利息；赊购只进现金流，不重复计成本。年底应收/应付按截至 ${y}-12-31 的已收付计算。</div>`
+  return c.html(a4Page({
+    title: `${y} 年度封账单`,
+    body,
+    extraCss: `.sub{text-align:center} table{font-size:11.5px} th,td{padding:4px 6px}`,
+    sign: `<span>制表人：____________</span><span>老板：____________</span><span>会计：____________</span><span>日期：____________</span>`,
+    tip: '一年结完打一张，交给会计或存档；下一年从新年 1 月开始记，家底接着这张走'
+  }))
+})
+
 app.get('/year-print-link', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
