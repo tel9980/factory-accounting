@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -9444,8 +9444,8 @@ async function selfCheck(db) {
   }
 }
 // 数据体检：把「账记得对不对」变成一张清单，一项项告诉你哪里要补
-app.get('/health-check', async (c) => {
-  const db = c.env.DB
+// 账本体检（首页分数条、设置页体检、体检报告单共用同一套算法）
+async function healthScan(db) {
   const q1 = (sql) => db.prepare(sql).first().catch((e) => { noteFail(e, '数据体检'); return {} })
   const qAll = (sql) => db.prepare(sql).all().then((r) => r.results || []).catch((e) => { noteFail(e, '数据体检'); return [] })
   const items = []
@@ -9513,7 +9513,7 @@ app.get('/health-check', async (c) => {
   let needWrite = false
   if (!last || last.d !== today) { hist.push({ d: today, s: score }); needWrite = true }
   else if (num(last.s) !== score) { last.s = score; needWrite = true }
-  hist = hist.slice(-8)
+  hist = hist.slice(-180)
   if (needWrite) {
     try {
       await db.prepare("INSERT INTO settings (key, value) VALUES ('health_hist', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(hist)).run()
@@ -9523,8 +9523,103 @@ app.get('/health-check', async (c) => {
   const delta = prevRec ? round2(score - num(prevRec.s)) : 0
   const fails = failBucket.slice()
   if (fails.length) items2.unshift({ k: 'fail', label: '有统计查询失败了', count: fails.length, tip: '某项统计没算出来（会显示成 0）。把下面这条发给开发：', go: '报表 → 🐞 运行日志', tab: 'report', list: fails.slice(0, 3).map((x) => ({ party: '', amount: 0, note: x })), party: String(fails[0] || '').slice(0, 60) })
-  return c.json({ ok: true, score, grade, clean: warn.length === 0, count: warn.length, items: items2, top, hist, delta, empty: emptyBook, degraded: fails, at: now() })
+  // 每项问题的「哪天发现 / 哪天修好」：顺带记进 settings.health_items，体检报告单要用
+  let ih = {}
+  try { ih = JSON.parse((await db.prepare("SELECT value AS v FROM settings WHERE key='health_items'").first() || {}).v || '{}') } catch (e) { ih = {} }
+  if (!ih || typeof ih !== 'object' || Array.isArray(ih)) ih = {}
+  let ihDirty = false
+  for (const it of items2) {
+    if (it.k === 'fail') continue
+    const p = ih[it.k] || {}
+    if (it.count > 0) {
+      if (!p.since) { p.since = today; ihDirty = true }
+      if (p.fixed) { p.fixed = ''; ihDirty = true }
+      it.since = p.since
+      it.days_open = Math.max(0, daysSince(p.since))
+      it.fixed = ''
+    } else {
+      if (p.since && !p.fixed) { p.fixed = today; ihDirty = true }
+      it.since = p.since || ''
+      it.fixed = p.fixed || ''
+      it.days_open = 0
+    }
+    ih[it.k] = p
+  }
+  if (ihDirty) {
+    try { await db.prepare("INSERT INTO settings (key, value) VALUES ('health_items', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(ih)).run() } catch (e) { /* 记不上不影响结果 */ }
+  }
+  return { ok: true, score, grade, clean: warn.length === 0, count: warn.length, items: items2, top, hist, delta, empty: emptyBook, degraded: fails, at: now() }
+}
+
+app.get('/health-check', async (c) => c.json(await healthScan(c.env.DB)))
+
+// 体检报告单：分数曲线 + 每项问题的发现/修好日期 + 一句结论（可打印）
+const HB_BLK = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+async function healthReport(db, days, savedKey) {
+  const s = await healthScan(db)
+  const pts = (s.hist || []).filter((x) => x && x.d).slice(-days).map((x) => ({ d: x.d, s: num(x.s) }))
+  const first = pts[0] || null
+  const lastP = pts[pts.length - 1] || null
+  const delta = first && lastP ? round2(lastP.s - first.s) : 0
+  const best = pts.reduce((a, b) => (!a || b.s > a.s ? b : a), null)
+  const worst = pts.reduce((a, b) => (!a || b.s < a.s ? b : a), null)
+  const spark = pts.map((p) => HB_BLK[Math.max(0, Math.min(7, Math.floor((p.s / 100) * 7.999)))]).join('')
+  const items = (s.items || []).filter((x) => x.k !== 'fail')
+  const open = items.filter((x) => x.count > 0).sort((a, b) => num(b.days_open) - num(a.days_open))
+  const fixed = items.filter((x) => x.fixed).sort((a, b) => (a.fixed < b.fixed ? 1 : -1))
+  const daysTxt = (n) => (num(n) <= 0 ? '今天刚出现' : `已经 ${num(n)} 天了`)
+  const sentences = []
+  if (s.empty) sentences.push('这本账还没记过东西，先记两笔单子再来体检。')
+  else if (pts.length < 2) sentences.push(`今天第一次体检：${s.score} 分（${s.grade}）。以后每次打开首页都会记一条，这里就能看出账本是在变好还是变差。`)
+  else if (delta > 0) sentences.push(`从 ${first.d} 的 ${first.s} 分到今天的 ${s.score} 分，升了 ${delta} 分。`)
+  else if (delta < 0) sentences.push(`从 ${first.d} 的 ${first.s} 分到今天的 ${s.score} 分，掉了 ${Math.abs(delta)} 分。`)
+  else sentences.push(`这段时间一直是 ${s.score} 分，没变。`)
+  if (fixed.length && !s.empty) sentences.push(`修好了 ${fixed.length} 处：${fixed.slice(0, 3).map((x) => x.label).join('、')}${fixed.length > 3 ? ' 等' : ''}。`)
+  if (open.length && !s.empty) {
+    const worst1 = open[0]
+    sentences.push(`还剩 ${open.length} 处没改，最老的是「${worst1.label}」，${daysTxt(worst1.days_open)}${worst1.tip ? '（' + worst1.tip + '）' : ''}。`)
+  }
+  if (!s.empty && !open.length) sentences.push('该改的都改完了，账本现在是干净的。')
+  const url = savedKey ? '/health-print?days=' + days + '&t=' + (await sigOf(savedKey, 'health', 'hr:' + days)) : ''
+  return {
+    ok: true, at: now(), days, score: s.score, grade: s.grade, empty: s.empty, clean: s.clean, count: s.count,
+    delta, first, last: lastP, best, worst, points: pts, spark,
+    open: open.map((x) => ({ k: x.k, label: x.label, count: x.count, tip: x.tip, go: x.go, tab: x.tab, since: x.since, days_open: x.days_open })),
+    fixed: fixed.map((x) => ({ k: x.k, label: x.label, since: x.since, fixed: x.fixed })),
+    items: items.map((x) => ({ k: x.k, label: x.label, count: x.count, tip: x.tip, go: x.go, tab: x.tab, since: x.since || '', fixed: x.fixed || '', days_open: num(x.days_open) })),
+    url, sentences, text: sentences.join('')
+  }
+}
+
+app.get('/health-report', async (c) => {
+  const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  return c.json(await healthReport(c.env.DB, days, saved))
 })
+
+app.get('/health-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'health', 'hr:' + days) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成体检报告单。</h3>')
+  const r = await healthReport(db, days, saved)
+  const t = await getTitle(db)
+  const tr = (x) => `<tr><td>${escHtml(x.label)}</td><td class="n">${x.count > 0 ? '还有 ' + x.count + ' 处' : '正常'}</td><td>${escHtml(x.since || '')}</td><td>${x.count > 0 ? daysTxtPrint(x.days_open) : (x.fixed ? '已修好' : '')}</td><td>${escHtml(x.fixed || '')}</td><td>${escHtml(x.count > 0 ? (x.tip || '') : '')}</td></tr>`
+  const rows = r.items.map(tr).join('')
+  const pts = r.points.map((p) => `${escHtml(p.d)} ${p.s}`).join('　')
+  const body = `<h1>账本体检报告单</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}　打印日期 ${now().slice(0, 10)}　统计范围 近 ${r.days} 天</div>
+<div class="score"><span class="big">${r.score}</span> 分 · ${escHtml(r.grade)}${r.delta ? `（${r.delta > 0 ? '+' : ''}${r.delta}）` : ''}</div>
+<h2>分数变化</h2><div class="spark">${escHtml(r.spark || '（还没有历史记录）')}</div><div class="tip">${escHtml(pts || '')}</div>
+<h2>结论</h2><ul>${r.sentences.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>
+<h2>逐项体检</h2><table><tr><th>检查项</th><th>现在</th><th>哪天发现的</th><th>持续多久</th><th>哪天修好的</th><th>怎么改</th></tr>${rows}</table>
+<div class="tip">分数算法：满分 100，按问题扣分——接口报错、没备份各扣 10，上月没结账扣 5，其余每项扣 8。分数只是提醒，不影响账上的数字。</div>`
+  return c.html(a4Page({ title: '账本体检报告单', body, extraCss: '.score{font-size:15px;margin:6px 0 12px}.score .big{font-size:30px;font-weight:700;color:#1f6feb}.spark{font-size:22px;letter-spacing:2px;color:#1f6feb;margin:4px 0}.tip{font-size:12px;color:#777;margin:6px 0}' }))
+})
+function daysTxtPrint(n) { return num(n) <= 0 ? '今天刚出现' : `${num(n)} 天` }
 
 // 运行日志（出错留痕查询）
 app.get('/error-log', async (c) => {

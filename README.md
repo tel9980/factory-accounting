@@ -650,11 +650,107 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - `GET /year-open-print-link?year=` → `GET /year-open-print?t=`（签名 A4「年度期初结转凭据」：上年结存表 现金/应收/应付/借款/家底 + 结转说明 + 制表/老板/会计/日期签字），改字符即「链接已失效」；
    - 前端报表页年度总账面板「🗓 开新年度（上年结转）」：列出期初五项与逐项检查（✓/✗/·）、已开账时显示「现在的数 vs 年初」差多少，按钮「确认开账 / 重新定一次期初」「打印结转凭据」；
    - 员工口令访问 `/year-open*` 403。
+
+217. ✅ **老账搬家（把别的本子上的欠款一次搬进来）**：从 Excel / 纸本 / 别的软件转过来时，不用一笔笔录——
+218. ✅ **对账日历真正接上了（每月几号发对账单）**：`party_terms.recon_day` 一直存在但日历面板只靠按钮手动点、从没自动出现——
+   - `/recon-calendar` 每行补齐 `open_cnt`（还欠几笔）、`send_text`（现成微信话术：「兴旺五金，对一下账：到 2026-11-17，还有 1 笔加工费没结，共 6000 元…」；已结清时改说「这边账上你这边的款都结清了」）、`url`（`sigOf(saved, party, kind)` 签名的 `/statement-print` 打印页）；顶部加 `text`（「今天该发对账单的有 1 家、晚了的有 1 家（涉及欠款 ¥9000）」/「还没有单位约好每月几号发对账单」）、`count`、`sent_count`；
+   - 前端「单位」页进入时自动 `loadReconCal()`（不用再点按钮），面板顶部一行结论、每家「复制话术 / 打印页 / 📄 发好了，记一笔」，到点未发的两家以上给「一键复制 N 家话术」（按 欠款+话术 拼好，依次粘贴即可）；
+   - 「记一笔」走 `POST /statement-log`（channel=对账日），同家同日同月只记一条，记完日历立刻变「本月已发」；首页提醒「N 家到点该发对账单了」沿用同一批数据。
+   - `POST /migrate-preview {type:'ar'|'ap', text|rows, date, cost_mode:'none'|'pct', margin_pct}`：服务端解析文本（一行一笔：`名字,金额[,成本][,日期]`，逗号/制表符/空格都认，表头行自动跳过，第 3 格填日期也认），逐行给 `ok/error/dup/dup_text/known`，返回 `ar_total`/`ap_total`/`bad_count`/`dup_count`/`party_list` 与人话结论（「认出 3 笔客户还欠，共 ¥9800（3 家），其中 1 笔账上已经有了」）；**只读，不写库**；
+   - 判重两道：批内重复（同一批里前面已有同名同额同日）+ 账上重复（`${table} 同名同额同日` 已存在）；
+   - 成本处理：`cost_mode='none'` 不填（毛利偏高，返回 `tip` 提醒以后补）、`'pct'` 按毛利率估（`amount*(1-margin/100)`）；
+   - `POST /migrate-apply`：仍有坏行返回 400 并点名「第 3 行：金额要大于 0」；跨月先查 `isMonthLocked` → 403；重复行默认跳过（`confirm_dup` 才真重复记）；插入 `orders(item_name='期初搬入', operator='期初搬入')` / `payables(remark='期初搬入')`，**到期日按账期算，没设账期按 30 天**；写审计「老账搬入」；
+   - 前端「导入」页顶部「📥 老账搬家」：客户欠我 / 我欠供应商 切换、多行文本框、统一日期、成本不填或按毛利率估、「先看看（不写入）」逐行 ✓/✗、「确认搬进来（N 笔）」；有重复先弹「默认跳过」；
+   - 员工口令访问 `/migrate-*` 一律 403。
+219. ✅ **对账单自助确认（对方点一下就行，不用再打电话问「你看了吗」）**：发对账单时多带一条「确认链接」——
+   - `GET /statement-ack-link?type=ar|ap&party=&month=` 生成签名链接（`sigOf(saved, party, 'ack:'+type)`，只绑这一家，改一个字符就失效）；
+   - `GET /statement-ack?type=&party=&t=&month=` 手机只读页：页头厂名 + 这家到今天的账（月初欠 / 本月新增 / 本月已付 / 我这边记还欠多少）+ 还没结清的单子（最早 12 笔，含已收/还欠）+ 两个按钮「✓ 对得上，没问题」「✗ 有几笔对不上」（填差额 + 说明）；
+   - `POST /statement-ack {type,party,month,t,ack,amount,note}` 校验签名后写 `statement_log`（`channel='自助确认'`、`ack='ok'|'doubt'`、`ack_at`、note 记「对方说对不上，差 ¥800（6月那笔少了）」）并写审计；**异议直接进「争议台账」**（`/dispute-book` 以 `statement_log.ack='doubt'` 为起点，实测 count 1）；
+   - `GET /statement-acks?days=30` 回执台账：`ok_count`/`doubt_count`/`pending`（本月发了还没回音的家数）+ `rows[{party,ack_text,note,at,days}]` + 人话结论（「最近 30 天有 2 家回了：1 家说对得上，1 家说对不上」）与建议；
+   - 前端：单位页对账日历每行「让对方确认」→ 复制「甲客户，这是我这边到今天的对账明细，您点开核一下…+链接」；报表页「✅ 对账回执」面板逐条显示谁确认了、谁说对不上、差多少；
+   - 公开页 `/statement-ack` 已加进免口令放行名单（页面自己验签名），其它接口仍需口令。
+
+220. ✅ **催款话术跟着对账回执走（说「对不上」的先核数、别催钱）**：`GET /collect-list` 每行多查一次该家最近一条对账回执（`statement_log` 里 `ack IN ('ok','doubt')` 取最新一条，按 `norm(party)` 归并），据此换话术——
+   - `ack='ok'` 且 120 天内：`ack_kind='ok'`，话术变成「…2026-11 我们对过账，您那边确认过对得上，这笔数没疑问，麻烦这两天安排一下」；
+   - `ack='doubt'` 且未 `resolved_at`：`hold=true`，话术变成「上次对账您说有一笔对不上（差 ¥800…），我这边先把数核清楚，核完把明细发您。数对上了咱再谈结款，不着急」——**把催钱改成核对口径，避免一边吵架一边催款**；
+   - `ack='doubt'` 且已 `resolved_at`：`ack_kind='fixed'`，话术变成「上次您提的差异已经核清补记了，现在还有 X 元没结…」；
+   - 回执备注先清洗前缀（`^对方说对不上[，,]?`、`^对方确认[:：]?`），避免话术里出现「（对方说对不上，差 ¥800）」这种复读；
+   - 返回新增 `ok_n`/`hold_n`/`hold_amt`/`advice`：`hold_n>0` 时给「有 N 家（共 ¥X）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催」，`ok_n>0` 时给「这几家话术里写明了『您确认过』，催起来更硬气」；
+   - 前端催款清单每行多一行回执标记：`✓ 对方 N 天前确认过对得上` / `⚠ 先别催钱 · 对方 N 天前说对不上（…）`，顶部把 `advice` 逐条渲染成提示条；
+   - 实测：甲客户 ack=ok → 话术带「您确认过对得上」；乙客户 ack=doubt（差 ¥800，备注「6月那笔少了」）→ `hold=true`、话术转核对口径、`hold_amt=3000`、两条 advice 都对；伪造签名 POST → 403。
+221. ✅ **付款承诺台账（答应哪天付、到底付没付）**：`dunning_log.promise_date` 以前只存不用——
+   - `GET /promise-book?days=365&type=ar|ap`：每次承诺判三种结果——`kept`（承诺窗口 `[催款日, 承诺日+1]` 内有进账）、`broken`（日子过了、一分没付、还欠着）、`pending`（还没到日子）；每家汇总 `promises/kept/broken/pending/rate/last_promise/last_broken/broken_amt`，返回 `rows/parties/count/kept_n/broken_n/pending_n/rate/broken_amt/advice/text`；
+   - 提醒规则：失约 ≥1 次 → 「别只听日子，让他先付一部分」；兑现率 ≥80% 且 ≥2 次 → 「这家说话算数，可以适当宽限」；
+   - `/collect-list` 每行多 `promise_text`（「上回答应 11-07 付，又没付（10 天前）」）、`promise_broken`、`promise_rate`，**催款话术自动把这句放在最前面**（「甲客户 你好，上回答应 11-07 付，又没付（10 天前）。加工厂账上你这边还有 5000 元没结…」），并多一条 advice 点名失约家数；
+   - `/customer-card` 增 `promise{promises,kept,broken,pending,rate,last_broken}`，画像文本多一行「答应付款 2 次：兑现 0 次、失约 1 次（兑现率 0%）」；
+   - 前端报表页「🤝 付款承诺」面板（`loadPromiseBook`/`closePromiseBook`，data `pbook`），催款清单行显示红字「⏰ 上回答应 11-07 付，又没付」。
+
+222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
+   - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；
+   - 扣分规则：答应付款失约每次 −25（最多 −50）、兑现率<50% 且≥2 次 −10、最老一笔欠款>60 天 −10、超 90 天未收 −10、对方说对不上的对账单 −10；
+   - `GET /credit-grade?party=&type=` 单家；没记录的返回 `grade:'N'`（新单位）「建议先收定金或做现款」；
+   - **接单时就提醒**：`orderChecks` 新增两项——失约 ≥3 次且还欠钱 → `credit_bad`「这单建议只做现款，或者先收一半定金」；失约 ≥1 次且最老欠款 ≥30 天 → `credit_watch`「这单建议先收一部分定金」；
+   - 前端报表页「🎚 信用分档」（看客户/看供应商），每家显示档位、分数、还欠、扣分原因、「怎么办」；
+   - 员工口令访问 `/credit-book`、`/credit-grade` 一律 403。
+223. ✅ **账期按信用收紧（信用差的别给 30 天）**：账期以前是手动设的死数字，D 档客户照样给 30 天——
+   - `gradeCalc({broken,done,rate,oldest,over90,doubt})` 抽成公共打分函数，`creditBook` 与新加的 `gradeLight(db,party,type)`（只查 2 次、不加载流水，建单时用）共用同一套规则；
+   - **档位对应账期**：`const GRADE_DAYS = { A: 45, B: 30, C: 15, D: 7, N: 30 }`；
+   - `GET /term-advice?type=ar|ap`：每家给 `now_days`（现在设的天数，没设=0）/`suggest_days`（按档位）/`action`（`set` 没设 / `tighten` 偏宽（now>sug+5）/ `loosen` 偏紧（now<sug−10）/ `ok`）/`action_text`（「现在给 60 天，建议收紧到 45 天」），带 `unpaid`/`oldest_days`/`broken`/`why`，按「该收紧 → 该补 → 可放宽 → 匹配」排序；返回 `counts{tighten,loosen,set,ok}`、`auto`、`grade_days` 与人话结论「1 家客户的账期该收紧了（丙客户 60→45 天），其中还欠着 ¥3000」；
+   - `POST /term-advice/apply {type, mode:'tighten'|'all', parties?, fix_open?}`：`tighten` 只动偏宽的，`all` 收紧+放宽+补未设；写 `party_terms` 用 `ON CONFLICT(party) DO UPDATE SET term_days=excluded.term_days`（保留原有的对账周期/对账日）；`fix_open:true` 时顺手把未结单的到期日按新账期重算（**已结账月份跳过**）；写审计「按信用调账期」；
+   - `GET|POST /term-auto {on}`：settings `term_auto`；**开启后 `termDue(db,party,baseIso,type)` 对「没单独设账期」的单位按档位算到期日**（原来一律用默认账期），单独设过账期的照旧优先；
+   - 9 处 `termDue` 调用全部补上 `type`（建单 ar/ap、导入 ar/ap、老账搬家 ar/ap、对账补记/新建按 type），否则供应商会被按客户档位算；
+   - 前端「单位 → 账期」区新增「⏱ 账期该收紧了」面板：逐家显示档位、`现在 X 天 → 建议 Y 天`、还欠多少、扣分原因，三个按钮「只收紧偏宽的（N 家）」「全部按信用调」「开启/关掉信用账期」；进「单位」tab 自动加载；
+   - 实测：丙客户（A 档，设 60 天）→ 建议 45、`tighten`；甲客户（D 档，未设）→ 建议 7、`set`；乙客户（A 档，设 30）→ 建议 45、`loosen`；开启信用账期后给甲客户新单 → 到期日 = 开单日 +7 天，给新客户丁客户 → +30 天（N 档）；`apply mode=all` 后四家全部 `ok`，顺手补了 3 个到期日。
+
+224. ✅ **这周催款排班（谁先打、哪天打）**：以前 `/collect-list` 只给一个「谁最急」的排序，一周里怎么安排全靠自己——结果大额老账被新账挤到后面，或者同一家一周催三次。现在排成日历：
+   - `GET /collect-plan?type=ar|ap&days=7&per_day=3`：先算优先级 `score = 还欠 × (0.5 + min(欠款天数,180)/60) × (1 + min(逾期天数,90)/30) × 信用权重`（A 0.9 / B 1 / C 1.15 / D 1.3 / N 1），对账说「对不上」的 ×0.8（先核数别催钱）；
+   - **刚催过的往后排**：2 天内催过的 ×0.5，并且只从第 3 天起排，避免同一家天天被追；
+   - **分到具体哪天**：贪心分配——每天最多 `per_day` 家，每个客户往「当天金额最少」的那天空里塞，周日照排（小厂周日也干活）；排不下的给 `rest` 提示「下周接着催」；
+   - 每行给 `act` 建议动作：`先核对数`（对方说对不上）/ `等 11-20 那天`（有未到期的付款承诺）/ `打电话`（逾期 >30 天或 ≥5000）/ `发微信`（其余）；
+   - 返回 `plan[{date,wd,label,rows,amount}]`、`plan_n`/`plan_amt`/`rest`/`rows`（完整优先级）与人话结论「这 7 天要催 3 家（共 ¥13000）：周二 1 家、周四 1 家、周五 1 家。最急的是 甲客户（欠 ¥5000，欠 68 天 · 金额大 · 信用 D · 今天刚催过），排在周四。」；
+   - 前端应收/应付页各加「📅 这周催款排班」，面板按天分组（蓝色日期条 + 每家一行），点某家复制单条提醒，底部「整周排班复制」一次拷出整周安排；
+   - denyStaff 加 `/^\/collect-plan/`（含信用档位）；实测：3 家（5000/68 天/D 档、6000/10 天、2000/当天）→ 分到周二/周四/周五，甲客户因「今天刚催过」被挪到周四；再催一次丙客户 → 立刻挪到后半周；`per_day=1` 时也只排 3 家、`rest` 正确。
+
+225. ✅ **月度催款战报（催了几次、催回多少、哪家白催）**：以前只能看「这个月催了几次」，看不出效果——催了 3 次一分没回的，和催一次就付清的，在表上长得一样。现在按月算账：
+   - `GET /dunning-report?type=ar|ap&month=`：把本月每次催款按单位归并，再和本月回款对上——`paid_after` = 该家**首催日之后**的回款（催之前就付的不算你的功劳）；
+   - 五种状态：`paid` 催回了 / `part` 催回一部分还欠 / `useless` **催 ≥3 次一分没回**（附「答应过 N 次也没付」）/ `broken` 答应过付款又没付 / `waiting` 刚催还没动静；
+   - 汇总：`times` 催款次数、`recovered` 催后收回、`all_paid` 本月总回款（算占比）、`per_time` 平均每催一次收回多少、`useless_n`/`broken_n`、`prev{times,paid}` 上月对比；
+   - 另有 `self_rows`：**没催自己付了的**（这几家不用花力气），给 `self_n`/`self_amt`；
+   - 建议四条：催款效率（占比 + 每催一次多少钱）、白催名单（「再催也是白费劲，改成打电话或上门，或者先停掉账期」）、失约家数、不用花力气的名单，再加一句和上月的次数对比；
+   - 前端报表页「📣 催款月报」：月份输入 + 每家一行（催几次、本月回款、催后回款、还欠、信用档）+ 「📋 复制月报」；denyStaff 加 `/^\/dunning-report/`；
+   - 实测：甲客户（5000，催 3 次、承诺 3 次全过期、一分没回）→ `useless`「催了 3 次，一分没回（答应过 3 次也没付）」；乙客户（催 1 次后付清 4000）→ `paid`；丙客户（没催自己付 3000）→ 进「不用花力气」；汇总「催了 2 家共 4 次，催后收回 ¥4000（本月总回款 ¥7000，占 57%），平均每催一次 ¥1000」；空月份「2026-08 没催过款、也没有回款记录」；员工口令 403。
+
+226. ✅ **月度对账完成度（这个月账到底核清没有）**：对账记录散在四个地方（发对账单 `statement_log`、对方回执 `statement_log.ack`、差异处理 `recon_log`、签字确认 `recon_confirm`），月底没人说得清「核完没核完」。新增 `GET /recon-board?type=ar|ap&month=&months=6`（**原 `/recon-progress` 已存在且前端在用，新接口另起名 `/recon-board`，否则会被先定义的路由遮住**）：
+   - **应核对家数** = 本月开过单的家 ∪ 还有未结欠款的家（老账也要对，不能只看本月）；
+   - 每家给一个状态，按严重程度排：`disputed` 对方说对不上（红）→ `diff` 有差异没处理完（红）→ `none` 这个月没发过对账单 → `sent` 发过没回话 → `done` 核对清楚（对方确认 / 签了确认单 / 差异已处理）；
+   - 每行带 `sent`（哪天下的对账单）、`ack`、`diff`、`left`（还欠多少）、`cnt`（本月几单）；
+   - 返回 `total`/`rate`/`cnt{done,disputed,diff,sent,none}`/`rows`/`curve`（近 N 个月逐月 `total/done/rate/bar`，每月应核对 = 当月开过单的家）/`advice`（分五种情况给下一步）/人话结论「2026-11 该核对 4 家，核对清楚 1 家（25%）：1 家对方说对不上、1 家没发过对账单、1 家等回话。」；
+   - 前端报表页「📊 对账完成度」：月份可填（留空=本月），逐家一行显示状态与还欠，下面「近 6 个月对账完成度」逐月一行，可一键复制；
+   - denyStaff 加 `/^\/recon-board/`（员工 403，实测）；实测：4 家（甲只发对账单 / 乙确认对得上 / 丙说对不上 / 丁没发过）→ 25%，四种状态全对，advice 三条分别指向核数、批量发对账单、过两天再问。
+
+227. ✅ **结账前的对账把关 + 顺手修掉一条被顶掉的路由**：以前结账自检只看「有没有未处理的差异」，不看「有多少家根本没对账」——4 家客户只对过 1 家，照样能一次点完结账。现在：
+   - `async function reconRate(db, mm)`（结账把关 / 月报共用）：按家算状态——`disputed`（对方说对不上，未解决）/ `diff`（有差异没处理完）/ `none`（没发过对账单）/ `sent`（发了没回话）/ `done`（对方确认对得上、签了确认单，或差异已处理完），返回 `{total,done,rate,disputed,diff,none,sent,rows}`；**应核对 = 本月开过单的家 + 还有未结欠款的家**（应收应付都算）；
+   - `closePrecheck` 新增第 7 项 `recon_rate`：「应核对 4 家，核对清楚 1 家（25%），3 家还没发过对账单」，**完成度 <60% 且应核对 ≥3 家 → 阻断结账**（`blockers` 加 `recon_rate`，`BC_LABEL` 加「这个月对账没做完」）；
+   - `/month-close` 改成总是先跑一次自检：不确认且有阻断 → 409 `need_confirm`；**强制结账（`confirm:true`）会在审计里留痕**——「结转 2026-11：毛利 14000，成本 0，对账 1/4 家（强制结账：还没出本月小结、这个月对账没做完）」；
+   - `/month-report` 月度小结文本新增「—— 对账 ——」段（应核对几家 / 核对清楚几家 / 对方说对不上几家 / 还没发对账单几家），返回体加 `recon{total,done,rate,disputed,none}`；
+   - **顺手修 bug：`app.get('/month-report')` 定义了两次**（前面那条是「取自动生成的报表包 b64」，后面那条是「月度小结文本」），Worker 先注册先匹配 → 前面那条永远不生效，「下载报表包」拿到的是文本、`b64` 为空，下载一直失败。把报表包那条改名为 `/month-pack-file`，前端 `downloadPack` 同步改；实测 404 提示正确、`/month-report` 文本照旧；
+   - **踩坑（自己写的 bug）**：`reconRate` 首版用 `out[st]++` 和 `out.done++` 同时累加，`st==='done'` 时把 `out.done` 加了两次 → 1/4 报成 2/4（`none` 3 家 + `done` 2 家 = 5 > total 4 才看出来）。改用独立 `CNT` 计数器再回写；
+   - 实测：4 家客户本月各 1 单、只确认了乙客户 → `recon_rate` 1/4 25% bad、阻断项 `['summary','recon_rate']`；不确认结账 409；`confirm:true` 结账成功且审计留「对账 1/4 家（强制结账：…）」；解锁重结正常；员工口令不受影响。
+
+228. ✅ **账本体检报告单（账本这半年是在变好还是变差）**：健康分以前只会告诉你「现在多少分」，看不出趋势——62 分是刚从 40 分爬上来、还是从 90 分掉下来的，界面上长得一模一样；也看不出「这个问题什么时候出现的、有没有人管」。现在：
+   - `/health-check` 主体抽成 `async function healthScan(db)`，首页分数条 / 设置页「体检一下」/ 报告单三处共用同一套算法，不会再出现两处分数不一致；
+   - 分数历史从「只留最近 8 天」放宽到 **180 天**（`settings.health_hist`）；新增 `settings.health_items` 记每项问题的 `{since, fixed}`——**每次体检顺带记账**：某项从 0 变成有问题就记下「哪天发现」，从有问题变回 0 就记下「哪天修好」；
+   - `GET /health-report?days=180`：`score/grade/delta`、`points[{d,s}]`、`spark`（▁▂▃▄▅▆▇█ 火花线）、`best/worst/first/last`、`open[{k,label,count,tip,go,since,days_open}]`、`fixed[{k,label,since,fixed}]`、`sentences[]`、`text`、`url`（签名打印页）；
+   - 结论是比出来的，不是套话：「从 2026-08-20 的 62 分到今天的 88 分，升了 26 分。修好了 3 处：单子没填材料/外协成本、往来单位没设账期、最近没自动备份。还剩 1 处没改，最老的是「应付没约定付款日」，已经 12 天了。」**分数没变就说「这段时间一直是 X 分，没变」，不硬夸**；
+   - `GET /health-print?days=&t=`：A4 体检报告单（大号分数 + 火花线 + 结论 + 逐项「现在／哪天发现／持续多久／哪天修好／怎么改」六列 + 分数算法说明），签名绑定 `days`，改参数即「链接已失效」；
+   - 前端设置页「📋 体检报告单」面板：分数、火花线、结论逐句、还没改的逐项（带「已经 N 天」）、已修好的打勾，可「复制报告」「打印页」；
+   - 实测：空账本只说「先记两笔再来体检」（不硬编 100 分好评）；记一张没填成本的单 → 63 分、5 项、`since=2026-11-17`、火花线 `▆`；打印页含六列表头与「今天刚出现」，伪造签名返回「链接已失效」。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 327 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 329 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -937,7 +1033,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（181）
+**其它（单个接口）**（183）
 
 - `GET /`
 - `GET /access-guide`
@@ -1002,6 +1098,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `POST /handover-note`
 - `GET /handover-print`
 - `GET /health-check`
+- `GET /health-print`
+- `GET /health-report`
 - `GET /help`
 - `GET /history`
 - `POST /import`
@@ -1122,89 +1220,3 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /year-summary`
 
 <!-- API-LIST:END -->
-
-217. ✅ **老账搬家（把别的本子上的欠款一次搬进来）**：从 Excel / 纸本 / 别的软件转过来时，不用一笔笔录——
-218. ✅ **对账日历真正接上了（每月几号发对账单）**：`party_terms.recon_day` 一直存在但日历面板只靠按钮手动点、从没自动出现——
-   - `/recon-calendar` 每行补齐 `open_cnt`（还欠几笔）、`send_text`（现成微信话术：「兴旺五金，对一下账：到 2026-11-17，还有 1 笔加工费没结，共 6000 元…」；已结清时改说「这边账上你这边的款都结清了」）、`url`（`sigOf(saved, party, kind)` 签名的 `/statement-print` 打印页）；顶部加 `text`（「今天该发对账单的有 1 家、晚了的有 1 家（涉及欠款 ¥9000）」/「还没有单位约好每月几号发对账单」）、`count`、`sent_count`；
-   - 前端「单位」页进入时自动 `loadReconCal()`（不用再点按钮），面板顶部一行结论、每家「复制话术 / 打印页 / 📄 发好了，记一笔」，到点未发的两家以上给「一键复制 N 家话术」（按 欠款+话术 拼好，依次粘贴即可）；
-   - 「记一笔」走 `POST /statement-log`（channel=对账日），同家同日同月只记一条，记完日历立刻变「本月已发」；首页提醒「N 家到点该发对账单了」沿用同一批数据。
-   - `POST /migrate-preview {type:'ar'|'ap', text|rows, date, cost_mode:'none'|'pct', margin_pct}`：服务端解析文本（一行一笔：`名字,金额[,成本][,日期]`，逗号/制表符/空格都认，表头行自动跳过，第 3 格填日期也认），逐行给 `ok/error/dup/dup_text/known`，返回 `ar_total`/`ap_total`/`bad_count`/`dup_count`/`party_list` 与人话结论（「认出 3 笔客户还欠，共 ¥9800（3 家），其中 1 笔账上已经有了」）；**只读，不写库**；
-   - 判重两道：批内重复（同一批里前面已有同名同额同日）+ 账上重复（`${table} 同名同额同日` 已存在）；
-   - 成本处理：`cost_mode='none'` 不填（毛利偏高，返回 `tip` 提醒以后补）、`'pct'` 按毛利率估（`amount*(1-margin/100)`）；
-   - `POST /migrate-apply`：仍有坏行返回 400 并点名「第 3 行：金额要大于 0」；跨月先查 `isMonthLocked` → 403；重复行默认跳过（`confirm_dup` 才真重复记）；插入 `orders(item_name='期初搬入', operator='期初搬入')` / `payables(remark='期初搬入')`，**到期日按账期算，没设账期按 30 天**；写审计「老账搬入」；
-   - 前端「导入」页顶部「📥 老账搬家」：客户欠我 / 我欠供应商 切换、多行文本框、统一日期、成本不填或按毛利率估、「先看看（不写入）」逐行 ✓/✗、「确认搬进来（N 笔）」；有重复先弹「默认跳过」；
-   - 员工口令访问 `/migrate-*` 一律 403。
-219. ✅ **对账单自助确认（对方点一下就行，不用再打电话问「你看了吗」）**：发对账单时多带一条「确认链接」——
-   - `GET /statement-ack-link?type=ar|ap&party=&month=` 生成签名链接（`sigOf(saved, party, 'ack:'+type)`，只绑这一家，改一个字符就失效）；
-   - `GET /statement-ack?type=&party=&t=&month=` 手机只读页：页头厂名 + 这家到今天的账（月初欠 / 本月新增 / 本月已付 / 我这边记还欠多少）+ 还没结清的单子（最早 12 笔，含已收/还欠）+ 两个按钮「✓ 对得上，没问题」「✗ 有几笔对不上」（填差额 + 说明）；
-   - `POST /statement-ack {type,party,month,t,ack,amount,note}` 校验签名后写 `statement_log`（`channel='自助确认'`、`ack='ok'|'doubt'`、`ack_at`、note 记「对方说对不上，差 ¥800（6月那笔少了）」）并写审计；**异议直接进「争议台账」**（`/dispute-book` 以 `statement_log.ack='doubt'` 为起点，实测 count 1）；
-   - `GET /statement-acks?days=30` 回执台账：`ok_count`/`doubt_count`/`pending`（本月发了还没回音的家数）+ `rows[{party,ack_text,note,at,days}]` + 人话结论（「最近 30 天有 2 家回了：1 家说对得上，1 家说对不上」）与建议；
-   - 前端：单位页对账日历每行「让对方确认」→ 复制「甲客户，这是我这边到今天的对账明细，您点开核一下…+链接」；报表页「✅ 对账回执」面板逐条显示谁确认了、谁说对不上、差多少；
-   - 公开页 `/statement-ack` 已加进免口令放行名单（页面自己验签名），其它接口仍需口令。
-
-220. ✅ **催款话术跟着对账回执走（说「对不上」的先核数、别催钱）**：`GET /collect-list` 每行多查一次该家最近一条对账回执（`statement_log` 里 `ack IN ('ok','doubt')` 取最新一条，按 `norm(party)` 归并），据此换话术——
-   - `ack='ok'` 且 120 天内：`ack_kind='ok'`，话术变成「…2026-11 我们对过账，您那边确认过对得上，这笔数没疑问，麻烦这两天安排一下」；
-   - `ack='doubt'` 且未 `resolved_at`：`hold=true`，话术变成「上次对账您说有一笔对不上（差 ¥800…），我这边先把数核清楚，核完把明细发您。数对上了咱再谈结款，不着急」——**把催钱改成核对口径，避免一边吵架一边催款**；
-   - `ack='doubt'` 且已 `resolved_at`：`ack_kind='fixed'`，话术变成「上次您提的差异已经核清补记了，现在还有 X 元没结…」；
-   - 回执备注先清洗前缀（`^对方说对不上[，,]?`、`^对方确认[:：]?`），避免话术里出现「（对方说对不上，差 ¥800）」这种复读；
-   - 返回新增 `ok_n`/`hold_n`/`hold_amt`/`advice`：`hold_n>0` 时给「有 N 家（共 ¥X）上次对账说对不上：先把数核清再谈钱，话术已经改成核对口径，别硬催」，`ok_n>0` 时给「这几家话术里写明了『您确认过』，催起来更硬气」；
-   - 前端催款清单每行多一行回执标记：`✓ 对方 N 天前确认过对得上` / `⚠ 先别催钱 · 对方 N 天前说对不上（…）`，顶部把 `advice` 逐条渲染成提示条；
-   - 实测：甲客户 ack=ok → 话术带「您确认过对得上」；乙客户 ack=doubt（差 ¥800，备注「6月那笔少了」）→ `hold=true`、话术转核对口径、`hold_amt=3000`、两条 advice 都对；伪造签名 POST → 403。
-223. ✅ **账期按信用收紧（信用差的别给 30 天）**：账期以前是手动设的死数字，D 档客户照样给 30 天——
-   - `gradeCalc({broken,done,rate,oldest,over90,doubt})` 抽成公共打分函数，`creditBook` 与新加的 `gradeLight(db,party,type)`（只查 2 次、不加载流水，建单时用）共用同一套规则；
-   - **档位对应账期**：`const GRADE_DAYS = { A: 45, B: 30, C: 15, D: 7, N: 30 }`；
-   - `GET /term-advice?type=ar|ap`：每家给 `now_days`（现在设的天数，没设=0）/`suggest_days`（按档位）/`action`（`set` 没设 / `tighten` 偏宽（now>sug+5）/ `loosen` 偏紧（now<sug−10）/ `ok`）/`action_text`（「现在给 60 天，建议收紧到 45 天」），带 `unpaid`/`oldest_days`/`broken`/`why`，按「该收紧 → 该补 → 可放宽 → 匹配」排序；返回 `counts{tighten,loosen,set,ok}`、`auto`、`grade_days` 与人话结论「1 家客户的账期该收紧了（丙客户 60→45 天），其中还欠着 ¥3000」；
-   - `POST /term-advice/apply {type, mode:'tighten'|'all', parties?, fix_open?}`：`tighten` 只动偏宽的，`all` 收紧+放宽+补未设；写 `party_terms` 用 `ON CONFLICT(party) DO UPDATE SET term_days=excluded.term_days`（保留原有的对账周期/对账日）；`fix_open:true` 时顺手把未结单的到期日按新账期重算（**已结账月份跳过**）；写审计「按信用调账期」；
-   - `GET|POST /term-auto {on}`：settings `term_auto`；**开启后 `termDue(db,party,baseIso,type)` 对「没单独设账期」的单位按档位算到期日**（原来一律用默认账期），单独设过账期的照旧优先；
-   - 9 处 `termDue` 调用全部补上 `type`（建单 ar/ap、导入 ar/ap、老账搬家 ar/ap、对账补记/新建按 type），否则供应商会被按客户档位算；
-   - 前端「单位 → 账期」区新增「⏱ 账期该收紧了」面板：逐家显示档位、`现在 X 天 → 建议 Y 天`、还欠多少、扣分原因，三个按钮「只收紧偏宽的（N 家）」「全部按信用调」「开启/关掉信用账期」；进「单位」tab 自动加载；
-   - 实测：丙客户（A 档，设 60 天）→ 建议 45、`tighten`；甲客户（D 档，未设）→ 建议 7、`set`；乙客户（A 档，设 30）→ 建议 45、`loosen`；开启信用账期后给甲客户新单 → 到期日 = 开单日 +7 天，给新客户丁客户 → +30 天（N 档）；`apply mode=all` 后四家全部 `ok`，顺手补了 3 个到期日。
-
-224. ✅ **这周催款排班（谁先打、哪天打）**：以前 `/collect-list` 只给一个「谁最急」的排序，一周里怎么安排全靠自己——结果大额老账被新账挤到后面，或者同一家一周催三次。现在排成日历：
-   - `GET /collect-plan?type=ar|ap&days=7&per_day=3`：先算优先级 `score = 还欠 × (0.5 + min(欠款天数,180)/60) × (1 + min(逾期天数,90)/30) × 信用权重`（A 0.9 / B 1 / C 1.15 / D 1.3 / N 1），对账说「对不上」的 ×0.8（先核数别催钱）；
-   - **刚催过的往后排**：2 天内催过的 ×0.5，并且只从第 3 天起排，避免同一家天天被追；
-   - **分到具体哪天**：贪心分配——每天最多 `per_day` 家，每个客户往「当天金额最少」的那天空里塞，周日照排（小厂周日也干活）；排不下的给 `rest` 提示「下周接着催」；
-   - 每行给 `act` 建议动作：`先核对数`（对方说对不上）/ `等 11-20 那天`（有未到期的付款承诺）/ `打电话`（逾期 >30 天或 ≥5000）/ `发微信`（其余）；
-   - 返回 `plan[{date,wd,label,rows,amount}]`、`plan_n`/`plan_amt`/`rest`/`rows`（完整优先级）与人话结论「这 7 天要催 3 家（共 ¥13000）：周二 1 家、周四 1 家、周五 1 家。最急的是 甲客户（欠 ¥5000，欠 68 天 · 金额大 · 信用 D · 今天刚催过），排在周四。」；
-   - 前端应收/应付页各加「📅 这周催款排班」，面板按天分组（蓝色日期条 + 每家一行），点某家复制单条提醒，底部「整周排班复制」一次拷出整周安排；
-   - denyStaff 加 `/^\/collect-plan/`（含信用档位）；实测：3 家（5000/68 天/D 档、6000/10 天、2000/当天）→ 分到周二/周四/周五，甲客户因「今天刚催过」被挪到周四；再催一次丙客户 → 立刻挪到后半周；`per_day=1` 时也只排 3 家、`rest` 正确。
-
-225. ✅ **月度催款战报（催了几次、催回多少、哪家白催）**：以前只能看「这个月催了几次」，看不出效果——催了 3 次一分没回的，和催一次就付清的，在表上长得一样。现在按月算账：
-   - `GET /dunning-report?type=ar|ap&month=`：把本月每次催款按单位归并，再和本月回款对上——`paid_after` = 该家**首催日之后**的回款（催之前就付的不算你的功劳）；
-   - 五种状态：`paid` 催回了 / `part` 催回一部分还欠 / `useless` **催 ≥3 次一分没回**（附「答应过 N 次也没付」）/ `broken` 答应过付款又没付 / `waiting` 刚催还没动静；
-   - 汇总：`times` 催款次数、`recovered` 催后收回、`all_paid` 本月总回款（算占比）、`per_time` 平均每催一次收回多少、`useless_n`/`broken_n`、`prev{times,paid}` 上月对比；
-   - 另有 `self_rows`：**没催自己付了的**（这几家不用花力气），给 `self_n`/`self_amt`；
-   - 建议四条：催款效率（占比 + 每催一次多少钱）、白催名单（「再催也是白费劲，改成打电话或上门，或者先停掉账期」）、失约家数、不用花力气的名单，再加一句和上月的次数对比；
-   - 前端报表页「📣 催款月报」：月份输入 + 每家一行（催几次、本月回款、催后回款、还欠、信用档）+ 「📋 复制月报」；denyStaff 加 `/^\/dunning-report/`；
-   - 实测：甲客户（5000，催 3 次、承诺 3 次全过期、一分没回）→ `useless`「催了 3 次，一分没回（答应过 3 次也没付）」；乙客户（催 1 次后付清 4000）→ `paid`；丙客户（没催自己付 3000）→ 进「不用花力气」；汇总「催了 2 家共 4 次，催后收回 ¥4000（本月总回款 ¥7000，占 57%），平均每催一次 ¥1000」；空月份「2026-08 没催过款、也没有回款记录」；员工口令 403。
-
-226. ✅ **月度对账完成度（这个月账到底核清没有）**：对账记录散在四个地方（发对账单 `statement_log`、对方回执 `statement_log.ack`、差异处理 `recon_log`、签字确认 `recon_confirm`），月底没人说得清「核完没核完」。新增 `GET /recon-board?type=ar|ap&month=&months=6`（**原 `/recon-progress` 已存在且前端在用，新接口另起名 `/recon-board`，否则会被先定义的路由遮住**）：
-   - **应核对家数** = 本月开过单的家 ∪ 还有未结欠款的家（老账也要对，不能只看本月）；
-   - 每家给一个状态，按严重程度排：`disputed` 对方说对不上（红）→ `diff` 有差异没处理完（红）→ `none` 这个月没发过对账单 → `sent` 发过没回话 → `done` 核对清楚（对方确认 / 签了确认单 / 差异已处理）；
-   - 每行带 `sent`（哪天下的对账单）、`ack`、`diff`、`left`（还欠多少）、`cnt`（本月几单）；
-   - 返回 `total`/`rate`/`cnt{done,disputed,diff,sent,none}`/`rows`/`curve`（近 N 个月逐月 `total/done/rate/bar`，每月应核对 = 当月开过单的家）/`advice`（分五种情况给下一步）/人话结论「2026-11 该核对 4 家，核对清楚 1 家（25%）：1 家对方说对不上、1 家没发过对账单、1 家等回话。」；
-   - 前端报表页「📊 对账完成度」：月份可填（留空=本月），逐家一行显示状态与还欠，下面「近 6 个月对账完成度」逐月一行，可一键复制；
-   - denyStaff 加 `/^\/recon-board/`（员工 403，实测）；实测：4 家（甲只发对账单 / 乙确认对得上 / 丙说对不上 / 丁没发过）→ 25%，四种状态全对，advice 三条分别指向核数、批量发对账单、过两天再问。
-
-227. ✅ **结账前的对账把关 + 顺手修掉一条被顶掉的路由**：以前结账自检只看「有没有未处理的差异」，不看「有多少家根本没对账」——4 家客户只对过 1 家，照样能一次点完结账。现在：
-   - `async function reconRate(db, mm)`（结账把关 / 月报共用）：按家算状态——`disputed`（对方说对不上，未解决）/ `diff`（有差异没处理完）/ `none`（没发过对账单）/ `sent`（发了没回话）/ `done`（对方确认对得上、签了确认单，或差异已处理完），返回 `{total,done,rate,disputed,diff,none,sent,rows}`；**应核对 = 本月开过单的家 + 还有未结欠款的家**（应收应付都算）；
-   - `closePrecheck` 新增第 7 项 `recon_rate`：「应核对 4 家，核对清楚 1 家（25%），3 家还没发过对账单」，**完成度 <60% 且应核对 ≥3 家 → 阻断结账**（`blockers` 加 `recon_rate`，`BC_LABEL` 加「这个月对账没做完」）；
-   - `/month-close` 改成总是先跑一次自检：不确认且有阻断 → 409 `need_confirm`；**强制结账（`confirm:true`）会在审计里留痕**——「结转 2026-11：毛利 14000，成本 0，对账 1/4 家（强制结账：还没出本月小结、这个月对账没做完）」；
-   - `/month-report` 月度小结文本新增「—— 对账 ——」段（应核对几家 / 核对清楚几家 / 对方说对不上几家 / 还没发对账单几家），返回体加 `recon{total,done,rate,disputed,none}`；
-   - **顺手修 bug：`app.get('/month-report')` 定义了两次**（前面那条是「取自动生成的报表包 b64」，后面那条是「月度小结文本」），Worker 先注册先匹配 → 前面那条永远不生效，「下载报表包」拿到的是文本、`b64` 为空，下载一直失败。把报表包那条改名为 `/month-pack-file`，前端 `downloadPack` 同步改；实测 404 提示正确、`/month-report` 文本照旧；
-   - **踩坑（自己写的 bug）**：`reconRate` 首版用 `out[st]++` 和 `out.done++` 同时累加，`st==='done'` 时把 `out.done` 加了两次 → 1/4 报成 2/4（`none` 3 家 + `done` 2 家 = 5 > total 4 才看出来）。改用独立 `CNT` 计数器再回写；
-   - 实测：4 家客户本月各 1 单、只确认了乙客户 → `recon_rate` 1/4 25% bad、阻断项 `['summary','recon_rate']`；不确认结账 409；`confirm:true` 结账成功且审计留「对账 1/4 家（强制结账：…）」；解锁重结正常；员工口令不受影响。
-
-222. ✅ **信用分档（谁可以宽限、谁只做现款）**：把「失约几次、欠多久、有没有争议」合成一个 0–100 分 + A/B/C/D 档——
-   - `GET /credit-book?type=ar|ap` 全量分档：每家 `grade`/`label`（A 可以放心 / B 正常 / C 要盯 / D 只做现款）/`score`/`unpaid`/`oldest_days`/`over90`/`promises`/`kept`/`broken`/`rate`/`doubt`/`why`（扣分原因）/`advice`（怎么办），按分数从差到好排；返回 `by{A,B,C,D}`、`bad_count` 与人话结论「客户里 1 家要盯（甲客户 D），合计还欠 ¥11100」；
-   - 扣分规则：答应付款失约每次 −25（最多 −50）、兑现率<50% 且≥2 次 −10、最老一笔欠款>60 天 −10、超 90 天未收 −10、对方说对不上的对账单 −10；
-   - `GET /credit-grade?party=&type=` 单家；没记录的返回 `grade:'N'`（新单位）「建议先收定金或做现款」；
-   - **接单时就提醒**：`orderChecks` 新增两项——失约 ≥3 次且还欠钱 → `credit_bad`「这单建议只做现款，或者先收一半定金」；失约 ≥1 次且最老欠款 ≥30 天 → `credit_watch`「这单建议先收一部分定金」；
-   - 前端报表页「🎚 信用分档」（看客户/看供应商），每家显示档位、分数、还欠、扣分原因、「怎么办」；
-   - 员工口令访问 `/credit-book`、`/credit-grade` 一律 403。
-221. ✅ **付款承诺台账（答应哪天付、到底付没付）**：`dunning_log.promise_date` 以前只存不用——
-   - `GET /promise-book?days=365&type=ar|ap`：每次承诺判三种结果——`kept`（承诺窗口 `[催款日, 承诺日+1]` 内有进账）、`broken`（日子过了、一分没付、还欠着）、`pending`（还没到日子）；每家汇总 `promises/kept/broken/pending/rate/last_promise/last_broken/broken_amt`，返回 `rows/parties/count/kept_n/broken_n/pending_n/rate/broken_amt/advice/text`；
-   - 提醒规则：失约 ≥1 次 → 「别只听日子，让他先付一部分」；兑现率 ≥80% 且 ≥2 次 → 「这家说话算数，可以适当宽限」；
-   - `/collect-list` 每行多 `promise_text`（「上回答应 11-07 付，又没付（10 天前）」）、`promise_broken`、`promise_rate`，**催款话术自动把这句放在最前面**（「甲客户 你好，上回答应 11-07 付，又没付（10 天前）。加工厂账上你这边还有 5000 元没结…」），并多一条 advice 点名失约家数；
-   - `/customer-card` 增 `promise{promises,kept,broken,pending,rate,last_broken}`，画像文本多一行「答应付款 2 次：兑现 0 次、失约 1 次（兑现率 0%）」；
-   - 前端报表页「🤝 付款承诺」面板（`loadPromiseBook`/`closePromiseBook`，data `pbook`），催款清单行显示红字「⏰ 上回答应 11-07 付，又没付」。

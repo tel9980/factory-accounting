@@ -140,7 +140,7 @@ Page({
       ] }
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    hc: null, hc_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
+    hc: null, hc_open: false, hr: null, hr_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, cp: null, rb: null, rb_month: '', dr: null, dr_month: '', tg: null, tadv: null, term_auto: false,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -1776,6 +1776,44 @@ Page({
         this.setData({ health: r, health_done: true, hc: { score: r.score, grade: r.grade, clean: r.clean, count: r.count, delta: r.delta || 0, items: r.items } })
         wx.showToast({ title: r.clean ? '体检全部通过' : '有 ' + r.count + ' 项要补', icon: 'none' })
       }
+    })
+  },
+  // 📋 体检报告单：分数曲线 + 每项问题哪天发现、哪天修好
+  loadHealthReport() {
+    this.req({
+      url: API_BASE + '/health-report?days=180',
+      success: (res) => {
+        const r = res.data || {}
+        if (!r.ok) { wx.showToast({ title: (r && r.error) || '取不到报告单', icon: 'none' }); return }
+        this.setData({ hr: r, hr_open: true })
+      }
+    })
+  },
+  closeHealthReport() { this.setData({ hr_open: false }) },
+  copyHealthReport() {
+    const r = this.data.hr
+    if (!r) return
+    const L = []
+    L.push('【账本体检报告单】' + (r.at || '').slice(0, 10))
+    L.push('现在 ' + r.score + ' 分 · ' + r.grade + (r.delta ? '（比上次 ' + (r.delta > 0 ? '+' : '') + r.delta + '）' : ''))
+    if (r.spark) L.push('分数变化：' + r.spark)
+    for (const x of (r.sentences || [])) L.push('· ' + x)
+    if ((r.open || []).length) {
+      L.push('—— 还没改 ——')
+      for (const x of r.open) L.push('· ' + x.label + '（' + x.count + ' 处，' + (x.since || '') + ' 起，' + (x.days_open > 0 ? '已 ' + x.days_open + ' 天' : '今天刚出现') + '）')
+    }
+    if ((r.fixed || []).length) {
+      L.push('—— 已经修好 ——')
+      for (const x of r.fixed) L.push('· ' + x.label + '：' + (x.fixed || ''))
+    }
+    wx.setClipboardData({ data: L.join('\n') })
+  },
+  openHealthPrint() {
+    const r = this.data.hr
+    if (!r || !r.url) return
+    wx.setClipboardData({
+      data: API_BASE + r.url,
+      success: () => wx.showModal({ title: '打印页链接已复制', content: '粘贴到浏览器打开，可以直接打印或存成 PDF。', showCancel: false })
     })
   },
   loadErrorLog() {

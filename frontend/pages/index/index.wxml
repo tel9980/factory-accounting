@@ -1308,6 +1308,7 @@
     <view class="form">
       <view class="tip">数据体检：把「账记得对不对」列成清单。100 分不用管；哪项有数字就按后面的路径去补一下</view>
       <button class="btn" size="mini" bindtap="loadHealthDetail">🩺 体检一下{{health.score ? '（' + health.score + ' 分）' : ''}}</button>
+      <button class="btn" size="mini" bindtap="loadHealthReport">📋 体检报告单（看账本在变好还是变差）</button>
       <button class="btn" size="mini" bindtap="loadErrorLog">🐞 运行日志（看有没有报错）</button>
     </view>
     <view class="list" wx:if="{{health_done}}">
@@ -1321,6 +1322,29 @@
             <view class="pre" wx:if="{{item.list.length}}">　{{item.k === 'cost' ? '如：' : ''}}{{item.party || ''}}{{item.k === 'dup' ? (item.date + ' ' + item.amount) : ''}}</view>
           </view>
         </block>
+      </view>
+    </view>
+    <view class="list" wx:if="{{hr_open && hr}}">
+      <view class="item">
+        <view class="row1"><text class="nm">📋 账本体检报告单</text><text class="amt" bindtap="closeHealthReport">收起</text></view>
+        <view class="row1"><text class="nm">现在 {{hr.score}} 分 · {{hr.grade}}<text wx:if="{{hr.delta}}" class="{{hr.delta>0?'green':'red'}}">（{{hr.delta>0?'+':''}}{{hr.delta}}）</text></text><text class="amt">{{hr.days}} 天</text></view>
+        <view class="pre" wx:if="{{hr.spark}}">分数变化 {{hr.spark}}</view>
+        <view class="pre" wx:for="{{hr.sentences}}" wx:key="*this">· {{item}}</view>
+        <block wx:for="{{hr.open}}" wx:key="k">
+          <view class="row2" style="margin-top:10rpx">
+            <text class="red">● {{item.label}}：{{item.count}} 处</text>
+            <view class="pre">　{{item.since}} 起 · {{item.days_open>0 ? '已经 ' + item.days_open + ' 天' : '今天刚出现'}}</view>
+            <view class="pre">　怎么改：{{item.tip}}</view>
+          </view>
+        </block>
+        <block wx:for="{{hr.fixed}}" wx:key="k">
+          <view class="row2"><text class="green">✓ {{item.label}}：{{item.fixed}} 修好了</text></view>
+        </block>
+        <view class="row2">
+          <text class="lnk" bindtap="copyHealthReport">复制报告</text>
+          <text class="lnk" bindtap="openHealthPrint">打印页</text>
+          <text class="lnk" bindtap="loadHealthReport">刷新</text>
+        </view>
       </view>
     </view>
     <view class="list" wx:if="{{err_shown}}">
