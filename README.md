@@ -963,11 +963,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **实测**：并发打 `/tax-pack /month-brief /health-check /collect-list /ar-summary /year-book` 制造拥塞 → `/tax-pack` 记到一条 1376ms；`/slow-log` 回报「最近 7 天有 1 次慢请求，涉及 1 个接口；最慢 /tax-pack 1376ms」；同一接口再慢也不重复记（每小时一条）。空账本回报「最近 7 天没有超过 800ms 的请求，速度正常」。
    - 顺带把 `slow_log` 加进清库脚本；三库 + `backend/schema.sql` 都已建表（附 `idx_slow_created`）。
 
+264. ✅ **在制与交期（车间里压着多少钱 · 答应的日子做到了没）**：前面能算"赚了多少"，但工厂最容易忽略的是**钱压在车间里**——接了单、料下了、活没交，材料钱先出去了，钱还没进来。
+   - **在制看板 `GET /wip`**：把所有没交付的单（`status < 2`）按材料成本算一遍——一共几张、占了多少材料钱、能收多少、还没收多少、**平均压了几天**；再按工序分组（"押在哪个工序上的钱最值钱"，最多 8 组）、按状态分（待加工/加工中）、挑出**超过 14 天没动**的（钱和数量）、列出最久的 10 张。车间里没活时直说"车间里没有压着的单子"。
+   - **交期表现 `GET /ontime?months=6`**：算准时率——晚交天数 = 实际交付日 − 约定交货日，输出准时张数/准时率/晚交张数/平均晚几天 + 近几月曲线 + 最离谱的 10 张（客户、产品、约定日、实交日、晚几天）+ 建议（准时率 <70% 就直说"要么产能不够、要么交期报得太乐观"）。
+   - **新增 `orders.delivered_at`**（三库 + schema.sql）：第一次把单标成「已交付」时自动记下当天（`POST /orders/:id/status` 支持传 `date` 补记旧单）。**这里有个故意的取舍**：没有交付痕迹的老单**不拿开单日冒充**——否则每张单都"准时"、准时率永远 100%，那是自欺欺人；所以模拟数据上它会老实说"还没有可算准时率的单子"。
+   - 前端：报表页「🏭 车间里压着多少钱 · 交期准不准」面板，一眼看到在制金额/卡住的单/按工序分布，下面接交期曲线与最晚的几张，可一键复制。
+   - **实测**：模拟账本（1271 单、498 张没交完）→ 在制材料 ¥1,336,105.68、能收 ¥2,357,184、平均压 161 天，477 张超 14 天没动；主账本造 3 张约定 11-10 的单，实交 11-08 / 11-12 / 11-20 → 准时 1 张（33.3%）、平均晚 6 天、点名"晚了 10 天那张"；标完已交付后 `/wip` 立刻少这 3 张。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 396 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
+共 398 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
 
 **accounts**（4）
 
@@ -1339,7 +1346,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（206）
+**其它（单个接口）**（208）
 
 - `GET /`
 - `GET /access-guide`
@@ -1450,6 +1457,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /networth`
 - `GET /networth-snapshots`
 - `GET /next-step`
+- `GET /ontime`
 - `GET /order-print`
 - `GET /order-print-link`
 - `GET /outsource-book`
@@ -1529,6 +1537,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /trend`
 - `POST /unseal`
 - `GET /weekly-text`
+- `GET /wip`
 - `POST /wx-login`
 - `GET /wx-status`
 - `POST /wx-subscribed`

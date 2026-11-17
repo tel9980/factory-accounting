@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS orders (
   progress TEXT DEFAULT '',             -- 当前工序（如 备料/加工/喷涂/包装）
   created_at TEXT NOT NULL,
   month TEXT,                         -- =substr(created_at,1,7)，触发器自动填，首页走索引
-  created_by TEXT                     -- 谁录的（'老板' / '员工·小王'），员工「只看自己录的单」用
+  created_by TEXT                     -- 谁录的（'老板' / '员工·小王'），员工「只看自己录的单」用,
+  delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);

@@ -2262,6 +2262,36 @@
           <button class="btn ghost half" size="mini" bindtap="closeDeliveryPlan">收起</button>
         </view>
       </block>
+      <view class="tip">🏭 车间里压着多少钱 · 交期准不准（在制与交期）</view>
+      <view class="frow">
+        <button class="btn ghost" size="mini" bindtap="openWip">看现在压了多少</button>
+        <button class="btn ghost" size="mini" bindtap="closeWip" wx:if="{{wip}}">收起</button>
+      </view>
+      <view class="prev" wx:if="{{wip}}">
+        <view class="prev-h">在制：{{wip.count}} 张没交完 · 材料成本 ¥{{wip.cost}}</view>
+        <view class="prev-row"><text class="prev-t">能收 ¥{{wip.price}}</text><text class="prev-n">还没收到 ¥{{wip.left}}</text><text>平均压 {{wip.avg_idle}} 天</text></view>
+        <view class="prev-row red" wx:if="{{wip.stuck_cnt}}"><text class="prev-t">超过 14 天没动 {{wip.stuck_cnt}} 张</text><text class="prev-n">押着材料 ¥{{wip.stuck_cost}}</text><text bindtap="copyWip">复制</text></view>
+        <view class="prev-row" wx:for="{{wip.by_progress}}" wx:key="k">
+          <text class="prev-t">{{item.k}}</text><text class="prev-n">{{item.cnt}} 张</text><text>材料 ¥{{item.cost}}</text>
+        </view>
+        <view class="tip" wx:for="{{wip.advice}}" wx:key="*this">· {{item}}</view>
+        <view class="tip" wx:if="{{wip.count}}">明细（按下料成本排，点开看单）：</view>
+        <view class="prev-row" wx:for="{{wip.rows}}" wx:key="id" bindtap="goWipOrder" data-id="{{item.id}}" wx:if="{{index < 8}}">
+          <text class="prev-t">{{item.party}} {{item.item}}</text>
+          <text class="prev-n">{{item.status_text}}{{item.progress ? '·' + item.progress : ''}}</text>
+          <text class="{{item.idle>=14?'red':'ok'}}">压 {{item.idle}} 天</text>
+        </view>
+      </view>
+      <view class="prev" wx:if="{{ot}}">
+        <view class="prev-h">交期：{{ot.text}}</view>
+        <view class="prev-row" wx:for="{{ot.by_month}}" wx:key="m">
+          <text class="prev-t">{{item.m}}</text><text class="prev-n">交 {{item.cnt}} 张</text><text class="{{item.rate>=80?'ok':'red'}}">准时 {{item.rate}}%</text>
+        </view>
+        <view class="prev-row red" wx:for="{{ot.rows}}" wx:key="id" wx:if="{{index < 5}}">
+          <text class="prev-t">{{item.party}} {{item.item}}</text><text class="prev-n">约定 {{item.due}}</text><text>实交 {{item.done}}（晚 {{item.late}} 天）</text>
+        </view>
+        <view class="tip" wx:for="{{ot.advice}}" wx:key="*this">· {{item}}</view>
+      </view>
       <view class="tip">🔧 返工 / 报废 / 客诉（钱是怎么被悄悄吃掉的）</view>
       <view class="frow">
         <input class="inp half" placeholder="月份 YYYY-MM（留空本月）" value="{{rwk_month}}" bindinput="onRwkMonth" bindconfirm="loadReworkBook"/>

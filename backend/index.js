@@ -7330,13 +7330,19 @@ app.get('/dunning', async (c) => {
 // 订单状态
 app.post('/orders/:id/status', async (c) => {
   const id = c.req.param('id')
-  const { status } = await c.req.json()
+  const { status, date } = await c.req.json()
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
-  await db.prepare('UPDATE orders SET status=? WHERE id=?').bind(num(status), id).run()
-  await logAudit(db, '状态变更', o.customer, `${o.customer} ${o.item_name} → ${['待加工','加工中','已交付'][num(status)] || num(status)}`)
+  const st = num(status)
+  // 第一次标"已交付"时记下交付日期（算准时率用），之后改来改去不覆盖
+  if (st === 2 && !o.delivered_at) {
+    await db.prepare("UPDATE orders SET status=?, delivered_at=? WHERE id=?").bind(st, toIsoDate(date) || todayIso(), id).run()
+  } else {
+    await db.prepare('UPDATE orders SET status=? WHERE id=?').bind(st, id).run()
+  }
+  await logAudit(db, '状态变更', o.customer, `${o.customer} ${o.item_name} → ${['待加工','加工中','已交付'][st] || st}`)
   return c.json({ ok: true })
 })
 
@@ -12077,6 +12083,99 @@ app.patch('/orders/:id', async (c) => {
   ])
   await logAudit(db, '编辑应收', ncust, d || '（没改动）', `order:${id}`)
   return c.json({ ok: true, changed: d })
+})
+
+// ── 在制（钱压在车间里多少）＋ 交期表现 ──
+app.get('/wip', async (c) => {
+  const db = c.env.DB
+  const rows0 = (await db.prepare(`SELECT id, customer, item_name, price, COALESCE(cost,0) cost, paid, COALESCE(written_off,0) wo,
+      COALESCE(status,0) st, progress, deliver_date, created_at,
+      COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=orders.id), created_at) AS last_move
+    FROM orders WHERE COALESCE(status,0) < 2 ORDER BY id`)
+    .all().catch((e) => { noteFail(e, '在制'); return { results: [] } })).results || []
+  const rows = rows0.map((r) => {
+    const last = String(r.last_move || r.created_at || '').slice(0, 10)
+    const idle = daysSince(last)
+    return {
+      id: num(r.id), party: r.customer || '', item: r.item_name || '',
+      price: round2(num(r.price)), cost: round2(num(r.cost)),
+      left: round2(num(r.price) - num(r.paid) - num(r.wo)),
+      status: num(r.st), status_text: ['待加工', '加工中', '已交付'][num(r.st)] || '待加工',
+      progress: r.progress || '', deliver_date: (r.deliver_date || '').slice(0, 10),
+      idle, late_deliver: r.deliver_date ? dayDiff(String(r.deliver_date).slice(0, 10)) : null
+    }
+  })
+  const count = rows.length
+  const cost = round2(rows.reduce((a, x) => a + x.cost, 0))
+  const price = round2(rows.reduce((a, x) => a + x.price, 0))
+  const left = round2(rows.reduce((a, x) => a + x.left, 0))
+  const avgIdle = count ? Math.round(rows.reduce((a, x) => a + x.idle, 0) / count) : 0
+  const byStatus = [0, 1].map((k) => ({ k, label: ['待加工', '加工中'][k], cnt: rows.filter((x) => x.status === k).length, cost: round2(rows.filter((x) => x.status === k).reduce((a, x) => a + x.cost, 0)) }))
+  const pmap = {}
+  rows.forEach((x) => { const k = x.progress || '（还没写工序）'; const e = pmap[k] || (pmap[k] = { k, cnt: 0, cost: 0 }); e.cnt++; e.cost += x.cost })
+  const byProgress = Object.values(pmap).sort((a, b) => b.cost - a.cost).slice(0, 8).map((x) => ({ k: x.k, cnt: x.cnt, cost: round2(x.cost) }))
+  const stuck = rows.filter((x) => x.idle >= 14)
+  const overdue = rows.filter((x) => x.late_deliver !== null && x.late_deliver < 0)
+  const oldest = rows.slice().sort((a, b) => b.idle - a.idle).slice(0, 10)
+  const advice = []
+  if (!count) advice.push('车间里没有压着的单子，都交完了。')
+  else {
+    advice.push(`还有 ${count} 张没交付，占着材料成本 ¥${cost}、能收 ¥${left}。`)
+    if (stuck.length) advice.push(`其中 ${stuck.length} 张超过 14 天没动（最久 ${oldest[0].idle} 天），先去车间问一句卡在哪。`)
+    if (overdue.length) advice.push(`${overdue.length} 张已经过了约定交货日，最久的拖了 ${Math.abs(Math.min(...overdue.map((x) => x.late_deliver)))} 天，客户那边最好主动说一声。`)
+    const big = byProgress[0]
+    if (big && big.cost > 0 && count >= 3) advice.push(`压在「${big.k}」上的最值钱（${big.cnt} 张、材料 ¥${big.cost}），先把这个工序理顺。`)
+  }
+  const text = count
+    ? `车间还有 ${count} 张没交完，材料成本 ¥${cost}（能收 ¥${price}，还没收到的 ¥${left}）；平均压了 ${avgIdle} 天。`
+    : '车间里没有压着的单子。'
+  return c.json({ ok: true, count, cost, price, left, avg_idle: avgIdle, by_status: byStatus, by_progress: byProgress,
+    stuck_cnt: stuck.length, stuck_cost: round2(stuck.reduce((a, x) => a + x.cost, 0)),
+    overdue_cnt: overdue.length, rows: rows.slice().sort((a, b) => b.cost - a.cost).slice(0, 20), oldest, advice, text })
+})
+
+app.get('/ontime', async (c) => {
+  const db = c.env.DB
+  const months = Math.min(24, Math.max(1, num(c.req.query('months'), 6)))
+  const since = new Date(Date.now() + TZ_MS)
+  since.setUTCMonth(since.getUTCMonth() - months)
+  const from = since.toISOString().slice(0, 7)
+  const raw = (await db.prepare(`SELECT id, customer, item_name, price, COALESCE(cost,0) cost, deliver_date, delivered_at, created_at,
+      COALESCE((SELECT MAX(p.created_at) FROM process_log p WHERE p.order_id=orders.id), '') AS last_move
+    FROM orders WHERE COALESCE(status,0) = 2 AND substr(created_at,1,7) >= ? ORDER BY id DESC LIMIT 2000`)
+    .bind(from).all().catch((e) => { noteFail(e, '交期'); return { results: [] } })).results || []
+  const rows = []
+  for (const r of raw) {
+    const dd = (r.deliver_date || '').slice(0, 10)
+    // 只用"真的交付过的痕迹"：标已交付时记的 delivered_at，或工序日志最后一条。
+    // 都没有就不用开单日冒充 —— 否则每张单都"准时"，准时率永远 100%，等于自欺欺人
+    const done = (r.delivered_at || r.last_move || '').slice(0, 10)
+    if (!dd || !done) continue
+    const late = Math.round((dateNum(done) - dateNum(dd)) / 86400000)
+    rows.push({ id: num(r.id), party: r.customer || '', item: r.item_name || '', price: round2(num(r.price)),
+      due: dd, done, late, on_time: late <= 0, month: done.slice(0, 7), no_stamp: !r.delivered_at })
+  }
+  const cnt = rows.length
+  const onTime = rows.filter((x) => x.on_time).length
+  const rate = cnt ? Math.round((onTime / cnt) * 1000) / 10 : 0
+  const lates = rows.filter((x) => !x.on_time)
+  const avgLate = lates.length ? Math.round(lates.reduce((a, x) => a + x.late, 0) / lates.length) : 0
+  const worst = lates.slice().sort((a, b) => b.late - a.late).slice(0, 10)
+  const mm = {}
+  rows.forEach((x) => { const e = mm[x.month] || (mm[x.month] = { m: x.month, cnt: 0, on: 0 }); e.cnt++; if (x.on_time) e.on++ })
+  const byMonth = Object.values(mm).sort((a, b) => (a.m < b.m ? 1 : -1)).slice(0, months).map((x) => ({ m: x.m, cnt: x.cnt, on: x.on, rate: Math.round((x.on / x.cnt) * 1000) / 10 }))
+  const advice = []
+  if (!cnt) advice.push('这几个月没有「写了交货日又交完了」的单子，先在开单时填上交货日，这里才有数。')
+  else {
+    advice.push(`${months} 个月里交了 ${cnt} 张，准时 ${onTime} 张（${rate}%）。`)
+    if (rate >= 90) advice.push('交期控制得不错，可以放心接更紧的单。')
+    else if (rate >= 70) advice.push(`有 ${lates.length} 张晚交，平均晚 ${avgLate} 天，接单时把交货日往后留两天更稳。`)
+    else advice.push(`准时率只有 ${rate}%，平均晚 ${avgLate} 天——要么产能不够，要么报的交期太乐观，先把交货日统一往后调 2–3 天。`)
+    if (worst.length && worst[0].late >= 7) advice.push(`最离谱的是 ${worst[0].party} 那张 ${worst[0].item}，晚了 ${worst[0].late} 天。`)
+  }
+  const text = cnt ? `${months} 个月交了 ${cnt} 张，准时 ${onTime} 张（${rate}%），晚交的平均晚 ${avgLate} 天。` : '还没有可算准时率的单子（需要在开单时填交货日、并且标成已交付）。'
+  return c.json({ ok: true, months, count: cnt, on_time: onTime, rate, late_cnt: lates.length, avg_late: avgLate,
+    rows: worst, by_month: byMonth, no_stamp_cnt: rows.filter((x) => x.no_stamp).length, advice, text })
 })
 
 // 更新订单工序进度（生产环节基础版）

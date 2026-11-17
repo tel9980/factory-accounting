@@ -79,7 +79,7 @@ Page({
     psv: null,
     fp: null, fr_party: '', fr_party_kw: '', fr_item: '', fr_price: '', fr_unit: '件', fr_note: '',
     os: null, os_party: '', os_item: '', os_qty: '', os_price: '', os_due: '',
-    dp: null, dp_days: 7,
+    dp: null, dp_days: 7, wip: null, ot: null,
     rw_faults: ['自己做坏了', '材料有问题', '客户改了要求', '图纸 / 尺寸给错', '别的原因'],
     rwk: null, rwk_month: '', rw_kind: 'rework', rw_party: '', rw_item: '', rw_qty: '', rw_cost: '', rw_reason: '', rw_fix: '', rw_fault_idx: 0,
     pw: null, pw_month: '', pw_recs: [], pw_rates: null, pw_worker: '', pw_date: '', pw_item: '', pw_process: '', pw_qty: '', pw_rate: '',
@@ -7031,6 +7031,27 @@ Page({
     } })
   },
   // ===== 返工 / 报废 / 客诉 =====
+  loadWip() {
+    this.req({ url: API_BASE + '/wip', success: (res) => { const d = res.data || {}; if (d.ok !== false) this.setData({ wip: d }) } })
+  },
+  loadOntime() {
+    this.req({ url: API_BASE + '/ontime?months=6', success: (res) => { const d = res.data || {}; if (d.ok !== false) this.setData({ ot: d }) } })
+  },
+  openWip() { this.loadWip(); this.loadOntime() },
+  closeWip() { this.setData({ wip: null, ot: null }) },
+  copyWip() {
+    const w = this.data.wip, o = this.data.ot
+    if (!w) return
+    const L = [w.text]
+    if (o && o.count) L.push(o.text)
+    ;(w.advice || []).forEach((t) => L.push('· ' + t))
+    ;(w.by_progress || []).slice(0, 5).forEach((x) => L.push(`押在「${x.k}」：${x.cnt} 张、材料 ¥${x.cost}`))
+    wx.setClipboardData({ data: L.join('\n'), success: () => wx.showToast({ title: '已复制' }) })
+  },
+  goWipOrder(e) {
+    const id = e.currentTarget.dataset.id
+    if (id) this.showDetail({ currentTarget: { dataset: { type: 'ar', id } } })
+  },
   loadReworkBook() {
     const mm = String(this.data.rwk_month || '').trim() || dayOf().slice(0, 7)
     this.req({ url: API_BASE + '/rework-book?month=' + mm, success: (r) => {
