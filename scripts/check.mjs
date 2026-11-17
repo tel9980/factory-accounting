@@ -47,6 +47,42 @@ for (const r of routes) {
 }
 say(bad.filter((x) => x.startsWith('路由重名')).length === 0, `${routes.length} 条路由，没有重名`)
 
+// ── 2.5 「await 一个不存在的变量」：ReferenceError 的典型写法，接口整个 500 ──
+// 这一类事故真实发生过：`const pb = await pbP` 让「客户信用」整页 500，访问向导里抄来一句
+// `if (labor > 0)` 让使用向导 500。注意这个静态检查的边界：
+//   只抓「整个文件里都没声明过」的变量（纯手滑打错名字那种）；
+//   变量在别处声明、只是这里拿不到的（就是上面那两例）静态看不出来 —— 那种由 scripts/smoke.mjs
+//   逐个接口打一遍来抓，所以 CI 里两步都要跑。
+// 扫之前先把行尾 // 注释去掉，免得文档里写一句 `await xxx` 就把构建搞红。
+console.log('\n[2.5] await 未声明的变量')
+const declNames = new Set()
+for (const m of beSrc.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declNames.add(m[1])
+for (const m of beSrc.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)) declNames.add(m[1])
+for (const m of beSrc.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=/g)) {
+  for (const f of m[1].split(',')) {
+    const n = f.split(':').pop().trim()
+    if (/^[A-Za-z_$][\w$]*$/.test(n)) declNames.add(n)
+  }
+}
+for (const m of beSrc.matchAll(/(?:const|let|var)\s*\[([^\]]*)\]\s*=/g)) {
+  for (const f of m[1].split(',')) {
+    const n = f.trim()
+    if (/^[A-Za-z_$][\w$]*$/.test(n)) declNames.add(n)
+  }
+}
+const JS_WORDS = new Set(['new', 'this', 'typeof', 'void', 'delete', 'await', 'async', 'super', 'import', 'yield'])
+const orphanAwaits = []
+beSrc.split('\n').forEach((rawLine, i) => {
+  // 去掉行尾注释（只认「空白 + //」开头的，别把 'https://…' 截了）
+  const line = rawLine.replace(/(^|\s)\/\/.*$/, '')
+  for (const m of line.matchAll(/await\s+([A-Za-z_$][\w$]*)(?![A-Za-z0-9_$])\s*(?![.(])/g)) {
+    if (JS_WORDS.has(m[1]) || declNames.has(m[1])) continue
+    orphanAwaits.push(`第 ${i + 1} 行：await ${m[1]} —— 全文没有声明过这个变量，运行时必然 ReferenceError`)
+  }
+})
+for (const o of orphanAwaits) fail(o)
+say(orphanAwaits.length === 0, '没有「await 一个没声明过的变量」这种必崩写法')
+
 // ── 3. schema.sql 按新库能不能一次建起来（新装唯一入口，坏了等于装不上）──
 console.log('\n[3] schema.sql 新装')
 let db = null

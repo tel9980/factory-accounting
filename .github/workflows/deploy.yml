@@ -32,9 +32,42 @@ jobs:
       - name: 跑自检
         run: node scripts/check.mjs
 
+  smoke:
+    name: 起本地服务，把 224 个 GET 接口挨个打一遍
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: 安装依赖
+        run: npm ci
+        working-directory: backend
+      - name: 用 schema.sql 灌一个本地库（顺便验证新装能用）
+        run: npx wrangler d1 execute factory-db --local --file=schema.sql
+        working-directory: backend
+        env:
+          CI: '1'
+      - name: 起本地 server
+        run: |
+          nohup npx wrangler dev --local --port 8791 --ip 127.0.0.1 > /tmp/wd.log 2>&1 &
+          echo started
+        working-directory: backend
+        env:
+          CI: '1'
+          WRANGLER_SEND_METRICS: 'false'
+      - name: 接口冒烟（500 就算坏）
+        run: node scripts/smoke.mjs --base http://127.0.0.1:8791 --key 8888
+      - name: 挂了就打印 server 日志
+        if: failure()
+        run: tail -80 /tmp/wd.log
+
   deploy:
     name: 部署到 Cloudflare
-    needs: check
+    needs: [check, smoke]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

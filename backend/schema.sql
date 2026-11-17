@@ -666,3 +666,28 @@ CREATE TABLE IF NOT EXISTS month_report (
   created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_month_report_month ON month_report(month);
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 表达式索引：让 substr(created_at,1,10) 这种写法也能走索引
+--
+-- 背景：全库有 106 处按天过滤（substr(created_at,1,10)=? / >=?）、28 处按年过滤
+-- （substr(created_at,1,4)=?）、还有到期日按天比（substr(due_date,1,10)<=?）。
+-- 函数包着字段，普通索引用不上，每次都扫全表 —— D1 是按「读了多少行」计费的，
+-- 一次按天查流水在 4.8 万行的账本上要读 4.8 万行。
+-- SQLite 支持「在表达式上建索引」，查询里的表达式和索引完全一致时照样能用，
+-- 所以这 7 个索引不用改一行代码就能让上面那 134 处全都走进来。
+--
+-- 实测（24000 单 / 48000 条流水 / 6000 应付，node:sqlite 内存库）：
+--   某天流水        3.31ms → 0.00ms（SEARCH ledger USING INDEX idx_ledger_day）
+--   某段日期（三个月）2.15ms → 0.07ms（COVERING INDEX idx_orders_day）
+--   某年订单        1.88ms → 0.56ms
+--   到期日在一个月内  2.72ms → 0.06ms
+--   建这 7 个索引本身 42ms（一次性）。
+-- 注：表达式索引会随写入维护，账本这种「写少读多」的场景是净赚。
+CREATE INDEX IF NOT EXISTS idx_orders_day ON orders(substr(created_at,1,10));
+CREATE INDEX IF NOT EXISTS idx_orders_year ON orders(substr(created_at,1,4));
+CREATE INDEX IF NOT EXISTS idx_orders_due_day ON orders(substr(due_date,1,10));
+CREATE INDEX IF NOT EXISTS idx_ledger_day ON ledger(substr(created_at,1,10));
+CREATE INDEX IF NOT EXISTS idx_ledger_year ON ledger(substr(created_at,1,4));
+CREATE INDEX IF NOT EXISTS idx_payables_day ON payables(substr(created_at,1,10));
+CREATE INDEX IF NOT EXISTS idx_payables_due_day ON payables(substr(due_date,1,10));

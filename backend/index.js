@@ -143,9 +143,58 @@ async function ensureBaseTables(db) {
     'CREATE INDEX IF NOT EXISTS idx_debt_repays_debt ON debt_repays(debt_id)',
     'CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)',
     'CREATE INDEX IF NOT EXISTS idx_invoices_order ON invoices(order_id)',
-    'CREATE INDEX IF NOT EXISTS idx_writeoffs_ref ON writeoffs(ref_type, ref_id)'
+    'CREATE INDEX IF NOT EXISTS idx_writeoffs_ref ON writeoffs(ref_type, ref_id)',
+    `CREATE TABLE IF NOT EXISTS prepaids (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, months INTEGER DEFAULT 0, start_date TEXT, category TEXT DEFAULT '', account_id INTEGER DEFAULT 0, remark TEXT DEFAULT '', active INTEGER DEFAULT 1, created_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS wx_users (id INTEGER PRIMARY KEY AUTOINCREMENT, openid TEXT UNIQUE, nickname TEXT DEFAULT '', quota INTEGER DEFAULT 0, created_at TEXT, last_at TEXT)`,
+    `CREATE TABLE IF NOT EXISTS bank_flows (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, direction TEXT, amount REAL NOT NULL DEFAULT 0, memo TEXT DEFAULT '', matched_type TEXT, matched_id INTEGER DEFAULT 0, created_at TEXT)`,
+    `CREATE TABLE IF NOT EXISTS month_report (id INTEGER PRIMARY KEY AUTOINCREMENT, month TEXT, name TEXT, b64 TEXT, size INTEGER DEFAULT 0, created_at TEXT)`,
+    'CREATE INDEX IF NOT EXISTS idx_bank_flows_date ON bank_flows(date)',
+    'CREATE INDEX IF NOT EXISTS idx_month_report_month ON month_report(month)',
+    // 表达式索引：全库有 106 处按天、28 处按年、还有到期日按天比的过滤，都是 substr(字段,1,10) 这种写法，
+    // 函数包着字段，普通索引用不上 → 每次扫全表（D1 按读了多少行计费）。
+    // 在表达式上建索引，查询里写法一致就能命中，一行代码都不用改（详见 schema.sql 末尾的说明和实测）。
+    'CREATE INDEX IF NOT EXISTS idx_orders_day ON orders(substr(created_at,1,10))',
+    'CREATE INDEX IF NOT EXISTS idx_orders_year ON orders(substr(created_at,1,4))',
+    'CREATE INDEX IF NOT EXISTS idx_orders_due_day ON orders(substr(due_date,1,10))',
+    'CREATE INDEX IF NOT EXISTS idx_ledger_day ON ledger(substr(created_at,1,10))',
+    'CREATE INDEX IF NOT EXISTS idx_ledger_year ON ledger(substr(created_at,1,4))',
+    'CREATE INDEX IF NOT EXISTS idx_payables_day ON payables(substr(created_at,1,10))',
+    'CREATE INDEX IF NOT EXISTS idx_payables_due_day ON payables(substr(due_date,1,10))'
   ]
   await db.batch(ddl.map((s) => db.prepare(s)))
+}
+
+// 老库缺列自愈：这些列是后来加功能时补的，线上库如果是更早的 schema 建的就没有，
+// 而代码里的查询直接用到了它 —— 表现是整个接口 500（例：/disputes 用了 statement_log.resolved_at，
+// 2026-11 全接口扫 5xx 时抓到）。这里按「有就跳过、没有就 ALTER」的方式补齐，
+// 一个 isolate 只跑一次（_memoDdl 记忆），代价是几条 PRAGMA。
+const EXTRA_COLS = {
+  statement_log: [['ack', "TEXT DEFAULT ''"], ['ack_at', 'TEXT'], ['resolved_at', 'TEXT']],
+  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT']],
+  payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT']],
+  ledger: [['account_id', 'INTEGER DEFAULT 0'], ['cash', 'INTEGER DEFAULT 1'], ['import_batch', 'TEXT']],
+  dunning_log: [['promise_date', 'TEXT']],
+  import_log: [['batch', 'TEXT']],
+  loans: [['import_batch', 'TEXT']],
+  assets: [['maint_months', 'INTEGER DEFAULT 0'], ['maint_last', 'TEXT'], ['disposed_at', 'TEXT'], ['dispose_amount', 'REAL DEFAULT 0']],
+  net_snapshots: [['cash', 'REAL DEFAULT 0']],
+  trash: [['ref_id', 'INTEGER DEFAULT 0'], ['batch', 'TEXT'], ['deleted_at', 'TEXT']],
+  audit_log: [['ref_id', 'INTEGER DEFAULT 0']],
+  edit_requests: [['ref_id', 'INTEGER DEFAULT 0'], ['reason', "TEXT DEFAULT ''"], ['status', "TEXT DEFAULT 'open'"]]
+}
+
+async function ensureExtraCols(db) {
+  for (const t of Object.keys(EXTRA_COLS)) {
+    let have
+    try {
+      have = new Set(((await db.prepare('PRAGMA table_info(' + t + ')').all()).results || []).map((x) => x.name))
+    } catch (e) { continue }
+    if (!have.size) continue  // 表还没建就别 ALTER（建表由 ensureBaseTables 负责）
+    for (const [c, decl] of EXTRA_COLS[t]) {
+      if (have.has(c)) continue
+      try { await db.prepare('ALTER TABLE ' + t + ' ADD COLUMN ' + c + ' ' + decl).run() } catch (e) { noteFail(e, '补列 ' + t + '.' + c) }
+    }
+  }
 }
 
 async function monthPL(db, mm) {
@@ -526,6 +575,8 @@ app.get('/access-guide', async (c) => {
     ] },
   ]
   const tips = []
+  // 这里曾经有一句 `if (labor > 0) …`：是从 /cost-hint 抄过来的，可这个接口里没有 labor/cost 这两个变量，
+  // 于是 /access-guide 每次都 ReferenceError → 500（2026-11 全接口扫 5xx 时才发现，已删）
   if (!recOn) tips.push('没设恢复码：口令忘了就进不来了，现在去设')
   if (staffOn) tips.push('员工口令开着：人不干了记得一键停用')
   if (bakDays === null) tips.push('还没做过备份：设置 → 备份一次')
@@ -6864,7 +6915,9 @@ async function creditBook(db, type) {
   const old = (await db.prepare(`SELECT ${who} AS party, COALESCE(SUM(${OPEN}),0) s FROM ${tbl}
     WHERE ${OPEN}>0.005 AND substr(created_at,1,10)<? GROUP BY ${who}`).bind(dayAgo(90)).all().catch(() => ({ results: [] }))).results || []
   const disp = (await db.prepare("SELECT party, COUNT(*) n FROM statement_log WHERE ack='doubt' AND COALESCE(resolved_at,'')='' GROUP BY party").all().catch(() => ({ results: [] }))).results || []
-  const pb = await pbP
+  // 这里以前写的是 `await pbP` —— pbP 是另一个接口（/promise-book）里的局部变量，
+  // 拿到这儿来永远是 ReferenceError，于是「客户信用」整页 500（2026-11 冒烟时才发现）。
+  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
   const om = {}, dm = {}, pm = {}
   old.forEach((r) => { om[norm(r.party)] = round2(num(r.s)) })
   disp.forEach((r) => { dm[norm(r.party)] = num(r.n) })
@@ -14688,6 +14741,7 @@ partyStaffTable = _memoDdl(partyStaffTable, 'partystaff')
 matTable = _memoDdl(matTable, 'mat')
 ensureStaffTable = _memoDdl(ensureStaffTable, 'staff')
 ensureBaseTables = _memoDdl(ensureBaseTables, 'base')
+ensureExtraCols = _memoDdl(ensureExtraCols, 'cols')
 
 export default {
   fetch: async (req, env, ctx) => {
@@ -14705,6 +14759,7 @@ export default {
     const db = book === 3 ? env.DB3 : book === 2 ? env.DB2 : env.DB
     // 老账本上缺的 7 张基础表在这里兜一次底（_memoDdl 记忆，一个 isolate 只跑一次，之后 0 开销）
     try { await ensureBaseTables(db) } catch (e) { noteFail(e, '建表兜底') }
+    try { await ensureExtraCols(db) } catch (e) { noteFail(e, '补列兜底') }
     return app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx)
   },
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站
@@ -14720,6 +14775,9 @@ export default {
   try { await ensureBaseTables(env.DB) } catch (e) {}
   try { await ensureBaseTables(env.DB2) } catch (e) {}
   try { await ensureBaseTables(env.DB3) } catch (e) {}
+  try { await ensureExtraCols(env.DB) } catch (e) {}
+  try { await ensureExtraCols(env.DB2) } catch (e) {}
+  try { await ensureExtraCols(env.DB3) } catch (e) {}
     const books = [['1', env.DB], ['2', env.DB2], ['3', env.DB3]]
     for (const [bid, db] of books) {
       if (!db) continue

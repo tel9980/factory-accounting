@@ -1019,6 +1019,23 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **删掉重复建表**：`accounts / categories / advances` 各建了两遍（后面那份注释更全，留后面那份）。
    - **实测**：`node scripts/check.mjs` 报「新库能建出 54 张表」；`npx wrangler d1 execute factory-db --local --file=schema.sql` 从报错变成 exit 0；随后本地起 worker，记单、首页、报表、备份、恢复、员工权限全部真跑通。
 
+272. ✅ **按天/按年的过滤全走上索引（106 + 28 处，一行代码没改）**：账本里有 106 处按天过滤（`substr(created_at,1,10)=?` / `>=?`）、28 处按年过滤（`substr(created_at,1,4)=?`），加上到期日按天比（`substr(due_date,1,10)<=?`）。函数包着字段，普通索引一个都用不上 —— 每次都扫全表，而 **D1 是按「读了多少行」计费的**，4.8 万行的账本查「某一天收了多少」就要读 4.8 万行。
+   - **办法**：在表达式上建索引（SQLite 支持），查询里的写法和索引完全一致时照样命中 —— 所以这 134 处一行都不用改。
+   - **实测**（24000 单 / 48000 条流水 / 6000 应付，`node:sqlite` 内存库，`/tmp` 下的对照脚本跑出来的）：某天流水 3.31ms → **0.00ms**（`SEARCH ledger USING INDEX idx_ledger_day`）；某段日期的订单 2.15ms → **0.07ms**（COVERING INDEX）；某年订单 1.88ms → 0.56ms；到期日在一个月内的 2.72ms → **0.06ms**；建这 7 个索引本身 42ms（一次性）。
+   - 索引写进 `schema.sql`（新装自带），同时在 `ensureBaseTables()` 里兜底建一次 —— **线上老库部署完第一次请求就自动补上，不用手工跑 SQL**。
+   - 顺带在本地灌了 6000 单 / 15000 条流水，实测首页 40ms、应收 13ms、账龄 88ms、在制 49ms（本地无网络往返，线上还要加上 D1 往返）。
+
+273. ✅ **全接口冒烟：224 个 GET 挨个打一遍，抓出 3 个躺着的 500**：`/credit-book`（客户信用整页）、`/access-guide`（使用向导）、`/disputes`（争议台账）在线上是**一点就报错**的，而人不会把 224 个接口挨个点。
+   - 病因三种，全是 266 那批功能混进来的：①`const pb = await pbP` —— `pbP` 是 `/promise-book` 里的局部变量，拿到 `creditBook()` 里永远 `ReferenceError`；②访问向导里抄了一句 `if (labor > 0)`，那个接口里根本没有 `labor`；③`/disputes` 用了 `statement_log.resolved_at`，老库没这一列 → `no such column`。
+   - **`scripts/smoke.mjs`（新增）**：从源码抽出所有 GET 路由（`:id` 换成 1），并发打一遍，**500 就算坏**（参数没给导致的 4xx 不算），失败时打印路由和响应体，并提示去哪看堆栈（设置 → 数据体检 → 🐞 运行日志）。只对本机/测试库跑（少数 GET 会顺手补建表、写默认值，设计上是幂等自愈）。
+   - **CI 加了一步**：先用 `schema.sql` 灌一个本地库（顺便天天验证「新装能用」），再起 `wrangler dev --local`，再跑冒烟；红了就打印 server 日志、不部署。
+   - 现在本地全绿：**224 个 GET 没有一个 5xx**。
+
+274. ✅ **老库缺列自愈 + 再补 4 张表 + 静态检查加一类「必崩写法」**：
+   - `ensureExtraCols()`：代码里用到、但老库可能是更早 schema 建的列（`statement_log.ack/ack_at/resolved_at`、`orders.cost/written_off/rev/no_invoice/import_batch/delivered_at`、`ledger.account_id/cash`、`dunning_log.promise_date`、`assets.maint_*`、`trash.*`、`edit_requests.*` 等 11 张表 30 列），启动时 `PRAGMA` 查一遍、缺了就 `ALTER TABLE` 补上（一个 isolate 只跑一次）。`/disputes` 那个 500 就是靠它治好的。
+   - `prepaids / wx_users / bank_flows / month_report` 这 4 张表也进 `ensureBaseTables()` 兜底（和 271 那 11 张一个道理：以前一份建表语句都没有）。
+   - `scripts/check.mjs` 新增 **[2.5] 检查**：`await 一个全文都没声明过的变量` 直接红（`const pb = await pbP` 那种手滑就是这么来的）；顺带把行尾 `//` 注释剔掉再扫，免得文档里写一句 `await xxx` 把构建搞红。**注意它的边界**：变量在别处声明、只是这里拿不到（就是 273 里那两例）静态看不出来 —— 那种靠冒烟脚本抓，所以 CI 两步都要跑，缺一不可。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
