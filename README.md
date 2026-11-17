@@ -622,11 +622,20 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - `POST /invoice-skip {order_id}` 客户不要票就标一下（`orders.no_invoice`），不再提醒，可取消；
    - 首页提醒加「N 笔收了钱还没开票，共 ¥X」；`/invoices` 的 `uninvoiced` 与提醒都改成同一口径（算部分开票、排除不要票）；
    - 前端家底页发票区「🧾 该开还没开的票（一键开）」：每行显示已收/已开/待开/税额，可「开这张」「复制开票信息」「不要票」。
+213. ✅ **完整年度总账（含年底结存、和去年比、可打印）**：`GET /year-book?year=` 一页看全年：
+   - 12 个月的接单额/材料外协/现金费用/摊销折旧/净利/实收/实付/单数 + 利润条；
+   - 全年合计、净利率、月均、最好的月与最差的月；
+   - **现金：年初 → 年底**（`账户期初合计 + 该年之前的流水` 为年初）；
+   - **年底应收/应付按「截至 12-31 已收付多少」算**，不能用单据现在的 `paid`（否则往年的欠款会算成今年的）；借款按「本金 − 截至年底已还本金」；
+   - 年底家底 = 现金 + 应收 − 应付 − 借款；
+   - 自动和去年比（接单/成本/费用推净利），给 4 条提示（比去年多赚少赚、最好最差月、年底还有多少没收回来、净利率过低）；
+   - `GET /year-print-link?year=` → `/year-print?t=` 签名的 A4 年度总账（12 行月度表 + 全年合计 + 年底结存 + 口径说明 + 签字栏），改字符即「链接已失效」；
+   - 前端报表页「📊 完整年度总账」：可看 12 个月利润条、年底结存、去年对比、复制、打印。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 297 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 300 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -888,7 +897,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（160）
+**其它（单个接口）**（163）
 
 - `GET /`
 - `GET /access-guide`
@@ -1048,7 +1057,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-status`
 - `POST /wx-subscribed`
 - `POST /wx-test`
+- `GET /year-book`
 - `GET /year-customers`
+- `GET /year-print`
+- `GET /year-print-link`
 - `GET /year-summary`
 
 <!-- API-LIST:END -->

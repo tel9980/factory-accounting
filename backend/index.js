@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -7313,6 +7313,152 @@ app.get('/anomaly', async (c) => {
 })
 
 // ===== 年度总账：12 个月拼一张 =====
+// ===== 年度总账：一年下来赚了多少、钱去哪了、年底还剩多少没收回来 =====
+async function yearBook(db, y) {
+  const y0 = y + '-01-01'
+  const y1 = y + '-12-31'
+  const prevY = String(num(y) - 1)
+  const jobs = [
+    // 接单额 / 成本 / 笔数，按月
+    db.prepare(`SELECT substr(created_at,1,7) mk, COALESCE(SUM(price),0) inc, COALESCE(SUM(COALESCE(cost,0)),0) mat, COUNT(*) n
+      FROM orders WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all(),
+    // 现金：收 / 付 / 费用 / 折旧摊销预提，按月
+    db.prepare(`SELECT substr(created_at,1,7) mk,
+      COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) recv,
+      COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) pay,
+      COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
+      COALESCE(SUM(CASE WHEN cash=1 AND ref_type IN ('amort','dep','accrual') THEN amount ELSE 0 END),0) adj
+      FROM ledger WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all(),
+    // 现金余额：期初（账户期初 + 该年之前的流水）
+    db.prepare(`SELECT COALESCE((SELECT SUM(COALESCE(opening,0)) FROM accounts),0) AS opening,
+      COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM ledger WHERE cash=1 AND substr(created_at,1,10)<?),0) AS before_flow,
+      COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM ledger WHERE cash=1 AND substr(created_at,1,10)<=?),0) AS upto_flow`).bind(y0, y1).first(),
+    // 年底应收 / 应付（按「截至年底收付了多少」算，不能用现在的 paid）
+    db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.price - COALESCE(p.s,0) - COALESCE(w.s,0) > 0 THEN t.price - COALESCE(p.s,0) - COALESCE(w.s,0) ELSE 0 END),0) AS v, COUNT(*) AS c
+      FROM orders t
+      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM ledger WHERE ref_type='order' AND direction='in' AND substr(created_at,1,10)<=? GROUP BY ref_id) p ON p.ref_id=t.id
+      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,10)<=? GROUP BY ref_id) w ON w.ref_id=t.id
+      WHERE substr(t.created_at,1,10)<=?`).bind(y1, y1, y1).first(),
+    db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.amount - COALESCE(p.s,0) - COALESCE(w.s,0) > 0 THEN t.amount - COALESCE(p.s,0) - COALESCE(w.s,0) ELSE 0 END),0) AS v, COUNT(*) AS c
+      FROM payables t
+      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM ledger WHERE ref_type='payable' AND direction='out' AND substr(created_at,1,10)<=? GROUP BY ref_id) p ON p.ref_id=t.id
+      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM writeoffs WHERE ref_type='payable' AND substr(created_at,1,10)<=? GROUP BY ref_id) w ON w.ref_id=t.id
+      WHERE substr(t.created_at,1,10)<=?`).bind(y1, y1, y1).first(),
+    // 年底还欠多少钱（借款本金 − 已还本金）
+    db.prepare(`SELECT COALESCE(SUM(d.principal),0) - COALESCE((SELECT SUM(r.amount) FROM debt_repays r WHERE r.kind='principal' AND substr(r.rdate,1,10)<=?),0) AS v
+      FROM debts d WHERE substr(d.start_date,1,10)<=?`).bind(y1, y1).first(),
+    // 去年对比
+    db.prepare(`SELECT COALESCE(SUM(price),0) inc, COALESCE(SUM(COALESCE(cost,0)),0) mat FROM orders WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
+    db.prepare(`SELECT COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp FROM ledger WHERE substr(created_at,1,4)=?`).bind(prevY).first()
+  ]
+  const [oR, lR, cashR, arR, apR, debtR, pOrdR, pExpR] = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e, '年度总账'); return null })))
+  const orows = (oR && oR.results) || []
+  const lrows = (lR && lR.results) || []
+  const oMap = {}, lMap = {}
+  for (const r of orows) oMap[r.mk] = r
+  for (const r of lrows) lMap[r.mk] = r
+  const months = []
+  let maxP = 1
+  for (let i = 1; i <= 12; i++) {
+    const mk = y + '-' + String(i).padStart(2, '0')
+    const o = oMap[mk] || {}, l = lMap[mk] || {}
+    const income = round2(num(o.inc))
+    const mat = round2(num(o.mat))
+    const exp = round2(num(l.exp))
+    const adj = round2(num(l.adj))
+    const profit = round2(income - mat - exp - adj)
+    if (Math.abs(profit) > maxP) maxP = Math.abs(profit)
+    months.push({ m: mk, label: String(i) + '月', income, mat, exp, adj, profit, cnt: num(o.n), recv: round2(num(l.recv)), pay: round2(num(l.pay)) })
+  }
+  for (const r of months) r.bar = Math.round(Math.abs(r.profit) / maxP * 100)
+  const T = (k) => round2(months.reduce((a, x) => a + x[k], 0))
+  const income = T('income'), mat = T('mat'), exp = T('exp'), adj = T('adj'), profit = T('profit')
+  const active = months.filter((x) => x.income > 0 || x.profit !== 0)
+  const sorted = months.slice().sort((a, b) => b.profit - a.profit)
+  const best = sorted[0], worst = sorted[sorted.length - 1]
+  const cash = cashR || {}
+  const cashStart = round2(num(cash.opening) + num(cash.before_flow))
+  const cashEnd = round2(num(cash.opening) + num(cash.upto_flow))
+  const arEnd = round2(num(arR && arR.v)), apEnd = round2(num(apR && apR.v)), debtEnd = round2(num(debtR && debtR.v))
+  const netEnd = round2(cashEnd + arEnd - apEnd - debtEnd)
+  const prevIncome = round2(num(pOrdR && pOrdR.inc)), prevMat = round2(num(pOrdR && pOrdR.mat)), prevExp = round2(num(pExpR && pExpR.exp))
+  const prevProfit = round2(prevIncome - prevMat - prevExp)
+  const margin = income > 0 ? round2(profit / income * 100) : 0
+  const tips = []
+  if (!income && !exp) tips.push({ tone: 'gray', text: `${y} 年还没有单据，先把接的单和花的钱记上。` })
+  else {
+    if (prevProfit !== 0) {
+      const d = round2(profit - prevProfit)
+      tips.push({ tone: d >= 0 ? 'ok' : 'warn', text: `比 ${prevY} 年${d >= 0 ? '多赚' : '少赚'} ${Math.abs(d)} 元（${prevY} 年 ${prevProfit} 元）` })
+    }
+    if (active.length >= 2) tips.push({ tone: 'info', text: `最好的一个月是 ${best.label}（${best.profit} 元），最差是 ${worst.label}（${worst.profit} 元）` })
+    if (arEnd > 0) tips.push({ tone: 'warn', text: `年底还有 ${arEnd} 元没收回来，这笔钱没进兜里` })
+    if (apEnd > 0) tips.push({ tone: 'info', text: `年底还欠供应商 ${apEnd} 元` })
+    if (debtEnd > 0) tips.push({ tone: 'warn', text: `年底还欠借款 ${debtEnd} 元` })
+    if (margin < 15 && income > 0) tips.push({ tone: 'bad', text: `全年净利率只有 ${margin}%，几乎白干，看看哪几单不赚钱` })
+  }
+  const text = [
+    `【${y} 年总账】`,
+    `接单 ${income} 元（${months.reduce((a, x) => a + x.cnt, 0)} 单），材料·外协成本 ${mat} 元，现金费用 ${exp} 元，摊销折旧预提 ${adj} 元`,
+    `净利 ${profit} 元，净利率 ${margin}%`,
+    `现金：年初 ${cashStart} → 年底 ${cashEnd}（${cashEnd - cashStart >= 0 ? '多了' : '少了'} ${Math.abs(round2(cashEnd - cashStart))}）`,
+    `年底还没收回来 ${arEnd} 元，欠供应商 ${apEnd} 元，欠借款 ${debtEnd} 元，家底 ${netEnd} 元`
+  ].join('\n')
+  return {
+    ok: true, year: y, months, totals: { income, mat, exp, adj, profit, margin, recv: T('recv'), pay: T('pay'), cnt: months.reduce((a, x) => a + x.cnt, 0), avg_month: active.length ? round2(profit / active.length) : 0 },
+    best: { label: best.label, profit: best.profit }, worst: { label: worst.label, profit: worst.profit },
+    active_months: active.length,
+    cash: { start: cashStart, end: cashEnd, net: round2(cashEnd - cashStart) },
+    ar_end: arEnd, ap_end: apEnd, debt_end: debtEnd, net_worth: netEnd,
+    prev: { year: prevY, income: prevIncome, profit: prevProfit },
+    tips, text
+  }
+}
+
+app.get('/year-book', async (c) => {
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  return c.json(await yearBook(c.env.DB, y))
+})
+
+// 年度总账打印链接（签名，免口令）
+app.get('/year-print-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '还没设访问口令' }, 400)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const t = await sigOf(saved, 'year', 'yb:' + y)
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/year-print?year=' + y + '&t=' + t })
+})
+
+app.get('/year-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'year', 'yb:' + y) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度总账打印页。</h3>')
+  const d = await yearBook(db, y)
+  const t = await getTitle(db)
+  const rows = d.months.map((m) => `<tr><td>${escHtml(m.label)}</td><td class="n">${m.cnt || ''}</td><td class="n">${m.income || ''}</td><td class="n">${m.mat || ''}</td><td class="n">${m.exp || ''}</td><td class="n b ${m.profit < 0 ? 'red' : ''}">${m.profit || ''}</td><td class="n">${m.recv || ''}</td><td class="n">${m.pay || ''}</td></tr>`).join('')
+  const body = `<h1>${escHtml(y)} 年度总账</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}　制表日期 ${now().slice(0, 10)}</div>
+<table><tr><th>月份</th><th>单数</th><th>接单额</th><th>材料外协</th><th>现金费用</th><th>净利</th><th>实收</th><th>实付</th></tr>${rows}
+<tr class="total"><td>全年</td><td class="n">${d.totals.cnt}</td><td class="n">${d.totals.income}</td><td class="n">${d.totals.mat}</td><td class="n">${d.totals.exp}</td><td class="n">${d.totals.profit}</td><td class="n">${d.totals.recv}</td><td class="n">${d.totals.pay}</td></tr></table>
+<h2>年底结存</h2>
+<table><tr><td>现金（各账户合计）</td><td class="n">${d.cash.end}</td></tr><tr><td>客户还欠（应收）</td><td class="n">${d.ar_end}</td></tr><tr><td>欠供应商（应付）</td><td class="n">-${d.ap_end}</td></tr><tr><td>欠借款</td><td class="n">-${d.debt_end}</td></tr><tr class="total"><td>家底（净资产）</td><td class="n">${d.net_worth}</td></tr></table>
+<h2>说明</h2><div class="sub" style="text-align:left">净利（权责口径）= 接单额 − 单子上的材料·外协成本 − 现金费用 − 摊销 − 折旧 − 预提利息；赊购只进现金流不重复算成本。年底应收/应付按「截至 ${y}-12-31 已收付多少」计算，不是现在的余额。</div>`
+  return c.html(a4Page({
+    title: `${y} 年度总账`,
+    body,
+    extraCss: `.sub{text-align:center} table{font-size:11.5px} th,td{padding:4px 6px}`,
+    sign: `<span>制表人：____________</span><span>老板：____________</span><span>日期：____________</span>`,
+    tip: '这张表可以打印出来给会计、给银行、给自己看'
+  }))
+})
+
 app.get('/year-summary', async (c) => {
   const db = c.env.DB
   const y = String(c.req.query('year') || now().slice(0, 4))

@@ -87,6 +87,7 @@ Page({
     xp: null, xp_open: false,
     rcc: null, rcc_month: '',
     itd: null, itd_rate: 0.13,
+    yb: null, yb_year: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0, e_date: '',
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
@@ -3829,6 +3830,45 @@ Page({
         wx.showToast({ title: d.count ? ('有 ' + d.count + ' 条要留意') : '没发现异常', icon: 'none' })
       },
       fail: () => wx.showToast({ title: '看不了，下拉刷新再试', icon: 'none' })
+    })
+  },
+  // 完整年度总账：12 个月 + 年底结存 + 去年对比 + 可打印
+  loadYearBook() {
+    const y = String(this.data.yb_year || '').trim()
+    this.req({
+      url: API_BASE + '/year-book' + (y ? '?year=' + y : ''),
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ yb: d })
+      },
+      fail: () => wx.showToast({ title: '取不到年度总账', icon: 'none' })
+    })
+  },
+  onYbYear(e) { this.setData({ yb_year: e.detail.value }) },
+  closeYearBook() { this.setData({ yb: null }) },
+  copyYearBook() {
+    const d = this.data.yb || {}
+    if (!d.text) return
+    wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
+  },
+  openYearPrint() {
+    const y = (this.data.yb || {}).year
+    if (!y) return wx.showToast({ title: '先看这一年', icon: 'none' })
+    this.req({
+      url: API_BASE + '/year-print-link?year=' + y,
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '生成不了链接', icon: 'none' })
+        wx.setClipboardData({
+          data: u,
+          success: () => wx.showModal({
+            title: '打印链接已复制',
+            content: '在电脑浏览器里粘贴打开，就能打印或存 PDF 给会计、银行。\n链接带签名，改字符就失效。',
+            showCancel: false
+          })
+        })
+      }
     })
   },
   loadYearSummary() {

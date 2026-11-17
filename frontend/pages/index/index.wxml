@@ -1156,6 +1156,32 @@
         <view class="tip">最好 {{ys.best.month_label}} {{ys.best.profit}} 元　最差 {{ys.worst.month_label}} {{ys.worst.profit}} 元　月均 {{ys.avg_profit}} 元</view>
       </view>
     </view>
+
+    <view class="form">
+      <view class="tip">📊 完整年度总账（含年底结存、和去年比、可打印给会计）</view>
+      <view class="frow">
+        <input class="inp half" placeholder="年份，如 2026（不填=今年）" value="{{yb_year}}" bindinput="onYbYear" bindconfirm="loadYearBook"/>
+        <button class="btn half" size="mini" bindtap="loadYearBook">看这一年</button>
+      </view>
+      <view wx:if="{{yb}}">
+        <view class="tip">{{yb.year}} 年：接单 {{yb.totals.income}} · 材料外协 {{yb.totals.mat}} · 现金费用 {{yb.totals.exp}} · 摊销折旧 {{yb.totals.adj}} → 净利 {{yb.totals.profit}}（净利率 {{yb.totals.margin}}%）</view>
+        <view class="plrow" wx:for="{{yb.months}}" wx:key="m">
+          <text class="pll">{{item.label}}</text>
+          <text class="plv {{item.profit<0?'bad':'ok'}}">{{item.profit}}</text>
+          <view class="ybar"><view class="{{item.profit<0?'ybar-in bad':'ybar-in'}}" style="width:{{item.bar}}%"></view></view>
+        </view>
+        <view class="tip">最好 {{yb.best.label}} {{yb.best.profit}} 元　最差 {{yb.worst.label}} {{yb.worst.profit}} 元　月均 {{yb.totals.avg_month}} 元（{{yb.active_months}} 个月有账）</view>
+        <view class="row2">现金：年初 {{yb.cash.start}} → 年底 {{yb.cash.end}}（{{yb.cash.net>=0?'多了':'少了'}} {{yb.cash.net}}）</view>
+        <view class="row2">年底还没收回来 {{yb.ar_end}} · 欠供应商 {{yb.ap_end}} · 欠借款 {{yb.debt_end}}</view>
+        <view class="row2"><text class="b">年底家底 {{yb.net_worth}} 元</text></view>
+        <view class="row2 {{item.tone}}" wx:for="{{yb.tips}}" wx:key="text">· {{item.text}}</view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" bindtap="copyYearBook">复制这段</button>
+          <button class="btn ghost" size="mini" bindtap="openYearPrint">打印年度总账</button>
+          <button class="btn ghost" size="mini" bindtap="closeYearBook">收起</button>
+        </view>
+      </view>
+    </view>
     <view class="form">
       <view class="tip">赚没赚（两种算法，看你想看什么）</view>
       <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{pc_month}}" bindinput="onPcMonth"/>
