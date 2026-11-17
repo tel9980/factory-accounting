@@ -3853,6 +3853,58 @@ Page({
     wx.setClipboardData({ data: d.text, success: () => wx.showToast({ title: '已复制', icon: 'none' }) })
   },
   // 给会计的资料包：一年的总览/月度汇总/利润表/资产负债表/明细/流水/发票/固定资产/借款 打成 Excel
+  // 开新年度（上年结转）
+  loadYearOpen() {
+    const y = String(this.data.yb_year || '').trim() || String(new Date().getFullYear())
+    if (!/^\d{4}$/.test(y)) return wx.showToast({ title: '年份写 4 位数，如 2026', icon: 'none' })
+    wx.showLoading({ title: '算结转数…' })
+    this.req({
+      url: API_BASE + '/year-open?year=' + y,
+      success: (res) => { wx.hideLoading(); const d = res.data || {}; if (d.error) return wx.showToast({ title: d.error, icon: 'none' }); this.setData({ yo: d }) },
+      fail: () => wx.hideLoading()
+    })
+  },
+  doYearOpen() {
+    const yo = this.data.yo || {}
+    if (!yo.year) return wx.showToast({ title: '先看一下结转数', icon: 'none' })
+    wx.showModal({
+      title: yo.opened ? '重新定一次期初？' : '确认开账',
+      content: (yo.opened ? '会覆盖原来的凭据。' : '') + '这只是把年初数定下来、留一张凭据，不动任何账目；没结清的单子和借款本来就继续算。',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.showLoading({ title: '开账中…' })
+        this.req({
+          url: API_BASE + '/year-open',
+          method: 'POST',
+          data: { year: Number(yo.year), confirm: !!yo.opened },
+          success: (res) => {
+            wx.hideLoading()
+            const d = res.data || {}
+            if (d.error) return wx.showModal({ title: '开不了账', content: d.error, showCancel: false })
+            wx.showModal({ title: '开好了', content: d.text || '', showCancel: false })
+            this.loadYearOpen()
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
+  },
+  closeYearOpen() { this.setData({ yo: null }) },
+  openYearOpenPrint() {
+    const y = (this.data.yo || {}).year
+    if (!y) return
+    this.req({
+      url: API_BASE + '/year-open-print-link?year=' + y,
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '生成不了链接', icon: 'none' })
+        wx.setClipboardData({ data: u, success: () => wx.showModal({
+          title: '结转凭据链接已复制',
+          content: '在电脑浏览器里打开就能打印，给会计和银行看：说明新一年的账从哪儿接着算。',
+          showCancel: false }) })
+      }
+    })
+  },
   exportTaxPack() {
     const y = (this.data.yb || {}).year || ''
     wx.showLoading({ title: '打包中…' })

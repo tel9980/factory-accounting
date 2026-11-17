@@ -644,11 +644,17 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - `GET /year-close-print-link?year=` → `GET /year-close-print?t=`（签名 A4 年度封账单：12 行月度表 + 结账状态列 + 全年合计 + 年底结存 + 封账说明 + 制表/老板/会计/日期四个签字位），改字符即「链接已失效」；
    - 前端报表页月结归档区「📅 一键结账全年」：先逐月列 ✓/○ 与原因，再「一键结完这 N 个月」；结完弹「结过了哪几个月 + 合计净利 + 锁住了什么 + 怎么解锁」；旁边「打印年度封账单」；
    - 员工口令访问 `/year-close*` 一律 403。
+216. ✅ **开新年度（上年结转）**：新的一年不用手工抄期初——
+   - `GET /year-open?year=` 算上年结存 → 新年期初：`opening{cash,ar,ap,debt,net}` + `ar_cnt`/`ap_cnt`（上年没结清单据数）+ `live`（现在的实际数）+ `drift`（现在 − 年初）+ `items` 五项检查（上年有没有账 / 12 月结没结账 / 上年欠款是否带到新年 / 新年度已记几笔 / 是否已开过账）+ 人话 `text`；
+   - `POST /year-open {year, note}` 把期初**定下来并留凭据**（settings `year_open_<年>`），写审计「开新年度」；**不改任何账目**——未结清的单据、未还完的借款本来就在库里继续算，开账只是把「年初起点」固定下来；已开过再开返回 **409 `already_open`**，带 `confirm:true` 可重新定一次；`DELETE /year-open/:year` 撤销凭据（数据不动）；
+   - `GET /year-open-print-link?year=` → `GET /year-open-print?t=`（签名 A4「年度期初结转凭据」：上年结存表 现金/应收/应付/借款/家底 + 结转说明 + 制表/老板/会计/日期签字），改字符即「链接已失效」；
+   - 前端报表页年度总账面板「🗓 开新年度（上年结转）」：列出期初五项与逐项检查（✓/✗/·）、已开账时显示「现在的数 vs 年初」差多少，按钮「确认开账 / 重新定一次期初」「打印结转凭据」；
+   - 员工口令访问 `/year-open*` 403。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 305 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 310 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -843,6 +849,12 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `DELETE /writeoffs/:id`
 - `GET /writeoffs`
 
+**year-open**（3）
+
+- `DELETE /year-open/:year`
+- `GET /year-open`
+- `POST /year-open`
+
 **auth**（7）
 
 - `GET /auth/recover-info`
@@ -910,7 +922,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（168）
+**其它（单个接口）**（170）
 
 - `GET /`
 - `GET /access-guide`
@@ -1077,6 +1089,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /year-close-print`
 - `GET /year-close-print-link`
 - `GET /year-customers`
+- `GET /year-open-print`
+- `GET /year-open-print-link`
 - `GET /year-print`
 - `GET /year-print-link`
 - `GET /year-summary`

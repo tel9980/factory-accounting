@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -454,7 +454,7 @@ app.use('*', async (c, next) => {
       (/^\/trash/.test(path) && m !== 'GET')
       || /^\/staff-activity/.test(path)
       || /^\/party-merge/.test(path)
-      || /^\/(schema-check|books-check)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
+      || /^\/(schema-check|books-check|year-open)/.test(path) || /^\/customer-card/.test(path) || /^\/auth\/staff-off/.test(path)
       || (/^\/handover-note$/.test(path))
       || (/^\/invoice-(from-order|skip)$/.test(path) && m !== 'OPTIONS')
       || (/^\/(seal|unseal)$/.test(path))
@@ -7599,6 +7599,139 @@ app.get('/year-print', async (c) => {
     extraCss: `.sub{text-align:center} table{font-size:11.5px} th,td{padding:4px 6px}`,
     sign: `<span>制表人：____________</span><span>老板：____________</span><span>日期：____________</span>`,
     tip: '这张表可以打印出来给会计、给银行、给自己看'
+  }))
+})
+
+// ===== 开新年度：把上年的结存变成新年的期初（不用手工抄一遍） =====
+async function yearOpenData(db, y) {
+  const py = String(num(y) - 1)
+  const yb = await yearBook(db, py)
+  const [bills, decLock, arCnt, apCnt, saved, live] = await Promise.all([
+    db.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,4)=?) + (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,4)=?) + (SELECT COUNT(*) FROM ledger WHERE substr(created_at,1,4)=?) n").bind(y, y, y).first().catch(() => ({ n: 0 })),
+    db.prepare('SELECT COUNT(*) n FROM month_lock WHERE month=?').bind(py + '-12').first().catch(() => ({ n: 0 })),
+    db.prepare('SELECT COUNT(*) n FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 AND substr(created_at,1,4)<=?').bind(py).first().catch(() => ({ n: 0 })),
+    db.prepare('SELECT COUNT(*) n FROM payables WHERE amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 AND substr(created_at,1,4)<=?').bind(py).first().catch(() => ({ n: 0 })),
+    db.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first().catch(() => null),
+    netNow(db).catch(() => null)
+  ])
+  let rec = null
+  try { rec = saved ? JSON.parse(saved.value) : null } catch (e) { rec = null }
+  const opening = { cash: yb.cash.end, ar: yb.ar_end, ap: yb.ap_end, debt: yb.debt_end, net: yb.net_worth }
+  const ar_cnt = num(arCnt && arCnt.n)
+  const ap_cnt = num(apCnt && apCnt.n)
+  const has_prev = yb.months.some((m) => m.cnt > 0)
+  const new_bills = num(bills && bills.n)
+  const dec_closed = num(decLock && decLock.n) > 0
+  const items = []
+  items.push({ k: 'prev', label: `${py} 年有没有账`, count: has_prev ? 1 : 0, tone: has_prev ? 'ok' : 'warn',
+    tip: has_prev ? `${py} 年有账，可以结转` : `${py} 年没有账，没有可结转的数`,
+    after: has_prev ? '' : '新年度从 0 开始，以前的账不用管', go: '' })
+  items.push({ k: 'dec', label: `${py} 年 12 月结账`, count: dec_closed ? 1 : 0, tone: dec_closed ? 'ok' : 'warn',
+    tip: dec_closed ? '12 月已经结账锁定' : '12 月还没结账（建议先结，结转数才定得下来）',
+    after: dec_closed ? '' : '没结也能结转，只是以后补记了 12 月的单，结转数会和现在不一样', go: 'report' })
+  items.push({ k: 'open_ar', label: '上年没收回来的钱', count: ar_cnt, tone: ar_cnt ? 'info' : 'ok',
+    tip: ar_cnt ? `${ar_cnt} 张单共 ${round2(yb.ar_end)} 元会带到新年度继续追` : '上年欠款都收清了',
+    after: '这些欠款不用重记，单据本来就在，新年度照常催、照常收', go: 'ar' })
+  items.push({ k: 'open_ap', label: '上年没付完的钱', count: ap_cnt, tone: ap_cnt ? 'info' : 'ok',
+    tip: ap_cnt ? `${ap_cnt} 张单共 ${round2(yb.ap_end)} 元会带到新年度继续付` : '上年欠款都付清了',
+    after: '', go: 'ap' })
+  items.push({ k: 'new_bills', label: `新年度已经记了 ${new_bills} 笔`, count: new_bills, tone: new_bills ? 'info' : 'ok',
+    tip: new_bills ? `已经在 ${y} 年记了 ${new_bills} 笔了` : `${y} 年还没开始记账`,
+    after: '开账只是把期初数定下来、留一张凭据，不影响已经记的单', go: '' })
+  if (rec) items.push({ k: 'opened', label: '已经开过账', count: 1, tone: 'ok',
+    tip: `已在 ${String(rec.created_at || '').slice(0, 16).replace('T', ' ')} 开过账`, after: '', go: '' })
+  const drift = live ? {
+    cash: round2(num(live.cash) - opening.cash), ar: round2(num(live.ar) - opening.ar),
+    ap: round2(num(live.ap) - opening.ap), net: round2(num(live.net) - opening.net)
+  } : null
+  const bad = items.filter((x) => x.tone === 'warn').length
+  return {
+    ok: true, year: y, prev: py, opening, ar_cnt, ap_cnt, has_prev, new_bills, dec_closed,
+    live: live ? { cash: round2(num(live.cash)), ar: round2(num(live.ar)), ap: round2(num(live.ap)), net: round2(num(live.net)) } : null,
+    drift, opened: !!rec, record: rec, items, can_open: has_prev,
+    text: !has_prev
+      ? `${py} 年没有账，没什么可结转的。直接在 ${y} 年记账就行。`
+      : `${y} 年年初接着 ${py} 年：手头现金 ${round2(opening.cash)} 元、客户还欠 ${round2(opening.ar)} 元（${ar_cnt} 单）、欠供应商 ${round2(opening.ap)} 元（${ap_cnt} 单）、欠借款 ${round2(opening.debt)} 元，家底 ${round2(opening.net)} 元。` +
+        (rec ? '（已经开过账了）' : `点「确认开账」把这几个数定下来，留一张凭据。`) +
+        (bad ? `\n注意：${items.filter((x) => x.tone === 'warn').map((x) => x.tip).join('；')}` : '')
+  }
+}
+
+app.get('/year-open', async (c) => {
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  return c.json(await yearOpenData(c.env.DB, y))
+})
+
+app.post('/year-open', async (c) => {
+  const db = c.env.DB
+  const body = await c.req.json().catch(() => ({}))
+  const y = String(body.year || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const d = await yearOpenData(db, y)
+  if (!d.has_prev) return c.json({ error: `${d.prev} 年没有账，不用开账，直接在 ${y} 年记账就行` }, 400)
+  if (d.opened && !body.confirm) {
+    return c.json({ error: `${y} 年已经开过账了（${String((d.record || {}).created_at || '').slice(0, 10)}），要重新定一次期初就带 confirm:true`, code: 'already_open', record: d.record }, 409)
+  }
+  const rec = { year: y, from: d.prev, ...d.opening, ar_cnt: d.ar_cnt, ap_cnt: d.ap_cnt,
+    note: String(body.note || '').slice(0, 200), created_at: now() }
+  await db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+    .bind('year_open_' + y, JSON.stringify(rec)).run()
+  await logAudit(db, '开新年度', y, `结转 ${d.prev} 年：现金 ${rec.cash}，应收 ${rec.ar}（${rec.ar_cnt} 单），应付 ${rec.ap}，借款 ${rec.debt}，家底 ${rec.net}`)
+  return c.json({ ok: true, record: rec,
+    text: `${y} 年开账了：年初现金 ${rec.cash} 元、应收 ${rec.ar} 元（${rec.ar_cnt} 单）、应付 ${rec.ap} 元（${rec.ap_cnt} 单）、借款 ${rec.debt} 元、家底 ${rec.net} 元。` +
+      `\n这些欠款和借款不用重记——单据本来就在，新年度照常催、照常收。` +
+      `\n想留一张纸：点「打印结转凭据」。` })
+})
+
+app.delete('/year-open/:year', async (c) => {
+  const y = String(c.req.param('year') || '')
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  await c.env.DB.prepare('DELETE FROM settings WHERE key=?').bind('year_open_' + y).run()
+  await logAudit(c.env.DB, '撤销开账', y, `撤销 ${y} 年的开账凭据（数据不动）`)
+  return c.json({ ok: true, note: '凭据删了，账上的数一分没动。' })
+})
+
+app.get('/year-open-print-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '还没设访问口令' }, 400)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
+  const t = await sigOf(saved, 'yearopen', 'yo:' + y)
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t })
+})
+
+app.get('/year-open-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const y = String(c.req.query('year') || now().slice(0, 4))
+  const want = String(c.req.query('t') || '')
+  const good = saved ? await sigOf(saved, 'yearopen', 'yo:' + y) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成结转凭据。</h3>')
+  const d = await yearOpenData(db, y)
+  const t = await getTitle(db)
+  const rec = d.record || { ...d.opening, ar_cnt: d.ar_cnt, ap_cnt: d.ap_cnt, created_at: now() }
+  const body = `<h1>${escHtml(y)} 年度期初结转凭据</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}　制单日期 ${now().slice(0, 10)}</div>
+<h2>上年结存（${escHtml(d.prev)}-12-31）</h2>
+<table><tr><th>项目</th><th>金额（元）</th><th>说明</th></tr>
+<tr><td>手头现金（各账户合计）</td><td class="n">${rec.cash}</td><td>账户余额自动延续，不用重记</td></tr>
+<tr><td>客户还欠（应收）</td><td class="n">${rec.ar}</td><td>${rec.ar_cnt || 0} 张单未结清</td></tr>
+<tr><td>欠供应商（应付）</td><td class="n">${rec.ap}</td><td>${rec.ap_cnt || 0} 张单未付清</td></tr>
+<tr><td>欠借款本金</td><td class="n">${rec.debt}</td><td>利息照合同继续算</td></tr>
+<tr class="total"><td>家底（净资产）</td><td class="n">${rec.net}</td><td>现金 + 应收 − 应付 − 借款</td></tr></table>
+<h2>结转说明</h2><div class="sub" style="text-align:left">以上余额是 ${escHtml(d.prev)} 年 12 月 31 日的结存，作为 ${escHtml(y)} 年的期初数。
+未结清的单据、未还完的借款仍在系统里原样保留，新年度继续催收、继续付款，不需要重新录入一遍。
+这张凭据只定「年初起点」，不改动任何账目。</div>
+${rec.note ? `<h2>备注</h2><div class="sub" style="text-align:left">${escHtml(rec.note)}</div>` : ''}`
+  return c.html(a4Page({
+    title: `${y} 年度期初结转凭据`,
+    body,
+    extraCss: `.sub{text-align:center} table{font-size:12px} th,td{padding:5px 8px}`,
+    sign: `<span>制表人：____________</span><span>老板：____________</span><span>会计：____________</span><span>日期：____________</span>`,
+    tip: '这张纸是给会计和银行看的：说明新一年的账是从哪里接着算的'
   }))
 })
 

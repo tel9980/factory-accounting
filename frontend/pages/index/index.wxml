@@ -1179,7 +1179,26 @@
           <button class="btn ghost" size="mini" bindtap="copyYearBook">复制这段</button>
           <button class="btn ghost" size="mini" bindtap="openYearPrint">打印年度总账</button>
           <button class="btn ghost" size="mini" bindtap="exportTaxPack">📦 给会计的资料包</button>
+          <button class="btn ghost" size="mini" bindtap="loadYearOpen">🗓 开新年度（上年结转）</button>
           <button class="btn ghost" size="mini" bindtap="closeYearBook">收起</button>
+        </view>
+        <view wx:if="{{yo}}">
+          <view class="prev-h">{{yo.year}} 年年初接着 {{yo.prev}} 年 · {{yo.opened?'已开账':'还没开账'}}</view>
+          <view class="aline {{yo.can_open?'ok':'warn'}}">{{yo.text}}</view>
+          <view class="row2">现金 <text class="b">{{yo.opening.cash}}</text> · 应收 <text class="b">{{yo.opening.ar}}</text>（{{yo.ar_cnt}} 单）· 应付 <text class="b">{{yo.opening.ap}}</text>（{{yo.ap_cnt}} 单）</view>
+          <view class="row2">欠借款 <text class="b">{{yo.opening.debt}}</text> · 家底 <text class="b">{{yo.opening.net}}</text></view>
+          <view class="row2" wx:if="{{yo.opened && yo.live}}">现在的数：现金 {{yo.live.cash}} · 应收 {{yo.live.ar}} · 应付 {{yo.live.ap}} · 家底 {{yo.live.net}}（和年初比 {{yo.drift.net>=0?'多':'少'}}了 {{yo.drift.net}}）</view>
+          <view class="hk-row" wx:for="{{yo.items}}" wx:key="k">
+            <view class="hk-main">
+              <view class="hk-t {{item.tone==='ok'?'ok':''}}">{{item.tone==='ok'?'✓':(item.tone==='warn'?'✗':'·')}} {{item.label}}</view>
+              <view class="hk-d">{{item.tip}}</view>
+            </view>
+          </view>
+          <view class="frow">
+            <button class="btn" size="mini" bindtap="doYearOpen" wx:if="{{yo.can_open}}">{{yo.opened?'重新定一次期初':'确认开账'}}</button>
+            <button class="btn ghost" size="mini" bindtap="openYearOpenPrint" wx:if="{{yo.opened}}">打印结转凭据</button>
+            <button class="btn ghost" size="mini" bindtap="closeYearOpen">收起</button>
+          </view>
         </view>
       </view>
     </view>
