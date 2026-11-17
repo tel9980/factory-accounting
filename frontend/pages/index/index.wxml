@@ -2442,7 +2442,7 @@
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ar" data-name="{{item.name}}">打印版</button>
-            <button size="mini" bindtap="trackLink" data-name="{{item.name}}">发进度</button>
+            <button size="mini" bindtap="trackLink" data-name="{{item.name}}">发对账明细</button>
             <button size="mini" bindtap="oneLiner" data-type="ar" data-n="{{item.name}}">一句话</button>
             <button size="mini" wx:if="{{role!='staff'}}" bindtap="setCreditLimit" data-name="{{item.name}}">设额度</button>
           </view>
@@ -2503,7 +2503,7 @@
       <view class="help-h">每天（30 秒）</view>
       <view class="help-p">1. 有活就记：首页「一句话记账」，如「收张老板3000」「付电费800」；或到「记账 → 应收」正经记一张单。</view>
       <view class="help-p">2. 收钱/付钱：在单子上按「收款」/「付款」，选账户（现金/银行卡/微信/支付宝），可改金额（部分收款）。</view>
-      <view class="help-p">3. 有活在做：点单子「进度」，写一句「已切完，在打磨」，客户问的时候直接发进度链接。</view>
+      <view class="help-p">3. 有活在做：点单子「进度」，写一句「已切完，在打磨」，客户问的时候直接发「对账明细」链接。</view>
       <view class="help-h">每周（5 分钟）</view>
       <view class="help-p">1. 首页「今天要做的事」：该催的、快到期的、超预算的，一条条点掉。</view>
       <view class="help-p">2. 「记账 → 应收」里看谁欠得最久，点「催款清单」生成话术，抄微信发过去。</view>
@@ -2513,7 +2513,7 @@
       <view class="help-p">3. 「报表 → 备份」备份一次（也可开云端/笔记站自动备份）。</view>
       <view class="help-h">要给别人用</view>
       <view class="help-p">· 员工：设置里设「员工口令」，给他这个口令——他能记账、收款，但删改单子、看利润要老板口令。</view>
-      <view class="help-p">· 客户：单位页「发进度」生成链接，发微信就行，只读、只能看他自己的单。</view>
+      <view class="help-p">· 客户：单位页「发对账明细」生成链接，发微信就行，只读、只能看他自己的单和收款记录。</view>
       <view class="help-h">换手机 / 丢了手机</view>
       <view class="help-p">· 数据在云上，换手机用同一个微信打开小程序、输老板口令即可，不用导出导入。</view>
       <view class="help-p">· 口令忘了：用恢复码自己重设（设置 → 🔑 找回口令 → 输入恢复码 + 新口令），不用求人。恢复码只显示一次，记得抄下来。</view>

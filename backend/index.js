@@ -600,7 +600,9 @@ app.get('/track', async (c) => {
     let late = ''
     if (left > 0 && due && dnum(due, today) > 0) late = '<span style="color:#c0392b">超 ' + dnum(due, today) + ' 天</span>'
     const lastP = procs.find((x) => x.order_id === d.id)
-    const st = esc(d.status || '待加工')
+    // status 存的是 0/1/2，不能直接显示数字
+    const ST = ['待加工', '加工中', '已交付']
+    const st = esc(ST[num(d.status)] || '待加工')
     const prog = lastP ? '<br><span style="color:#888;font-size:13px">' + esc(String(lastP.created_at || '').slice(5, 10)) + ' ' + esc(lastP.progress || '') + '</span>' : ''
     return '<tr><td>' + esc(String(d.created_at || '').slice(5, 10)) + '</td><td>' + esc(d.item_name || '加工') +
       '<br><span style="color:#2d6cdf;font-size:13px">' + st + '</span>' + prog + '</td>' +
@@ -608,17 +610,38 @@ app.get('/track', async (c) => {
       (left ? '<br><span style="color:#c0392b">未收 ' + round2(left) + ' ' + late + '</span>' : '<br><span style="color:#27ae60">已结清</span>') +
       '</td></tr>'
   }).join('')
+  // 收款记录（对方最想自己核对的就是这个）
+  const payRows = pays.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 30).map((p2) => {
+    const doc = docs.find((d) => d.id === p2.ref_id)
+    return '<tr><td>' + esc(String(p2.created_at || '').slice(5, 10)) + '</td><td>' + esc((doc && doc.item_name) || '加工费') +
+      (p2.remark ? '<br><span style="color:#888;font-size:13px">' + esc(String(p2.remark).slice(0, 24)) + '</span>' : '') +
+      '</td><td style="text-align:right">¥' + round2(num(p2.amount)) + '</td></tr>'
+  }).join('')
+  // 本月对账结论（期初 + 新增 − 已收 − 核销 = 期末）
+  let concl = null
+  try { concl = await conclusionOf(db, 'ar', party, now().slice(0, 7)) } catch (e) { concl = null }
+  const conclHtml = concl ? '<div class="card"><div class="sub">本月对账（' + esc(concl.month) + '）</div>' +
+    '<table><tr><td>期初欠</td><td style="text-align:right">¥' + round2(concl.open) + '</td></tr>' +
+    '<tr><td>本月新做（' + concl.add_cnt + ' 笔）</td><td style="text-align:right">¥' + round2(concl.add) + '</td></tr>' +
+    '<tr><td>本月已付（' + concl.paid_cnt + ' 笔）</td><td style="text-align:right">−¥' + round2(concl.paid) + '</td></tr>' +
+    (concl.wo > 0 ? '<tr><td>已核销</td><td style="text-align:right">−¥' + round2(concl.wo) + '</td></tr>' : '') +
+    '<tr><td><b>期末欠</b></td><td style="text-align:right"><b style="color:#c0392b">¥' + round2(concl.end) + '</b></td></tr></table>' +
+    '<div class="sub" style="margin-top:6px">数字对不上就直接打电话，别憋着。</div></div>' : ''
   const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>' + esc(t.title || '') + ' 进度</title><style>body{margin:0;background:#f4f5f7;font-family:-apple-system,"PingFang SC",sans-serif;color:#222}' +
+    '<title>' + esc(t.title || '') + ' 对账明细</title><style>body{margin:0;background:#f4f5f7;font-family:-apple-system,"PingFang SC",sans-serif;color:#222}' +
     '.wrap{max-width:640px;margin:0 auto;padding:14px}.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:10px}' +
     'h1{font-size:17px;margin:0 0 4px}.sub{color:#888;font-size:13px}.big{font-size:26px;font-weight:700;color:#c0392b}' +
     'table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 4px;border-bottom:1px solid #eee;vertical-align:top}' +
     '.foot{color:#999;font-size:12px;text-align:center;padding:10px 0 24px}</style></head><body><div class="wrap">' +
-    '<div class="card"><h1>' + esc(party) + ' · 加工进度</h1><div class="sub">' + esc(t.title || '') + (t.phone ? ' · ' + esc(t.phone) : '') + '　更新于 ' + today + '</div></div>' +
+    '<div class="card"><h1>' + esc(party) + ' · 对账明细</h1><div class="sub">' + esc(t.title || '') + (t.phone ? ' · ' + esc(t.phone) : '') + '　更新于 ' + today + '</div></div>' +
     '<div class="card"><div class="sub">还没收的钱</div><div class="big">¥' + round2(totalOpen) + '</div>' +
     '<div class="sub">共 ' + docs.length + ' 单 · 合计 ¥' + round2(totalAll) + ' · 已收 ¥' + round2(totalPaid) + '</div></div>' +
-    '<div class="card"><table>' + (rows || '<tr><td>暂时没有单子</td></tr>') + '</table></div>' +
-    '<div class="foot">这是一条只读链接，看不到别的客户，也不能改账。<br>' + esc(t.title || '') + (t.addr ? ' · ' + esc(t.addr) : '') + '</div></div></body></html>'
+    conclHtml +
+    '<div class="card"><div class="sub">每笔单据（做完了没、收了没）</div><table>' + (rows || '<tr><td>暂时没有单子</td></tr>') + '</table></div>' +
+    '<div class="card"><div class="sub">收到的钱（自己核对一下）</div><table>' + (payRows || '<tr><td>还没有收款记录</td></tr>') + '</table></div>' +
+    '<div class="foot">这是一条只读链接，只能看这一家，看不到别人、也不能改账。' +
+    (t.phone ? '<br><a href="tel:' + esc(t.phone) + '" style="color:#2d6cdf">有疑问打 ' + esc(t.phone) + '</a>' : '') +
+    '<br>' + esc(t.title || '') + (t.addr ? ' · ' + esc(t.addr) : '') + '</div></div></body></html>'
   // 留痕：谁什么时候看过
   const ua = String(c.req.header('user-agent') || '').slice(0, 60)
   await db.prepare('INSERT INTO track_log (party, ua, created_at) VALUES (?,?,?)').bind(party, ua, now()).run().catch(() => {})

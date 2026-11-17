@@ -4053,8 +4053,8 @@ Page({
           const rows = (lg.data && lg.data.rows) || []
           const tip = rows.length ? '对方点开过 ' + rows.length + ' 次，最近一次 ' + String(rows[0].created_at || '').slice(0, 16).replace('T', ' ') : '对方还没点开过'
           wx.showModal({
-            title: '进度链接已复制',
-            content: '发给' + name + '，他点开就能看到自己的单做到哪了、还欠多少（看不到别家，也改不了账）。\n' + tip,
+            title: '对账明细链接已复制',
+            content: '发给' + name + '，他点开能看到：本月期初/新增/已付/期末、每笔单做到哪了、收过哪些钱（看不到别家，也改不了账）。\n' + tip,
             confirmText: '知道了',
             success: () => wx.setClipboardData({ data: u })
           })
