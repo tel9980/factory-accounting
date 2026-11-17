@@ -5707,19 +5707,38 @@ Page({
       title: '备份全部数据',
       content: '会把全部订单、应付、流水打包成文本复制到剪贴板，粘贴到微信/记事本/电脑保存即可',
       success: (r) => {
-        if (r.confirm) {
-          this.req({
-            url: API_BASE + '/backup',
-            success: (res) => {
-              if (res.data && res.data.text) {
-                wx.setClipboardData({
-                  data: res.data.text,
-                  success: () => wx.showToast({ title: '已复制，请粘贴保存', icon: 'none' })
-                })
-              }
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/backup',
+          success: (res) => {
+            const text = (res.data && res.data.text) || ''
+            if (!text) { wx.showToast({ title: '没拿到备份内容', icon: 'none' }); return }
+            // 账本大了整份备份有好几 MB：塞进手机剪贴板基本会失败（微信请求对响应大小也有上限），
+            // 所以先按实际大小拦一下，劝他走云端备份；他坚持要复制也允许。
+            const mb = text.length / 1048576
+            const put = () => wx.setClipboardData({
+              data: text,
+              success: () => wx.showToast({ title: '已复制，请粘贴保存', icon: 'none' }),
+              fail: () => wx.showModal({
+                title: '复制失败',
+                content: `这段备份有 ${mb.toFixed(1)} MB，手机剪贴板装不下。用「云端备份」存进账本自己的数据库更稳。`,
+                confirmText: '云端备份',
+                success: (m) => { if (m.confirm) this.cloudBackup() }
+              })
+            })
+            if (mb >= 2) {
+              wx.showModal({
+                title: `备份有 ${mb.toFixed(1)} MB`,
+                content: '这么大一份，塞进剪贴板多半会失败（手机剪贴板扛不住），也白费流量。建议改用「云端备份」，它直接存进账本自己的数据库。',
+                confirmText: '云端备份',
+                cancelText: '还是复制',
+                success: (m) => { if (m.confirm) this.cloudBackup(); else put() }
+              })
+              return
             }
-          })
-        }
+            put()
+          }
+        })
       }
     })
   },

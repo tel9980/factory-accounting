@@ -3530,6 +3530,23 @@ app.post('/recon-fix', async (c) => {
 })
 
 // 一家的「对账结论」：期初欠多少、本月新增、已收、核销、期末欠多少，加上这个月核对过什么
+// 对账结论那几行字：单家和整批都调这一个，保证两边说法一模一样
+function conclusionText(o) {
+  const { party, month, isAp, open, add, addCnt, paid, paidCnt, wo, end } = o
+  const rec = Array.isArray(o.rec) ? o.rec : []
+  const lines = [
+    `对账期间：${month}`,
+    `期初${isAp ? '应付' : '应收'}：${open} 元`,
+    `本期新增：${add} 元（${addCnt} 笔）`,
+    `本期${isAp ? '已付' : '已收'}：${paid} 元（${paidCnt} 笔）`,
+    wo > 0 ? `本期核销：${wo} 元` : '',
+    `期末${isAp ? '应付' : '应收'}：${end} 元`,
+    rec.length ? '差异处理：' + rec.map((x) => `${x.party} 单上 ${num(x.imported)} / 我这 ${num(x.system)}${x.note ? '（' + x.note + '）' : ''}`).join('；') : ''
+  ].filter(Boolean)
+  const text = `【对账结论 · ${month}】${party}\n` + lines.slice(1).join('\n') + `\n\n上面这笔数两边对上了就回我一句「对」，我把这期结了。`
+  return { lines, text }
+}
+
 async function conclusionOf(db, type, party, month) {
   const isAp = type === 'ap'
   const T = isAp ? 'payables' : 'orders'
@@ -3555,17 +3572,58 @@ async function conclusionOf(db, type, party, month) {
   const end = round2(rOpen + rAdd - rPaid - rWo)
   const rec = (await db.prepare('SELECT * FROM recon_log WHERE month=? AND type=? AND party=? ORDER BY id DESC LIMIT 3').bind(month, type, party).all().catch(() => ({ results: [] }))).results || []
   const cfm = await db.prepare('SELECT * FROM recon_confirm WHERE month=? AND type=? AND party=? ORDER BY id DESC LIMIT 1').bind(month, type, party).first().catch(() => null)
-  const lines = [
-    `对账期间：${month}`,
-    `期初${isAp ? '应付' : '应收'}：${rOpen} 元`,
-    `本期新增：${rAdd} 元（${num(add && add.c)} 笔）`,
-    `本期${isAp ? '已付' : '已收'}：${rPaid} 元（${num(paid && paid.c)} 笔）`,
-    rWo > 0 ? `本期核销：${rWo} 元` : '',
-    `期末${isAp ? '应付' : '应收'}：${end} 元`,
-    rec.length ? '差异处理：' + rec.map((x) => `${x.party} 单上 ${num(x.imported)} / 我这 ${num(x.system)}${x.note ? '（' + x.note + '）' : ''}`).join('；') : ''
-  ].filter(Boolean)
-  const text = `【对账结论 · ${month}】${party}\n` + lines.slice(1).join('\n') + `\n\n上面这笔数两边对上了就回我一句「对」，我把这期结了。`
-  return { party, type, month, open: rOpen, add: rAdd, add_cnt: num(add && add.c), paid: rPaid, paid_cnt: num(paid && paid.c), wo: rWo, end, recon: rec, confirmed: !!cfm, confirmed_at: cfm ? (cfm.created_at || '').slice(0, 10) : '', lines, text }
+  const t = conclusionText({ party, month, isAp, open: rOpen, add: rAdd, addCnt: num(add && add.c), paid: rPaid, paidCnt: num(paid && paid.c), wo: rWo, end, rec })
+  return { party, type, month, open: rOpen, add: rAdd, add_cnt: num(add && add.c), paid: rPaid, paid_cnt: num(paid && paid.c), wo: rWo, end, recon: rec, confirmed: !!cfm, confirmed_at: cfm ? (cfm.created_at || '').slice(0, 10) : '', lines: t.lines, text: t.text }
+}
+
+// 整批对账结论：以前是「一家一家问 8 条 SQL」（60 家 = 480 条串行查询、700ms）。
+// 现在 8 条 GROUP BY 一次拿全，再在内存里拼；口径和单家 conclusionOf() 完全一致（共用 conclusionText）。
+async function conclusionBatch(db, type, month, names) {
+  const isAp = type === 'ap'
+  const T = isAp ? 'payables' : 'orders'
+  const P = isAp ? 'supplier' : 'customer'
+  const A = isAp ? 'amount' : 'price'
+  const rtype = isAp ? 'payable' : 'order'
+  const m0 = `${month}-01`
+  const m1 = `${month}-31`
+  const none = { results: [] }
+  const [rOpen0, rAdd, rPaid, rWo, rPaidBefore, rWoBefore, rCfm, rLog] = await Promise.all([
+    db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE substr(created_at,1,10)<? GROUP BY ${P}`).bind(m0).all().catch(() => none),
+    db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? GROUP BY ${P}`).bind(m0, m1).all().catch(() => none),
+    db.prepare(`SELECT t.${P} AS party, COALESCE(SUM(l.amount),0) AS v, COUNT(*) AS c FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=? GROUP BY t.${P}`).bind(rtype, m0, m1).all().catch(() => none),
+    db.prepare('SELECT party, COALESCE(SUM(amount),0) AS v, COUNT(*) AS c FROM writeoffs WHERE ref_type=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? GROUP BY party').bind(rtype, m0, m1).all().catch(() => none),
+    db.prepare(`SELECT t.${P} AS party, COALESCE(SUM(l.amount),0) AS v FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)<? GROUP BY t.${P}`).bind(rtype, m0).all().catch(() => none),
+    db.prepare('SELECT party, COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type=? AND substr(created_at,1,10)<? GROUP BY party').bind(rtype, m0).all().catch(() => none),
+    db.prepare('SELECT party, created_at FROM recon_confirm WHERE month=? AND type=? ORDER BY id DESC').bind(month, type).all().catch(() => none),
+    db.prepare('SELECT party, imported, system, note FROM recon_log WHERE month=? AND type=? ORDER BY id DESC').bind(month, type).all().catch(() => none)
+  ])
+  const idx = (res) => {
+    const m = new Map()
+    for (const r of ((res && res.results) || [])) m.set(r.party, r)
+    return m
+  }
+  const open0 = idx(rOpen0), add = idx(rAdd), paid = idx(rPaid), wo = idx(rWo)
+  const paidBefore = idx(rPaidBefore), woBefore = idx(rWoBefore)
+  const cfmMap = new Map()
+  for (const r of ((rCfm && rCfm.results) || [])) if (!cfmMap.has(r.party)) cfmMap.set(r.party, r) // ORDER BY id DESC，先见到的就是最新
+  const recMap = new Map()
+  for (const r of ((rLog && rLog.results) || [])) {
+    const a = recMap.get(r.party) || []
+    if (a.length < 3) a.push(r)
+    recMap.set(r.party, a)
+  }
+  const v = (m, k, f) => { const r = m.get(k); return r ? num(r[f]) : 0 }
+  return names.map((party) => {
+    const rOpen = round2(v(open0, party, 'v') - v(paidBefore, party, 'v') - v(woBefore, party, 'v'))
+    const rAdd = round2(v(add, party, 'v'))
+    const rPaid = round2(v(paid, party, 'v'))
+    const rWo = round2(v(wo, party, 'v'))
+    const end = round2(rOpen + rAdd - rPaid - rWo)
+    const rec = recMap.get(party) || []
+    const cfm = cfmMap.get(party) || null
+    const t = conclusionText({ party, month, isAp, open: rOpen, add: rAdd, addCnt: v(add, party, 'c'), paid: rPaid, paidCnt: v(paid, party, 'c'), wo: rWo, end, rec })
+    return { party, open: rOpen, add: rAdd, paid: rPaid, wo: rWo, end, confirmed: !!cfm, confirmed_at: cfm ? (cfm.created_at || '').slice(0, 10) : '', text: t.text }
+  })
 }
 
 // 对账结论：单家（给 party）或整批（不给 party，列出所有还欠钱或本月核对过的家）
@@ -3586,11 +3644,7 @@ app.get('/recon-conclusion', async (c) => {
   const parties = (await db.prepare(`SELECT ${P} AS party, COALESCE(SUM(CASE WHEN ${L}>0 THEN ${L} ELSE 0 END),0) AS left FROM ${T} GROUP BY ${P} HAVING left > 0.009 ORDER BY left DESC`).all().catch(() => ({ results: [] }))).results || []
   const logParties = (await db.prepare('SELECT DISTINCT party FROM recon_log WHERE month=? AND type=?').bind(month, type).all().catch(() => ({ results: [] }))).results || []
   const names = Array.from(new Set(parties.map((x) => x.party).concat(logParties.map((x) => x.party))))
-  const rows = []
-  for (const nm of names.slice(0, 60)) {
-    const o = await conclusionOf(db, type, nm, month)
-    rows.push({ party: nm, open: o.open, add: o.add, paid: o.paid, wo: o.wo, end: o.end, confirmed: o.confirmed, confirmed_at: o.confirmed_at, text: o.text })
-  }
+  const rows = await conclusionBatch(db, type, month, names.slice(0, 60))
   const totalEnd = round2(rows.reduce((a, x) => a + x.end, 0))
   const unconfirmed = rows.filter((x) => !x.confirmed).length
   return c.json({ ok: true, single: false, month, type, count: rows.length, total_end: totalEnd, unconfirmed, rows,
