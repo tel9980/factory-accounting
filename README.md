@@ -896,6 +896,10 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 前端：单位页「📝 合同价 / 框架价」面板（搜索、列出现有约定、停用、新增）。
    - 实测：兴旺五金「切割 3200 元/件」+「全部产品 5000 元/批」→ `/frame-check` 对 2800 报「低了 400」、3500 报「没低于框架价」；下单 2800 时 `checks` 返回 `below_frame` 那条文案。
 
+255. ✅ **顺手修掉的旧账（第111批）**：
+   - `/cash-bridge`（利润→现金桥接）在批量把 `substr(created_at,1,7)` 换成 `month` 列时，误伤了两条查询：`advances` 与 `writeoffs` 这两张表**没有** `month` 列，结果只要账上有预收款或核销过，打开这张桥接表就报 `D1_ERROR: no such column: month`（接口 500）。已改回 `substr(created_at,1,7)=?`，并写了个静态扫描脚本按「语句里出现的表是否有 month 列」复查了全库 `month` 用法，其余命中（`targets`/`wage_pays`/`month_report`）都是本来就有该列的表，无误。
+   - 全站 89 个主要 GET 接口冒烟：除 3 个「本来就不存在、前端也没用」的名字（`/ap-summary`、`/ledger`、`/targets`，实际用的是 `/ar-summary`、`/expenses`、`/budgets`）之外全部 200；`/cash-bridge` 修好后 residual 归零（净利 13100 → 现金 2000，中间 9 项差额全部解释得清）。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）

@@ -7310,12 +7310,12 @@ app.get('/cash-bridge', async (c) => {
     q1("SELECT COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) AS v FROM payables WHERE substr(created_at,1,10) <= ?", end),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='debt' AND month=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='debt' AND substr(created_at,1,7)=?", m),
-    q1("SELECT COALESCE(SUM(amount - used),0) AS v FROM advances WHERE type='in' AND month=?", m),
+    q1("SELECT COALESCE(SUM(amount - used),0) AS v FROM advances WHERE type='in' AND substr(created_at,1,7)=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE cash=0 AND ref_type='order' AND month=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='loan' AND month=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='loan' AND substr(created_at,1,7)=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,7)=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='payable' AND month=?", m),
+    q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='payable' AND substr(created_at,1,7)=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND month=?", m),
     q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,7)=?", m)
   ])
