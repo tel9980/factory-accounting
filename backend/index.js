@@ -6603,6 +6603,14 @@ app.get('/orders/:id/detail', async (c) => {
     })),
     import_origin: await importOrigin(db, o.import_batch),
     edits: await editHistory(db, 'order', id),
+    // 这张单上已经记的计件工钱（人工成本）：材料 + 人工 才是这张单真实花了多少
+    wage_rows: await (async () => {
+      try {
+        const wr = (await db.prepare('SELECT worker, process, qty, rate, amount, date FROM wage_records WHERE order_id=? ORDER BY id').bind(id).all()).results || []
+        const amt = round2(wr.reduce((a, x) => a + num(x.amount), 0))
+        return { rows: wr.map((x) => ({ worker: x.worker, process: x.process || '', qty: round2(num(x.qty)), rate: round2(num(x.rate)), amount: round2(num(x.amount)), date: (x.date || '').slice(0, 10) })), amount: amt, qty: round2(wr.reduce((a, x) => a + num(x.qty), 0)) }
+      } catch (e) { return { rows: [], amount: 0, qty: 0 } }
+    })(),
     writeoffs: wos.map((x) => ({ id: x.id, amount: round2(num(x.amount)), reason: x.reason || '', date: (x.created_at || '').slice(0, 10) }))
   })
 })

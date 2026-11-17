@@ -7700,6 +7700,13 @@ Page({
       const head = type === 'ar'
         ? d.customer + ' · ' + d.item_name + ' · 总 ' + d.price + ' · 已收 ' + d.paid + (d.written_off > 0 ? ' · 已核销 ' + d.written_off : '') + ' · 还欠 ' + d.unpaid
         : d.supplier + ' · 总 ' + d.amount + ' · 已付 ' + d.paid + (d.written_off > 0 ? ' · 已核销 ' + d.written_off : '') + ' · 还欠 ' + d.unpaid
+      // 这张单的成本构成：材料（单子上填的）+ 已记计件工钱，合起来才是真实成本
+      const wg = d.wage_rows
+      if (wg && (wg.amount > 0 || (wg.rows || []).length)) {
+        const detail = (wg.rows || []).map((x) => `${x.worker}${x.process ? '·' + x.process : ''} ${x.qty}×${x.rate}=${x.amount}`).join('；')
+        rows.push({ k: '成本', v: `材料 ${d.cost || 0} ＋ 工钱 ${wg.amount}（${wg.qty} 件）＝ ${(Number(d.cost || 0) + Number(wg.amount)).toFixed(2)}；毛利 ${(Number(d.price || d.amount || 0) - Number(d.cost || 0) - Number(wg.amount)).toFixed(2)}` })
+        if (detail) rows.push({ k: '记工', v: detail })
+      }
       const oi = d.import_origin
       let oline = ''
       if (oi) {
