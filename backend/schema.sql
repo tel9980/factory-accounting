@@ -9,10 +9,14 @@ CREATE TABLE IF NOT EXISTS orders (
   due_date TEXT,                        -- 约定收款日（可选，用于到期提醒）
   operator TEXT,                        -- 经手人
   progress TEXT DEFAULT '',             -- 当前工序（如 备料/加工/喷涂/包装）
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  month TEXT                          -- =substr(created_at,1,7)，触发器自动填，首页走索引
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_month ON orders(month);
+CREATE TRIGGER IF NOT EXISTS trg_orders_month AFTER INSERT ON orders WHEN NEW.month IS NULL
+BEGIN UPDATE orders SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
 -- 订单工序流水
 CREATE TABLE IF NOT EXISTS process_log (
@@ -37,10 +41,14 @@ CREATE TABLE IF NOT EXISTS payables (
   remark TEXT,
   operator TEXT,                        -- 经手人
   due_date TEXT,                        -- 约定付款日
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  month TEXT                          -- =substr(created_at,1,7)，触发器自动填
 );
 CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);
 CREATE INDEX IF NOT EXISTS idx_payables_created ON payables(created_at);
+CREATE INDEX IF NOT EXISTS idx_payables_month ON payables(month);
+CREATE TRIGGER IF NOT EXISTS trg_payables_month AFTER INSERT ON payables WHEN NEW.month IS NULL
+BEGIN UPDATE payables SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
 -- 收付流水（统一收入/支出）
 CREATE TABLE IF NOT EXISTS ledger (
@@ -52,9 +60,13 @@ CREATE TABLE IF NOT EXISTS ledger (
   category TEXT,
   remark TEXT,
   operator TEXT,             -- 经手人
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  month TEXT                 -- =substr(created_at,1,7)，触发器自动填
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);
+CREATE INDEX IF NOT EXISTS idx_ledger_month ON ledger(month);
+CREATE TRIGGER IF NOT EXISTS trg_ledger_month AFTER INSERT ON ledger WHEN NEW.month IS NULL
+BEGIN UPDATE ledger SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
 -- 系统设置（访问口令等）
 CREATE TABLE IF NOT EXISTS settings (
@@ -341,6 +353,17 @@ CREATE TABLE IF NOT EXISTS assets (
 
 
 -- 员工改单申请（员工不能直接删改单据，提申请由老板一键同意/驳回）
+-- 员工账号：一人一个口令，各自授权限（老的整体员工口令继续可用）
+CREATE TABLE IF NOT EXISTS staff_users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  pin TEXT NOT NULL UNIQUE,
+  modules TEXT NOT NULL DEFAULT 'ar,ap,exp,import,contact,asset',
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_staff_pin ON staff_users(pin);
+
 CREATE TABLE IF NOT EXISTS edit_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,              -- ar | ap | expense
@@ -367,3 +390,24 @@ CREATE INDEX IF NOT EXISTS idx_recon_confirm ON recon_confirm(month, type, party
 
 -- 客户不要发票的单据（不进待开票清单）
 -- ALTER TABLE orders ADD COLUMN no_invoice INTEGER DEFAULT 0;
+
+-- 报价单：先报价、客户点头再转成应收单（status: draft/sent/accepted/rejected/ordered）
+CREATE TABLE IF NOT EXISTS quotes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  no TEXT,
+  party TEXT NOT NULL,
+  item TEXT,
+  qty REAL DEFAULT 1,
+  price REAL DEFAULT 0,
+  cost REAL DEFAULT 0,
+  margin REAL DEFAULT 0,
+  note TEXT,
+  valid_days INTEGER DEFAULT 15,
+  status TEXT DEFAULT 'draft',
+  token TEXT,
+  order_id INTEGER,
+  sent_at TEXT,
+  decided_at TEXT,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status, created_at);

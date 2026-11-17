@@ -1546,6 +1546,32 @@
           </view>
         </view>
       </view>
+      <view wx:if="{{role!='staff'}}">
+        <button class="btn ghost" size="mini" bindtap="loadStaffUsers">👤 员工账号（一人一个口令）</button>
+        <view wx:if="{{su}}">
+          <view class="tip">{{su.text}}</view>
+          <view class="item" wx:for="{{su.rows}}" wx:key="id" wx:for-item="u">
+            <view class="row1">
+              <text class="nm">{{u.name}} · 口令 {{u.pin}}</text>
+              <text class="amt">{{u.active?'在用':'已停用'}}</text>
+            </view>
+            <view class="row2">能看：{{u.mod_text || '没开任何模块'}}</view>
+            <view class="frow">
+              <button size="mini" wx:for="{{su.all_mods}}" wx:key="*this" wx:for-item="mk" bindtap="toggleSuMod" data-id="{{u.id}}" data-k="{{mk}}">{{u.mods.indexOf(mk)>=0?'☑':'☐'}}{{su.labels[mk]}}</button>
+            </view>
+            <view class="frow">
+              <button class="btn" size="mini" bindtap="saveStaffUser" data-id="{{u.id}}">存权限</button>
+              <button class="btn ghost" size="mini" bindtap="resetSuPin" data-id="{{u.id}}">改口令</button>
+              <button class="btn ghost" size="mini" bindtap="toggleSuActive" data-id="{{u.id}}" data-on="{{u.active}}">{{u.active?'停用':'启用'}}</button>
+              <button class="btn ghost" size="mini" bindtap="delStaffUser" data-id="{{u.id}}">删</button>
+            </view>
+          </view>
+          <view class="frow">
+            <button class="btn" size="mini" bindtap="addStaffUser">＋ 加一个员工</button>
+            <button class="btn ghost" size="mini" bindtap="closeStaffUsers">收起</button>
+          </view>
+        </view>
+      </view>
       <view wx:if="{{role=='staff'}}">
         <button class="btn ghost" size="mini" bindtap="askStaffName" data-force="1">✏️ 改我的名字</button>
       </view>
@@ -2393,6 +2419,7 @@
 <textarea class="restore-ta" placeholder="{{bank_hint}}" value="{{bank_text}}" bindinput="onBankText"></textarea>
       <view class="tip" wx:if="{{bank_layout}}">✓ 认出这是「{{bank_layout}}」{{bank_skip ? '，跳过 ' + bank_skip + ' 笔不计收支/退款的' : ''}}</view>
       <button class="btn" size="mini" bindtap="importBank">导入流水</button>
+      <button class="btn ghost" size="mini" bindtap="importBankFile">📄 或者直接选 Excel 账单文件</button>
       <view class="duesoon" wx:if="{{bank_unmatched.count>0}}">{{bank_unmatched.count}} 笔还没认领，合计 ¥{{bank_unmatched.amount}}</view>
       <view class="frow" wx:if="{{bank_unmatched.count>0}}">
         <button class="btn" size="mini" bindtap="autoMatchBank">🤖 自动认领</button>
@@ -2461,6 +2488,13 @@
       <button class="btn" size="mini" bindtap="enableWx">开启微信提醒（要我手机上点允许）</button>
       <button class="btn" size="mini" bindtap="testWx">发一条测试通知</button>
       <view class="tip" wx:if="{{wx_info}}">已登记 {{wx_info.users}} 个微信，剩余可推 {{wx_info.quota}} 条{{wx_info.has_secret?'':'（还没存 AppSecret）'}}</view>
+      <view wx:if="{{wx_info && wx_info.wx_guide}}">
+        <view class="tip">{{wx_info.next}}</view>
+        <view class="item" wx:for="{{wx_info.wx_guide}}" wx:key="k" wx:for-item="g">
+          <view class="row1"><text class="nm">{{g.ok?'✓':'○'}} {{g.label}}</text><text class="amt">{{g.ok?'好了':'还差'}}</text></view>
+          <view class="row2" wx:if="{{!g.ok}}">怎么弄：{{g.how}}</view>
+        </view>
+      </view>
     </view>
   </block>
 

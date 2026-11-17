@@ -4107,6 +4107,96 @@ Page({
     })
   },
   closeStaffPerms() { this.setData({ spm: null }) },
+  // 员工账号：一人一个 4 位口令，各自授权限
+  loadStaffUsers() {
+    this.req({ url: API_BASE + '/staff-users', success: (res) => this.setData({ su: res.data || null }) })
+  },
+  closeStaffUsers() { this.setData({ su: null }) },
+  addStaffUser() {
+    wx.showModal({
+      title: '加个员工', editable: true, placeholderText: '他叫什么（比如 小王）',
+      success: (m) => {
+        const name = String(m.content || '').trim()
+        if (!m.confirm) return
+        if (!name) return wx.showToast({ title: '得先填个名字', icon: 'none' })
+        wx.showLoading({ title: '加…' })
+        this.req({
+          url: API_BASE + '/staff-users', method: 'POST', data: { name },
+          success: (res) => {
+            wx.hideLoading()
+            const d = res.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没加上', icon: 'none' })
+            this.loadStaffUsers()
+            wx.showModal({ title: '加好了', content: (d.text || '') + '\n\n口令可以随时在列表里点「改口令」重设。', showCancel: false })
+          },
+          fail: () => wx.hideLoading()
+        })
+      }
+    })
+  },
+  toggleSuMod(e) {
+    const d = this.data.su
+    if (!d) return
+    const id = e.currentTarget.dataset.id
+    const k = e.currentTarget.dataset.k
+    const rows = (d.rows || []).map((r) => {
+      if (r.id !== id) return r
+      const mods = (r.mods || []).slice()
+      const i = mods.indexOf(k)
+      if (i >= 0) mods.splice(i, 1)
+      else mods.push(k)
+      return Object.assign({}, r, { mods })
+    })
+    this.setData({ su: Object.assign({}, d, { rows }) })
+  },
+  saveStaffUser(e) {
+    const id = e.currentTarget.dataset.id
+    const d = this.data.su
+    const r = ((d && d.rows) || []).find((x) => x.id === id)
+    if (!r) return
+    if (!(r.mods || []).length) return wx.showToast({ title: '至少给他开一块', icon: 'none' })
+    this.req({
+      url: API_BASE + '/staff-users/' + id, method: 'POST', data: { mods: r.mods },
+      success: () => { wx.showToast({ title: '存好了', icon: 'success' }); this.loadStaffUsers() }
+    })
+  },
+  toggleSuActive(e) {
+    const id = e.currentTarget.dataset.id
+    const on = Number(e.currentTarget.dataset.on)
+    this.req({
+      url: API_BASE + '/staff-users/' + id, method: 'POST', data: { active: on ? 0 : 1 },
+      success: () => { wx.showToast({ title: on ? '已停用' : '已启用', icon: 'success' }); this.loadStaffUsers() }
+    })
+  },
+  resetSuPin(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '换个口令', editable: true, placeholderText: '4 位数字，留空就随机生成',
+      success: (m) => {
+        if (!m.confirm) return
+        const pin = String(m.content || '').replace(/\D/g, '')
+        this.req({
+          url: API_BASE + '/staff-users/' + id, method: 'POST', data: pin ? { pin } : { pin: String(1000 + Math.floor(Math.random() * 9000)) },
+          success: (res) => {
+            const d = res.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
+            this.loadStaffUsers()
+            wx.showToast({ title: '改好了', icon: 'success' })
+          }
+        })
+      }
+    })
+  },
+  delStaffUser(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删掉这个员工账号？', content: '删了他就登不进来了（记过的账不影响）。',
+      success: (m) => {
+        if (!m.confirm) return
+        this.req({ url: API_BASE + '/staff-users/' + id, method: 'DELETE', success: () => { this.loadStaffUsers(); wx.showToast({ title: '删了', icon: 'success' }) } })
+      }
+    })
+  },
   loadStaffAct() {
     this.req({
       url: API_BASE + '/staff-activity?days=7',
@@ -6574,6 +6664,56 @@ Page({
           wx.showToast({ title: '导入 ' + d.imported + ' 笔', icon: 'success' })
         }
         else wx.showToast({ title: d.error || '导入失败', icon: 'none' })
+      }
+    })
+  },
+  // 银行/微信/支付宝导出的 xlsx，直接选文件导（不用另存 CSV）
+  importBankFile() {
+    if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，请用粘贴方式', icon: 'none' })
+    wx.chooseMessageFile({
+      count: 1, type: 'file', extension: ['xlsx', 'XLSX'],
+      success: (r) => {
+        const f = (r.tempFiles || [])[0]
+        if (!f) return
+        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        wx.showLoading({ title: '读取中…' })
+        wx.getFileSystemManager().readFile({
+          filePath: f.path, encoding: 'base64',
+          success: (fr) => {
+            wx.showLoading({ title: '认出什么表…' })
+            this.req({
+              url: API_BASE + '/import-xlsx', method: 'POST', data: { type: 'bank', b64: fr.data, preview: true },
+              success: (res) => {
+                wx.hideLoading()
+                const d = res.data || {}
+                if (!d.ok) return wx.showToast({ title: d.error || '没认出来', icon: 'none' })
+                wx.showModal({
+                  title: '认出 ' + d.count + ' 笔流水',
+                  content: (d.layout_text || '') + '\n' + d.text + '\n\n先导进来，再一笔笔认领成账。',
+                  confirmText: '导入',
+                  success: (m) => {
+                    if (!m.confirm) return
+                    wx.showLoading({ title: '导入中…' })
+                    this.req({
+                      url: API_BASE + '/import-xlsx', method: 'POST', data: { type: 'bank', b64: fr.data },
+                      success: (r2) => {
+                        wx.hideLoading()
+                        const d2 = r2.data || {}
+                        if (!d2.ok) return wx.showToast({ title: d2.error || '导入失败', icon: 'none' })
+                        this.setData({ bank_layout: d2.layout_text || '', bank_skip: d2.skipped || 0 })
+                        this.loadBankFlows()
+                        wx.showToast({ title: '导入 ' + d2.imported + ' 笔', icon: 'success' })
+                      },
+                      fail: () => wx.hideLoading()
+                    })
+                  }
+                })
+              },
+              fail: () => wx.hideLoading()
+            })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '读不了这个文件', icon: 'none' }) }
+        })
       }
     })
   },

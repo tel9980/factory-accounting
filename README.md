@@ -797,11 +797,34 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - 实测三种格式全对：微信 3 笔（1200 出 / 3000 入 / 260 出，跳过 1 笔不计收支）、银行 3 笔（5000 出 / 8000 入 / 300 出）、老格式 2 笔。
 236. ✅ **5000 单压测实测**（上一轮只测到 2000 单）：往第三本灌 5000 张应收 + 3334 条流水后实测（含本机到服务器约 1 秒网络）——首页 `/dashboard` 冷 3.4s / 热 1.2s、`/ar` 1.2s、`/ar-summary` 0.85s、`/party-groups` 0.48s、`/report-view` 0.72s、`/kpi` 0.66s、`/year-summary` 0.48s、`/aging` 0.66s、`/due-schedule` 0.94s、`/settled` 0.49s、`/networth` 0.47s。结论：**首页是唯一随单量明显变慢的接口**（12 条子查询各自全表扫 `substr(created_at,1,7)`，D1 上没法走索引），5000 单时 1–3 秒还能用，但到 2 万单要动手（加月份列或按年分表）；其余接口都在 1 秒内。测完把 5000 单清掉。
 
+237. ✅ **月份列 + 索引：首页 1.2s → 0.64s（顺带把 119 处全表扫换成走索引）**：第 236 项压测发现首页慢在 12 条子查询各自 `substr(created_at,1,7)=?`——SQLite 对函数结果不走索引，只能全表扫。做法：
+   - orders / ledger / payables 各加一列 `month TEXT`（= 月份串）+ `idx_*_month` 索引；
+   - **触发器自动填新行**（D1 支持触发器，实测有效）：`CREATE TRIGGER trg_orders_month AFTER INSERT ON orders WHEN NEW.month IS NULL BEGIN UPDATE orders SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END`（ledger/payables 同）；
+   - `ensureMonthCols(db)` 在 cron 里幂等跑：PRAGMA 查列 → 缺就 ALTER → 建索引 → 建触发器 → 回填历史行；
+   - 写脚本按「这条 SQL 里出现的表名 ⊆ {orders, ledger, payables}」判定安全，**共替换 119 处 `substr(created_at,1,7)` → `month`，剩 80 处不动**（statement_log / recon_log / writeoffs / dunning_log 等没有 month 列的表，以及跨表混合语句）。
+   - 5000 单实测（三次取）：**首页 773/639/644ms（原 1246）**、ar-summary 876/1313/816（原 2240）、report-view 679/1184/691（原 1350）、kpi 621/631/646、year-summary 502/497/479、aging 907/905/475。口径一分没变：造 16000 单 + 1000 支出 → kpi 净利 9000、报表毛利 10000、年度汇总 11 月净利 9000。
+   - schema.sql 里三张表的建表语句也加了 `month` 列、索引与触发器，新建库自带（否则新库第一次 query 会查不到列）。
+238. ✅ **银行/微信账单的 Excel 直接导（不用先另存 CSV）**：粘贴已经能认微信/支付宝/银行的表，但手机上「导出 CSV」这一步很多人过不去——微信导出的就是 xlsx。现在：
+   - `/import-xlsx` 新增 `type:'bank'`：把 xlsx 每行还原成一行表格文本（纯数字单元格去掉千分位逗号、文字里的逗号换空格、列间用制表符）再交给和「粘贴」**同一个** `parseBankSmart`，所以认得出来的格式完全一致；
+   - 支持 `preview:true`：先回「认出 N 笔（收 ¥X / 付 ¥Y），跳过 M 笔不计收支/退款的」，点确认才写库；
+   - `DETECT_RULES` 最前面加「银行/微信流水」规则——否则表里的「交易对方」会被判成供应商；
+   - 前端银行流水面板加「📄 或者直接选 Excel 账单文件」，选完先弹预览再导。
+   - 实测：造一份微信 10 列账单 xlsx（2043 字节），`/detect-import` 判成 bank，预览「认出 3 笔（收 ¥3000 / 付 ¥1460.5），跳过 1 笔」，导入后 3 条流水（1200 出 / 3000 入 / 260.5 出）。
+239. ✅ **员工一人一个口令（人级权限，不再是全厂共用一个员工口令）**：以前员工口令是「一个口令所有人用」，虽然审计能靠手输名字区分，但权限只能整体开/关。现在：
+   - 三库（含 schema.sql）新建 `staff_users(id, name, pin UNIQUE, modules, active, created_at)`；
+   - 中间件先按口令查 `staff_users`：认到人就用**这个人的名字和模块权限**（`c.set('staff_name', …)`），认不到再退回老的整体员工口令——老的用法完全不受影响；
+   - `act(c)` 优先用服务端认定的名字 → 审计自动记「员工·小王」，不用再手输；
+   - 新接口 `GET/POST /staff-users`、`POST /staff-users/:id`（改名字/权限/口令/停用）、`DELETE /staff-users/:id`，都只老板可用（denyStaff 已加）；口令 4–6 位数字，随机生成，重口令直接 409；
+   - `/me` 返回 `staff_name` 与**这个人**的模块列表；无权限的模块报「这个员工口令没有开「应付」…」；
+   - 前端设置页「👤 员工账号（一人一个口令）」：加人、逐模块勾选、存权限、改口令、停用、删除。
+   - 实测：给「小王」只开应收 → 他 `/ar` 正常、`/ap` 403 且提示带模块名、管理员工账号 403；他记一单后 `/staff-activity` 的 `by_person` 显示「员工·小王 1 笔」。
+240. ✅ **微信提醒的配置自检清单**：订阅消息要填 AppID / AppSecret / 模板 ID / 字段名，还要有人点过授权——少一样都推不出去，但以前只报一句「还没配置完整」。现在 `/wx-config` 返回 `wx_guide`（五项：好了/还差 + 每项「怎么弄」的具体路径）、`missing`、`next`、`ready`，设置页照着清单一项项打勾即可。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 346 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 350 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -980,6 +1003,13 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `DELETE /recon-log/:id`
 - `GET /recon-log`
 - `PATCH /recon-log/:id`
+
+**staff-users**（4）
+
+- `DELETE /staff-users/:id`
+- `GET /staff-users`
+- `POST /staff-users`
+- `POST /staff-users/:id`
 
 **statement-log**（5）
 
