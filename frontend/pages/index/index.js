@@ -85,6 +85,7 @@ Page({
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     xp: null, xp_open: false,
+    rcc: null, rcc_month: '',
     categories: ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他'],
     e_category: 0, e_amount: '', e_remark: '', e_operator: '', e_acc: 0, e_date: '',
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
@@ -2762,6 +2763,74 @@ Page({
     })
   },
   // 我多记了：对方对账单上没有这么多 → 把差额核销掉（不动现金，只抹往来）
+  // 对账结论单：这个月该跟谁结、期末多少，一键出话术/打印确认单
+  loadReconConcl() {
+    const m = this.data.rcc_month || ''
+    const type = this.reconType()
+    this.req({
+      url: API_BASE + '/recon-conclusion?type=' + type + (m ? '&month=' + m : ''),
+      success: (res) => {
+        const d = res.data || {}
+        if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+        this.setData({ rcc: d })
+      },
+      fail: () => wx.showToast({ title: '取不到对账结论', icon: 'none' })
+    })
+  },
+  onRccMonth(e) { this.setData({ rcc_month: e.detail.value }, () => this.loadReconConcl()) },
+  closeReconConcl() { this.setData({ rcc: null }) },
+  copyRccOne(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const r = ((this.data.rcc || {}).rows || [])[i]
+    if (!r) return
+    wx.setClipboardData({ data: r.text, success: () => wx.showToast({ title: '结论已复制', icon: 'none' }) })
+  },
+  copyRccAll() {
+    const d = this.data.rcc || {}
+    if (!d.all_text) return wx.showToast({ title: '没有要发的', icon: 'none' })
+    wx.setClipboardData({ data: d.all_text, success: () => wx.showToast({ title: '全部结论已复制', icon: 'none' }) })
+  },
+  openReconPrint(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const r = ((this.data.rcc || {}).rows || [])[i]
+    const d = this.data.rcc || {}
+    if (!r) return
+    const type = this.reconType()
+    this.req({
+      url: API_BASE + '/recon-print-link?type=' + type + '&month=' + (d.month || '') + '&party=' + encodeURIComponent(r.party),
+      success: (res) => {
+        const u = (res.data || {}).url
+        if (!u) return wx.showToast({ title: '生成不了链接', icon: 'none' })
+        wx.setClipboardData({
+          data: u,
+          success: () => wx.showModal({
+            title: '打印版链接已复制',
+            content: '在电脑浏览器里粘贴打开就能打印/存 PDF；也可以直接发给对方看。\n链接只能看这一家这个月，改了字符就失效。',
+            showCancel: false
+          })
+        })
+      }
+    })
+  },
+  markReconConfirmed(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const r = ((this.data.rcc || {}).rows || [])[i]
+    const d = this.data.rcc || {}
+    if (!r) return
+    wx.showModal({
+      title: '对方确认了？',
+      content: `记下：${r.party} ${d.month} 期末 ${r.end} 元已核对确认。以后有争议这就是证据。`,
+      confirmText: '记下',
+      success: (res) => {
+        if (!res.confirm) return
+        this.req({
+          url: API_BASE + '/recon-confirm', method: 'POST',
+          data: { type: this.reconType(), month: d.month, party: r.party },
+          success: () => { wx.showToast({ title: '已记下确认', icon: 'none' }); this.loadReconConcl() }
+        })
+      }
+    })
+  },
   reconFixCut(e) {
     const r = ((this.data.recon || {}).rows || [])[e.currentTarget.dataset.i]
     if (!r) return

@@ -847,6 +847,26 @@
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadReconProgress">📈 对账进度</button>
         <button class="btn ghost" size="mini" bindtap="loadReconDunning">💬 差异话术</button>
+        <button class="btn" size="mini" bindtap="loadReconConcl">📄 出对账结论单</button>
+      </view>
+
+      <view class="prev" wx:if="{{rcc}}">
+        <view class="prev-h">{{rcc.text}}</view>
+        <view class="tip">这一期跟谁结了、期末欠多少。发话术给对方，他回「对」就点「已确认」，以后有争议就是证据。</view>
+        <view class="prev-row" wx:for="{{rcc.rows}}" wx:key="party">
+          <text class="prev-t">{{item.party}}</text>
+          <text class="prev-n">期初 {{item.open}} · 新增 {{item.add}} · 收付 {{item.paid}} → 期末 {{item.end}}</text>
+          <text class="{{item.confirmed?'ok':'red'}}">{{item.confirmed ? '已确认 ' + item.confirmed_at : '待对方确认'}}</text>
+          <view class="frow">
+            <button class="btn" size="mini" data-i="{{index}}" bindtap="copyRccOne">复制话术</button>
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="openReconPrint">打印确认单</button>
+            <button class="btn ghost" size="mini" wx:if="{{!item.confirmed}}" data-i="{{index}}" bindtap="markReconConfirmed">对方确认了</button>
+          </view>
+        </view>
+        <view class="frow">
+          <button class="btn ghost" size="mini" wx:if="{{rcc.count}}" bindtap="copyRccAll">复制全部</button>
+          <button class="btn ghost" size="mini" bindtap="closeReconConcl">收起</button>
+        </view>
       </view>
 
       <view class="prev" wx:if="{{rec_prog}}">

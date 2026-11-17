@@ -355,3 +355,12 @@ CREATE TABLE IF NOT EXISTS edit_requests (
   done_by TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_edit_req ON edit_requests(status, kind, ref_id);
+
+-- 对账结论确认（对方回「对」了，记一笔，作为这期结清的证据）
+CREATE TABLE IF NOT EXISTS recon_confirm (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT, type TEXT, party TEXT,
+  amount REAL, imported REAL, system REAL, diff REAL,
+  note TEXT, by TEXT, created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_recon_confirm ON recon_confirm(month, type, party);

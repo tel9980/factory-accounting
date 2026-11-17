@@ -417,7 +417,7 @@ const sigOf = async (key, party, type) => {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print') return next()
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -1962,6 +1962,157 @@ app.post('/recon-fix', async (c) => {
       .bind(month, type, party, imported, system, round2(imported - system), state, note, now()).run()
   }
   return c.json({ ok: true, id: newId, mode, party, amount, month, type, cut_amount: round2(num(b.cut_amount)), cut_left: round2(num(b.cut_left)) })
+})
+
+// 一家的「对账结论」：期初欠多少、本月新增、已收、核销、期末欠多少，加上这个月核对过什么
+async function conclusionOf(db, type, party, month) {
+  const isAp = type === 'ap'
+  const T = isAp ? 'payables' : 'orders'
+  const P = isAp ? 'supplier' : 'customer'
+  const A = isAp ? 'amount' : 'price'
+  const L = `${A} - COALESCE(paid,0) - COALESCE(written_off,0)`
+  const m0 = `${month}-01`
+  const m1 = `${month}-31`
+  const [open0, add, paid, wo, paidBefore, woBefore] = await Promise.all([
+    // 期初：这个月之前开的单的「原始金额」（不能直接用 paid，因为 paid 是累计到现在，含本月的收款）
+    db.prepare(`SELECT COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE ${P}=? AND substr(created_at,1,10)<?`).bind(party, m0).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE ${P}=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?`).bind(party, m0, m1).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(l.amount),0) AS v, COUNT(*) AS c FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND t.${P}=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=?`).bind(isAp ? 'payable' : 'order', party, m0, m1).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) AS v, COUNT(*) AS c FROM writeoffs WHERE ref_type=? AND party=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?`).bind(isAp ? 'payable' : 'order', party, m0, m1).first().catch(() => null),
+    // 这个月之前已经收/付掉的（含老单在本月前收的钱）
+    db.prepare(`SELECT COALESCE(SUM(l.amount),0) AS v FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND t.${P}=? AND substr(l.created_at,1,10)<?`).bind(isAp ? 'payable' : 'order', party, m0).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type=? AND party=? AND substr(created_at,1,10)<?`).bind(isAp ? 'payable' : 'order', party, m0).first().catch(() => null)
+  ])
+  const rOpen = round2(num(open0 && open0.v) - num(paidBefore && paidBefore.v) - num(woBefore && woBefore.v))
+  const rAdd = round2(num(add && add.v))
+  const rPaid = round2(num(paid && paid.v))
+  const rWo = round2(num(wo && wo.v))
+  const end = round2(rOpen + rAdd - rPaid - rWo)
+  const rec = (await db.prepare('SELECT * FROM recon_log WHERE month=? AND type=? AND party=? ORDER BY id DESC LIMIT 3').bind(month, type, party).all().catch(() => ({ results: [] }))).results || []
+  const cfm = await db.prepare('SELECT * FROM recon_confirm WHERE month=? AND type=? AND party=? ORDER BY id DESC LIMIT 1').bind(month, type, party).first().catch(() => null)
+  const lines = [
+    `对账期间：${month}`,
+    `期初${isAp ? '应付' : '应收'}：${rOpen} 元`,
+    `本期新增：${rAdd} 元（${num(add && add.c)} 笔）`,
+    `本期${isAp ? '已付' : '已收'}：${rPaid} 元（${num(paid && paid.c)} 笔）`,
+    rWo > 0 ? `本期核销：${rWo} 元` : '',
+    `期末${isAp ? '应付' : '应收'}：${end} 元`,
+    rec.length ? '差异处理：' + rec.map((x) => `${x.party} 单上 ${num(x.imported)} / 我这 ${num(x.system)}${x.note ? '（' + x.note + '）' : ''}`).join('；') : ''
+  ].filter(Boolean)
+  const text = `【对账结论 · ${month}】${party}\n` + lines.slice(1).join('\n') + `\n\n上面这笔数两边对上了就回我一句「对」，我把这期结了。`
+  return { party, type, month, open: rOpen, add: rAdd, add_cnt: num(add && add.c), paid: rPaid, paid_cnt: num(paid && paid.c), wo: rWo, end, recon: rec, confirmed: !!cfm, confirmed_at: cfm ? (cfm.created_at || '').slice(0, 10) : '', lines, text }
+}
+
+// 对账结论：单家（给 party）或整批（不给 party，列出所有还欠钱或本月核对过的家）
+app.get('/recon-conclusion', async (c) => {
+  const db = c.env.DB
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
+  const party = String(c.req.query('party') || '').trim()
+  if (party) {
+    const one = await conclusionOf(db, type, party, month)
+    return c.json({ ok: true, single: true, month, type, ...one })
+  }
+  const isAp = type === 'ap'
+  const T = isAp ? 'payables' : 'orders'
+  const P = isAp ? 'supplier' : 'customer'
+  const A = isAp ? 'amount' : 'price'
+  const L = `${A} - COALESCE(paid,0) - COALESCE(written_off,0)`
+  const parties = (await db.prepare(`SELECT ${P} AS party, COALESCE(SUM(CASE WHEN ${L}>0 THEN ${L} ELSE 0 END),0) AS left FROM ${T} GROUP BY ${P} HAVING left > 0.009 ORDER BY left DESC`).all().catch(() => ({ results: [] }))).results || []
+  const logParties = (await db.prepare('SELECT DISTINCT party FROM recon_log WHERE month=? AND type=?').bind(month, type).all().catch(() => ({ results: [] }))).results || []
+  const names = Array.from(new Set(parties.map((x) => x.party).concat(logParties.map((x) => x.party))))
+  const rows = []
+  for (const nm of names.slice(0, 60)) {
+    const o = await conclusionOf(db, type, nm, month)
+    rows.push({ party: nm, open: o.open, add: o.add, paid: o.paid, wo: o.wo, end: o.end, confirmed: o.confirmed, confirmed_at: o.confirmed_at, text: o.text })
+  }
+  const totalEnd = round2(rows.reduce((a, x) => a + x.end, 0))
+  const unconfirmed = rows.filter((x) => !x.confirmed).length
+  return c.json({ ok: true, single: false, month, type, count: rows.length, total_end: totalEnd, unconfirmed, rows,
+    all_text: rows.map((x) => x.text).join('\n\n'),
+    text: rows.length ? `这个月有 ${rows.length} 家要出对账结论，期末合计 ${totalEnd} 元，还有 ${unconfirmed} 家没确认。` : '这个月没有要出对账结论的单位。' })
+})
+
+// 对方回「对」了 → 记一笔确认（同一家同月只留最新一条）
+app.post('/recon-confirm', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const db = c.env.DB
+  const type = b.type === 'ap' ? 'ap' : 'ar'
+  const party = String(b.party || '').trim()
+  const month = (String(b.month || '').slice(0, 7)) || now().slice(0, 7)
+  if (!party) return c.json({ error: '缺少单位名称' }, 400)
+  const o = await conclusionOf(db, type, party, month)
+  const r = await db.prepare('INSERT INTO recon_confirm (month, type, party, amount, imported, system, diff, note, by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .bind(month, type, party, o.end, num(b.imported), num(b.system), round2(num(b.imported) - num(b.system)), String(b.note || '').trim(), act(c), now()).run()
+  await logAudit(db, '对账确认', party, `${month} 确认期末 ${o.end} 元`)
+  return c.json({ ok: true, id: r.meta && r.meta.last_row_id, party, month, amount: o.end, text: `已记下：${party} ${month} 期末 ${o.end} 元，对方确认过。` })
+})
+
+app.get('/recon-confirm', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || '').slice(0, 7)
+  const type = c.req.query('type') === 'ap' ? 'ap' : (c.req.query('type') === 'ar' ? 'ar' : '')
+  let sql = 'SELECT * FROM recon_confirm WHERE 1=1'
+  const args = []
+  if (month) { sql += ' AND month=?'; args.push(month) }
+  if (type) { sql += ' AND type=?'; args.push(type) }
+  sql += ' ORDER BY id DESC LIMIT 200'
+  const rows = (await db.prepare(sql).bind(...args).all().catch(() => ({ results: [] }))).results || []
+  return c.json({ ok: true, count: rows.length, rows: rows.map((x) => ({ id: x.id, month: x.month, type: x.type, party: x.party, amount: round2(num(x.amount)), note: x.note || '', by: x.by || '', date: (x.created_at || '').slice(0, 10) })) })
+})
+
+app.get('/recon-print-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
+  if (!party) return c.json({ error: '缺少对账单位' }, 400)
+  const t = await sigOf(saved, party, 'recon:' + month + ':' + type)
+  const base = new URL(c.req.url).origin
+  return c.json({ ok: true, url: base + '/recon-print?type=' + type + '&month=' + month + '&party=' + encodeURIComponent(party) + '&t=' + t })
+})
+
+// A4 对账确认单（双方签字用）
+app.get('/recon-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
+  const want = String(c.req.query('t') || '')
+  const good = saved && party ? await sigOf(saved, party, 'recon:' + month + ':' + type) : ''
+  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成对账确认单。</h3>')
+  const o = await conclusionOf(db, type, party, month)
+  const title = await getTitle(db)
+  const prof = await profLine(db, party)
+  const isAp = type === 'ap'
+  const rows = [
+    ['期初' + (isAp ? '应付' : '应收'), o.open],
+    ['本期新增（' + o.add_cnt + ' 笔）', o.add],
+    ['本期' + (isAp ? '已付' : '已收') + '（' + o.paid_cnt + ' 笔）', -o.paid],
+    ['本期核销', -o.wo],
+    ['期末' + (isAp ? '应付' : '应收'), o.end]
+  ]
+  const table = rows.map(([k, v], i) => `<tr${i === rows.length - 1 ? ' class="total"' : ''}><td>${escHtml(k)}</td><td class="n">${round2(v)}</td></tr>`).join('')
+  const reconBlock = o.recon.length
+    ? `<h2>本期核对说明</h2><table><tr><th>对账单金额</th><th>我这边金额</th><th>怎么处理的</th></tr>${o.recon.map((x) => `<tr><td class="n">${num(x.imported)}</td><td class="n">${num(x.system)}</td><td>${escHtml(x.note || (x.done ? '已处理' : '待处理'))}</td></tr>`).join('')}</table>`
+    : ''
+  return c.html(a4Page({
+    title: `对账确认单 ${month} ${party}`,
+    body: `<h1>对账确认单</h1>
+<div class="sub">账期：${escHtml(month)}　制单日期：${todayIso()}</div>
+<div class="who">${escHtml(title.title || '')}${title.phone ? '　电话：' + escHtml(title.phone) : ''}${title.addr ? '　地址：' + escHtml(title.addr) : ''}</div>
+<div class="who">往来单位：${escHtml(party)}${prof ? '　' + escHtml(prof) : ''}</div>
+<h2>${isAp ? '应付' : '应收'}结算</h2>
+<table>${table}</table>
+${reconBlock}
+<div class="sub" style="text-align:left;margin-top:14px">双方核对无误，以上金额经确认后作为本账期结算依据。</div>`,
+    extraCss: `.sum{margin-left:auto;width:60%}`,
+    sign: `<span>我方（盖章/签字）：____________</span><span>对方（盖章/签字）：____________</span><span>日期：____________</span>`,
+    tip: '这份确认单由小程序生成，签字后双方各留一份。',
+  }))
 })
 
 // 一次把整批差异处理完：我少记→补单，我多记→核销差额，不处理→留痕

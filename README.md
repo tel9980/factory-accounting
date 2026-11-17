@@ -602,11 +602,17 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **系统里没这家** → 建一张新单；
    - `POST /recon-fix-batch {type, month, rows}`：**一次把整批差异处理完**，返回「补记 N 家（共 ¥X）、核销 M 家（共 ¥Y）、跳过 K 家」并逐家写对账台账；
    - 三种模式都受月结锁定保护（锁定月 403），员工口令不能做（`denyStaff` 加 `/recon-fix`、`/recon-save`）。
+210. ✅ **对账结论单（对方回「对」才算结了这一期）**：差异处理完之后，每个月每家出一张结论：
+   - `GET /recon-conclusion?type=&month=&party=`（不给 party 就是整批）→ **期初 + 本期新增 − 本期已收 − 本期核销 = 期末**，逐项列出并给一段可直接发微信的话（「上面这笔数两边对上了就回我一句『对』，我把这期结了」）；
+   - **期初必须按「这个月之前开的单 − 这个月之前收的钱 − 这个月之前核销的」算**，不能直接拿单据的 `paid`（那是累计到现在的，会把本月收款重复扣一次）；
+   - `POST /recon-confirm {type, month, party}` 对方确认了就记一笔（`recon_confirm` 表，记期末金额、对账单金额、我这边金额、差额、经手人），以后有争议这就是证据；
+   - `GET /recon-print-link` → `/recon-print?t=` 签名的 A4 **对账确认单**（期初/新增/已收/核销/期末五行表 + 本期核对说明 + 双方盖章签字栏），改字符即「链接已失效」；
+   - 前端对账区「📄 出对账结论单」：每家显示「期初 · 新增 · 收付 → 期末」和「已确认/待对方确认」，可复制话术、打印确认单、点「对方确认了」。
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.py` 自动生成，请勿手改）
 
-共 289 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
+共 294 个接口。改完后端跑一次 `python3 scripts/gen-api-list.py` 即可同步本清单。
 
 **accounts**（4）
 
@@ -833,6 +839,11 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /onboarding`
 - `POST /onboarding/dismiss`
 
+**recon-confirm**（2）
+
+- `GET /recon-confirm`
+- `POST /recon-confirm`
+
 **report-head**（2）
 
 - `GET /report-head`
@@ -863,7 +874,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（154）
+**其它（单个接口）**（157）
 
 - `GET /`
 - `GET /access-guide`
@@ -971,12 +982,15 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /receipt-text`
 - `POST /receive-batch`
 - `GET /recon-calendar`
+- `GET /recon-conclusion`
 - `GET /recon-diff-text`
 - `GET /recon-dunning`
 - `POST /recon-fix`
 - `POST /recon-fix-batch`
 - `GET /recon-month`
 - `GET /recon-orders`
+- `GET /recon-print`
+- `GET /recon-print-link`
 - `GET /recon-progress`
 - `POST /recon-save`
 - `POST /reconcile`
