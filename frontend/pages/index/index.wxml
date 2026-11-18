@@ -1022,6 +1022,7 @@
         </view>
         <view class="tip" wx:if="{{import_preview.new_text}}">新单位（系统里还没有）：{{import_preview.new_text}}</view>
         <view class="tip" wx:if="{{import_preview.bad_count}}">有 {{import_preview.bad_count}} 行没看懂，这些不会导入</view>
+        <view class="tip" wx:if="{{import_preview.truncated}}">上面只列了前 {{import_preview.shown}} 行，点「确认入账」会把 {{import_preview.count}} 行全部导进去</view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="confirmImport">确认入账 {{import_preview.count}} 条</button>
           <button class="btn ghost" size="mini" bindtap="cancelPreview">取消</button>

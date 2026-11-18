@@ -266,6 +266,9 @@ Page({
     })
   },
   req(opts) {
+    // 兜底补域名：以前有 6 处写成 url: '/xxx'（少了 API_BASE +），wx.request 直接报「url 不合法」，
+    // 对应功能（账户对账、使用向导、客户卡片、月对账单、对账单据、今天收工）在真机上一次都没成功过。
+    if (opts && opts.url && !/^https?:\/\//.test(opts.url)) opts.url = API_BASE + opts.url
     // 连点保护：同一个动作（once 名字相同）没回来之前，重复点击直接忽略
     if (opts.once) {
       this._once = this._once || {}
@@ -366,10 +369,18 @@ Page({
         })(), opts.header),
         success: (res) => {
           if (res.statusCode === 401) {
-            if (this._askingKey) return
+            // 首屏一屏就发 18+13 个请求，全部 401。以前这里直接 return，等于把除第一个以外的请求全丢了，
+            // 用户输完口令看到一屏空白（还没有下拉刷新，只能杀进程重进）。现在排队，拿到口令后原样重放。
+            if (this._askingKey) { (this._keyQueue = this._keyQueue || []).push(opts); return }
             this._askingKey = true
+            this._keyQueue = []
             const code = res.data && res.data.code
             const done = () => { this._askingKey = false }
+            const replayKey = (k) => {
+              const q = this._keyQueue || []
+              this._keyQueue = []
+              q.forEach((o) => { try { this._send(o, k) } catch (e) { /* 单个失败不影响别的 */ } })
+            }
             if (code === 'no_key') {
               wx.showModal({
                 title: '首次使用',
@@ -384,13 +395,13 @@ Page({
                       success: (s) => {
                         done()
                         if (s.data && s.data.ok) {
-                          wx.setStorageSync('ak', k); doReq(k)
+                          wx.setStorageSync('ak', k); doReq(k); replayKey(k)
                           if (s.data.recover_code) this.showRecoverCode(s.data.recover_code)
                         } else wx.showToast({ title: (s.data && s.data.error) || '设置失败', icon: 'none' })
                       },
-                      fail: () => { done(); wx.showToast({ title: '网络失败', icon: 'none' }) }
+                      fail: () => { done(); this._keyQueue = []; wx.showToast({ title: '网络失败', icon: 'none' }) }
                     })
-                  } else done()
+                  } else { done(); this._keyQueue = [] }
                 }
               })
             } else {
@@ -401,8 +412,8 @@ Page({
                   if (r.confirm && r.content) {
                     const k = r.content.trim()
                     wx.setStorageSync('ak', k)
-                    done(); doReq(k)
-                  } else { done(); this.openRecover() }
+                    done(); doReq(k); replayKey(k)
+                  } else { done(); this._keyQueue = []; this.openRecover() }
                 }
               })
             }
@@ -3098,6 +3109,7 @@ Page({
     const { import_type, import_text } = this.data
     const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
+    this._impText = import_text
     wx.showLoading({ title: '看一遍…' })
     this.req({
       url: API_BASE + '/parse-import', method: 'POST',
@@ -3214,7 +3226,7 @@ Page({
     const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
     this.req({
       url: API_BASE + '/import-rows', method: 'POST',
-      data: { type: types[import_type], rows: good, confirm_dup: !!force },
+      data: { type: types[import_type], rows: good, text: this._impText || '', confirm_dup: !!force },
       success: (res) => {
         const d = res.data || {}
         const n = d.imported || 0

@@ -189,6 +189,7 @@ const dead = [...calls].filter((p) => !routeSet.has(p) && p !== '/')
 const familyOk = (p) => [...routeSet].some((r) => r.startsWith(p) || p.startsWith(r.split('/:x')[0] + '/'))
 const really = dead.filter((p) => !familyOk(p))
 for (const p of really) warn.push(`前端调了 ${p}，后台没有这个路由（可能是动态拼的，人工看一眼）`)
+if (dead.length && !really.length) warn.push(`这 ${dead.length} 个前端路径没直接命中路由、但前缀族对得上（动态拼的）：${dead.join('、')}`)
 say(true, `${calls.size} 个前端调用，${dead.length} 个没直接命中（${really.length} 个需要人工看）`)
 
 // ── 6. 页面绑定和方法重名（README 227/229 两个 bug 都出在这）──
