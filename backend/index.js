@@ -329,6 +329,46 @@ async function getStaffModules(db) {
   if (!v) return STAFF_MOD_DEFAULT.slice()
   return v.split(',').map((x) => x.trim()).filter((x) => STAFF_MOD_LABEL[x])
 }
+// ===== 功能模块开关 =====
+// 一个人用的时候，用不上的模块（计件工资、材料台账、生产返工…）可以关掉：
+// 界面上入口消失、后端接口直接 403，免得点进去一堆空页面、也免得误录。
+// 核心四块（应收/应付/支出/导入）不许关——关了就记不了账。
+const MODULES = [
+  { k: 'ar', name: '应收（客户欠我）', desc: '接单、收款、核销', keep: 1, routes: [/^\/orders/, /^\/ar(-|$)/, /^\/settled/, /^\/credits/, /^\/writeoffs/, /^\/advances?/, /^\/quick$/, /^\/promise/] },
+  { k: 'ap', name: '应付（我欠供应商）', desc: '进货、付款、核销', keep: 1, routes: [/^\/payables/, /^\/ap(-|$)/] },
+  { k: 'expense', name: '支出与报销', desc: '水电房租、员工报销冲抵', keep: 1, routes: [/^\/expenses?/, /^\/loans/, /^\/fixed/, /^\/ledger/, /^\/cashbook/, /^\/reimburse/] },
+  { k: 'import', name: 'Excel 导入', desc: '模板导入应收应付、对账、报销', keep: 1, routes: [/^\/import/, /^\/parse-import/, /^\/detect-import/, /^\/migrate/, /^\/export/] },
+  { k: 'wage', name: '计件工资', desc: '单价、计件记录、发工资', routes: [/^\/wage-/, /^\/payroll/, /^\/my-work/] },
+  { k: 'material', name: '材料台账', desc: '进出库、库存、框架价、在制', routes: [/^\/materials/, /^\/material-moves/, /^\/frame-prices/, /^\/wip$/] },
+  { k: 'prod', name: '生产与返工', desc: '工序进度、返工、外协', routes: [/^\/process-log/, /^\/reworks?$/, /^\/rework-book/, /^\/outsourc/, /^\/schedule/, /^\/pipeline/] },
+  { k: 'quote', name: '报价', desc: '报价单、转订单', routes: [/^\/quotes?$/, /^\/quotes\//, /^\/quote-/] },
+  { k: 'asset', name: '家底与资产', desc: '设备折旧、待摊、发票、转账', routes: [/^\/assets/, /^\/prepaids/, /^\/invoices?$/, /^\/invoices\//, /^\/networth/, /^\/transfers/, /^\/invoice-/] },
+  { k: 'debt', name: '借款', desc: '借进来、还本付息', routes: [/^\/debts?$/, /^\/debts\//, /^\/debt_repays/] },
+  { k: 'credit', name: '账期与催款', desc: '账期、信用额度、催款台账', routes: [/^\/party-terms/, /^\/credit/, /^\/dunning/, /^\/collect-/, /^\/customer-card/] },
+  { k: 'recon', name: '对账与对账单', desc: '对账单、对账结论、差异处理', routes: [/^\/recon/, /^\/statement/] },
+  { k: 'bank', name: '银行流水', desc: '导入银行账单、认领', routes: [/^\/bank-/] },
+  { k: 'budget', name: '预算与目标', desc: '月度预算、接单目标', routes: [/^\/budgets?$/, /^\/budgets\//, /^\/targets?$/, /^\/target$/] },
+  { k: 'staff', name: '员工与权限', desc: '员工口令、分客户、操作记录', routes: [/^\/staff-/, /^\/party-staff/] }
+]
+const MODULE_BY_KEY = {}
+for (const m of MODULES) MODULE_BY_KEY[m.k] = m
+const MODULE_OFF_NOTE = '这个模块没开（设置 → 功能模块 里可以打开）'
+// 存的是「关掉哪些」，没写的等于开着——这样以后新增模块对老账本默认就是开的
+async function modulesOff(db) {
+  const r = await db.prepare("SELECT value FROM settings WHERE key='modules_off'").first().catch(() => null)
+  const v = String((r && r.value) || '')
+  const set = new Set(v.split(',').map((x) => x.trim()).filter((x) => x && MODULE_BY_KEY[x]))
+  for (const m of MODULES) if (m.keep) set.delete(m.k)
+  return set
+}
+function moduleOfPath(path) {
+  for (const m of MODULES) {
+    if (m.keep) continue
+    for (const re of m.routes) if (re.test(path)) return m
+  }
+  return null
+}
+
 // 把「改了什么」拼成人话：金额 3000→3200；客户 张三→李四
 const diffText = (pairs) => pairs
   .filter(([, a, b]) => String(a == null ? '' : a) !== String(b == null ? '' : b))
@@ -950,6 +990,16 @@ app.use('*', async (c, next) => {
     }
   }
   c.set('role', role)
+  // 功能模块开关：关掉的模块，接口直接 403（前端入口也会藏起来，这里再兜一层）
+  try {
+    const off = await modulesOff(mainDb)
+    if (off.size) {
+      const mOff = moduleOfPath(path)
+      if (mOff && off.has(mOff.k)) {
+        return c.json({ code: 'module_off', module: mOff.k, error: '「' + mOff.name + '」' + MODULE_OFF_NOTE }, 403)
+      }
+    }
+  } catch (e) { /* 设置读不出来就不拦 */ }
   // 账本封存：整本只读（GET 照常），要动账先解封。放行：口令类、批量取数、封存开关本身
   try {
     const m2 = c.req.method
@@ -4728,6 +4778,29 @@ app.post('/staff-perms', async (c) => {
   }
   await logAudit(mainDb, '改员工权限', '员工权限', mods.map((m) => STAFF_MOD_LABEL[m]).join('、') + (body.self_only != null ? (body.self_only ? '；只给看自己录的单' : '；可看全部单据') : ''))
   return c.json({ ok: true, modules: mods, self_only: body.self_only != null ? !!body.self_only : undefined, scope: body.scope != null ? (String(body.scope) === 'own' ? 'own' : 'all') : undefined })
+})
+
+// 功能模块：看当前开关 + 改开关（只有老板能改）
+app.get('/modules', async (c) => {
+  const db = c.env.DB
+  const off = await modulesOff(db)
+  const list = MODULES.map((m) => ({ k: m.k, name: m.name, desc: m.desc || '', keep: !!m.keep, on: m.keep ? true : !off.has(m.k) }))
+  const offList = list.filter((x) => !x.on).map((x) => x.name)
+  return c.json({
+    ok: true, list, off: list.filter((x) => !x.on).map((x) => x.k),
+    text: offList.length ? `关掉了 ${offList.length} 个模块：${offList.join('、')}` : '所有模块都开着'
+  })
+})
+app.post('/modules', async (c) => {
+  if (c.get('role') !== 'owner') return c.json({ error: '只有老板口令能改模块开关', code: 'owner_only' }, 403)
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const want = Array.isArray(b.off) ? b.off.map((x) => String(x).trim()).filter((x) => x && MODULE_BY_KEY[x] && !MODULE_BY_KEY[x].keep) : []
+  const val = want.join(',')
+  await db.prepare("INSERT INTO settings (key,value) VALUES ('modules_off',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(val).run()
+  await logAudit(db, '改模块开关', '设置', val ? '关掉：' + want.map((k) => MODULE_BY_KEY[k].name).join('、') : '全部打开', '', act(c))
+  const off = await modulesOff(db)
+  return c.json({ ok: true, off: Array.from(off), text: off.size ? '已关掉 ' + Array.from(off).map((k) => MODULE_BY_KEY[k].name).join('、') : '所有模块都打开了' })
 })
 
 app.get('/me', async (c) => {
@@ -9284,6 +9357,7 @@ async function importRows(db, type, rows, opts) {
       if (staff && num(amount) > 0) {
         const accI = await accountId()
         await reimburseStaff(db, staff, num(amount), category || '', remark || '', d, accI)
+        total += num(amount)
         n++
       }
     }

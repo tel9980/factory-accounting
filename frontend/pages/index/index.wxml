@@ -44,7 +44,7 @@
   </view>
   <view class="subtabs" wx:if="{{group=='stat'}}">
     <view class="sub {{tab=='report'?'on':''}}" bindtap="setTab" data-t="report">报表</view>
-    <view class="sub {{tab=='asset'?'on':''}}" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="asset">家底</view>
+    <view class="sub {{tab=='asset'?'on':''}}" wx:if="{{role!='staff' && mod.asset!==false}}" bindtap="setTab" data-t="asset">家底</view>
     <view class="sub {{tab=='history'?'on':''}}" bindtap="setTab" data-t="history">历史</view>
     <view class="sub {{tab=='flows'?'on':''}}" bindtap="setTab" data-t="flows">流水</view>
   </view>
@@ -954,6 +954,22 @@
 
   <block wx:if="{{tab=='import'}}">
     <view class="form">
+      <view class="prev-h">📋 每天要用的模板（下下来填，填完直接传）</view>
+      <view class="tip">一天做几个表就传几个：应收按接单，应付按进货，对账按对方的余额，报销按员工报的。每行右边是「传」。</view>
+      <view class="tpl-row" wx:for="{{tpls}}" wx:key="t">
+        <view class="tpl-main">
+          <view class="tpl-n">{{item.n}}</view>
+          <view class="tpl-d">{{item.d}}</view>
+        </view>
+        <button class="btn ghost" size="mini" bindtap="excelTemplate" data-t="{{item.t}}">下</button>
+        <button class="btn" size="mini" wx:if="{{!item.recon}}" bindtap="tplPick" data-t="{{item.t}}">传</button>
+        <button class="btn" size="mini" wx:if="{{item.recon}}" bindtap="chooseReconFile">传</button>
+      </view>
+      <view class="tip">「对账」这一行只核对、不入账：传上来先和系统里的数比一比，差额可以一键补记。</view>
+    </view>
+  </block>
+  <block wx:if="{{tab=='import'}}">
+    <view class="form">
       <view class="prev-h">📤 Excel 改完再导回来（批量改单，先对比再写库）</view>
       <view class="tip">先在「报表 → 导出」下载带单号的表，在电脑上把金额、成本、到期日、经手人、备注改好，再传回来。系统只改有变化的行，而且会先把清单给你看。</view>
       <view class="frow">
@@ -1704,6 +1720,23 @@
           <view class="frow">
             <button class="btn" size="mini" bindtap="saveStaffPerms">存下来</button>
             <button class="btn ghost" size="mini" bindtap="closeStaffPerms">收起</button>
+          </view>
+        </view>
+      </view>
+      <view wx:if="{{role!='staff'}}">
+        <button class="btn ghost" size="mini" bindtap="loadModules">🧩 功能模块（用不上的关掉）</button>
+        <view wx:if="{{mods}}">
+          <view class="tip">{{mods.text}}。关掉的模块：界面上入口会藏起来，接口也直接不让用；以后想用随时打开，数据一条不删。</view>
+          <view class="item" wx:for="{{mods.list}}" wx:key="k" bindtap="toggleModule" data-k="{{item.k}}">
+            <view class="row1">
+              <text class="nm">{{item.on?'☑':'☐'}} {{item.name}}</text>
+              <text class="amt {{item.on?'':'red'}}">{{item.keep ? '基础功能' : (item.on?'开着':'关着')}}</text>
+            </view>
+            <view class="row2">{{item.desc}}</view>
+          </view>
+          <view class="tip">应收、应付、支出、Excel 导入这四块是记账的基础，不能关。</view>
+          <view class="frow">
+            <button class="btn ghost" size="mini" bindtap="closeModules">收起</button>
           </view>
         </view>
       </view>

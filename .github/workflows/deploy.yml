@@ -82,6 +82,10 @@ jobs:
       # 1 月收 12 月那笔单的尾款就被 403 挡住。这个脚本专门守这条线。
       - name: 跨月 / 跨年回归（结账后还能收上月的尾款）
         run: node scripts/test-crossmonth.mjs --base http://127.0.0.1:8791 --key 8888
+      # 功能模块开关：关掉的模块接口必须真 403（不能只是界面上藏起来），
+      # 打开后立刻恢复；应收/应付/支出/导入这四块谁都不能关。
+      - name: 功能模块开关回归
+        run: node scripts/test-modules.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log

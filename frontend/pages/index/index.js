@@ -123,6 +123,17 @@ Page({
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
+    mods: null, mod: {},
+    tpls: [
+      { t: 'ar', n: '应收（接单）', d: '客户, 产品, 金额, 成本, 到期日' },
+      { t: 'ap', n: '应付（进货）', d: '供应商, 金额, 备注, 到期日' },
+      { t: 'recon', n: '对账（对方的余额）', d: '单位, 金额 —— 只核对不入账', recon: true },
+      { t: 'reimb', n: '报销（员工报的）', d: '员工, 金额, 分类, 备注' },
+      { t: 'expense', n: '支出（水电房租）', d: '金额, 分类, 备注' },
+      { t: 'loan', n: '员工借支', d: '员工, 金额, 备注' },
+      { t: 'ar_init', n: '期初应收（按对账金额）', d: '客户, 金额 —— 接手前的旧账' },
+      { t: 'ap_init', n: '期初应付（按对账金额）', d: '供应商, 金额 —— 接手前欠别人的' }
+    ],
     prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
     month_amort: 0, month_accrue_int: 0, month_dep: 0, month_expense_cash: 0,
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
@@ -542,6 +553,7 @@ Page({
     }
     this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).length })
     this.flushPending(true)
+    if (!this._modsLoaded) { this._modsLoaded = true; this.loadModules() }
     this.refresh(); this.loadCloudBackup()
   },
   refresh() {
@@ -1440,6 +1452,13 @@ Page({
           this.loadAr(); this.loadAp(); this.loadArSummary()
         } })
     } })
+  },
+  // 模板中心那一行点「传」：先对准类型，再走选文件
+  tplPick(e) {
+    const t = e.currentTarget.dataset.t
+    const idx = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init'].indexOf(t)
+    if (idx >= 0 && idx !== this.data.import_type) this.setData({ import_type: idx })
+    this.chooseXlsxFile()
   },
   chooseXlsxFile() {
     const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
@@ -4348,6 +4367,65 @@ Page({
   },
   closeStaffPerms() { this.setData({ spm: null }) },
   // 员工账号：一人一个 4 位口令，各自授权限
+  // ===== 功能模块开关 =====
+  // 一个人用的时候用不上那么多模块：关掉的模块界面上入口藏起来、接口也 403，但数据一条不删。
+  loadModules() {
+    this.req({
+      url: API_BASE + '/modules',
+      success: (res) => {
+        const d = (res && res.data) || {}
+        if (!Array.isArray(d.list)) return
+        const map = {}
+        d.list.forEach((m) => { map[m.k] = !!m.on })
+        this._modOff = d.off || []
+        this.setData({ mods: { list: d.list, off: d.off || [], text: d.text || '' }, mod: map })
+        this.applyModuleFilter()
+      }
+    })
+  },
+  toggleModule(e) {
+    const k = e.currentTarget.dataset.k
+    const m = (this.data.mods && this.data.mods.list || []).find((x) => x.k === k)
+    if (!m) return
+    if (m.keep) return wx.showToast({ title: '这块是记账基础，不能关', icon: 'none' })
+    const off = (this.data.mods.off || []).slice()
+    const i = off.indexOf(k)
+    if (i >= 0) off.splice(i, 1)
+    else off.push(k)
+    this.req({
+      url: API_BASE + '/modules', method: 'POST', data: { off },
+      success: (res) => {
+        const d = (res && res.data) || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
+        wx.showToast({ title: i >= 0 ? '已打开' : '已关掉', icon: 'success' })
+        this.loadModules()
+      }
+    })
+  },
+  closeModules() { this.setData({ mods: null }) },
+  // 关掉的模块，在「找功能」里也不出现
+  applyModuleFilter() {
+    const off = this._modOff || []
+    if (!off.length) { if (this.data.feat_all !== FEATS) this.setData({ feat_all: FEATS }); return }
+    const KW = {
+      wage: /工资|计件|工序单价|发工资|计时/,
+      material: /材料|库存|领料|进货价|框架价|在制|余料/,
+      prod: /返工|外协|排产|工序|进度|生产/,
+      quote: /报价|价格表|转订单/,
+      asset: /资产|折旧|待摊|发票|转账|家底|净资产/,
+      debt: /借款|利息|还本/,
+      credit: /账期|额度|信用|催款/,
+      recon: /对账/,
+      bank: /银行流水/,
+      budget: /预算|目标/,
+      staff: /员工|权限/
+    }
+    const list = FEATS.filter((f) => {
+      const txt = (f.n || '') + ' ' + (f.desc || '') + ' ' + (f.kw || '')
+      return !off.some((k) => KW[k] && KW[k].test(txt))
+    })
+    this.setData({ feat_all: list })
+  },
   loadStaffUsers() {
     this.req({ url: API_BASE + '/staff-users', success: (res) => this.setData({ su: res.data || null }) })
   },
