@@ -263,6 +263,34 @@ async function sweep() {
   if (!five) ok(`${n} 个写路由空 body 打过去，没有一个 5xx`)
 }
 
+// ── 账本自检：跑完这一轮写入后，「单据 vs 流水 vs 核销记录」必须还对得上 ──
+// 这是最值钱的一条断言：上面每一步都返回 200，但账可能是错的（比如收款只改了单据
+// 没进流水、核销只写了一张表）。/selfcheck 会把 10 类不一致数出来，这里要求它为 0。
+async function consistency() {
+  console.log('\n[账本自检：单据 / 流水 / 核销记录 / 库存 对不对得上]')
+  const res = await call('GET', '/selfcheck')
+  if (res.status !== 200 || !res.data) return no('账本自检', `→ ${res.status} ${brief(res.data)}`)
+  const d = res.data
+  const items = [
+    ['应收单已收 vs 收款流水', d.mismatch],
+    ['应付单已付 vs 付款流水', d.ap_mismatch],
+    ['收款超过单据金额', d.overpaid],
+    ['应收核销 vs 核销记录', d.wo_mismatch],
+    ['应付核销 vs 核销记录', d.wo_mismatch_ap],
+    ['流水挂的单据已不存在', d.orphan_ledger],
+    ['材料库存算出负数', d.stock_negative],
+    ['预收/预付抵超了', d.advance_over],
+    ['流水挂的账户已删除', d.account_orphan],
+    ['单据没记上月份', d.month_null]
+  ]
+  const broke = items.filter(([, v]) => Number(v) > 0)
+  if (broke.length) {
+    no('账本自检', broke.map(([k, v]) => `${k} ${v} 处`).join('；') + (d.issues && d.issues.length ? `\n     ${d.issues.slice(0, 6).join('\n     ')}` : ''))
+  } else {
+    ok(`${d.orders} 张应收 / ${d.payables} 张应付，10 类一致性检查全部为 0`)
+  }
+}
+
 // ── 跑 ───────────────────────────────────────────────────────
 if (!(await waitReady())) {
   console.log(`❌ 服务器没起来：${BASE}`)
@@ -272,6 +300,7 @@ await ensureKey()
 try {
   await mainFlow()
   await sweep()
+  await consistency()
 } catch (e) {
   no('脚本自身', String((e && e.stack) || e))
 }

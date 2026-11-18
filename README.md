@@ -1199,6 +1199,14 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **`check.mjs` 该红的现在真会红**：没装 `node:sqlite` 时不再只 warning 跳过（跳过 = 永远绿）；前端调了后台不存在的路由从 warn 改成 fail。
    - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 609 SQL / 251 调用 / 733 绑定）、`test-batch.mjs` 8 项（含去重用例）、`test-key-queue.mjs` 8 项、`smoke.mjs` 224 GET 无 5xx、`smoke-write.mjs` 45 步主流程 + 88 个写路由全通。
 
+285. ✅ **账目自检从 2 类扩到 10 类，写接口冒烟开始查「账对不对」**：上一轮把 4 处对账口径改成认核销，但「哪里还漏着核销」和「改完之后账有没有真的对得上」这两件事没人管。
+   - **`selfCheck()` 从 2 类一致性扩到 10 类**：以前只比「单据已收/已付 vs 流水合计」和「有没有多收」。现在再加：`written_off` vs `writeoffs` 表（应收、应付各一类，核销记录被删/改会立刻现形）、流水挂着的单据已删除（`ref_type` 是 order/payable/advance/loan 但目标行没了）、材料库存算成负数、预收/预付抵掉的比收到的多、现金流水挂的账户已被删除、`month` 为空的单据（触发器漏填就会掉出月报）。全部是一条聚合，跑一次代价很小；`/selfcheck` 和首页红点、每日定时自检、设置页「数据体检」共用同一套结果。
+   - **又找出 10 处「未收/未付」漏减核销**（和上一轮 A1 同一类病，散在各处）：首页 `/dashboard` 的 `overdue`、`due_soon`、`pay_soon` 三个列表，`/search` 搜索结果的应收/应付，`/export-csv` 的「未收/未付」列，Markdown 导出表格的「未收/未付」列，`/credits` 信用看板的 `unpaid`（连 `unpaid > 0` 判断也一起错，已核销的单仍算进「欠款榜」和「平均回款天数」）。这些地方不会报错，只是数字比实际大——最容易被当成「客户还欠我钱」。
+   - **写接口冒烟加一步「账本自检」**：`smoke-write.mjs` 跑完 45 步主流程和 88 个写路由后，再打一次 `/selfcheck`，要求 10 类全为 0，不为 0 就逐条打印「哪一类、几处、哪张单」。这是最值钱的一条断言——上面每一步都返回 200，但账可能已经错了（收款只改单据没进流水、核销只写一张表）。
+   - **证明它真能抓**：手动 `DELETE FROM writeoffs` 删掉一条核销记录后，`/selfcheck` 立刻 `ok:false`、`bad:1`，并指名「应付 #2 …：单据已核销 50，核销记录合计 0」；`smoke-write.mjs` 也随之失败退出。不是「写完就算绿」的摆设。
+   - 前端 `genSelfcheck()` 的文案把 10 类列全（以前只列 3 类，剩下 7 类只出现在 `issues` 里）。
+   - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / **611** SQL / 251 调用 / 733 绑定）、`test-batch.mjs` 8 项、`test-key-queue.mjs` 8 项；**新建空库**跑 `smoke.mjs` 224 GET 无 5xx + `smoke-write.mjs` 45 步 + 88 写路由全通 + 账本自检 10 类全 0。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
