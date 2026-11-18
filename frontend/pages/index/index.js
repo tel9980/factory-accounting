@@ -3,6 +3,8 @@ const API_BASE = 'https://jz.qy663.de5.net'
 // 手机本地日期串（YYYY-MM-DD）。不能用 toISOString()——那是 UTC，北京时间 0~8 点会差一天
 const pad2 = (n) => String(n).padStart(2, '0')
 const dayOf = (d) => { const x = d || new Date(); return x.getFullYear() + '-' + pad2(x.getMonth() + 1) + '-' + pad2(x.getDate()) }
+// 转数字：空串/非数字一律当 0（页面上到处是输入框，直接 Number() 会得到 NaN）
+const num0 = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 
 // 功能索引：170 多项功能太多，用「找功能」搜索直接跳过去（纯前端，不发请求）
 const FEATS = [
@@ -100,6 +102,7 @@ Page({
     due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
     ar_list: [], ap_list: [], expense_list: [],
     onboard: null,
+    ob_open: false, ob_accs: [], ob_term: '30', ob_ar: '', ob_ap: '', ob_busy: false,
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
@@ -6873,6 +6876,57 @@ Page({
     const k = e.currentTarget.dataset.k
     if (k === 'acc' || k === 'term') return this.setData({ group: 'me', tab: 'contact' })
     this.setData({ group: 'bill', tab: 'import', import_type: k === 'ap' ? 6 : 5 })
+  },
+  // 开账向导：一屏把底数填完（账户余额 / 默认账期 / 期初应收 / 期初应付）
+  openOnboardWizard() {
+    this.req({
+      url: API_BASE + '/accounts',
+      success: (res) => {
+        const accs = ((res.data && res.data.accounts) || []).map((a) => ({
+          id: a.id, name: a.name, opening: num0(a.opening) ? String(a.opening) : ''
+        }))
+        const ob = this.data.onboard || {}
+        this.setData({
+          tab: 'home', group: 'home',
+          ob_open: true, ob_accs: accs,
+          ob_term: String(ob.default_term || 30),
+          ob_ar: this.data.ob_ar || '', ob_ap: this.data.ob_ap || ''
+        })
+      }
+    })
+  },
+  closeObWizard() { this.setData({ ob_open: false }) },
+  onObAcc(e) {
+    const i = Number(e.currentTarget.dataset.i)
+    const list = (this.data.ob_accs || []).slice()
+    if (!list[i]) return
+    list[i].opening = e.detail.value
+    this.setData({ ob_accs: list })
+  },
+  onObTerm(e) { this.setData({ ob_term: e.detail.value }) },
+  onObAr(e) { this.setData({ ob_ar: e.detail.value }) },
+  onObAp(e) { this.setData({ ob_ap: e.detail.value }) },
+  applyOnboarding() {
+    if (this.data.ob_busy) return
+    const accs = (this.data.ob_accs || []).map((a) => ({ id: a.id, opening: num0(a.opening) }))
+    const arText = String(this.data.ob_ar || '').trim()
+    const apText = String(this.data.ob_ap || '').trim()
+    if (!accs.some((a) => a.opening > 0) && !arText && !apText && !num0(this.data.ob_term)) {
+      return wx.showToast({ title: '先填一项再保存', icon: 'none' })
+    }
+    this.setData({ ob_busy: true })
+    this.req({
+      url: API_BASE + '/onboarding/apply',
+      method: 'POST',
+      data: { accounts: accs, term: num0(this.data.ob_term), ar_text: arText, ap_text: apText },
+      success: (res) => {
+        const d = res.data || {}
+        this.setData({ ob_busy: false, ob_open: false, ob_ar: '', ob_ap: '' })
+        wx.showModal({ title: '开账完成', content: d.text || '记好了，可以开始记账了。', showCancel: false })
+        this.loadOnboard(); this.loadAccounts(); this.loadAr(); this.loadAp(); this.loadDashboard()
+      },
+      fail: () => this.setData({ ob_busy: false })
+    })
   },
   onbDismiss() {
     wx.showModal({

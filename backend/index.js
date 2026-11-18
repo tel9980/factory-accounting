@@ -7346,6 +7346,94 @@ app.post('/onboarding/dismiss', async (c) => {
   return c.json({ ok: true })
 })
 
+// 开账向导：一屏把「账户余额 / 默认账期 / 期初应收 / 期初应付」填完，一次提交
+// 为什么单独做一个接口：以前这 4 件事分散在「设置 → 账户」「设置 → 单位」「记账 → 导入」三个页面，
+// 第一次上手的人（尤其是只做流水的小财务）根本不知道该去哪，开账就卡在这里。
+const parseOpeningText = (raw) => {
+  const out = []
+  const push = (p, a) => {
+    const party = String(p || '').trim()
+    const amount = round2(num(a))
+    if (party && amount > 0) out.push({ party, amount })
+  }
+  if (Array.isArray(raw)) {
+    for (const r of raw) push(r && (r.party || r.name), r && r.amount)
+    return out
+  }
+  for (const line of String(raw || '').split(/[\n\r]+/)) {
+    const s = line.trim()
+    if (!s) continue
+    // 「张老板 12000」「张老板,12000」「张老板，12000」「张老板\t12000」都认
+    const m = s.match(/^(.+?)[\s,，\t:：|]+(-?[\d.]+)\s*(?:元|块)?$/)
+    if (!m) continue
+    push(m[1], m[2])
+  }
+  return out
+}
+
+app.post('/onboarding/apply', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const db = c.env.DB
+  const cid = String(b.client_id || '')
+  if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
+  await ensureAccounts(db)
+  await ensureCats(db)
+  const created = stampOf(b.date)
+  if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再填期初' }, 403)
+  const done = { accounts: 0, term: 0, ar: 0, ap: 0, skip_ar: [], skip_ap: [] }
+
+  // 1) 账户余额：直接「设」成现在手上有多少钱（不是累加，小白好理解；再点一次不会翻倍）
+  const accs = Array.isArray(b.accounts) ? b.accounts : []
+  for (const a of accs) {
+    const id = num(a && a.id)
+    if (!id) continue
+    await db.prepare('UPDATE accounts SET opening=? WHERE id=?').bind(round2(num(a && a.opening)), id).run()
+    done.accounts++
+  }
+
+  // 2) 默认账期：新单自动算到期日
+  const term = num(b.term)
+  if (term > 0) {
+    await db.prepare("INSERT INTO settings (key,value) VALUES ('default_term',?) ON CONFLICT(key) DO UPDATE SET value=?")
+      .bind(String(term), String(term)).run()
+    done.term = term
+  }
+
+  // 3) 期初应收：一家一条，记成「期初应收」的单子
+  for (const r of parseOpeningText(b.ar_text || b.ar)) {
+    const dup = await db.prepare("SELECT id FROM orders WHERE customer=? AND price=? AND item_name='期初应收' AND substr(created_at,1,7)=?")
+      .bind(r.party, r.amount, created.slice(0, 7)).first().catch(() => null)
+    if (dup) { done.skip_ar.push(r.party); continue }
+    const due = (await termDue(db, r.party, created, 'ar').catch(() => null)) || null
+    await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, created_at) VALUES (?,?,?,0,0,0,?,?)')
+      .bind(r.party, '期初应收', r.amount, due, created).run()
+    done.ar++
+  }
+
+  // 4) 期初应付：一家一条
+  for (const r of parseOpeningText(b.ap_text || b.ap)) {
+    const dup = await db.prepare("SELECT id FROM payables WHERE supplier=? AND amount=? AND remark='期初应付' AND substr(created_at,1,7)=?")
+      .bind(r.party, r.amount, created.slice(0, 7)).first().catch(() => null)
+    if (dup) { done.skip_ap.push(r.party); continue }
+    const due = (await termDue(db, r.party, created, 'ap').catch(() => null)) || null
+    await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, created_at) VALUES (?,?,0,?,?,?,?)')
+      .bind(r.party, r.amount, '', '期初应付', due, created).run()
+    done.ap++
+  }
+
+  await db.prepare("INSERT INTO settings (key,value) VALUES ('onboard_done','1') ON CONFLICT(key) DO UPDATE SET value='1'").run()
+  await opMark(db, cid, 'onboard', 0)
+  await logAudit(db, '开账向导', '开账', `账户 ${done.accounts} 个、账期 ${done.term || '未设'} 天、期初应收 ${done.ar} 家、期初应付 ${done.ap} 家`, '', act(c))
+  const parts = []
+  if (done.accounts) parts.push(`账户余额 ${done.accounts} 个`)
+  if (done.term) parts.push(`默认账期 ${done.term} 天`)
+  if (done.ar) parts.push(`期初应收 ${done.ar} 家`)
+  if (done.ap) parts.push(`期初应付 ${done.ap} 家`)
+  return c.json(Object.assign({ ok: true }, done, {
+    text: parts.length ? `记好了：${parts.join('、')}。可以开始记账了。` : '这次什么都没填，先填上再点一次。'
+  }))
+})
+
 // 账龄表：欠款按 30/60/90 天分档，一眼看出哪笔要坏
 app.get('/aging', async (c) => {
   const db = c.env.DB

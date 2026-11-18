@@ -87,6 +87,7 @@
     <view class="card ob" wx:if="{{onboard && onboard.show && !onboard.all_done}}">
       <view class="card-h">开账引导（照着填几步就能用）<text class="card-n">{{onboard.done}}/{{onboard.total}}</text></view>
       <view class="ob-tip">先把底数填上，欠款合计、毛利、手头现金才准。照着填完，一次就行。</view>
+      <view class="ob-go" bindtap="openOnboardWizard">⚡ 一屏填完（推荐，30 秒）</view>
       <view class="ob-item {{item.done?'done':''}}" wx:for="{{onboard.steps}}" wx:key="k" bindtap="onbGo" data-k="{{item.k}}">
         <text class="ob-dot">{{item.done?'✓':'○'}}</text>
         <view class="ob-body">
@@ -96,6 +97,25 @@
         <text class="ob-a">{{item.done?'已完成':'去填 ›'}}</text>
       </view>
       <view class="ob-x" catchtap="onbDismiss">不再提示</view>
+    </view>
+    <view class="card" wx:if="{{ob_open}}">
+      <view class="card-h">开账向导<text class="card-n" bindtap="closeObWizard">关闭</text></view>
+      <view class="tip">四块填完点最下面「保存，开始记账」。哪块没有就留空，不影响。</view>
+      <view class="ob-sec">1. 现在手上有多少钱</view>
+      <view class="ob-row" wx:for="{{ob_accs}}" wx:key="id">
+        <text class="ob-k">{{item.name}}</text>
+        <input class="ob-in" type="digit" placeholder="0" value="{{item.opening}}" bindinput="onObAcc" data-i="{{index}}" />
+      </view>
+      <view class="ob-sec">2. 默认账期（天）</view>
+      <view class="ob-row">
+        <text class="ob-k">新单到期日按这个算</text>
+        <input class="ob-in" type="number" placeholder="30" value="{{ob_term}}" bindinput="onObTerm" />
+      </view>
+      <view class="ob-sec">3. 别人还欠我（一家一行：名字 空格 金额）</view>
+      <textarea class="ob-ta" placeholder="张老板 12000&#10;李老板 8000" value="{{ob_ar}}" bindinput="onObAr" auto-height />
+      <view class="ob-sec">4. 我还欠别人（一家一行：名字 空格 金额）</view>
+      <textarea class="ob-ta" placeholder="某某化工 5000&#10;某某外协厂 8000" value="{{ob_ap}}" bindinput="onObAp" auto-height />
+      <button class="btn" bindtap="applyOnboarding" loading="{{ob_busy}}">保存，开始记账</button>
     </view>
     <view class="card" wx:if="{{hc_open}}">
       <view class="card-h">账本健康<text class="card-n" bindtap="closeHealth">收起</text></view>
@@ -3352,6 +3372,7 @@
       <button class="btn" size="mini" bindtap="renameBook">改当前账套名</button>
       <button class="btn" size="mini" bindtap="loadBooksCheck">🧾 看看三个账本都在干嘛</button>
       <button class="btn ghost" size="mini" bindtap="loadBookTpl">🧱 新账本模板（空账本一次配好）</button>
+      <button class="btn ghost" size="mini" bindtap="openOnboardWizard">⚡ 开账向导（填余额 / 账期 / 期初欠款）</button>
       <view wx:if="{{btp}}">
         <view class="tip">{{btp.text}}</view>
         <view class="item" wx:for="{{btp.rows}}" wx:key="k">

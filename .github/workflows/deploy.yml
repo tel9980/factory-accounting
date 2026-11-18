@@ -98,6 +98,11 @@ jobs:
       # 「押金 20000」读成 1954-09-13、「应付 30000」直接变空丢掉。
       - name: Excel 导入回归（对账金额 / 付房东押金 / 金额不被当日期）
         run: node scripts/test-import-xlsx.mjs --base http://127.0.0.1:8791 --key 8888
+      # 开账向导：一屏填完「账户余额 / 默认账期 / 期初应收 / 期初应付」。
+      # 这四件事以前分散在三个页面，第一次上手的人根本不知道该去哪；合并成一次提交后，
+      # 最容易坏的就是「一次提交」本身：漏写一块、重复点翻倍、余额被累加而不是设成实际数。
+      - name: 开账向导回归（四块一次填完 / 重复点不翻倍）
+        run: node scripts/test-onboarding.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log
