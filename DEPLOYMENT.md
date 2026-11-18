@@ -96,6 +96,12 @@ npx wrangler deploy
 
 员工口令在「设置 → 员工口令」里开（`POST /auth/staff`），员工登录后看不到钱（见 README 268）。
 
+**员工账号（一人一个 PIN）**：`staff_users.pin` 也不再存明文，改成 `pin_hash = sha256(staff_salt|sp|PIN)`，登录按哈希查（全局盐，才能按口令直接索引到人）。老库里的明文 PIN 会在**第一次有人用它登录时自动迁移**，迁移完 `pin` 列只剩 `'@'+id` 占位符。所以：新建账号 / 重设口令时返回的 4 位数字**只显示这一次**，列表里只显示「口令已设」；员工忘了就点「换个口令」重设一个。
+
+**响应 ETag**：GET 的 JSON/HTML（≤256KB）都会带 `ETag`，客户端带 `if-none-match` 且对得上就回 304。小程序 `wx.request` 不发这个头，行为不变；浏览器打开打印页/对账单才省流量。`/backup` 这种大响应不打 ETag。
+
+**D1 读复制（read replication）默认关闭**，理由和开启方法写在 `backend/wrangler.toml` 的注释里：开了之后「刚记完一笔就刷新」可能读到滞后副本，人会以为没存进去再记一遍。要开必须同时改造成 Sessions API（`env.DB.withSession('first-primary')`）。
+
 ### 1.6 前端（微信小程序）
 
 1. 微信开发者工具导入 `frontend` 目录。

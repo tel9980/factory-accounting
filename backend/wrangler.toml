@@ -6,6 +6,17 @@ compatibility_date = "2024-11-01"
 binding = "DB"
 database_name = "factory-db"
 database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
+# 读复制（read replication）：查过了，现在是 disabled，故意没开。
+#   1) 开了之后读请求会就近走副本，但副本有延迟 —— 这套系统到处是「刚记完一笔就刷新看」，
+#      副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，账就重了。
+#   2) 要安全用必须配 Sessions API（env.DB.withSession('first-primary') 把写后读钉回主库），
+#      399 个接口逐个改，改动面比收益大得多。
+#   3) 现在库里 594KB、每天读 3.3 万行，读复制省的那点延迟根本看不见。
+# 真要开（wrangler 4 才支持这个配置键；现在用的是 3.114）：
+#   npx wrangler d1 info factory-db        # 先看 read_replication.mode
+#   在 Cloudflare 控制台 D1 → 选库 → Settings 里打开，或 PATCH /accounts/<id>/d1/database/<db> {"read_replication":{"mode":"auto"}}
+#   然后把下面这行取消注释（本地 dev 也用得上）：
+# read_replication = { mode = "auto" }
 
 [triggers]
 crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1", "0 2 1 * *"]

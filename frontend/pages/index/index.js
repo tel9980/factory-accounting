@@ -4334,7 +4334,7 @@ Page({
             const d = res.data || {}
             if (!d.ok) return wx.showToast({ title: d.error || '没加上', icon: 'none' })
             this.loadStaffUsers()
-            wx.showModal({ title: '加好了', content: (d.text || '') + '\n\n口令可以随时在列表里点「改口令」重设。', showCancel: false })
+            wx.showModal({ title: '加好了', content: (d.text || '') + '\n\n口令只显示这一次（库里存的是加密后的），忘了就在列表里点「换个口令」重设。', showCancel: false })
           },
           fail: () => wx.hideLoading()
         })
@@ -4388,7 +4388,9 @@ Page({
             const d = res.data || {}
             if (!d.ok) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
             this.loadStaffUsers()
-            wx.showToast({ title: '改好了', icon: 'success' })
+            // 口令现在只存哈希，新口令只有这一次能看见，必须当场弹出来
+            if (d.pin) wx.showModal({ title: '新口令是 ' + d.pin, content: '记下来告诉他。库里只存加密后的，以后再想看得重新设一个。', showCancel: false })
+            else wx.showToast({ title: '改好了', icon: 'success' })
           }
         })
       }

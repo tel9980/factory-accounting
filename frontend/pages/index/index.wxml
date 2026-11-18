@@ -1712,7 +1712,7 @@
           <view class="tip">{{su.text}}</view>
           <view class="item" wx:for="{{su.rows}}" wx:key="id" wx:for-item="u">
             <view class="row1">
-              <text class="nm">{{u.name}} · 口令 {{u.pin}}</text>
+              <text class="nm">{{u.name}}{{u.pin ? ' · 口令 ' + u.pin : (u.pin_set ? ' · 口令已设（忘了点「换个口令」）' : ' · 还没设口令')}}</text>
               <text class="amt">{{u.active?'在用':'已停用'}}</text>
             </view>
             <view class="row2">能看：{{u.mod_text || '没开任何模块'}}</view>

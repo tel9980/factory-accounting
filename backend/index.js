@@ -116,12 +116,15 @@ async function ensureStaffTable(db) {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     pin TEXT NOT NULL UNIQUE,
+    pin_hash TEXT,
     modules TEXT NOT NULL DEFAULT 'ar,ap,exp,import,contact,asset',
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
   )`).run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_pin ON staff_users(pin)').run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_hash ON staff_users(pin_hash)').run().catch(() => {})
 }
+ensureStaffTable = _memoDdl(ensureStaffTable, 'stafftable')
 
 async function ensureMonthCols(db) {
   for (const t of ['orders', 'ledger', 'payables']) {
@@ -429,6 +432,77 @@ async function authOk(db, ip) {
   _lockCache.delete(ip)
   try { await db.prepare('DELETE FROM auth_fails WHERE ip=?').bind(ip).run() } catch (e) {}
 }
+// 便宜的 32 位哈希（FNV-1a），只用来给响应体打 ETag —— 不做任何安全用途
+function fnv1a(str) {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0
+  }
+  return h >>> 0
+}
+
+// ---- 员工口令：用一个全局盐（不能每行随机盐，否则没法按口令直接查到人） ----
+// 4 位数字本身就不抗暴力，真正的防线是上面的试错锁定；这里做到「库里不留明文」，
+// 免得备份/截图/一眼扫过 D1 控制台就把别人的口令看光。
+let _pinSalt = ''
+async function staffSalt(db) {
+  if (_pinSalt) return _pinSalt
+  let v = ''
+  try { const r = await db.prepare("SELECT value FROM settings WHERE key='staff_salt'").first(); v = r ? String(r.value) : '' } catch (e) { v = '' }
+  if (!v) {
+    v = randHex(16)
+    try { await db.prepare("INSERT OR IGNORE INTO settings (key,value) VALUES ('staff_salt',?)").bind(v).run() } catch (e) {}
+  }
+  _pinSalt = v
+  return v
+}
+async function pinHash(db, pin) { return hashKey(await staffSalt(db), 'sp|' + String(pin)) }
+// 老库里的明文 PIN 一次性转成哈希：转完 pin 列只留一个占位符（列上有 UNIQUE，不能都填空串）
+// 结构就绪（列/索引/盐）：每个 isolate 只跑一次。
+// 注意别套 _memoDdl —— 那个包装器只 await 不返回，返回值会被吞掉，
+// 这里必须把「到底有没有 pin_hash 列」这个结论带回去。
+let _pinReadyDb = null
+async function staffPinReady(db) {
+  if (_pinReadyDb === db) return true
+  const cols = ((await db.prepare('PRAGMA table_info(staff_users)').all()).results) || []
+  if (!cols.length) return false
+  if (!cols.some((x) => x.name === 'pin_hash')) await db.prepare('ALTER TABLE staff_users ADD COLUMN pin_hash TEXT').run().catch(() => {})
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_hash ON staff_users(pin_hash)').run().catch(() => {})
+  await staffSalt(db)
+  _pinReadyDb = db
+  return true
+}
+
+// 把还留着明文的老 PIN 转成哈希（转完 pin 列只留占位符，列上有 UNIQUE 不能都填空串）。
+// 平时一行都不会命中，只有老库刚升级、或者刚手动往表里塞过明文的这一次。
+async function migrateStaffPins(db) {
+  try {
+    const old = (await db.prepare("SELECT id, pin FROM staff_users WHERE COALESCE(pin,'')<>'' AND COALESCE(pin_hash,'')=''").all()).results || []
+    for (const r of old) {
+      const h = await pinHash(db, r.pin)
+      await db.prepare("UPDATE staff_users SET pin_hash=?, pin='@'||id WHERE id=?").bind(h, num(r.id)).run().catch(() => {})
+    }
+    return old.length
+  } catch (e) { return 0 }
+}
+
+// 单值设置项的校验（staff_key 这类）：老账本明文时对上就顺手升级成哈希
+async function verifySetting(db, key, given) {
+  const r = await db.prepare('SELECT value FROM settings WHERE key=?').bind(key).first().catch(() => null)
+  const saved = r ? String(r.value) : ''
+  if (!saved || !given) return false
+  if (isHashed(saved)) {
+    const parts = saved.split('$')
+    return parts.length === 3 && safeEq(await hashKey(parts[1], given), parts[2])
+  }
+  if (safeEq(String(given), saved)) {
+    try { await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(await makeKeyRecord(given), key).run() } catch (e) {}
+    return true
+  }
+  return false
+}
+
 // 试错太多时统一的 429 文案（口令、员工 PIN、恢复码共用一套）
 const tooMany = (sec) => ({ error: `试错太多次了，${Math.max(1, Math.ceil(sec / 60))} 分钟后再试（急着进去可以用「恢复码」重设口令，那条路不受这个限制）`, code: 'too_many', retry_after: sec })
 
@@ -592,9 +666,10 @@ app.post('/auth/staff', async (c) => {
   const pw = String(password || '').trim()
   if (pw && pw.length < 4) return c.json({ error: '员工口令至少 4 位' }, 400)
   if (pw && (await verifyKey(mainDb, pw))) return c.json({ error: '员工口令不能和老板口令一样' }, 400)
+  const rec = pw ? await makeKeyRecord(pw) : ''
   const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
-  if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_key'").bind(pw).run()
-  else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_key', ?)").bind(pw).run()
+  if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_key'").bind(rec).run()
+  else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_key', ?)").bind(rec).run()
   return c.json({ ok: true, enabled: !!pw })
 })
 
@@ -739,10 +814,32 @@ const sigOf = async (keyOrDb, party, type) => {
 }
 
 // 生成 A4 打印版对账单链接（小程序里点「打印版」调用）
+// ETag / 304：只处理 GET、200、JSON 或 HTML、且响应体不太大（/backup 那种 9MB 直接跳过）。
+// 只有客户端真的发了 if-none-match 才可能回 304 —— 小程序 wx.request 从来不发这个头，
+// 所以对现有前端只是「多一个响应头」，不会改变任何行为；浏览器打开打印页才真省流量。
+async function applyEtag(c) {
+  const res = c.res
+  if (c.req.method !== 'GET' || !res || res.status !== 200) return
+  const cl = Number(res.headers.get('content-length') || 0)
+  if (cl > 262144) return
+  const ct = res.headers.get('content-type') || ''
+  if (!/application\/json|text\/html/i.test(ct)) return
+  try {
+    const body = await res.clone().text()
+    if (body.length > 262144) return
+    const etag = 'W/"' + body.length.toString(36) + '-' + fnv1a(body).toString(36) + '"'
+    const h = new Headers(res.headers)
+    h.set('ETag', etag)
+    const inm = c.req.header('if-none-match') || ''
+    const hit = inm && (inm.trim() === '*' || inm.split(',').some((x) => x.trim() === etag))
+    c.res = hit ? new Response(null, { status: 304, headers: h }) : new Response(body, { status: 200, headers: h })
+  } catch (e) { /* 读不出 body 就算了，照常返回 */ }
+}
+
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') return next()
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c); return }
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -757,14 +854,24 @@ app.use('*', async (c, next) => {
   else if (given) {
     // 一人一个口令：认到人就按这个人的名字和权限走
     let su = null
-    try { su = await mainDb.prepare('SELECT * FROM staff_users WHERE pin=? AND active=1').bind(given).first() } catch (e) { su = null }
+    try {
+      await ensureStaffTable(mainDb)
+      if (await staffPinReady(mainDb)) {
+        const h = await pinHash(mainDb, given)
+        su = await mainDb.prepare('SELECT * FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
+        if (!su) {
+          // 老库刚升级：第一次有人用口令登录时把明文 PIN 补成哈希，然后重试一次
+          const n = await migrateStaffPins(mainDb)
+          if (n) su = await mainDb.prepare('SELECT * FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
+        }
+      }
+    } catch (e) { su = null }
     if (su) {
       role = 'staff'
       c.set('staff_name', String(su.name || ''))
       staffMods = String(su.modules || '').split(',').map((x) => x.trim()).filter(Boolean)
     } else {
-      const staff = await getStaffKey(mainDb)
-      if (staff && given === staff) role = 'staff'
+      if (await verifySetting(mainDb, 'staff_key', given)) role = 'staff'
     }
   }
   if (!role) {
@@ -844,13 +951,17 @@ app.use('*', async (c, next) => {
       }
     } catch (e) { /* 不是 JSON 就算了，不拦 */ }
   }
+  await applyEtag(c)
 })
 
 // 员工账号：一人一个 4 位口令，各自授权限；谁记的账自动带名字
 app.get('/staff-users', async (c) => {
   const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   await ensureStaffTable(db)
-  const rows = (await db.prepare('SELECT id, name, pin, modules, active, created_at FROM staff_users ORDER BY active DESC, id').all()).results || []
+  await staffPinReady(db)
+  await migrateStaffPins(db)
+  const rows = (await db.prepare("SELECT id, name, CASE WHEN COALESCE(pin_hash,'')<>'' THEN 1 ELSE 0 END AS pin_set, modules, active, created_at FROM staff_users ORDER BY active DESC, id").all()).results || []
+  rows.forEach((r) => { r.pin = '' })   // 库里是哈希，明文只在新建/重置那一次返回
   const mods = rows.map((r) => ({ ...r, mods: String(r.modules || '').split(',').filter(Boolean), mod_text: String(r.modules || '').split(',').filter(Boolean).map((k) => STAFF_MOD_LABEL[k] || k).join('、') }))
   const global = await getStaffModules(db)
   return c.json({
@@ -867,12 +978,14 @@ app.post('/staff-users', async (c) => {
   if (!name) return c.json({ error: '先填个名字（比如 小王）' }, 400)
   let mods = Array.isArray(b.mods) ? b.mods.filter((k) => STAFF_MOD_LABEL[k]) : null
   if (mods && !mods.length) return c.json({ error: '至少给他开一个模块' }, 400)
+  await staffPinReady(db)
+  await migrateStaffPins(db)
   let pin = String(b.pin || '').replace(/\D/g, '').slice(0, 6)
-  if (!pin) { let n = 0; do { pin = String(1000 + Math.floor(Math.random() * 9000)); n++ } while (n < 30 && await db.prepare('SELECT 1 FROM staff_users WHERE pin=?').bind(pin).first()) }
-  const exists = await db.prepare('SELECT id FROM staff_users WHERE pin=?').bind(pin).first()
+  if (!pin) { let n = 0; do { pin = String(1000 + Math.floor(Math.random() * 9000)); n++ } while (n < 30 && await db.prepare('SELECT 1 FROM staff_users WHERE pin_hash=?').bind(await pinHash(db, pin)).first()) }
+  const exists = await db.prepare('SELECT id FROM staff_users WHERE pin_hash=?').bind(await pinHash(db, pin)).first()
   if (exists) return c.json({ error: '这个口令已经有人用了，换一个' }, 409)
-  const r = await db.prepare('INSERT INTO staff_users (name, pin, modules, active, created_at) VALUES (?,?,?,1,?)')
-    .bind(name, pin, (mods || Object.keys(STAFF_MOD_LABEL)).join(','), now()).run()
+  const r = await db.prepare("INSERT INTO staff_users (name, pin, pin_hash, modules, active, created_at) VALUES (?,?,?,?,1,?)")
+    .bind(name, '@' + randHex(6), await pinHash(db, pin), (mods || Object.keys(STAFF_MOD_LABEL)).join(','), now()).run()
   await logAudit(db, '加员工账号', '员工账号', `加了 ${name}（口令 ${pin}）`, '', act(c))
   return c.json({ ok: true, id: (r.meta && r.meta.last_row_id) || 0, name, pin, text: `加好了：${name}，口令 ${pin}。把口令给他，他在小程序里输这个口令就能记账，记的账会自动记上「${name}」。` })
 })
@@ -888,11 +1001,21 @@ app.post('/staff-users/:id', async (c) => {
   if (b.name != null) { const nm = String(b.name).trim().slice(0, 12); if (!nm) return c.json({ error: '名字不能是空的' }, 400); sets.push('name=?'); vals.push(nm) }
   if (Array.isArray(b.mods)) { const mm = b.mods.filter((k) => STAFF_MOD_LABEL[k]); if (!mm.length) return c.json({ error: '至少给他开一个模块' }, 400); sets.push('modules=?'); vals.push(mm.join(',')) }
   if (b.active != null) { sets.push('active=?'); vals.push(num(b.active) ? 1 : 0) }
-  if (b.pin != null) { const np = String(b.pin).replace(/\D/g, '').slice(0, 6); if (np.length < 4) return c.json({ error: '口令至少 4 位数字' }, 400); const dup = await db.prepare('SELECT id FROM staff_users WHERE pin=? AND id<>?').bind(np, id).first(); if (dup) return c.json({ error: '这个口令已经有人用了' }, 409); sets.push('pin=?'); vals.push(np) }
+  if (b.pin != null) {
+    await staffPinReady(db)
+    const np = String(b.pin).replace(/\D/g, '').slice(0, 6)
+    if (np.length < 4) return c.json({ error: '口令至少 4 位数字' }, 400)
+    const h = await pinHash(db, np)
+    const dup = await db.prepare('SELECT id FROM staff_users WHERE pin_hash=? AND id<>?').bind(h, id).first()
+    if (dup) return c.json({ error: '这个口令已经有人用了' }, 409)
+    sets.push("pin=?", 'pin_hash=?'); vals.push('@' + randHex(6), h)
+    var newPin = np
+  }
   if (!sets.length) return c.json({ error: '没有要改的东西' }, 400)
   await db.prepare('UPDATE staff_users SET ' + sets.join(',') + ' WHERE id=?').bind(...vals, id).run()
   await logAudit(db, '改员工账号', '员工账号', `改了 ${row.name}`, '', act(c))
-  return c.json({ ok: true })
+  // 改了口令就把新口令回一次（库里只有哈希，之后谁也看不到明文了）
+  return c.json({ ok: true, pin: typeof newPin === 'string' ? newPin : '' })
 })
 app.delete('/staff-users/:id', async (c) => {
   const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB

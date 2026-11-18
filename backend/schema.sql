@@ -373,12 +373,14 @@ CREATE INDEX IF NOT EXISTS idx_att_ref ON attachments(ref_type, ref_id);
 CREATE TABLE IF NOT EXISTS staff_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  pin TEXT NOT NULL UNIQUE,
+  pin TEXT NOT NULL UNIQUE,             -- 老库里是明文，现已改成占位符（'@'+id）
+  pin_hash TEXT,                        -- sha256(staff_salt|sp|口令)，登录按它查
   modules TEXT NOT NULL DEFAULT 'ar,ap,exp,import,contact,asset',
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_staff_pin ON staff_users(pin);
+CREATE INDEX IF NOT EXISTS idx_staff_hash ON staff_users(pin_hash);
 
 CREATE TABLE IF NOT EXISTS edit_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

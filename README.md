@@ -418,7 +418,9 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - **✅ 审计流水无界增长**：`audit_log` 从来没人清，而 `/audit-log` 每次 `ORDER BY id DESC`。现在定时任务留 180 天（`trash` 30 天、`backups` 30 份是原来就有的）。
 - **✅ `orders.status` 没有索引**：EXPLAIN 实测 `WHERE status=1` 是 `SCAN orders`，现在补了 `idx_orders_status`；材料流水按物料查再按日期排要走临时 B 树，补了 `(material, date)` 复合索引。
 - **✅ `/contacts` 没有 LIMIT**：两家大表全量 `GROUP BY` 再全量返回，客户上千家时小程序一次渲染几千行，现在按欠款倒序取前 500 家。
-- **⏳ 还没做的**：员工 PIN 仍是 4 位明文（改成哈希就没法按 PIN 直接索引，要全表比对，得先设计登录态）；HTTP 层没有 `ETag`/`304`（客户端已有 7 天本地缓存，收益有限）；`wrangler.toml` 没开 D1 读复制。
+- **✅ 员工 PIN 也是明文**：`staff_users.pin` 存原文，而且 `WHERE pin=?` 直接比。现在存 `sha256(staff_salt|sp|口令)`，登录按 `pin_hash` 查；**老库的明文 PIN 在第一次有人用它登录时自动迁移**（迁移完 `pin` 列只留 `'@'+id` 占位符，因为那列有 UNIQUE 不能都填空串）。用**全局盐**而不是每行随机盐，正是为了还能按口令直接索引查到人。代价是明文只在「新建 / 重设口令」那一次返回，列表里显示「口令已设」，忘了就重设——4 位数字本来就该当一次性凭证用。员工总口令 `settings.staff_key` 一起改成哈希（`verifySetting`）。
+- **✅ 没有 `ETag`/`304`**：全库 0 处 `ETag`。现在中间件给 GET 的 JSON/HTML 响应打 `W/"长度-哈希"`（FNV-1a，不算安全用途），**客户端带了 `if-none-match` 且对得上就回 304**；>256KB 的响应（`/backup` 那种 9MB）直接跳过不打。小程序 `wx.request` 从来不发这个头，所以对现有前端只是多一个响应头、不改任何行为；真正省流量的是浏览器打开打印页/对账单那些场景。
+- **⏸ D1 读复制：查过、能开，故意没开**。`wrangler d1 info factory-db` 现在是 `read_replication.mode = disabled`。不开的理由是这套系统到处是「刚记完一笔就刷新看」：开了 auto 模式，读会就近走副本，副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，**账就重了**。要安全用必须配 Sessions API（`env.DB.withSession('first-primary')` 把写后读钉回主库），399 个接口逐个改，改动面远大于收益；何况现在库才 594KB、每天读 3.3 万行，省下的延迟根本看不见。开启方法和注意事项写在 `backend/wrangler.toml` 的注释里（wrangler 3.114 还不支持 `read_replication` 配置键，得用 4.x）。
 
 > 审计方法：只读源码 + `node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN` 验证索引是否命中；行号对应 2026-11-18 的 `backend/index.js`（15164 行）版本。
 
@@ -1157,6 +1159,14 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **附件可选 R2**：`POST /attachments` 有 `env.ATTACH` 绑定就 `put` 到 R2、D1 只存 `r2_key`，`GET /attachment/:id` 自动从 R2 取回转成 base64（接口形状不变），删除时一起删；没绑定就走原路。base64 ↔ 字节用分段转换，避免 650KB 一次性 `apply` 打爆调用栈。**当前账号 R2 还没开通**，代码留着等开通。
    - **索引/容量**：`idx_orders_status`、`idx_mat_move_mat_date`；`/contacts` 加 `LIMIT 500`；`audit_log` 定时任务保留 180 天。
    - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 607 SQL / 733 绑定）、`smoke.mjs` 224 个 GET 无 5xx、`test-batch.mjs` 通过；实测老明文口令登录 → 库里变 `s1$…` 且 `sign_secret` 已种；改口令 → 旧口令 401、新口令 200、老打印链接仍有效；员工口令照常、员工碰 `/margin-by` 仍 403。
+
+282. ✅ **员工 PIN 不再明文；响应带 ETag；读复制想清楚了没开**：把上一轮列的三项 ⏳ 收尾。
+   - **员工 PIN 哈希**：`staff_users.pin_hash = sha256(staff_salt|sp|口令)`，登录按它查（`pinHash` / `staffSalt` / `migrateStaffPins` / `staffPinReady`）。用**全局盐**是为了还能按口令直接索引到人；每行随机盐就只能全表比对。老库明文 PIN 在第一次有人用它登录时自动迁移（迁移后 `pin` 列写 `'@'+id` 占位，因为该列有 UNIQUE 约束不能都填空串）。明文只在**新建账号 / 重设口令**那一次返回，列表改显示「口令已设（忘了点「换个口令」）」，前端 wxml 与改口令弹窗同步改了。员工总口令 `settings.staff_key` 同样改成哈希（新 `verifySetting`，老明文对上时顺手升级）。
+   - **踩到的坑**：`_memoDdl` 那个记忆化包装器**只 `await` 不返回**，拿它包 `staffPinReady` 会把「有没有 pin_hash 列」这个返回值吞掉，导致所有员工 PIN 一律 401——改成自己用 `_pinReadyDb` 记；另外迁移必须和「结构就绪」拆开：结构只跑一次（记忆化），迁移在查不到人时再补跑一次，否则老库升级后第一次登录必然失败。
+   - **ETag / 304**：中间件 `applyEtag(c)`，GET + 200 + JSON/HTML + ≤256KB 才打 `W/"<len36>-<fnv36>"`；只有客户端真发了 `if-none-match` 才回 304。放行的打印页（`/quote-print`、`/statement-ack` 等 17 条白名单）也走同一个函数——原来白名单分支是 `return next()`，后面的后处理根本不会执行。
+   - **D1 读复制：没开，理由写在 `backend/wrangler.toml` 注释里**。`read_replication.mode` 实测 `disabled`；auto 模式会让「刚写完就读」读到滞后副本，这套系统里等于让人重复记账。要安全用得上 Sessions API（`withSession('first-primary')`），399 个接口逐个改不划算；且现在库 594KB、每天读 3.3 万行，收益为零。
+   - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 607 SQL / 733 绑定）、`test-batch.mjs` 4 项全绿、`smoke.mjs` 224 个 GET 无 5xx；实测 5 个口令矩阵（老板 `9999` 200、员工新口令 200、两个老明文 PIN 迁移后 200、被轮换掉的旧口令 401）；`/dashboard` 首请求拿 ETag → 再请求 304、错误 ETag → 200；`/quote-print` 200 带 ETag → 304；`/backup` 9MB 不打 ETag；`/me`、`/access-guide` 在员工总口令开/关两种状态下都是 200。
+   - **本轮动了前端**（员工列表文案 + 改口令弹窗）：小程序需要重新上传发布。
 
 <!-- API-LIST:BEGIN -->
 
