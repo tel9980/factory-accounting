@@ -22,6 +22,11 @@ on:
       - '.github/**'
   workflow_dispatch:
 
+# 同一分支上连续 push 时取消旧的部署，避免老版本后落地把生产回退。
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     name: 自检（语法 / 路由重名 / schema 建库 / SQL / 前端绑定）

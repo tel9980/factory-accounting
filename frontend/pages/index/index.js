@@ -178,7 +178,7 @@ Page({
     trash_list: [],
     ar_filter: 'open', ar_sort: 'new', ar_sum: {}, ap_filter: 'open', ap_sort: 'new', ap_sum: {},
     ar_view: 'order', ap_view: 'order', ar_groups: [], ap_groups: [], ar_open: '', ap_open: '',
-    detail_show: false, detail_title: '', detail_head: '', detail_rows: [], detail_text: '',
+    detail_show: false, detail_title: '', detail_head: '', detail_rows: [],
     ar_filters: [{ k: 'open', n: '全部未结' }, { k: 'overdue', n: '逾期 30 天+' }, { k: 'due', n: '7 天内到期' }, { k: 'closed', n: '已结清' }],
     ar_sorts: [{ k: 'new', n: '最新' }, { k: 'old', n: '最久未结' }, { k: 'amount', n: '金额大' }, { k: 'due', n: '最近到期' }],
     cloud_backup_at: '',
@@ -301,16 +301,21 @@ Page({
   },
   _cachePut(rel, data) {
     if (!rel) return
+    // 报错响应不能进缓存：否则断网时把「口令错误 / 接口报错」当成上次的数据渲染出来。
+    if (data && (data.error || data.ok === false || data.code === 'bad_key' || data.code === 'no_key')) return
     let str = ''
     try { str = JSON.stringify(data) } catch (e) { return }
     if (!str || str.length > 80000) return   // 大响应（导出之类）不占手机空间
     try { wx.setStorage({ key: this._cacheKey(rel), data: { t: Date.now(), d: data } }) } catch (e) {}
   },
-  _cacheGet(rel) {
+  // maxAge 默认 7 天：离线兜底本来就允许看旧数据（顶部会显示「X 前的数据」），
+  // 但太旧的（跨了账期）就别拿了，免得把上个月的快照当成这个月的。
+  _cacheGet(rel, maxAge) {
     if (!rel) return null
+    const cap = maxAge == null ? 7 * 86400000 : maxAge
     try {
       const v = wx.getStorageSync(this._cacheKey(rel))
-      if (v && v.d !== undefined && v.d !== null) return v
+      if (v && v.d !== undefined && v.d !== null && (cap <= 0 || Date.now() - Number(v.t || 0) <= cap)) return v
     } catch (e) {}
     return null
   },
@@ -478,7 +483,8 @@ Page({
         if (d.results.some((x) => x && (x.code === 'no_key' || x.code === 'bad_key'))) return fallback()
         d.results.forEach((val, i) => {
           const o = q[i].opts
-          this._cachePut(q[i].path, val)
+          // 合批前 caller 明确说了 cache:false（动态数据），这里也要遵守，不能无脑缓存。
+          if (o.cache !== false && !(o.method && o.method.toUpperCase() !== 'GET')) this._cachePut(q[i].path, val)
           o.success && o.success({ data: val, statusCode: 200 })
         })
         if (this._offShown) { this._offShown = false; this.setData({ offline_at: '' }) }
@@ -1995,7 +2001,7 @@ Page({
   // 设置页「🩺 体检一下」：把明细摊开给人看（首页那条健康分条用上面的 loadHealth）
   loadHealthDetail() {
     this.req({
-      url: API_BASE + '/health-check',
+      url: API_BASE + '/health-check?fresh=1',
       success: (res) => {
         const r = res.data || {}
         if (!r.items) return
@@ -7761,8 +7767,7 @@ Page({
         rows.push({ k: '来源', v: oline })
       }
       const all = rows.concat(wos).concat(eds)
-      const text = head + '\n' + (all.map((x) => x.k + '  ' + x.v).join('\n') || '还没有' + (type === 'ar' ? '收款' : '付款') + '记录')
-      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: all, detail_text: text, detail_id: id, detail_type: type === 'ar' ? 'order' : 'payable', detail_att: [] })
+      this.setData({ detail_show: true, detail_title: type === 'ar' ? '应收明细' : '应付明细', detail_head: head, detail_rows: all, detail_id: id, detail_type: type === 'ar' ? 'order' : 'payable', detail_att: [] })
       this.loadAttach(type === 'ar' ? 'order' : 'payable', id)
     } })
   },
@@ -7825,6 +7830,10 @@ Page({
   noop() {},
   closeDetail() { this.setData({ detail_show: false }) },
   copyDetail() {
-    wx.setClipboardData({ data: this.data.detail_text, success: () => wx.showToast({ title: '已复制', icon: 'success' }) })
+    // 明细行数多时，text 字符串和 rows 是同一份内容的两份拷贝；用 rows 现拼，
+    // 省掉每次点开明细都往 setData 里塞一份几百行的长文本（setData 是跨线程拷贝）。
+    const d = this.data
+    const text = [d.detail_head, ...((d.detail_rows || []).map((x) => x.k + '  ' + x.v))].filter(Boolean).join('\n')
+    wx.setClipboardData({ data: text, success: () => wx.showToast({ title: '已复制', icon: 'success' }) })
   },
 })

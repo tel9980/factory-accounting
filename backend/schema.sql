@@ -691,3 +691,6 @@ CREATE INDEX IF NOT EXISTS idx_ledger_day ON ledger(substr(created_at,1,10));
 CREATE INDEX IF NOT EXISTS idx_ledger_year ON ledger(substr(created_at,1,4));
 CREATE INDEX IF NOT EXISTS idx_payables_day ON payables(substr(created_at,1,10));
 CREATE INDEX IF NOT EXISTS idx_payables_due_day ON payables(substr(due_date,1,10));
+
+-- 发工资幂等：同一个人同一个月只能发一次（/payroll/pay 运行时也建，新装库这里直接带）。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wage_pay_once ON wage_pays(month, worker);
