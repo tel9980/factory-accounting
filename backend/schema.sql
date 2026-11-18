@@ -473,6 +473,20 @@ CREATE TABLE IF NOT EXISTS wage_pays (
 );
 CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month);
 
+-- 工资里扣的钱（宿舍水电、宿舍租金、伙食、罚款）：厂里先付给房东，再从工人工资里扣回来。
+-- 应发不动，实发 = 应发 − 扣款；扣款不产生现金流水（钱在付房东那次已经出去了）。
+CREATE TABLE IF NOT EXISTS wage_deduct (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  month TEXT NOT NULL,
+  worker TEXT NOT NULL DEFAULT '',
+  kind TEXT DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  remark TEXT DEFAULT '',
+  by TEXT DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wage_deduct ON wage_deduct(month, worker);
+
 -- 材料台账：进货 / 领用 / 结存（材料名与单位全部自定义，不预设行业）
 CREATE TABLE IF NOT EXISTS materials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -83,6 +83,8 @@ Page({
     rw_faults: ['自己做坏了', '材料有问题', '客户改了要求', '图纸 / 尺寸给错', '别的原因'],
     rwk: null, rwk_month: '', rw_kind: 'rework', rw_party: '', rw_item: '', rw_qty: '', rw_cost: '', rw_reason: '', rw_fix: '', rw_fault_idx: 0,
     pw: null, pw_month: '', pw_recs: [], pw_rates: null, pw_worker: '', pw_date: '', pw_item: '', pw_process: '', pw_qty: '', pw_rate: '',
+    wd_open: false, wd_workers: '', wd_kind: '宿舍水电', wd_amount: '', wd_remark: '', wd_rows: [],
+    wd_kinds: ['宿舍水电', '宿舍租金', '伙食', '罚款', '其他'],
     wr_worker: '', wr_item: '', wr_rate: '', wr_unit: '件',
     bank_layout: '', bank_skip: 0,
     bv: null,
@@ -118,15 +120,18 @@ Page({
     wf_rows: [], wf_bad: 0, wf_waived: 0,
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
-    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额'],
+    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日'],
     role: 'owner', staff_enabled: false, cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
     mods: null, mod: {},
     tpls: [
-      { t: 'ar', n: '应收（接单）', d: '客户, 产品, 金额, 成本, 到期日' },
-      { t: 'ap', n: '应付（进货）', d: '供应商, 金额, 备注, 到期日' },
+      { t: 'ar_recon', n: '应收对账（按客户对账金额）', d: '客户, 对账金额, 月份 —— 一个月一家一条' },
+      { t: 'ap_recon', n: '应付对账（按供应商/外发）', d: '供应商, 对账金额, 分类, 月份 —— 外发选「外发加工费」' },
+      { t: 'ar', n: '应收（按单）', d: '客户, 产品, 金额, 成本, 到期日' },
+      { t: 'ap', n: '应付（按单）', d: '供应商, 分类, 金额, 备注, 到期日' },
+      { t: 'prepaid', n: '付房东（租金/押金/水电）', d: '名称, 金额, 月数(0=押金), 分类, 起始日' },
       { t: 'recon', n: '对账（对方的余额）', d: '单位, 金额 —— 只核对不入账', recon: true },
       { t: 'reimb', n: '报销（员工报的）', d: '员工, 金额, 分类, 备注' },
       { t: 'expense', n: '支出（水电房租）', d: '金额, 分类, 备注' },
@@ -134,7 +139,8 @@ Page({
       { t: 'ar_init', n: '期初应收（按对账金额）', d: '客户, 金额 —— 接手前的旧账' },
       { t: 'ap_init', n: '期初应付（按对账金额）', d: '供应商, 金额 —— 接手前欠别人的' }
     ],
-    prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '12', pp_cat: '房租', pp_start: '',
+    prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '1', pp_cat: '厂房租金', pp_start: '',
+    pp_cats: ['厂房租金', '宿舍租金', '水费', '电费', '押金', '其他'],
     month_amort: 0, month_accrue_int: 0, month_dep: 0, month_expense_cash: 0,
     debts: [], debt_sum: {}, credit_limits: [], d_lender: '', d_principal: '', d_rate: '6', d_start: '', d_term: '12', d_kind: 0, d_paykind: 0, d_remark: '',
     debt_kinds: ['银行贷款', '个人借款', '其他'], debt_paykinds: ['按月付息到期还本', '等额本息', '到期一次还本付息'], issue_count: 0, issue_at: '',
@@ -1347,7 +1353,7 @@ Page({
   },
   // 导出导入模板（CSV，微信发到电脑用 Excel 填）
   exportTemplate() {
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
     const t = types[this.data.import_type] || 'ar'
     const url = API_BASE + '/import-template?type=' + t
     wx.showLoading({ title: '生成模板…' })
@@ -1372,7 +1378,7 @@ Page({
   },
   // 下载 Excel（.xlsx）模板：真 Excel 文件，WPS/Excel 直接打开填
   excelTemplate(e) {
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
     const ov = e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.t : ''
     const t = ov || types[this.data.import_type] || 'ar'
     wx.showLoading({ title: '生成中…' })
@@ -1459,12 +1465,12 @@ Page({
   // 模板中心那一行点「传」：先对准类型，再走选文件
   tplPick(e) {
     const t = e.currentTarget.dataset.t
-    const idx = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init'].indexOf(t)
+    const idx = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid'].indexOf(t)
     if (idx >= 0 && idx !== this.data.import_type) this.setData({ import_type: idx })
     this.chooseXlsxFile()
   },
   chooseXlsxFile() {
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
     const t = types[this.data.import_type] || 'ar'
     if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，请用粘贴方式', icon: 'none' })
     wx.chooseMessageFile({
@@ -3170,7 +3176,7 @@ Page({
   },
   doImport() {
     const { import_type, import_text } = this.data
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
     this._impText = import_text
     wx.showLoading({ title: '看一遍…' })
@@ -3286,7 +3292,7 @@ Page({
   // 入账；dup 不空时先问一句「好像记过了」，再决定是否强制导入
   postImportRows(good, force) {
     const { import_type } = this.data
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
     this.req({
       url: API_BASE + '/import-rows', method: 'POST',
       data: { type: types[import_type], rows: good, text: this._impText || '', confirm_dup: !!force },
@@ -5666,6 +5672,7 @@ Page({
   onPPTotal(e) { this.setData({ pp_total: e.detail.value }) },
   onPPMonths(e) { this.setData({ pp_months: e.detail.value }) },
   onPPCat(e) { this.setData({ pp_cat: e.detail.value }) },
+  pickPPCat(e) { this.setData({ pp_cat: e.currentTarget.dataset.k, pp_months: e.currentTarget.dataset.k === '押金' ? '0' : (this.data.pp_months || '1') }) },
   onPPStart(e) { this.setData({ pp_start: e.detail.value }) },
   addPrepaid() {
     const d = this.data
@@ -5673,7 +5680,7 @@ Page({
     if (!(Number(d.pp_months) >= 1)) return wx.showToast({ title: '摊几个月要填', icon: 'none' })
     this.req({
       url: API_BASE + '/prepaids', method: 'POST',
-      data: { name: d.pp_name || d.pp_cat, total: Number(d.pp_total), months: Number(d.pp_months), category: d.pp_cat || '房租', start_date: d.pp_start || '' },
+      data: { name: d.pp_name || d.pp_cat, total: Number(d.pp_total), months: Number(d.pp_months), category: d.pp_cat || '厂房租金', start_date: d.pp_start || '' },
       success: () => {
         wx.showToast({ title: '已记上，按月摊销', icon: 'none' })
         this.setData({ pp_name: '', pp_total: '', pp_start: '' })
@@ -7365,6 +7372,51 @@ Page({
         wx.showToast({ title: '发了 ¥' + d.total })
         this.loadPayroll()
         if (this.loadHomeData) this.loadHomeData()
+      } })
+    } })
+  },
+  // ===== 从工资里扣宿舍水电（厂里先付房东，再按人头扣回来）=====
+  toggleWageDeduct() {
+    const open = !this.data.wd_open
+    this.setData({ wd_open: open })
+    if (open) this.loadWageDeducts()
+  },
+  onWdField(e) { this.setData({ [e.currentTarget.dataset.k]: e.detail.value }) },
+  pickWdKind(e) { this.setData({ wd_kind: e.currentTarget.dataset.k }) },
+  loadWageDeducts(mm) {
+    const m = mm || this.data.pw_month || dayOf().slice(0, 7)
+    this.req({ url: API_BASE + '/wage-deducts?month=' + m, silent: true, success: (r) => {
+      const d = r.data || {}
+      if (d.ok) this.setData({ wd_rows: d.rows || [] })
+    } })
+  },
+  addWageDeduct() {
+    const d = this.data
+    const mm = d.pw_month || dayOf().slice(0, 7)
+    const workers = String(d.wd_workers || '').split(/[，,、\s]+/).map((x) => x.trim()).filter(Boolean)
+    const amount = Number(d.wd_amount) || 0
+    if (!workers.length) return wx.showToast({ title: '扣谁？填个名字', icon: 'none' })
+    if (!(amount > 0)) return wx.showToast({ title: '每人扣多少', icon: 'none' })
+    this.req({ url: API_BASE + '/wage-deducts', method: 'POST', once: 'addWd',
+      data: { month: mm, workers, amount, kind: d.wd_kind, remark: d.wd_remark || '' },
+      success: (r) => {
+        const x = r.data || {}
+        if (!x.ok) return wx.showModal({ title: '没扣成', content: x.error || '', showCancel: false })
+        wx.showToast({ title: '扣了 ' + x.added + ' 人' })
+        this.setData({ wd_workers: '', wd_amount: '', wd_remark: '' })
+        this.loadWageDeducts(mm)
+        this.loadPayroll()
+      } })
+  },
+  delWageDeduct(e) {
+    const id = e.currentTarget.dataset.id
+    wx.showModal({ title: '删掉这条扣款？', content: '删了实发工资会变回来。', success: (r) => {
+      if (!r.confirm) return
+      this.req({ url: API_BASE + '/wage-deducts/' + id, method: 'DELETE', success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return wx.showToast({ title: d.error || '没删掉', icon: 'none' })
+        this.loadWageDeducts()
+        this.loadPayroll()
       } })
     } })
   },

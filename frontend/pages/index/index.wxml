@@ -2075,24 +2075,28 @@
     </view>
 
     <view class="form">
-      <view class="tip">🗓 待摊费用（房租/保险一次付几个月，按月摊进成本）{{prepaid_sum.open_count ? '：' + prepaid_sum.open_count + ' 项在摊，每月约 ' + prepaid_sum.month_amount + ' 元，还没摊完 ' + prepaid_sum.total_left + ' 元' : ''}}</view>
+      <view class="tip">🗓 付给房东的钱（厂房租金、宿舍租金、水费、电费按月摊；押金月数填 0，不摊、退租时收回）{{prepaid_sum.open_count ? '：' + prepaid_sum.open_count + ' 项在摊，每月约 ' + prepaid_sum.month_amount + ' 元，还没摊完 ' + prepaid_sum.total_left + ' 元' : ''}}</view>
       <view class="debt-add" wx:if="{{role!='staff'}}">
-        <input class="inp" placeholder="名称（如 一年厂房房租）" value="{{pp_name}}" bindinput="onPPName"/>
+        <input class="inp" placeholder="名称（如 11月厂房租金 / 宿舍押金）" value="{{pp_name}}" bindinput="onPPName"/>
         <view class="frow">
           <input class="inp half" placeholder="一共付了多少" type="digit" value="{{pp_total}}" bindinput="onPPTotal"/>
-          <input class="inp half" placeholder="摊几个月" type="number" value="{{pp_months}}" bindinput="onPPMonths"/>
+          <input class="inp half" placeholder="摊几个月（0=押金不摊）" type="number" value="{{pp_months}}" bindinput="onPPMonths"/>
         </view>
         <view class="frow">
-          <input class="inp half" placeholder="分类（房租/保险…）" value="{{pp_cat}}" bindinput="onPPCat"/>
+          <block wx:for="{{pp_cats}}" wx:key="*this">
+            <text class="chip {{pp_cat==item?'on':''}}" bindtap="pickPPCat" data-k="{{item}}">{{item}}</text>
+          </block>
+        </view>
+        <view class="frow">
           <picker mode="date" value="{{pp_start}}" bindchange="onPPStart"><view class="picker">付款日：{{pp_start || '今天'}} ▾</view></picker>
         </view>
-        <button class="btn" size="mini" bindtap="addPrepaid">记待摊（钱先付出去，成本按月摊）</button>
+        <button class="btn" size="mini" bindtap="addPrepaid">记一笔（钱先付出去，成本按月摊）</button>
         <button class="btn" size="mini" bindtap="runAmort">补摊本月（有漏掉的月份就点这里）</button>
       </view>
       <view class="list" wx:if="{{prepaids.length}}">
         <view class="item" wx:for="{{prepaids}}" wx:key="id">
           <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{item.active=='open' ? '还没摊 ' + item.remain : '已摊完'}}</text></view>
-          <view class="row2">总额 {{item.total}} · 每月 {{item.per_month}} · 已摊 {{item.amortized}}（{{item.done_months}}/{{item.months}} 个月）</view>
+          <view class="row2">总额 {{item.total}} · {{item.deposit ? '押金，不摊（退租时收回）' : '每月 ' + item.per_month + ' · 已摊 ' + item.amortized + '（' + item.done_months + '/' + item.months + ' 个月）'}}</view>
           <view class="row2" wx:if="{{item.next_month}}">下次摊销 {{item.next_month}} 约 {{item.per_month}} 元</view>
           <view class="btns">
             <button size="mini" wx:if="{{role!='staff'}}" bindtap="togglePrepaid" data-id="{{item.id}}" data-active="{{item.active}}">{{item.active=='open' ? '停摊' : '继续摊'}}</button>
@@ -2447,15 +2451,41 @@
           <view class="row2" wx:if="{{pw.locked}}">🔒 这个月已结账锁定，记工和发工资要先解锁</view>
         </view>
         <view class="item" wx:for="{{pw.rows}}" wx:key="worker">
-          <view class="row1"><text class="nm">{{item.worker}}</text><text class="amt {{item.left>0?'red':''}}">应发 ¥{{item.due}}</text></view>
-          <view class="row2">{{item.cnt}} 笔 · {{item.qty}} 件 · 已发 ¥{{item.paid}}{{item.left>0?' · 还差 ¥'+item.left:' · 发完了 ✓'}}</view>
+          <view class="row1"><text class="nm">{{item.worker}}</text><text class="amt {{item.left>0?'red':''}}">实发 ¥{{item.net}}</text></view>
+          <view class="row2">应发 ¥{{item.due}}{{item.deduct>0?' − 扣款 ¥'+item.deduct:''}} · {{item.cnt}} 笔 · {{item.qty}} 件 · 已发 ¥{{item.paid}}{{item.left>0?' · 还差 ¥'+item.left:' · 发完了 ✓'}}</view>
           <view class="row2" wx:if="{{item.advance>0}}">另外还欠借支 ¥{{item.advance}}（可以从这次工资里扣）</view>
           <view class="btns"><button size="mini" wx:if="{{item.left>0}}" bindtap="payWorker" data-w="{{item.worker}}">发工资</button></view>
         </view>
         <view class="frow">
           <button class="btn" size="mini" bindtap="payAllWorkers">💰 全部发完</button>
+          <button class="btn ghost" size="mini" bindtap="toggleWageDeduct">💧 扣宿舍水电</button>
           <button class="btn ghost" size="mini" bindtap="printPayroll">🖨 打工资单</button>
           <button class="btn ghost" size="mini" bindtap="closePayroll">收起</button>
+        </view>
+        <view class="box" wx:if="{{wd_open}}">
+          <view class="row1"><text class="nm">从工资里扣（宿舍水电/宿舍租金）</text><text class="amt">{{pw.month}}</text></view>
+          <view class="row2">厂里先把钱付给房东了，这里按人头从工资里扣回来。应发不动，实发 = 应发 − 扣款，扣款不产生现金流水。</view>
+          <view class="frow">
+            <input class="inp" placeholder="扣谁（多人用逗号隔开，如 张三,李四）" value="{{wd_workers}}" bindinput="onWdField" data-k="wd_workers"/>
+          </view>
+          <view class="frow">
+            <input class="inp half" type="digit" placeholder="每人扣多少" value="{{wd_amount}}" bindinput="onWdField" data-k="wd_amount"/>
+            <input class="inp half" placeholder="备注（可空，如 11月宿舍水电）" value="{{wd_remark}}" bindinput="onWdField" data-k="wd_remark"/>
+          </view>
+          <view class="frow">
+            <block wx:for="{{wd_kinds}}" wx:key="*this">
+              <text class="chip {{wd_kind==item?'on':''}}" bindtap="pickWdKind" data-k="{{item}}">{{item}}</text>
+            </block>
+          </view>
+          <view class="frow">
+            <button class="btn" size="mini" bindtap="addWageDeduct">＋ 扣上</button>
+            <button class="btn ghost" size="mini" bindtap="toggleWageDeduct">收起</button>
+          </view>
+          <view class="item" wx:for="{{wd_rows}}" wx:key="id">
+            <view class="row1"><text class="nm">{{item.worker}} · {{item.kind}}</text><text class="amt">−¥{{item.amount}}</text></view>
+            <view class="row2">{{item.remark}}</view>
+            <view class="btns"><button size="mini" class="ghost" bindtap="delWageDeduct" data-id="{{item.id}}">删</button></view>
+          </view>
         </view>
         <view class="box">
           <view class="row1"><text class="nm">记一笔工</text><text class="amt">{{pw.month}}</text></view>

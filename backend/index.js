@@ -1990,6 +1990,19 @@ async function wageTable(db) {
     by TEXT DEFAULT '',
     created_at TEXT NOT NULL
   )`).run()
+  // 工资里扣的钱：宿舍水电、宿舍租金、伙食、罚款……付给房东以后从工资里扣回来，
+  // 应发不减，实发 = 应发 − 扣款。单独一张表，不混进记工。
+  await db.prepare(`CREATE TABLE IF NOT EXISTS wage_deduct (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    month TEXT NOT NULL,
+    worker TEXT NOT NULL DEFAULT '',
+    kind TEXT DEFAULT '',
+    amount REAL NOT NULL DEFAULT 0,
+    remark TEXT DEFAULT '',
+    by TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+  )`).run()
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_deduct ON wage_deduct(month, worker)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_rec_month ON wage_records(month)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_rec_worker ON wage_records(worker)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_wage_pay_month ON wage_pays(month)').run()
@@ -2126,18 +2139,34 @@ async function payrollOf(db, mm) {
   const { results: loans } = await db.prepare('SELECT staff, SUM(amount-COALESCE(used,0)-COALESCE(returned,0)) a FROM loans GROUP BY staff').all()
   const loanMap = {}
   for (const l of loans || []) if (num(l.a) > 0.005) loanMap[l.staff] = num(l.a)
+  // 宿舍水电、宿舍租金这类「厂里先付给房东、再从工资里扣回来」的钱
+  const { results: dds } = await db.prepare('SELECT worker, SUM(amount) a FROM wage_deduct WHERE month=? GROUP BY worker').bind(mm).all().catch(() => ({ results: [] }))
+  const ddMap = {}
+  for (const d of dds || []) ddMap[d.worker] = num(d.a)
   const rows = (recs || []).map((r) => {
     const due = Math.round(num(r.a) * 100) / 100
     const paid = Math.round((payMap[r.worker] || 0) * 100) / 100
+    const deduct = Math.round((ddMap[r.worker] || 0) * 100) / 100
+    const net = Math.round((due - deduct) * 100) / 100
     return {
-      worker: r.worker, qty: num(r.q), cnt: num(r.n), due,
-      paid, left: Math.round((due - paid) * 100) / 100,
+      worker: r.worker, qty: num(r.q), cnt: num(r.n), due, deduct, net,
+      paid, left: Math.round((net - paid) * 100) / 100,
       advance: Math.round((loanMap[r.worker] || 0) * 100) / 100
     }
   })
   const total = rows.reduce((s, r) => s + r.due, 0)
   const paidTotal = rows.reduce((s, r) => s + r.paid, 0)
-  return { month: mm, rows, total: Math.round(total * 100) / 100, paid_total: Math.round(paidTotal * 100) / 100, left_total: Math.round((total - paidTotal) * 100) / 100, people: rows.length }
+  const ddTotal = rows.reduce((s, r) => s + r.deduct, 0)
+  const netTotal = total - ddTotal
+  return {
+    month: mm, rows,
+    total: Math.round(total * 100) / 100,
+    deduct_total: Math.round(ddTotal * 100) / 100,
+    net_total: Math.round(netTotal * 100) / 100,
+    paid_total: Math.round(paidTotal * 100) / 100,
+    left_total: Math.round((netTotal - paidTotal) * 100) / 100,
+    people: rows.length
+  }
 }
 
 app.get('/payroll', async (c) => {
@@ -2147,9 +2176,10 @@ app.get('/payroll', async (c) => {
   const p = await payrollOf(db, mm)
   const locked = await isMonthLocked(db, mm)
   const unpaid = p.rows.filter((r) => r.left > 0.005)
+  const ddTxt = p.deduct_total > 0.005 ? `，扣宿舍水电等 ¥${p.deduct_total}，实发 ¥${p.net_total}` : ''
   const text = !p.rows.length
     ? `${mm} 还没有记工记录。先在下面「记一笔工」填：今天谁、干了什么活、多少件。`
-    : `${mm} ${p.people} 人记工，应发 ¥${p.total}，已发 ¥${p.paid_total}，还差 ¥${p.left_total}` + (unpaid.length ? `（${unpaid.map((r) => r.worker).join('、')} 还没发完）` : '，都发完了 ✓')
+    : `${mm} ${p.people} 人记工，应发 ¥${p.total}${ddTxt}，已发 ¥${p.paid_total}，还差 ¥${p.left_total}` + (unpaid.length ? `（${unpaid.map((r) => r.worker).join('、')} 还没发完）` : '，都发完了 ✓')
   return c.json({ ok: true, ...p, locked, unpaid_cnt: unpaid.length, text })
 })
 
@@ -2173,7 +2203,11 @@ app.post('/payroll/pay', async (c) => {
     const due = Math.round(num(recs && recs[0] && recs[0].a) * 100) / 100
     const { results: pays } = await db.prepare('SELECT SUM(amount) a FROM wage_pays WHERE month=? AND worker=?').bind(mm, w).all()
     const paid = num(pays && pays[0] && pays[0].a)
-    const left = Math.round((due - paid) * 100) / 100
+    // 宿舍水电这类扣款先扣掉再算实发：付房东的钱已经从账上出去了，工资只发净额
+    const dd = await db.prepare('SELECT SUM(amount) a FROM wage_deduct WHERE month=? AND worker=?').bind(mm, w).first().catch(() => null)
+    const deduct = Math.round(num(dd && dd.a) * 100) / 100
+    const net = Math.round((due - deduct) * 100) / 100
+    const left = Math.round((net - paid) * 100) / 100
     if (left <= 0.005) continue
     const amt = body.amount && workers.length === 1 ? Math.min(num(body.amount), left) : left
     if (amt <= 0) continue
@@ -2181,14 +2215,71 @@ app.post('/payroll/pay', async (c) => {
     const payInfo = await db.prepare('INSERT OR IGNORE INTO wage_pays (month, worker, amount, account_id, note, by, created_at) VALUES (?,?,?,?,?,?,?)')
       .bind(mm, w, amt, acc, String(body.note || ''), act(c), ts).run()
     if (!changesOf(payInfo)) continue   // 已经发过了（并发/重复），跳过
+    const note = deduct > 0.005 ? `${w} ${mm} 计件工资（应发 ${due} 扣 ${deduct}）` : `${w} ${mm} 计件工资`
     const ledInfo = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,'工资',?,?,?,1,?)")
-      .bind(amt, `${w} ${mm} 计件工资`, act(c), acc, ts).run()
+      .bind(amt, note, act(c), acc, ts).run()
     done.push({ worker: w, amount: amt })
   }
   if (!done.length) return c.json({ error: '这几个人这个月的工资都已经发过了' }, 400)
   const sum = done.reduce((s, d) => s + d.amount, 0)
   await logAudit(db, '发工资', done.map((d) => d.worker).join('、'), `${mm} 共 ¥${Math.round(sum * 100) / 100}`, '', act(c))
   return c.json({ ok: true, paid: done, total: Math.round(sum * 100) / 100 })
+})
+
+// ===== 工资里扣的钱（宿舍水电、宿舍租金、伙食…）=====
+// 场景：房东的宿舍水电厂里先付了，按人头从工人工资里扣回来。
+// 应发不动，实发 = 应发 − 扣款；扣款不产生现金流水（钱在付房东那次已经出去了）。
+const WAGE_DEDUCT_KINDS = ['宿舍水电', '宿舍租金', '伙食', '罚款', '其他']
+
+app.get('/wage-deducts', async (c) => {
+  const db = c.env.DB
+  await wageTable(db)
+  const mm = String(c.req.query('month') || now().slice(0, 7))
+  const rows = (await db.prepare('SELECT * FROM wage_deduct WHERE month=? ORDER BY worker, id').bind(mm).all()).results || []
+  const byWorker = {}
+  for (const r of rows) byWorker[r.worker] = round2(num(byWorker[r.worker]) + num(r.amount))
+  const byKind = {}
+  for (const r of rows) byKind[r.kind || '其他'] = round2(num(byKind[r.kind || '其他']) + num(r.amount))
+  return c.json({
+    ok: true, month: mm, rows, kinds: WAGE_DEDUCT_KINDS,
+    count: rows.length, total: round2(rows.reduce((a, r) => a + num(r.amount), 0)),
+    by_worker: Object.keys(byWorker).map((w) => ({ worker: w, amount: byWorker[w] })),
+    by_kind: Object.keys(byKind).map((k) => ({ kind: k, amount: byKind[k] })),
+    locked: await isMonthLocked(db, mm)
+  })
+})
+
+app.post('/wage-deducts', async (c) => {
+  const b = await c.req.json()
+  const db = c.env.DB
+  await wageTable(db)
+  const mm = String(b.month || now().slice(0, 7))
+  if (await isMonthLocked(db, mm)) return c.json({ error: `${mm} 已结账锁定，先解锁再扣` }, 403)
+  const amt = num(b.amount)
+  if (!(amt > 0)) return c.json({ error: '扣多少钱要大于 0' }, 400)
+  const list = Array.isArray(b.workers) && b.workers.length ? b.workers.map(String) : (b.worker ? [String(b.worker)] : [])
+  if (!list.length) return c.json({ error: '扣谁的' }, 400)
+  const kind = String(b.kind || '宿舍水电').trim() || '宿舍水电'
+  const ts = stampOf(String(b.date || todayIso()).slice(0, 10))
+  const done = []
+  for (const w of list) {
+    const r = await db.prepare('INSERT INTO wage_deduct (month, worker, kind, amount, remark, by, created_at) VALUES (?,?,?,?,?,?,?)')
+      .bind(mm, w, kind, round2(amt), String(b.remark || ''), act(c), ts).run()
+    done.push({ id: r.meta && r.meta.last_row_id, worker: w, amount: round2(amt) })
+  }
+  await logAudit(db, '工资扣款', done.map((d) => d.worker).join('、'), `${mm} ${kind} 每人 ¥${round2(amt)}`, '', act(c))
+  return c.json({ ok: true, added: done.length, rows: done, month: mm })
+})
+
+app.delete('/wage-deducts/:id', async (c) => {
+  const db = c.env.DB
+  const id = num(c.req.param('id'))
+  const row = await db.prepare('SELECT * FROM wage_deduct WHERE id=?').bind(id).first()
+  if (!row) return c.json({ error: '没找到这条扣款' }, 404)
+  if (await isMonthLocked(db, String(row.month || ''))) return c.json({ error: `${row.month} 已结账锁定，先解锁再改` }, 403)
+  await db.prepare('DELETE FROM wage_deduct WHERE id=?').bind(id).run()
+  await logAudit(db, '删工资扣款', row.worker, `${row.month} ${row.kind} ¥${round2(num(row.amount))}`, '', act(c))
+  return c.json({ ok: true })
 })
 
 app.get('/payroll-link', async (c) => {
@@ -2212,13 +2303,13 @@ app.get('/payroll-print', async (c) => {
   const p = await payrollOf(db, mm)
   const head = await getTitle(db)
   const money = (n) => Number(n || 0).toFixed(2)
-  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n">${r.cnt}</td><td class="n">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${money(r.advance)}</td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell"></td></tr>`).join('')
+  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n">${r.cnt}</td><td class="n">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${r.deduct > 0.005 ? money(r.deduct) : ''}</td><td class="n">${money(r.net)}</td><td class="n">${money(r.advance)}</td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell"></td></tr>`).join('')
   const pageBody = `<h1>计件工资表</h1>
 <div class="meta"><span>${escHtml(head.title || '')}</span><span>月份：${mm}</span><span>人数：${p.people}</span></div>
-<table><thead><tr><th>工人</th><th class="n">笔数</th><th class="n">件数</th><th class="n">应发</th><th class="n">未还借支</th><th class="n">已发</th><th class="n">还差</th><th>签字</th></tr></thead>
-<tbody>${trs || '<tr><td colspan="8">这个月没有记工记录</td></tr>'}</tbody>
-<tfoot><tr class="total"><td>合计</td><td class="n">${p.rows.reduce((s, r) => s + r.cnt, 0)}</td><td class="n">${p.rows.reduce((s, r) => s + r.qty, 0)}</td><td class="n">${money(p.total)}</td><td></td><td class="n">${money(p.paid_total)}</td><td class="n">${money(p.left_total)}</td><td></td></tr></tfoot></table>
-<p class="tip">算法：应发 = 本月每笔记工（件数 × 单价）之和；已发 = 本月发工资记的支出；还差 = 应发 − 已发。未还借支另列，发工资时可商量从里面扣。</p>`
+<table><thead><tr><th>工人</th><th class="n">笔数</th><th class="n">件数</th><th class="n">应发</th><th class="n">扣款</th><th class="n">实发</th><th class="n">未还借支</th><th class="n">已发</th><th class="n">还差</th><th>签字</th></tr></thead>
+<tbody>${trs || '<tr><td colspan="10">这个月没有记工记录</td></tr>'}</tbody>
+<tfoot><tr class="total"><td>合计</td><td class="n">${p.rows.reduce((s, r) => s + r.cnt, 0)}</td><td class="n">${p.rows.reduce((s, r) => s + r.qty, 0)}</td><td class="n">${money(p.total)}</td><td class="n">${p.deduct_total > 0.005 ? money(p.deduct_total) : ''}</td><td class="n">${money(p.net_total)}</td><td></td><td class="n">${money(p.paid_total)}</td><td class="n">${money(p.left_total)}</td><td></td></tr></tfoot></table>
+<p class="tip">算法：应发 = 本月每笔记工（件数 × 单价）之和；扣款 = 宿舍水电、宿舍租金这类厂里先付给房东、再从工资里扣回来的钱；实发 = 应发 − 扣款；已发 = 本月发工资记的支出；还差 = 实发 − 已发。未还借支另列，发工资时可商量从里面扣。</p>`
   return c.html(a4Page({ title: `${mm} 计件工资表`, body: pageBody, sign: '<span>制表人</span><span>发款人</span><span>日期</span>' }))
 })
 
@@ -2791,6 +2882,21 @@ const monthAdd = (iso, k) => {
   d.setUTCDate(Math.min(day, last))
   return d.toISOString().slice(0, 10)
 }
+// 「2026-11」「202611」「11月」→ 那个月的最后一天。
+// 按对账金额导入时一个月就一条，记在月末：月报、对账单、账龄都落在正确的那一月。
+const monthEndOf = (input, baseMonth) => {
+  const s = String(input === null || input === undefined ? '' : input).trim().replace(/[年月\/._]/g, '-').replace(/-+$/, '')
+  let y = 0
+  let m = 0
+  let g = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (g) { y = num(g[1]); m = num(g[2]) }
+  if (!y) { g = s.match(/^(\d{4})-(\d{1,2})$/); if (g) { y = num(g[1]); m = num(g[2]) } }
+  if (!y) { g = s.match(/^(\d{4})(\d{2})$/); if (g) { y = num(g[1]); m = num(g[2]) } }
+  if (!y) { g = s.match(/^(\d{1,2})$/); if (g && baseMonth) { y = num(String(baseMonth).slice(0, 4)); m = num(g[1]) } }
+  if (!y || y < 1900 || y > 2999 || m < 1 || m > 12) return ''
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate()
+  return `${y}-${String(m).padStart(2, '0')}-${String(last).padStart(2, '0')}`
+}
 const equalPay = (p, rate, n) => {
   const i = num(rate) / 1200
   if (!n) return 0
@@ -2967,13 +3073,16 @@ app.delete('/credit-limits/:id', async (c) => {
 
 // ==================== 待摊费用（房租/保险等一次付多月，按月摊） ====================
 const PREPAID_CAT = '待摊费用'
-const amortPerMonth = (p) => round2(num(p.total) / Math.max(1, num(p.months)))
+// 付给房东的这几样都是「先付出去、以后按月用掉或退租收回」：
+// 厂房租金、宿舍租金、水费、电费按月摊；押金月数填 0，不摊、一直挂着（退租时收回）。
+const PREPAID_CATS = ['厂房租金', '宿舍租金', '水费', '电费', '押金', '其他']
+const amortPerMonth = (p) => (num(p.months) > 0 ? round2(num(p.total) / num(p.months)) : 0)
 const prepaidView = async (db, p) => {
-  const months = Math.max(1, num(p.months))
+  const months = num(p.months) > 0 ? num(p.months) : 0
   const start = (p.start_date || p.created_at || now()).slice(0, 10)
   const done = (await db.prepare("SELECT created_at FROM ledger WHERE ref_type='amort' AND ref_id=?").bind(p.id).all()).results
   const doneMonths = done.map((r) => (r.created_at || '').slice(0, 7))
-  const amortized = round2(amortPerMonth(p) * Math.min(months, doneMonths.length))
+  const amortized = months ? round2(amortPerMonth(p) * Math.min(months, doneMonths.length)) : 0
   let nextMonth = ''
   for (let k = 0; k < months; k += 1) {
     const m = monthOf(monthAdd(start, k))
@@ -2983,7 +3092,9 @@ const prepaidView = async (db, p) => {
     id: p.id, name: p.name || '', total: num(p.total), months, per_month: amortPerMonth(p),
     start_date: start, category: p.category || '', account_id: num(p.account_id), remark: p.remark || '',
     active: num(p.active) ? 'open' : 'closed', amortized, remain: round2(num(p.total) - amortized),
-    done_months: doneMonths.length, next_month: nextMonth, end_month: monthOf(monthAdd(start, months - 1))
+    deposit: months === 0,
+    done_months: doneMonths.length, next_month: nextMonth,
+    end_month: months ? monthOf(monthAdd(start, months - 1)) : ''
   }
 }
 
@@ -2994,7 +3105,8 @@ const runAmort = async (db) => {
   let amount = 0
   const today = now().slice(0, 10)
   for (const p of list) {
-    const months = Math.max(1, num(p.months))
+    const months = num(p.months) > 0 ? num(p.months) : 0
+    if (!months) continue // 押金这类不摊的，跳过
     const start = (p.start_date || p.created_at || today).slice(0, 10)
     const per = amortPerMonth(p)
     for (let k = 0; k < months; k += 1) {
@@ -3029,9 +3141,10 @@ app.post('/prepaids', async (c) => {
   const b = await c.req.json()
   const db = c.env.DB
   const total = num(b.total)
-  const months = Math.max(1, num(b.months))
+  // 月数 0 = 不摊销（押金这类：钱付出去了，但不算成本，退租时收回）
+  const months = Math.max(0, num(b.months))
   if (!(total > 0)) return c.json({ error: '总金额要大于 0' }, 400)
-  const cat = String(b.category || '房租').trim() || '房租'
+  const cat = String(b.category || '厂房租金').trim() || '厂房租金'
   const acc = num(b.account_id) || (await defaultAccountId(db))
   const start = String(b.start_date || now()).slice(0, 10)
   const r = await db.prepare('INSERT INTO prepaids (name, total, months, start_date, category, account_id, remark, active, created_at) VALUES (?,?,?,?,?,?,?,1,?)')
@@ -3039,9 +3152,9 @@ app.post('/prepaids', async (c) => {
   const id = r.meta && r.meta.last_row_id
   // 付款流水：现金流出，分类「待摊费用」（不算当月成本，按月摊）
   await db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,?,?,?,1,?)")
-    .bind(total, PREPAID_CAT, '预付 ' + String(b.name || cat) + '（' + months + ' 个月）', 'prepaid', id, acc, start).run()
-  const run = await runAmort(db)
-  return c.json({ ok: true, id, per_month: round2(total / months), amort: run })
+    .bind(total, PREPAID_CAT, '预付 ' + String(b.name || cat) + (months ? '（' + months + ' 个月）' : '（押金，不摊）'), 'prepaid', id, acc, start).run()
+  const run = months ? await runAmort(db) : { added: 0, amount: 0 }
+  return c.json({ ok: true, id, per_month: months ? round2(total / months) : 0, deposit: months === 0, amort: run })
 })
 
 app.patch('/prepaids/:id', async (c) => {
@@ -3633,7 +3746,7 @@ const parseImportRows = (type, text) => {
   const out = []
   for (const line of parseLines(text)) {
     const { names, nums, date } = splitLoose(line)
-    const row = { line, ok: false, error: '', party: '', item: '', amount: 0, cost: 0, category: '', date }
+    const row = { line, ok: false, error: '', party: '', item: '', amount: 0, cost: 0, category: '', months: 0, date }
     if (!names.length) { row.error = '没看懂这行（缺名字）'; out.push(row); continue }
     row.party = names[0]
     if (type === 'ar' || type === 'ar_init') {
@@ -3651,6 +3764,20 @@ const parseImportRows = (type, text) => {
       } else {
         row.item = names[1] || '期初欠款'
       }
+    } else if (type === 'ar_recon') {
+      // 贴「张老板 12800」就是这家这个月的对账金额
+      row.item = '月度对账'
+      row.amount = nums[0] || 0
+    } else if (type === 'ap_recon') {
+      row.amount = nums[0] || 0
+      const cat = apCatOf(names[1])
+      if (cat) { row.category = cat; row.item = names[2] || '月度对账' } else row.item = names[1] || '月度对账'
+    } else if (type === 'prepaid') {
+      // 「名称 金额 月数 分类」：月数 0 就是押金，不摊
+      row.amount = nums[0] || 0
+      row.months = Math.max(0, nums[1] || 0)
+      row.category = String(names[1] || '').trim()
+      row.item = names[2] || ''
     } else if (type === 'expense') {
       row.amount = nums[0] || 0
       row.category = names[0] || '其他'
@@ -3719,8 +3846,11 @@ app.post('/import-rows', async (c) => {
   const arr = rows.map((r) => {
     const date = r.date || ''
     if (type === 'ar') return [r.party, r.item || '批量导入', num(r.amount), num(r.cost) || '', date].filter((x, i) => !(i === 3 && (x === '' || x === 0)))
+    if (type === 'ar_recon') return [r.party, num(r.amount), date, r.item || '']
     if (type === 'ar_init') return [r.party, num(r.amount), date]
     if (type === 'ap') return [r.party, r.category || '', num(r.amount), r.item || '', date]
+    if (type === 'ap_recon') return [r.party, num(r.amount), r.category || '', date, r.item || '']
+    if (type === 'prepaid') return [r.party, num(r.amount), num(r.months), r.category || '', date, r.item || '']
     if (type === 'ap_init') return [r.party, num(r.amount)]
     if (type === 'expense') return [num(r.amount), r.category || '', r.item || '', date]
     if (type === 'loan') return [r.party, num(r.amount), r.item || '', date]
@@ -5818,6 +5948,28 @@ async function xlsxToRows(buf) {
       return xmlUnesc(ts.map((x) => x.replace(/<[^>]+>/g, '')).join(''))
     })
   }
+  // 哪些单元格样式是「日期」：只有日期格式的数字才按 Excel 序号转成 YYYY-MM-DD。
+  // 以前不看样式、见到 20000~60000 的数字就当日期，于是「押金 20000」被读成 1954-09-13、
+  // 「应付 30000」直接变成空值丢掉 —— 金额正好落在 2 万~6 万的文件都会中招。
+  const dateXf = new Set()
+  if (files['xl/styles.xml']) {
+    const st = dec.decode(files['xl/styles.xml'])
+    const custom = {}
+    for (const m of st.matchAll(/<numFmt[^>]*numFmtId="(\d+)"[^>]*formatCode="([^"]*)"/g)) {
+      custom[m[1]] = xmlUnesc(m[2])
+    }
+    const builtinDate = new Set(['14', '15', '16', '17', '18', '19', '20', '21', '22', '27', '30', '36', '45', '46', '47', '50', '57'])
+    const xfs = (st.match(/<cellXfs[\s>][\s\S]*?<\/cellXfs>/) || [''])[0]
+    let i = 0
+    for (const m of xfs.matchAll(/<xf[^>]*>/g)) {
+      const fid = (m[0].match(/numFmtId="(\d+)"/) || [])[1] || '0'
+      const code = custom[fid] || ''
+      // 自定义格式里带 y/m/d 的才算日期（m 单独出现是数字占位，得排除掉纯数字格式）
+      const isDate = builtinDate.has(fid) || (!!code && /[yd]/i.test(code) && !/^[#0.,%\s]+$/.test(code))
+      if (isDate) dateXf.add(String(i))
+      i++
+    }
+  }
   const sheet = dec.decode(files[sheets[0]])
   const rows = []
   for (const rx of sheet.match(/<row[\s>][\s\S]*?<\/row>/g) || []) {
@@ -5825,6 +5977,7 @@ async function xlsxToRows(buf) {
     for (const cx of rx.match(/<c[\s>][\s\S]*?<\/c>|<c[^>]*\/>/g) || []) {
       const ref = (cx.match(/r="([A-Z]+)\d+"/) || [])[1] || ''
       const ta = (cx.match(/t="([^"]+)"/) || [])[1] || ''
+      const sIdx = (cx.match(/ s="(\d+)"/) || [])[1] || ''
       let v = ''
       if (ta === 's') {
         const idx = Number((cx.match(/<v>([\s\S]*?)<\/v>/) || [])[1] || -1)
@@ -5835,7 +5988,7 @@ async function xlsxToRows(buf) {
         const raw = (cx.match(/<v>([\s\S]*?)<\/v>/) || [])[1]
         if (raw == null) v = ''
         else {
-          const iso = xlSerialToIso(raw)
+          const iso = dateXf.has(sIdx) ? xlSerialToIso(raw) : null
           v = iso || xmlUnesc(raw)
         }
       }
@@ -5968,13 +6121,19 @@ const apCatOf = (s) => {
 
 const IMPORT_TEMPLATES = {
   ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '成本(可空)', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['张老板', '外壳加工', 5000, 3000, '12-05', '小王', '11-05'], ['李老板', '法兰件', 3200, '', '', '', '']] },
+  // 按客户对账金额导入：一个月跟每个客户对一次账，一行就是一家，不用拆成一张张单。
+  ar_recon: { name: '应收对账导入模板（按客户对账金额）', rows: [['客户', '对账金额', '月份(可空)', '备注(可空)'], ['张老板', 12800, '2026-11', ''], ['李老板', 9600, '', '含打样费']] },
   ar_init: { name: '期初应收模板', rows: [['客户', '金额', '日期(可空)'], ['张老板', 5000, ''], ['李老板', 3000, '07-01']] },
   ap: { name: '应付导入模板', rows: [['供应商', '分类', '金额', '备注', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['某某化工', '硫酸', 2000, '98% 一吨', '11-30', '小王', '11-05'], ['某某染料行', '染料', 5000, '', '', '', ''], ['某某外协厂', '外发加工费', 8000, '这批外发', '', '', '']] },
+  // 按供应商 / 外发对账金额导入：同样一个月一行，外发就在分类里写「外发加工费」。
+  ap_recon: { name: '应付对账导入模板（按供应商/外发对账金额）', rows: [['供应商', '对账金额', '分类(可空)', '月份(可空)', '备注(可空)'], ['某某化工', 8600, '硫酸', '2026-11', ''], ['某某外协厂', 12000, '外发加工费', '', '这批外发']] },
   ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
   expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '经手人(可空)', '日期(可空)'], [1200, '房租', '8月房租', '', '11-01'], [300, '水电', '电费', '', '']] },
   loan: { name: '员工借支模板', rows: [['员工', '金额', '备注', '日期(可空)'], ['张三', 1000, '买辅料', '11-05'], ['李四', 500, '加油', '']] },
   recon: { name: '对账模板（客户/供应商对账单）', rows: [['单位', '金额'], ['张老板', 5000], ['李老板', 4000], ['王老板', 35000]] },
-  reimb: { name: '报销模板', rows: [['员工', '金额', '分类', '备注', '日期(可空)'], ['张三', 800, '采购', '买螺丝', '11-06'], ['张三', 200, '运费', '送货油费', '']] }
+  reimb: { name: '报销模板', rows: [['员工', '金额', '分类', '备注', '日期(可空)'], ['张三', 800, '采购', '买螺丝', '11-06'], ['张三', 200, '运费', '送货油费', '']] },
+  // 付房东的钱：租金/水电按月摊，押金月数填 0（不摊，退租收回）
+  prepaid: { name: '房东预付模板（租金/押金/水电）', rows: [['名称', '金额', '月数(0=押金不摊)', '分类', '起始日(可空)', '备注(可空)'], ['11月厂房租金', 12000, 1, '厂房租金', '2026-11-01', ''], ['宿舍押金', 6000, 0, '押金', '2026-11-01', '退租收回'], ['11月宿舍水电', 1800, 1, '水费', '', '宿舍表按人头分']] }
 }
 
 // 下载 Excel 模板（base64 返回，小程序存文件后可直接用 Excel/WPS 打开编辑）
@@ -5995,7 +6154,10 @@ app.get('/import-template-xlsx', async (c) => {
     // 应付模板第 2 列是「分类」，给个下拉，省得每天手打（也能自己写别的，写错不影响金额）
     dv = [{ sq: 'B2:B200', list: AP_CATS }]
   }
-  const xlsx = await makeXlsxSheets([{ name: t === 'expense' ? '支出' : t === 'reimb' ? '报销' : '导入', rows: T.rows, dv }])
+  if (t === 'ap_recon') dv = [{ sq: 'C2:C200', list: AP_CATS }]
+  if (t === 'prepaid') dv = [{ sq: 'D2:D200', list: PREPAID_CATS }]
+  const sheetName = t === 'expense' ? '支出' : t === 'reimb' ? '报销' : t === 'prepaid' ? '预付' : t === 'ar_recon' ? '应收对账' : t === 'ap_recon' ? '应付对账' : '导入'
+  const xlsx = await makeXlsxSheets([{ name: sheetName, rows: T.rows, dv }])
   return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx), dv: dv.length > 0 })
 })
 
@@ -6024,7 +6186,7 @@ async function previewImport(db, type, rawRows) {
     let dateGiven = false
     if (p.length > 1 && looksLikeDate(p[p.length - 1])) { d = toIsoDate(p.pop()); dateGiven = true }
     else if (type === 'ar_init' || type === 'ap_init') d = `${todayIso().slice(0, 4)}-01-01T00:00:00.000Z`
-    let party = '', item = '', amount = 0, cost = 0, category = '', extra = ''
+    let party = '', item = '', amount = 0, cost = 0, category = '', extra = '', months = 0
     if (type === 'ar') { const [c, it, pr, co, dueC, operC] = p; party = c || ''; item = it || ''; amount = num(pr); cost = num(co); extra = [dueC ? '到期 ' + dueC : '', operC ? '经手 ' + operC : ''].filter(Boolean).join(' ') }
     else if (type === 'ar_init' || type === 'ap_init') { const [c, pr] = p; party = c || ''; amount = num(pr) }
     else if (type === 'ap') {
@@ -6038,7 +6200,29 @@ async function previewImport(db, type, rawRows) {
     else if (type === 'expense') { const [am, cat, rm, operE] = p; amount = num(am); category = cat || ''; item = rm || ''; extra = operE ? '经手 ' + operE : '' }
     else if (type === 'loan') { const [sf, am, rm] = p; party = sf || ''; item = rm || ''; amount = num(am) }
     else if (type === 'reimb') { const [sf, am, cat, rm] = p; party = sf || ''; amount = num(am); category = cat || ''; item = rm || '' }
-    parsed.push({ party: String(party).trim(), item: String(item).trim(), amount: round2(amount), cost: round2(cost), category: String(category).trim(), date: (d || t).slice(0, 10), date_given: dateGiven, extra })
+    else if (type === 'ar_recon') {
+      // 按客户对账金额：客户, 对账金额, 月份(可空), 备注(可空)
+      const [c, am, mon, rm] = p
+      party = c || ''; amount = num(am); item = '月度对账'
+      const me = monthEndOf(mon, todayIso())
+      if (me) { d = me; dateGiven = true; extra = '记到 ' + me + '（' + me.slice(0, 7) + ' 月底）' }
+      if (rm) extra = (extra ? extra + ' ' : '') + String(rm)
+    }
+    else if (type === 'ap_recon') {
+      // 按供应商/外发对账金额：供应商, 对账金额, 分类(可空), 月份(可空), 备注(可空)
+      const [sp3, am, ct, mon, rm] = p
+      party = sp3 || ''; amount = num(am); category = apCatOf(ct) || String(ct || '').trim(); item = rm || '月度对账'
+      const me = monthEndOf(mon, todayIso())
+      if (me) { d = me; dateGiven = true; extra = '记到 ' + me + '（' + me.slice(0, 7) + ' 月底）' }
+    }
+    else if (type === 'prepaid') {
+      // 付房东：名称, 金额, 月数(0=押金不摊), 分类, 起始日(可空), 备注(可空)
+      const [nm, am, mo, ct, sd, rm] = p
+      party = nm || ''; amount = num(am); months = Math.max(0, num(mo)); category = String(ct || '').trim() || '厂房租金'; item = rm || ''
+      extra = num(mo) > 0 ? `${num(mo)} 个月，每月摊 ${round2(num(am) / num(mo))}` : '押金/不摊，钱挂在待摊里'
+      if (sd && looksLikeDate(sd)) { d = toIsoDate(sd); dateGiven = true }
+    }
+    parsed.push({ party: String(party).trim(), item: String(item).trim(), amount: round2(amount), cost: round2(cost), category: String(category).trim(), months: num(months), date: (d || t).slice(0, 10), date_given: dateGiven, extra })
   }
   // 一次把 7 天窗口内的老单据捞出来，避免逐行查库
   const dates = parsed.map((x) => x.date).filter(Boolean).sort()
@@ -6067,7 +6251,7 @@ async function previewImport(db, type, rawRows) {
     if (lockSet.has(m)) { r.locked = true; r.error = m + ' 已结账锁定，这一行导不进去' }
     if (r.ok && !r.locked) {
       const k = norm(x.party) + '|' + x.amount
-      const src = type === 'ar' ? iAr : type === 'ap' ? iAp : type === 'expense' ? iEx : null
+      const src = (type === 'ar' || type === 'ar_recon') ? iAr : (type === 'ap' || type === 'ap_recon') ? iAp : type === 'expense' ? iEx : null
       if (src) {
         const hit = (src[type === 'expense' ? norm(x.category) + '|' + x.amount : k] || []).find((d) => d >= addDaysIso(x.date, -7) && d <= x.date)
         if (hit) { r.dup = true; r.dup_text = `系统里 ${hit} 已经有一笔一样的（¥${x.amount}）` }
@@ -9388,6 +9572,58 @@ async function importRows(db, type, rows, opts) {
         total += num(amount)
         n++
       }
+    } else if (type === 'ar_recon') {
+      // 按客户对账金额：一家一条，记在月末。同客户同月同金额已经导过就跳过（一天导两遍不会翻倍）。
+      // 列序按模板：客户, 对账金额, 月份(可空), 备注(可空)
+      const [customer, price, mon, remark] = p
+      const me = monthEndOf(mon, todayIso())
+      if (me) d = me
+      if (customer && num(price) > 0) {
+        const mm = monthOf(d)
+        const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,7)=?").bind(customer, num(price), mm).first()
+        if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar_recon' }); continue }
+        const dueIso = await due(customer, d, 'ar')
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, created_at, import_batch) VALUES (?,?,?,0,0,0,?,?,?)')
+          .bind(customer, String(remark || '').trim() || '月度对账', num(price), dueIso || null, d, batch).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(price)
+        n++
+      }
+    } else if (type === 'ap_recon') {
+      // 按供应商/外发对账金额：一家一条，记在月末
+      // 列序按模板：供应商, 对账金额, 分类(可空), 月份(可空), 备注(可空)
+      const [supplier, amount, catIn, mon, remark] = p
+      const me = monthEndOf(mon, todayIso())
+      if (me) d = me
+      const category = apCatOf(catIn) || String(catIn || '').trim()
+      if (supplier && num(amount) > 0) {
+        const mm = monthOf(d)
+        const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,7)=?").bind(supplier, num(amount), mm).first()
+        if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap_recon' }); continue }
+        const dueIso = await due(supplier, d, 'ap')
+        const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, created_at, import_batch) VALUES (?,?,0,?,?,?,?,?)')
+          .bind(supplier, num(amount), category, String(remark || '').trim() || '月度对账', dueIso || null, d, batch).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += num(amount)
+        n++
+      }
+    } else if (type === 'prepaid') {
+      // 付房东：名称, 金额, 月数(0=押金不摊), 分类, 起始日(可空), 备注(可空)
+      const [nm, amount, months, cat, startIn, remark] = p
+      const amt = num(amount)
+      const mo = Math.max(0, num(months))
+      if (startIn && looksLikeDate(startIn)) d = toIsoDate(startIn)
+      if (nm && amt > 0) {
+        const accI = await accountId()
+        const w = await db.prepare('INSERT INTO prepaids (name, total, months, start_date, category, account_id, remark, active, created_at) VALUES (?,?,?,?,?,?,?,1,?)')
+          .bind(String(nm), amt, mo, (d || t).slice(0, 10), String(cat || '').trim() || '厂房租金', accI, String(remark || ''), now()).run()
+        const pid = w.meta && w.meta.last_row_id
+        if (pid) ids.push(pid)
+        await db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,?,?,?,1,?)")
+          .bind(amt, PREPAID_CAT, '预付 ' + String(nm) + (mo ? '（' + mo + ' 个月）' : '（押金，不摊）'), 'prepaid', pid, accI, d).run()
+        total += amt
+        n++
+      }
     } else if (type === 'ap_init') {
       const [supplier, amount] = p
       if (supplier && num(amount) > 0) {
@@ -9433,6 +9669,8 @@ async function importRows(db, type, rows, opts) {
       }
     }
   }
+  // 付房东的钱导完，按月摊一次（押金月数 0，不摊）
+  if (type === 'prepaid' && n) { try { await runAmort(db) } catch (e) { noteFail(e, '导入后摊销') } }
   await logAudit(db, '批量导入', type, `导入 ${n} 条${skippedLocked ? `，跳过锁定 ${skippedLocked} 条` : ''}${dups.length ? `，疑似重复 ${dups.length} 条未导入` : ''}`, '', o.by)
   return { imported: n, skipped_locked: skippedLocked, dup: dups, dup_count: dups.length, ids, total: round2(total), batch }
 }
@@ -13729,7 +13967,7 @@ const BACKUP_TABLES = BACKUP_CORE.concat([
   'material_moves', 'materials', 'month_archive', 'month_lock', 'net_snapshots', 'outsourcing',
   'party_profiles', 'party_staff', 'party_terms', 'phrases', 'process_log', 'quotes', 'recon_confirm',
   'recon_log', 'reworks', 'settings', 'statement_log', 'targets', 'track_log', 'transfers', 'trash',
-  'wage_pays', 'wage_rates', 'wage_records', 'writeoffs',
+  'wage_deduct', 'wage_pays', 'wage_rates', 'wage_records', 'writeoffs',
   'prepaids', 'bank_flows',
 ])
 // 不进备份的表：每一条都要写原因，/backup-verify 会把这张表原样列给用户看（不是悄悄漏）
@@ -13746,7 +13984,7 @@ const BACKUP_SKIP = [
   ['month_report', '月度报表存档是 xlsx 本体（base64），和照片一个道理，会把备份撑大']
 ]
 // 备份里的 month 列：orders/payables/ledger 有触发器自动补，别的表要恢复完手动补一遍，否则按月报表会缺这几块
-const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archive', 'recon_log', 'dunning_log', 'net_snapshots', 'recon_confirm', 'wage_records', 'wage_pays', 'reworks', 'bank_flows']
+const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archive', 'recon_log', 'dunning_log', 'net_snapshots', 'recon_confirm', 'wage_records', 'wage_pays', 'wage_deduct', 'reworks', 'bank_flows']
 // 口令这类东西不进备份文件，免得备份发出去把口令也带出去
 const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sign_secret', 'sealed', 'sealed_at', 'sealed_note']
 async function buildBackup(db) {

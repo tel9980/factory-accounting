@@ -91,6 +91,11 @@ jobs:
       # 名字里带数字（「王五金2店」）不能让金额悄悄变成 2 块。
       - name: 应付分类回归（模板下拉 / 老模板兼容 / 名字带数字）
         run: node scripts/test-apcat.mjs --base http://127.0.0.1:8791 --key 8888
+      # Excel 导入：应收按客户对账金额、应付按供应商/外发对账金额、房东租金押金走待摊。
+      # 顺带钉死一个老坑：读 xlsx 不看单元格格式时，20000~60000 的金额会被当成 Excel 日期序号，
+      # 「押金 20000」读成 1954-09-13、「应付 30000」直接变空丢掉。
+      - name: Excel 导入回归（对账金额 / 付房东押金 / 金额不被当日期）
+        run: node scripts/test-import-xlsx.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log
