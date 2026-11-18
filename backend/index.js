@@ -152,6 +152,7 @@ async function ensureBaseTables(db) {
     `CREATE TABLE IF NOT EXISTS writeoffs (id INTEGER PRIMARY KEY AUTOINCREMENT, ref_type TEXT NOT NULL, ref_id INTEGER NOT NULL DEFAULT 0, party TEXT DEFAULT '', amount REAL NOT NULL DEFAULT 0, reason TEXT DEFAULT '', created_at TEXT NOT NULL)`,
     'CREATE TABLE IF NOT EXISTS targets (month TEXT PRIMARY KEY, receive REAL DEFAULT 0, order_add REAL DEFAULT 0, created_at TEXT)',
     'CREATE TABLE IF NOT EXISTS credit_limits (id INTEGER PRIMARY KEY AUTOINCREMENT, party TEXT UNIQUE, limit_amount REAL DEFAULT 0, note TEXT DEFAULT \'\', created_at TEXT)',
+    'CREATE TABLE IF NOT EXISTS auth_fails (ip TEXT PRIMARY KEY, n INTEGER DEFAULT 0, first_at INTEGER DEFAULT 0, locked_until INTEGER DEFAULT 0)',
     'CREATE INDEX IF NOT EXISTS idx_debts_status ON debts(status)',
     'CREATE INDEX IF NOT EXISTS idx_debt_repays_debt ON debt_repays(debt_id)',
     'CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)',
@@ -182,6 +183,7 @@ async function ensureBaseTables(db) {
 // 2026-11 全接口扫 5xx 时抓到）。这里按「有就跳过、没有就 ALTER」的方式补齐，
 // 一个 isolate 只跑一次（_memoDdl 记忆），代价是几条 PRAGMA。
 const EXTRA_COLS = {
+  attachments: [['r2_key', 'TEXT']],
   statement_log: [['ack', "TEXT DEFAULT ''"], ['ack_at', 'TEXT'], ['resolved_at', 'TEXT']],
   orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT']],
   payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT']],
@@ -318,6 +320,118 @@ const getKey = async (db) => {
   return r ? String(r.value) : ''
 }
 
+// ==================== 口令存储与试错限制 ====================
+// 原来 access_key 是明文存 D1、直接字符串比较，而且没有任何频率限制：
+// 口令最少 4 位，4 位数字只有 1 万种，Worker 一秒能试上千次 —— 几分钟就能爆破。
+// 现在改成：存 s1$<salt>$<sha256>，老账本的明文口令在下次登录成功时自动升级（用户无感）；
+// 试错按 IP 计数，15 分钟内错 10 次锁 15 分钟。
+const KEY_PREFIX = 's1$'
+const randHex = (n = 16) => { const b = new Uint8Array(n); crypto.getRandomValues(b); return [...b].map((x) => x.toString(16).padStart(2, '0')).join('') }
+const hashKey = async (salt, key) => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ak|' + salt + '|' + String(key)))
+  return [...new Uint8Array(buf)].map((x) => x.toString(16).padStart(2, '0')).join('')
+}
+const makeKeyRecord = async (key) => { const salt = randHex(16); return KEY_PREFIX + salt + '$' + (await hashKey(salt, key)) }
+const isHashed = (v) => String(v || '').startsWith(KEY_PREFIX)
+// 定长比较，别让「错在第几位」从耗时上漏出去
+const safeEq = (a, b) => {
+  const x = String(a == null ? '' : a), y = String(b == null ? '' : b)
+  if (x.length !== y.length) return false
+  let d = 0
+  for (let i = 0; i < x.length; i++) d |= x.charCodeAt(i) ^ y.charCodeAt(i)
+  return d === 0
+}
+// 校验口令；老账本还是明文时，对上了顺手升级成哈希（并把签名密钥先种好，老打印链接不断）
+async function verifyKey(db, given) {
+  const saved = await getKey(db)
+  if (!saved || !given) return false
+  if (isHashed(saved)) {
+    const parts = saved.split('$')
+    if (parts.length !== 3) return false
+    return safeEq(await hashKey(parts[1], given), parts[2])
+  }
+  if (safeEq(String(given), saved)) {
+    try {
+      await seedSignSecret(db, saved)
+      await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(await makeKeyRecord(given)).run()
+    } catch (e) { noteFail(e, '口令升级') }
+    return true
+  }
+  return false
+}
+
+// 打印链接的签名密钥：以前直接拿口令当密钥，口令一改成哈希，已经发出去的链接会全失效。
+// 所以单独存一份 sign_secret，第一次用到时种进去（老账本先沿用明文口令，老链接继续有效）。
+let _signCache = null
+async function seedSignSecret(db, v) {
+  try { await db.prepare("INSERT OR IGNORE INTO settings (key,value) VALUES ('sign_secret',?)").bind(String(v)).run() } catch (e) {}
+}
+async function signSecret(db) {
+  if (_signCache && Date.now() - _signCache.at < 300000) return _signCache.v
+  let v = ''
+  try { const r = await db.prepare("SELECT value FROM settings WHERE key='sign_secret'").first(); v = r ? String(r.value) : '' } catch (e) { v = '' }
+  if (!v) {
+    const k = await getKey(db)
+    v = k && !isHashed(k) ? k : randHex(24)
+    await seedSignSecret(db, v)
+  }
+  _signCache = { v, at: Date.now() }
+  return v
+}
+
+const AUTH_MAX_FAIL = 10
+const AUTH_WINDOW_MS = 15 * 60 * 1000
+const AUTH_LOCK_MS = 10 * 60 * 1000
+async function authTable(db) {
+  await db.prepare('CREATE TABLE IF NOT EXISTS auth_fails (ip TEXT PRIMARY KEY, n INTEGER DEFAULT 0, first_at INTEGER DEFAULT 0, locked_until INTEGER DEFAULT 0)').run().catch(() => {})
+}
+const clientIp = (c) => String(c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown').split(',')[0].trim().slice(0, 60) || 'unknown'
+// 返回还要等几秒（0 = 没锁）
+// 每个请求都查一次 D1 太浪费，按 IP 在内存里记 30 秒：确认过没锁就不必再查。
+const _lockCache = new Map()
+async function authLocked(db, ip) {
+  const t = Date.now()
+  const hit = _lockCache.get(ip)
+  if (hit && t - hit.at < 30000) {   // 内存里最多信 30 秒，别让缓存和库里的状态对不上
+    if (hit.until > t) return Math.ceil((hit.until - t) / 1000)
+    if (!hit.until) return 0
+  }
+  try {
+    const r = await db.prepare('SELECT locked_until FROM auth_fails WHERE ip=?').bind(ip).first()
+    const until = r ? Number(r.locked_until) || 0 : 0
+    _lockCache.set(ip, { until, at: t })
+    return until > t ? Math.ceil((until - t) / 1000) : 0
+  } catch (e) { return 0 }
+}
+async function authFail(db, ip) {
+  try {
+    await authTable(db)
+    const t = Date.now()
+    const r = await db.prepare('SELECT n, first_at FROM auth_fails WHERE ip=?').bind(ip).first()
+    let n = 1, first = t
+    if (r) {
+      n = (Number(r.n) || 0) + 1
+      first = Number(r.first_at) || t
+      if (t - first > AUTH_WINDOW_MS) { n = 1; first = t }
+    }
+    const locked = n >= AUTH_MAX_FAIL ? t + AUTH_LOCK_MS : 0
+    await db.prepare('INSERT INTO auth_fails (ip,n,first_at,locked_until) VALUES (?,?,?,?) ON CONFLICT(ip) DO UPDATE SET n=excluded.n, first_at=excluded.first_at, locked_until=excluded.locked_until').bind(ip, n, first, locked).run()
+    _lockCache.set(ip, { until: locked, at: t })
+    _authDirty.add(ip)
+    return { n, locked: !!locked, left: Math.max(0, AUTH_MAX_FAIL - n) }
+  } catch (e) { return { n: 0, locked: false, left: AUTH_MAX_FAIL } }
+}
+// 只在「这个 IP 确实错过」的时候才写一次 DELETE —— 否则每个请求都写一次 D1，太贵
+const _authDirty = new Set()
+async function authOk(db, ip) {
+  if (!_authDirty.has(ip)) return
+  _authDirty.delete(ip)
+  _lockCache.delete(ip)
+  try { await db.prepare('DELETE FROM auth_fails WHERE ip=?').bind(ip).run() } catch (e) {}
+}
+// 试错太多时统一的 429 文案（口令、员工 PIN、恢复码共用一套）
+const tooMany = (sec) => ({ error: `试错太多次了，${Math.max(1, Math.ceil(sec / 60))} 分钟后再试（急着进去可以用「恢复码」重设口令，那条路不受这个限制）`, code: 'too_many', retry_after: sec })
+
 // 访问口令：首次设置 / 修改 / 校验
 app.post('/auth/setup', async (c) => {
   const { key } = await c.req.json()
@@ -326,7 +440,7 @@ app.post('/auth/setup', async (c) => {
   const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const existing = await getKey(db)
   if (existing) return c.json({ error: '口令已存在，请用修改功能' }, 400)
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(k).run()
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(await makeKeyRecord(k)).run()
   // 顺手给一个恢复码：忘了口令时能自救（只显示这一次）
   let code = ''
   try { code = await saveRecoverCode(db) } catch (e) { /* 忽略 */ }
@@ -338,10 +452,19 @@ app.post('/auth/change', async (c) => {
   const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(db)
   if (!saved) return c.json({ error: '尚未设置口令' }, 400)
-  if (String(old_key || '') !== saved) return c.json({ error: '旧口令不对' }, 403)
+  const ip = clientIp(c)
+  const wait = await authLocked(db, ip)
+  if (wait) return c.json(tooMany(wait), 429)
+  if (!(await verifyKey(db, old_key))) {
+    const f = await authFail(db, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return c.json({ error: '旧口令不对', code: 'bad_key', left: f.left }, 403)
+  }
+  await authOk(db, ip)
   const nk = String(new_key || '').trim()
   if (nk.length < 4) return c.json({ error: '新口令至少 4 位' }, 400)
-  await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(nk).run()
+  await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(await makeKeyRecord(nk)).run()
+  _signCache = null
   return c.json({ ok: true })
 })
 
@@ -401,7 +524,15 @@ app.post('/auth/recover-code', async (c) => {
   const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(db)
   if (!saved) return c.json({ error: '尚未设置口令', code: 'no_key' }, 400)
-  if (String(body.key || '') !== saved) return c.json({ error: '老板口令不对', code: 'bad_key' }, 403)
+  const ip = clientIp(c)
+  const wait = await authLocked(db, ip)
+  if (wait) return c.json(tooMany(wait), 429)
+  if (!(await verifyKey(db, body.key))) {
+    const f = await authFail(db, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return c.json({ error: '老板口令不对', code: 'bad_key', left: f.left }, 403)
+  }
+  await authOk(db, ip)
   const code = await saveRecoverCode(db)
   await logAudit(db, '重设恢复码', '口令', '生成了新的恢复码')
   return c.json({ ok: true, code })
@@ -436,7 +567,8 @@ app.post('/auth/recover', async (c) => {
     return c.json({ error: `恢复码不对（还能试 ${8 - n} 次）`, code: 'bad_code', left: 8 - n }, 403)
   }
   if (pw.length < 4) return c.json({ error: '新口令至少 4 位', code: 'bad_password' }, 400)
-  await setSettingRaw(db, 'access_key', pw)
+  await setSettingRaw(db, 'access_key', await makeKeyRecord(pw))
+  _signCache = null
   await delSettingRaw(db, 'recover_fail')
   await delSettingRaw(db, 'recover_lock')
   await logAudit(db, '用恢复码重设口令', '口令', '恢复码验证通过，口令已重设').catch(() => {})
@@ -456,10 +588,10 @@ app.post('/auth/staff', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   if (!saved) return c.json({ error: '尚未设置老板口令' }, 400)
-  if (String(key || '') !== saved) return c.json({ error: '只有老板口令能设员工口令' }, 403)
+  if (!(await verifyKey(mainDb, key))) return c.json({ error: '只有老板口令能设员工口令' }, 403)
   const pw = String(password || '').trim()
   if (pw && pw.length < 4) return c.json({ error: '员工口令至少 4 位' }, 400)
-  if (pw && pw === saved) return c.json({ error: '员工口令不能和老板口令一样' }, 400)
+  if (pw && (await verifyKey(mainDb, pw))) return c.json({ error: '员工口令不能和老板口令一样' }, 400)
   const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
   if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_key'").bind(pw).run()
   else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_key', ?)").bind(pw).run()
@@ -472,7 +604,7 @@ app.post('/auth/staff-off', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   if (!saved) return c.json({ error: '尚未设置老板口令' }, 400)
-  if (String(b.key || '') !== saved) return c.json({ error: '只有老板口令能停用员工口令' }, 403)
+  if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板口令能停用员工口令' }, 403)
   const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
   if (!old || !old.value) return c.json({ ok: true, enabled: false, note: '本来就没开员工口令' })
   await mainDb.prepare("DELETE FROM settings WHERE key='staff_key'").run()
@@ -598,7 +730,9 @@ app.get('/access-guide', async (c) => {
 })
 
 // 打印链接签名（不暴露访问口令）
-const sigOf = async (key, party, type) => {
+const sigOf = async (keyOrDb, party, type) => {
+  // 传 db 就自己取签名密钥（sign_secret），传字符串就按老办法直接用
+  const key = keyOrDb && typeof keyOrDb === 'object' ? await signSecret(keyOrDb) : String(keyOrDb || '')
   const data = new TextEncoder().encode(String(key) + '|' + String(party) + '|' + String(type))
   const buf = await crypto.subtle.digest('SHA-256', data)
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20)
@@ -613,10 +747,13 @@ app.use('*', async (c, next) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   if (!saved) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
+  const ip = clientIp(c)
+  const wait = await authLocked(mainDb, ip)
+  if (wait) return c.json(tooMany(wait), 429)
   const given = String(c.req.header('x-access-key') || '')
   let role = ''
   let staffMods = null
-  if (given && given === saved) role = 'owner'
+  if (given && (await verifyKey(mainDb, given))) role = 'owner'
   else if (given) {
     // 一人一个口令：认到人就按这个人的名字和权限走
     let su = null
@@ -630,7 +767,12 @@ app.use('*', async (c, next) => {
       if (staff && given === staff) role = 'staff'
     }
   }
-  if (!role) return c.json({ error: '访问口令错误', code: 'bad_key' }, 401)
+  if (!role) {
+    const f = await authFail(mainDb, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return c.json({ error: '访问口令错误', code: 'bad_key', left: f.left }, 401)
+  }
+  await authOk(mainDb, ip)
   // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
   if (role === 'staff') {
     const m = c.req.method
@@ -869,6 +1011,19 @@ app.get('/supply-price', async (c) => {
 })
 
 // 单据照片：送货单、验收单、发票、微信转账截图，直接拍一张存着（压缩后存，一张几十 KB）
+// base64 ↔ 字节：分段处理，一张 650KB 的图一次性 apply 会把调用栈打爆
+const bytesToB64 = (bytes) => {
+  let s = ''
+  const CH = 0x8000
+  for (let i = 0; i < bytes.length; i += CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH))
+  return btoa(s)
+}
+const b64ToBytes = (b64) => {
+  const bin = atob(String(b64 || ''))
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
 const ATT_MAX_CHARS = 900000   // 单张 base64 上限（约 650KB）
 const ATT_TYPES = ['order', 'payable', 'asset', 'expense']
 app.post('/attachments', async (c) => {
@@ -885,8 +1040,24 @@ app.post('/attachments', async (c) => {
   if (num(cnt && cnt.n) >= 6) return c.json({ error: '这一单已经存了 6 张，够用了（想换就先删一张）' }, 400)
   const name = String(b.name || '照片').slice(0, 40)
   const mime = String(b.mime || 'image/jpeg').slice(0, 30)
-  const r = await db.prepare('INSERT INTO attachments (ref_type, ref_id, name, mime, size, b64, created_at) VALUES (?,?,?,?,?,?,?)')
-    .bind(refType, refId, name, mime, b64.length, b64, now()).run()
+  // 有 R2 绑定就存对象存储（D1 按行存 base64 又贵又占读行数），没绑定就照旧存库里，
+  // 老账本/没开 R2 的部署行为完全不变。取回时统一转回 base64，接口形状不变。
+  let r2Key = ''
+  let b64Store = b64
+  const bucket = c.env.ATTACH
+  if (bucket && typeof bucket.put === 'function') {
+    try {
+      r2Key = 'att/' + refType + '/' + refId + '/' + Date.now() + '-' + randHex(6)
+      await bucket.put(r2Key, b64ToBytes(b64), { httpMetadata: { contentType: mime } })
+      b64Store = ''
+    } catch (e) {
+      noteFail(e, '照片存 R2')
+      r2Key = ''
+      b64Store = b64
+    }
+  }
+  const r = await db.prepare('INSERT INTO attachments (ref_type, ref_id, name, mime, size, b64, r2_key, created_at) VALUES (?,?,?,?,?,?,?,?)')
+    .bind(refType, refId, name, mime, b64.length, b64Store, r2Key, now()).run()
   const id = r.meta && r.meta.last_row_id ? num(r.meta.last_row_id) : 0
   await logAudit(db, '存单据照片', refType, refType + ' #' + refId + ' 加了照片「' + name + '」', String(refId), act(c))
   return c.json({ ok: true, id, kb: Math.round(b64.length / 1365) })
@@ -903,13 +1074,22 @@ app.get('/attachment/:id', async (c) => {
   const db = c.env.DB
   const a = await db.prepare('SELECT * FROM attachments WHERE id=?').bind(num(c.req.param('id'))).first()
   if (!a) return c.json({ error: '照片不在了' }, 404)
-  return c.json({ ok: true, id: num(a.id), name: a.name, mime: a.mime, b64: a.b64, day: String(a.created_at || '').slice(0, 10) })
+  let b64 = String(a.b64 || '')
+  if (!b64 && a.r2_key && c.env.ATTACH) {
+    try {
+      const obj = await c.env.ATTACH.get(String(a.r2_key))
+      if (obj) b64 = bytesToB64(new Uint8Array(await obj.arrayBuffer()))
+    } catch (e) { noteFail(e, '照片取 R2') }
+  }
+  if (!b64) return c.json({ error: '照片本体找不到了（可能没上传成功），删了重拍一张' }, 404)
+  return c.json({ ok: true, id: num(a.id), name: a.name, mime: a.mime, b64, day: String(a.created_at || '').slice(0, 10) })
 })
 app.delete('/attachment/:id', async (c) => {
   const db = c.env.DB
   const id = num(c.req.param('id'))
   const a = await db.prepare('SELECT * FROM attachments WHERE id=?').bind(id).first()
   if (!a) return c.json({ error: '照片不在了' }, 404)
+  if (a.r2_key && c.env.ATTACH) { try { await c.env.ATTACH.delete(String(a.r2_key)) } catch (e) { noteFail(e, '删 R2 照片') } }
   await db.prepare('DELETE FROM attachments WHERE id=?').bind(id).run()
   await logAudit(db, '删单据照片', a.ref_type, '删了照片「' + a.name + '」', String(a.ref_id), act(c))
   return c.json({ ok: true })
@@ -933,6 +1113,10 @@ async function matTable(db) {
     note TEXT DEFAULT '', by TEXT DEFAULT '', created_at TEXT NOT NULL
   )`).run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_mat_move_mat ON material_moves(material, month)').run()
+  // 领料流水是「某物料 + 按日期倒序」查的，(material, date) 复合索引能直接顺着索引取，不用再临时排序
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_mat_move_mat_date ON material_moves(material, date)').run()
+  // orders.status 是最常用的过滤条件之一（待加工/加工中/已交付），没有索引时 EXPLAIN 是 SCAN orders
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)').run()
 }
 app.get('/materials', async (c) => {
   const db = c.env.DB
@@ -1808,7 +1992,7 @@ app.get('/payroll-link', async (c) => {
   const saved = await getKey(mainDb)
   const mm = String(c.req.query('month') || now().slice(0, 7))
   const base = new URL(c.req.url).origin
-  const t = await sigOf(saved, 'payroll', 'wage:' + mm)
+  const t = await sigOf(mainDb, 'payroll', 'wage:' + mm)
   return c.json({ ok: true, month: mm, url: `${base}/payroll-print?month=${mm}&t=${t}` })
 })
 
@@ -1819,7 +2003,7 @@ app.get('/payroll-print', async (c) => {
   const t = String(c.req.query('t') || '')
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
-  const good = t && t === (await sigOf(saved, 'payroll', 'wage:' + mm))
+  const good = t && t === (await sigOf(mainDb, 'payroll', 'wage:' + mm))
   if (!good) return c.html(a4Page({ title: '链接已失效', body: '<h1>链接已失效</h1><p>工资单链接是绑月份的，月份变了或链接被改过就打不开了。回小程序重新点「打工资单」。</p>' }))
   const p = await payrollOf(db, mm)
   const head = await getTitle(db)
@@ -1973,7 +2157,7 @@ app.get('/statement-batch', async (c) => {
     if (left <= 0.005) continue
     const due = r.first_due ? String(r.first_due).slice(0, 10) : ''
     const over = due && due < today ? daysSince(due) : 0
-    const t = saved ? await sigOf(saved, r.party, type) : ''
+    const t = saved ? await sigOf(mainDb, r.party, type) : ''
     const url = t ? base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(r.party || '') + '&t=' + t : ''
     const newAmt = round2(num(newMap[r.party]))
     const lines = isAr
@@ -2013,7 +2197,7 @@ app.get('/statement-link', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
   if (!party) return c.json({ error: '缺少对账单位' }, 400)
-  const t = await sigOf(saved, party, type)
+  const t = await sigOf(mainDb, party, type)
   const base = new URL(c.req.url).origin
   const url = base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(party) + '&t=' + t
   return c.json({ ok: true, url })
@@ -2026,7 +2210,7 @@ app.get('/track-link', async (c) => {
   const saved = await getKey(mainDb)
   const party = String(c.req.query('party') || '').trim()
   if (!party) return c.json({ error: '缺少客户名' }, 400)
-  const t = await sigOf(saved, party, 'track')
+  const t = await sigOf(mainDb, party, 'track')
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/track?party=' + encodeURIComponent(party) + '&t=' + t })
 })
@@ -2037,7 +2221,7 @@ app.get('/track', async (c) => {
   const saved = await getKey(mainDb)
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
-  const good = saved && party ? await sigOf(saved, party, 'track') : ''
+  const good = saved && party ? await sigOf(mainDb, party, 'track') : ''
   if (!good || want !== good) return c.html('<meta name="viewport" content="width=device-width,initial-scale=1"><div style="padding:24px;font-size:16px;line-height:1.8">链接已失效：请让对方在小程序里重新发一次进度链接。</div>')
   const t = await getTitle(db)
   const docs = await db.prepare('SELECT * FROM orders WHERE customer=? ORDER BY id DESC LIMIT 40').bind(party).all().then((r) => r.results)
@@ -2222,7 +2406,7 @@ async function handoverData(db, env) {
 app.get('/handover', async (c) => {
   const d = await handoverData(c.env.DB, c.env)
   const saved = await getKey((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
-  const t = saved ? await sigOf(saved, 'handover', 'ho') : ''
+  const t = saved ? await sigOf((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, 'handover', 'ho') : ''
   const base = new URL(c.req.url).origin
   return c.json({ ...d, url: t ? base + '/handover-print?t=' + t : '' })
 })
@@ -2247,7 +2431,7 @@ app.get('/handover-print', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'handover', 'ho') : ''
+  const good = saved ? await sigOf(mainDb, 'handover', 'ho') : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成交接包。</h3>')
   const d = await handoverData(db, c.env)
   const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -2306,7 +2490,7 @@ app.get('/statement-print', async (c) => {
   const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
   // 链接里带签名，不含口令本身（口令泄露风险）
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, party, type) : ''
+  const good = saved ? await sigOf(mainDb, party, type) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印版」生成新链接。</h3>')
   if (!party) return c.html('<h3>缺少对账单位。</h3>')
   const today = now().slice(0, 10)
@@ -3045,7 +3229,7 @@ app.get('/report-link', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const mm = String(c.req.query('month') || month()).slice(0, 7)
-  const t = await sigOf(saved, 'report:' + mm, 'rp')
+  const t = await sigOf(mainDb, 'report:' + mm, 'rp')
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t })
 })
@@ -3060,7 +3244,7 @@ app.get('/order-print-link', async (c) => {
   const row = await db.prepare('SELECT id FROM orders WHERE id=?').bind(id).first()
   if (!row) return c.json({ error: '没找到这张单' }, 404)
   if (!saved) return c.json({ error: '先设访问口令才能生成打印页' }, 400)
-  const t = await sigOf(saved, String(id), 'order')
+  const t = await sigOf(mainDb, String(id), 'order')
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/order-print?id=' + id + '&t=' + t })
 })
@@ -3071,7 +3255,7 @@ app.get('/order-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const good = saved && id ? await sigOf(saved, String(id), 'order') : ''
+  const good = saved && id ? await sigOf(mainDb, String(id), 'order') : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印加工单」生成新链接。</h3>')
   const d = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!d) return c.html('<h3>没找到这张单。</h3>')
@@ -3113,7 +3297,7 @@ app.get('/report-print', async (c) => {
   const mm = String(c.req.query('month') || month()).slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.html('<h3>月份格式不对（应为 2026-11）</h3>')
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'report:' + mm, 'rp') : ''
+  const good = saved ? await sigOf(mainDb, 'report:' + mm, 'rp') : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印报表」生成新链接。</h3>')
   const head = await getTitle(db)
   const snap = await snapOf(db, mm)
@@ -3726,7 +3910,7 @@ app.get('/recon-print-link', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   if (!party) return c.json({ error: '缺少对账单位' }, 400)
-  const t = await sigOf(saved, party, 'recon:' + month + ':' + type)
+  const t = await sigOf(mainDb, party, 'recon:' + month + ':' + type)
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/recon-print?type=' + type + '&month=' + month + '&party=' + encodeURIComponent(party) + '&t=' + t })
 })
@@ -3740,7 +3924,7 @@ app.get('/recon-print', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   const want = String(c.req.query('t') || '')
-  const good = saved && party ? await sigOf(saved, party, 'recon:' + month + ':' + type) : ''
+  const good = saved && party ? await sigOf(mainDb, party, 'recon:' + month + ':' + type) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成对账确认单。</h3>')
   const o = await conclusionOf(db, type, party, month)
   const title = await getTitle(db)
@@ -7375,7 +7559,7 @@ app.post('/quotes/:id/send', async (c) => {
   const r = await qGet(db, id)
   if (!r) return c.json({ error: '报价单不存在' }, 404)
   const saved = await getKey(mainDb)
-  const t = saved ? await sigOf(saved, 'quote', 'q:' + id) : ''
+  const t = saved ? await sigOf(mainDb, 'quote', 'q:' + id) : ''
   const at = now()
   await db.prepare("UPDATE quotes SET status='sent', token=?, sent_at=? WHERE id=?").bind(t, at, id).run()
   const base = c.req.url.split('/quotes/')[0]
@@ -7392,7 +7576,7 @@ app.get('/quote-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const good = saved && id ? await sigOf(saved, 'quote', 'q:' + id) : ''
+  const good = saved && id ? await sigOf(mainDb, 'quote', 'q:' + id) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请让对方重新发一次报价。</h3>')
   const r = await qGet(db, id)
   if (!r) return c.html('<h3>这份报价已经不在了。</h3>')
@@ -7439,7 +7623,7 @@ app.post('/quote-ack', async (c) => {
   const id = num(b.id)
   const want = String(b.t || '')
   const saved = await getKey(mainDb)
-  const good = saved && id ? await sigOf(saved, 'quote', 'q:' + id) : ''
+  const good = saved && id ? await sigOf(mainDb, 'quote', 'q:' + id) : ''
   if (!good || want !== good) return c.json({ error: '链接已失效，请让老板重发' }, 403)
   const r = await qGet(db, id)
   if (!r) return c.json({ error: '这份报价已经不在了' }, 404)
@@ -8960,7 +9144,7 @@ app.get('/recon-calendar', async (c) => {
     r.send_text = r.left > 0
       ? `${r.party}，对一下账：到 ${today}，还有 ${n} 笔${r.kind === 'ap' ? '货款' : '加工费'}没结，共 ${r.left} 元。明细我发你对账单，方便的话今天核一下，有出入随时说。`
       : `${r.party}，${today} 对一下账：这边账上你这边的款都结清了，你看有没有对不上的地方。`
-    const t = saved ? await sigOf(saved, r.party, r.kind) : ''
+    const t = saved ? await sigOf(mainDb, r.party, r.kind) : ''
     r.url = t ? `${base}/statement-print?type=${r.kind}&party=${encodeURIComponent(r.party)}&t=${t}` : ''
   }
   const pick = (st) => rows.filter((r) => r.state === st)
@@ -9937,7 +10121,7 @@ app.get('/statement-ack-link', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const party = String(c.req.query('party') || '').trim()
   if (!party) return c.json({ error: '要指定是哪一家' }, 400)
-  const t = await sigOf(saved, party, 'ack:' + type)
+  const t = await sigOf(mainDb, party, 'ack:' + type)
   const base = new URL(c.req.url).origin
   const m = String(c.req.query('month') || '').slice(0, 7)
   return c.json({ ok: true, url: base + '/statement-ack?type=' + type + '&party=' + encodeURIComponent(party) + (m ? '&month=' + m : '') + '&t=' + t })
@@ -9951,7 +10135,7 @@ app.get('/statement-ack', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
   const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigOf(saved, party, 'ack:' + type) : ''
+  const good = saved && party ? await sigOf(mainDb, party, 'ack:' + type) : ''
   if (!good || want !== good) return c.html(ackPage('<div class="card"><h3>链接已失效</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
   const t = await getTitle(db)
   const d = await conclusionOf(db, type, party, month)
@@ -9994,7 +10178,7 @@ app.post('/statement-ack', async (c) => {
   const type = b.type === 'ap' ? 'ap' : 'ar'
   const party = String(b.party || '').trim()
   const month = String(b.month || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigOf(saved, party, 'ack:' + type) : ''
+  const good = saved && party ? await sigOf(mainDb, party, 'ack:' + type) : ''
   if (!good || String(b.t || '') !== good) return c.json({ error: '链接已失效，请让老板重新发一次' }, 403)
   const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
   const amt = round2(num(b.amount))
@@ -10823,7 +11007,7 @@ app.get('/year-review-print-link', async (c) => {
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
   const saved = await getKey(c.env.DB)
-  const t = saved ? await sigOf(saved, 'yearreview', 'yr:' + y) : ''
+  const t = saved ? await sigOf((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, 'yearreview', 'yr:' + y) : ''
   return c.json({ ok: true, url: `${c.req.url.split('/year-review-print-link')[0]}/year-review-print?year=${encodeURIComponent(y)}&t=${encodeURIComponent(t)}`, year: y })
 })
 
@@ -10833,7 +11017,7 @@ app.get('/year-review-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'yearreview', 'yr:' + y) : ''
+  const good = saved ? await sigOf(mainDb, 'yearreview', 'yr:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度回顾。</h3>')
   const d = await yearReview(db, y)
   const t = await getTitle(db)
@@ -11099,7 +11283,7 @@ app.get('/year-close-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigOf(saved, 'year', 'yc:' + y)
+  const t = await sigOf(mainDb, 'year', 'yc:' + y)
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/year-close-print?year=' + y + '&t=' + t })
 })
@@ -11110,7 +11294,7 @@ app.get('/year-close-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'year', 'yc:' + y) : ''
+  const good = saved ? await sigOf(mainDb, 'year', 'yc:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度封账单。</h3>')
   const d = await yearBook(db, y)
   const s = await yearCloseScan(db, y)
@@ -11143,7 +11327,7 @@ app.get('/year-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigOf(saved, 'year', 'yb:' + y)
+  const t = await sigOf(mainDb, 'year', 'yb:' + y)
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/year-print?year=' + y + '&t=' + t })
 })
@@ -11154,7 +11338,7 @@ app.get('/year-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'year', 'yb:' + y) : ''
+  const good = saved ? await sigOf(mainDb, 'year', 'yb:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度总账打印页。</h3>')
   const d = await yearBook(db, y)
   const t = await getTitle(db)
@@ -11270,7 +11454,7 @@ app.get('/year-open-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigOf(saved, 'yearopen', 'yo:' + y)
+  const t = await sigOf(mainDb, 'yearopen', 'yo:' + y)
   const base = new URL(c.req.url).origin
   return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t })
 })
@@ -11281,7 +11465,7 @@ app.get('/year-open-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'yearopen', 'yo:' + y) : ''
+  const good = saved ? await sigOf(mainDb, 'yearopen', 'yo:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成结转凭据。</h3>')
   const d = await yearOpenData(db, y)
   const t = await getTitle(db)
@@ -12133,7 +12317,7 @@ app.get('/health-check', async (c) => {
 
 // 体检报告单：分数曲线 + 每项问题的发现/修好日期 + 一句结论（可打印）
 const HB_BLK = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
-async function healthReport(db, days, savedKey) {
+async function healthReport(db, days) {
   const s = await healthScan(db)
   const pts = (s.hist || []).filter((x) => x && x.d).slice(-days).map((x) => ({ d: x.d, s: num(x.s) }))
   const first = pts[0] || null
@@ -12158,7 +12342,7 @@ async function healthReport(db, days, savedKey) {
     sentences.push(`还剩 ${open.length} 处没改，最老的是「${worst1.label}」，${daysTxt(worst1.days_open)}${worst1.tip ? '（' + worst1.tip + '）' : ''}。`)
   }
   if (!s.empty && !open.length) sentences.push('该改的都改完了，账本现在是干净的。')
-  const url = savedKey ? '/health-print?days=' + days + '&t=' + (await sigOf(savedKey, 'health', 'hr:' + days)) : ''
+  const url = '/health-print?days=' + days + '&t=' + (await sigOf(db, 'health', 'hr:' + days))
   return {
     ok: true, at: now(), days, score: s.score, grade: s.grade, empty: s.empty, clean: s.clean, count: s.count,
     delta, first, last: lastP, best, worst, points: pts, spark,
@@ -12173,7 +12357,7 @@ app.get('/health-report', async (c) => {
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
-  return c.json(await healthReport(c.env.DB, days, saved))
+  return c.json(await healthReport(c.env.DB, days))
 })
 
 app.get('/health-print', async (c) => {
@@ -12182,9 +12366,9 @@ app.get('/health-print', async (c) => {
   const saved = await getKey(mainDb)
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(saved, 'health', 'hr:' + days) : ''
+  const good = saved ? await sigOf(mainDb, 'health', 'hr:' + days) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成体检报告单。</h3>')
-  const r = await healthReport(db, days, saved)
+  const r = await healthReport(db, days)
   const t = await getTitle(db)
   const tr = (x) => `<tr><td>${escHtml(x.label)}</td><td class="n">${x.count > 0 ? '还有 ' + x.count + ' 处' : '正常'}</td><td>${escHtml(x.since || '')}</td><td>${x.count > 0 ? daysTxtPrint(x.days_open) : (x.fixed ? '已修好' : '')}</td><td>${escHtml(x.fixed || '')}</td><td>${escHtml(x.count > 0 ? (x.tip || '') : '')}</td></tr>`
   const rows = r.items.map(tr).join('')
@@ -12983,11 +13167,14 @@ app.delete('/profiles/:id', async (c) => {
 
 app.get('/contacts', async (c) => {
   const db = c.env.DB
+  // 两家大表全量 GROUP BY 再全量返回，客户多了以后小程序一次渲染几千行会卡；
+  // 按欠款倒序取前 500 家（真正会去看的就是「欠我钱最多的那些」）。
+  const LIMIT = 500
   const ar = await db.prepare(
-    "SELECT customer AS name, SUM(price) AS total, SUM(paid) AS paid, SUM(price-paid-COALESCE(written_off,0)) AS unpaid, COUNT(*) AS cnt FROM orders GROUP BY customer ORDER BY unpaid DESC"
+    `SELECT customer AS name, SUM(price) AS total, SUM(paid) AS paid, SUM(price-paid-COALESCE(written_off,0)) AS unpaid, COUNT(*) AS cnt FROM orders GROUP BY customer ORDER BY unpaid DESC LIMIT ${LIMIT}`
   ).all()
   const ap = await db.prepare(
-    "SELECT supplier AS name, SUM(amount) AS total, SUM(paid) AS paid, SUM(amount-paid-COALESCE(written_off,0)) AS unpaid, COUNT(*) AS cnt FROM payables GROUP BY supplier ORDER BY unpaid DESC"
+    `SELECT supplier AS name, SUM(amount) AS total, SUM(paid) AS paid, SUM(amount-paid-COALESCE(written_off,0)) AS unpaid, COUNT(*) AS cnt FROM payables GROUP BY supplier ORDER BY unpaid DESC LIMIT ${LIMIT}`
   ).all()
   return c.json({
     ar: ar.results.map((r) => ({ ...r, total: round2(r.total), paid: round2(r.paid), unpaid: round2(r.unpaid) })),
@@ -13062,6 +13249,7 @@ const BACKUP_TABLES = BACKUP_CORE.concat([
 ])
 // 不进备份的表：每一条都要写原因，/backup-verify 会把这张表原样列给用户看（不是悄悄漏）
 const BACKUP_SKIP = [
+  ['auth_fails', '口令试错计数，临时数据，不用备份'],
   ['backups', '备份自己，不套娃'],
   ['attachments', '单据照片是图片本体，一张几百 KB，塞进每日快照会把备份撑爆（照片在单据明细里单独看）'],
   ['staff_users', '存员工口令 PIN，和其它口令一样不出本机'],
@@ -13075,7 +13263,7 @@ const BACKUP_SKIP = [
 // 备份里的 month 列：orders/payables/ledger 有触发器自动补，别的表要恢复完手动补一遍，否则按月报表会缺这几块
 const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archive', 'recon_log', 'dunning_log', 'net_snapshots', 'recon_confirm', 'wage_records', 'wage_pays', 'reworks', 'bank_flows']
 // 口令这类东西不进备份文件，免得备份发出去把口令也带出去
-const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sealed', 'sealed_at', 'sealed_note']
+const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sign_secret', 'sealed', 'sealed_at', 'sealed_note']
 async function buildBackup(db) {
   const out = { exported_at: now(), version: 3 }
   for (const t of BACKUP_TABLES) {
@@ -13260,7 +13448,7 @@ async function restoreCore(db, data, opts) {
       const cols = info.map((x) => x.name)
       if (!cols.length) continue
       const st = [t === 'settings'
-        ? db.prepare("DELETE FROM settings WHERE key NOT IN ('access_key','staff_key','sealed','sealed_at','sealed_note')")
+        ? db.prepare("DELETE FROM settings WHERE key NOT IN ('access_key','staff_key','sign_secret','sealed','sealed_at','sealed_note')")
         : db.prepare('DELETE FROM ' + t)]
       for (const r of rows) {
         if (t === 'settings' && BACKUP_SETTINGS_SKIP.includes(String(r.key))) continue
@@ -13369,7 +13557,7 @@ app.get('/backup-verify', async (c) => {
   // 一次 batch 拿全部行数（43 张表逐个 await 要 1–2 秒，batch 一个来回就够）
   const probe = ALL.concat(BACKUP_SKIP.map((x) => x[0]))
   const cntStmt = (t) => (t === 'settings'
-    ? db.prepare("SELECT COUNT(*) n FROM settings WHERE key NOT IN ('access_key','staff_key','sealed','sealed_at','sealed_note')")
+    ? db.prepare("SELECT COUNT(*) n FROM settings WHERE key NOT IN ('access_key','staff_key','sign_secret','sealed','sealed_at','sealed_note')")
     : db.prepare('SELECT COUNT(*) n FROM ' + t))
   try {
     const rs = await db.batch(probe.map(cntStmt))
@@ -15026,6 +15214,14 @@ export default {
         await db.prepare('DELETE FROM trash WHERE deleted_at < ?').bind(cutoff).run()
       } catch (e) {
         console.error('scheduled trash-clean failed book' + bid, e)
+      }
+      try {
+        // 「谁改了什么」的审计流水留 180 天：再久也没人翻，但表会一直长，
+        // 每次 /audit-log 都要 ORDER BY id DESC 扫一遍。半年够查任何一笔账的来路。
+        const acut = new Date(Date.now() + TZ_MS - 180 * 86400000).toISOString().slice(0, 10)
+        await db.prepare('DELETE FROM audit_log WHERE substr(created_at,1,10) < ?').bind(acut).run()
+      } catch (e) {
+        console.error('scheduled audit-clean failed book' + bid, e)
       }
     }
     // 笔记站只同步主账套

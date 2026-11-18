@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_month ON orders(month);
 CREATE INDEX IF NOT EXISTS idx_orders_deliver ON orders(deliver_date);
 CREATE INDEX IF NOT EXISTS idx_orders_by ON orders(created_by);
@@ -362,7 +363,8 @@ CREATE TABLE IF NOT EXISTS assets (
 CREATE TABLE IF NOT EXISTS attachments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ref_type TEXT NOT NULL, ref_id INTEGER NOT NULL,
-  name TEXT, mime TEXT, size INTEGER, b64 TEXT, created_at TEXT NOT NULL
+  name TEXT, mime TEXT, size INTEGER, b64 TEXT, created_at TEXT NOT NULL,
+  r2_key TEXT                  -- 有 R2 时照片本体存在对象存储，这里只存 key
 );
 CREATE INDEX IF NOT EXISTS idx_att_ref ON attachments(ref_type, ref_id);
 
@@ -485,6 +487,7 @@ CREATE TABLE IF NOT EXISTS material_moves (
   note TEXT DEFAULT '', by TEXT DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mat_move_mat ON material_moves(material, month);
+CREATE INDEX IF NOT EXISTS idx_mat_move_mat_date ON material_moves(material, date);
 
 -- 员工负责的客户：员工只看自己负责的那几家（老板在设置里可关）
 CREATE TABLE IF NOT EXISTS party_staff (
@@ -694,3 +697,11 @@ CREATE INDEX IF NOT EXISTS idx_payables_due_day ON payables(substr(due_date,1,10
 
 -- 发工资幂等：同一个人同一个月只能发一次（/payroll/pay 运行时也建，新装库这里直接带）。
 CREATE UNIQUE INDEX IF NOT EXISTS idx_wage_pay_once ON wage_pays(month, worker);
+
+-- 口令试错计数（按 IP）：15 分钟内错 10 次锁 15 分钟，防止 4 位口令被爆破
+CREATE TABLE IF NOT EXISTS auth_fails (
+  ip TEXT PRIMARY KEY,
+  n INTEGER DEFAULT 0,
+  first_at INTEGER DEFAULT 0,
+  locked_until INTEGER DEFAULT 0
+);

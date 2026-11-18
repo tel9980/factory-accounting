@@ -408,6 +408,18 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - **README 编年史**：已 1700 多行、279 条迭代记录，是本项目唯一记录「为什么这么改」的地方，整理成独立 CHANGELOG 有丢信息的风险，先保留。
 - **PRAGMA 级数据约束**：库存、金额上限、唯一约束目前全靠应用层校验，SQLite 层几乎没有 `CHECK`/`UNIQUE` 兜底；等 P0 的事务改完再统一补。
 
+### 2026-11-18 复查：安全与容量（已落地）
+
+上面 17 项改完之后又查了一遍，发现的问题按「会不会真出事」排，前四条已经改完：
+
+- **✅ 口令是明文存的、而且没有试错限制**：`settings.access_key` 存原文、`String(k) !== saved` 直接比较、口令最少 4 位，全库找不到任何失败计数——4 位数字只有 1 万种，Worker 一秒能试上千次，几分钟就能爆破。现在存 `s1$<salt>$<sha256>`，老账本的明文口令在**下次登录成功时自动升级**（用户无感），比较改成定长比较；试错按 IP 计数，15 分钟内错 10 次锁 10 分钟（`auth_fails` 表），锁定期内正确口令也进不来——急着进去走「恢复码」那条路，它有自己的 8 次/10 分钟限制、不受 IP 锁影响。
+- **✅ 打印链接的签名密钥和口令绑在一起**：`sigOf()` 一直拿口令当密钥，口令一改成哈希，已经发到客户微信里的对账单/工资单链接会全失效。现在单独存 `sign_secret`，老账本第一次用到时把**原明文口令**种进去，所以老链接继续有效；改口令也不会让旧链接失效。
+- **✅ 附件 base64 塞在 D1 里**：一张 650KB 的图就是一行，D1 按「读行数」计费，照片一多，每次查单据都会把图片行读出来。现在**绑了 R2 就存对象存储**（`attachments.r2_key` 只留 key，取回时转回 base64，接口形状不变）；没绑 R2 的部署行为完全不变。R2 需要先在 Cloudflare 后台开通（当前账号还没开，`wrangler r2 bucket list` 返回 `Please enable R2`）。
+- **✅ 审计流水无界增长**：`audit_log` 从来没人清，而 `/audit-log` 每次 `ORDER BY id DESC`。现在定时任务留 180 天（`trash` 30 天、`backups` 30 份是原来就有的）。
+- **✅ `orders.status` 没有索引**：EXPLAIN 实测 `WHERE status=1` 是 `SCAN orders`，现在补了 `idx_orders_status`；材料流水按物料查再按日期排要走临时 B 树，补了 `(material, date)` 复合索引。
+- **✅ `/contacts` 没有 LIMIT**：两家大表全量 `GROUP BY` 再全量返回，客户上千家时小程序一次渲染几千行，现在按欠款倒序取前 500 家。
+- **⏳ 还没做的**：员工 PIN 仍是 4 位明文（改成哈希就没法按 PIN 直接索引，要全表比对，得先设计登录态）；HTTP 层没有 `ETag`/`304`（客户端已有 7 天本地缓存，收益有限）；`wrangler.toml` 没开 D1 读复制。
+
 > 审计方法：只读源码 + `node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN` 验证索引是否命中；行号对应 2026-11-18 的 `backend/index.js`（15164 行）版本。
 
 ## 说明
@@ -1136,6 +1148,15 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **⏳ 本次未做（清单里标 ⏳ 的 6 项）**：#5 定时备份「没变化跳过」（要碰 45 表快照关键路径，单独论证）；#9 promiseBook 按 party 下推（6 处调用含跨客户视图，贸然过滤会漏数据）；#11 大列表分页渲染 + #12 写后局部刷新（前端 7.8k 行单文件，缺 UI 自动化测试，回归风险大）；#14 静默失败提示（要逐处改 WXML 加「加载失败/重试」）；#16 CI 线上结构对比 + 部署后冒烟（要往 CI 里传 D1 只读 token，本次只先加了 concurrency）。
    - **自查到的 2 个 bug**：①`num()` 上限误伤毫秒时间戳 → 健康缓存用 `Number(h.at)`；②一次全局替换把 `accountId()` 改成自己递归自己 → 修回 `defaultAccountId(db)`。都在提交前 caught。
    - **验证**：`node scripts/check.mjs` 全绿（399 路由/54 表/604 SQL/251 调用/733 绑定）、`node scripts/test-batch.mjs` 新老后端各 4 项全绿、`node scripts/smoke.mjs` 224 个 GET 无 5xx；改前改后数据逐字节对比：reminders、report、report-data、statement-month、recon-conclusion、margin-by 全一致。
+
+281. ✅ **口令不再明文、也不再能被试出来；照片可以搬去 R2**：这一轮不是加功能，是补底线。
+   - **口令**：`settings.access_key` 从明文改成 `s1$<salt>$<sha256>`（`makeKeyRecord` / `verifyKey`，定长比较）；**老账本的明文口令在下次登录成功时自动升级**，用户什么都不用做。`/auth/setup`、`/auth/change`、`/auth/recover` 三处写入口都改成写哈希。
+   - **试错限制**：新表 `auth_fails(ip, n, first_at, locked_until)`，15 分钟内错 10 次锁 10 分钟；中间件、`/auth/change`、`/auth/recover-code` 都接上了，返回 429 `{code:'too_many', retry_after}`。锁定期内**正确口令也进不来**（否则锁就没意义），急用走恢复码——`/auth/recover` 自带 8 次/10 分钟的限制，不受 IP 锁影响。实测：连错 9 次都是 401 且带 `left`，第 10 次起 429。
+   - **签名密钥分离**：`sigOf()` 支持直接传 db，内部取 `settings.sign_secret`；老账本第一次用到时把原明文口令种进去，**已发出的打印链接继续有效**，改口令也不会让旧链接失效。实测：改口令前后 `/payroll-print`、`/health-print` 都是 200。
+   - **性能副作用**：锁定检查按 IP 在内存里记 30 秒（`_lockCache`），清计数只在「这个 IP 真错过」时才写一次 D1（`_authDirty`）——不然每个请求都要写一次。
+   - **附件可选 R2**：`POST /attachments` 有 `env.ATTACH` 绑定就 `put` 到 R2、D1 只存 `r2_key`，`GET /attachment/:id` 自动从 R2 取回转成 base64（接口形状不变），删除时一起删；没绑定就走原路。base64 ↔ 字节用分段转换，避免 650KB 一次性 `apply` 打爆调用栈。**当前账号 R2 还没开通**，代码留着等开通。
+   - **索引/容量**：`idx_orders_status`、`idx_mat_move_mat_date`；`/contacts` 加 `LIMIT 500`；`audit_log` 定时任务保留 180 天。
+   - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 607 SQL / 733 绑定）、`smoke.mjs` 224 个 GET 无 5xx、`test-batch.mjs` 通过；实测老明文口令登录 → 库里变 `s1$…` 且 `sign_secret` 已种；改口令 → 旧口令 401、新口令 200、老打印链接仍有效；员工口令照常、员工碰 `/margin-by` 仍 403。
 
 <!-- API-LIST:BEGIN -->
 

@@ -91,6 +91,9 @@ npx wrangler deploy
 
 打开 Worker 的网址（或小程序）第一次会要你设一个**老板口令**（接口 `POST /auth/setup`），
 设完会给你一个 4 段恢复码，**抄下来存好**（忘了口令只能靠它）。
+
+口令在库里存的是 `s1$<salt>$<sha256>`，不是明文；老账本里的明文口令会在**下次登录成功时自动升级**，用户无感。同一个 IP 15 分钟内错 10 次会锁 10 分钟（`auth_fails` 表），锁定期内正确口令也进不来——急着进去走恢复码重设，那条路自带 8 次/10 分钟的限制、不受 IP 锁影响。
+
 员工口令在「设置 → 员工口令」里开（`POST /auth/staff`），员工登录后看不到钱（见 README 268）。
 
 ### 1.6 前端（微信小程序）
@@ -118,6 +121,24 @@ npx wrangler deploy
 > 但补灌一次更干净，结构自检也就绿了。
 
 ---
+
+## 2.5 可选：把单据照片搬到 R2（省 D1 存储与读行数）
+
+单据照片默认以 base64 存在 D1 的 `attachments.b64` 里（单张上限约 650KB）。照片多了以后 D1 存储和「读行数」都会涨，可以改存对象存储：
+
+1. Cloudflare 后台 → R2 → **Enable R2**（当前账号还没开通，`wrangler r2 bucket list` 会返回 `Please enable R2 through the Cloudflare Dashboard.`）；
+2. 建桶：`npx wrangler r2 bucket create factory-attach`；
+3. `wrangler.toml` 里加上：
+
+   ```toml
+   [[r2_buckets]]
+   binding = "ATTACH"
+   bucket_name = "factory-attach"
+   ```
+
+4. `npx wrangler deploy`。
+
+代码是**可选绑定**：有 `ATTACH` 就走 R2（D1 只存 `attachments.r2_key`），没有就照旧存 D1；取回接口返回的仍是 base64，小程序端不用改。老照片不会自动搬（要搬得写一次性脚本；线上附件目前是 0 张，暂时没做）。
 
 ## 3. 备份与恢复（别等出事才看）
 
