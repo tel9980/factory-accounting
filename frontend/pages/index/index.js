@@ -566,30 +566,43 @@ Page({
     this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).length })
     this.flushPending(true)
     if (!this._modsLoaded) { this._modsLoaded = true; this.loadModules() }
-    this.refresh(); this.loadCloudBackup()
+    this.refresh(); this.loadCloudBackupLazy()
   },
   refresh() {
-    // 核心数据（每屏都要用，量小）
+    // 第一波：首屏第一眼要看的（首页那几个数字、提醒、我的今天、下一步、应收应付汇总）
     this.loadDashboard()
     this.loadReminders()
     this.loadMe()
-    this.loadBooks()
     this.loadAccounts()
-    this.loadCategories()
     this.loadOnboard()
-    this.loadCashflow()
-    this.loadTarget()
-    this.loadPipeline()
-    this.loadHealth()
-    this.loadMyWork()
-    this.loadMyDay()
-    this.loadFunding()
-    this.loadCashForecast()
     this.loadNextStep()
-    this.loadMonthTip()
-    this.loadTermDefault()
-    // 再加当前这一屏的（原来一次发 30 个请求，手机上每次保存都要等一轮）
+    // 当前这一屏自己的数据（切到哪一页就拉哪一页；首页那几张单子由 enterTab 一起带出来）
     this.enterTab(this.data.tab)
+    // 第二波：晚 150 毫秒再拉，跟第一眼无关的那些
+    //   体检分数、目标、在制、预收预付、资金预测、现金流、账本、分类、账期、我的活、本月提示
+    //   原来这 11 个跟第一波一起发，首屏要等 20 多个请求全回来才算完（真机 onShow 900 多毫秒）；
+    //   拆成两波之后第一波只有十来个，首屏先出来，剩下的自己补上。
+    clearTimeout(this._slowT)
+    this._slowT = setTimeout(() => {
+      this.loadHealth()
+      this.loadTarget()
+      this.loadPipeline()
+      this.loadFunding()
+      this.loadCashForecast()
+      this.loadCashflow()
+      this.loadBooks()
+      this.loadCategories()
+      this.loadTermDefault()
+      this.loadMyWork()
+      this.loadMonthTip()
+    }, 150)
+  },
+  // 备份时间这条跟首屏无关，而且不会天天变：5 分钟内只问一次，别每次切页面都打一遍
+  loadCloudBackupLazy() {
+    const t = Date.now()
+    if (this._cbAt && t - this._cbAt < 300000) return
+    this._cbAt = t
+    this.loadCloudBackup()
   },
   loadCloudBackup() {
     this.req({

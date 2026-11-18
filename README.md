@@ -1283,6 +1283,16 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **验证**：`check.mjs` 全绿（**406** 路由 / 56 表 / **622** SQL / 255 调用 / **752** 绑定）；新库按 CI 顺序全跑：`smoke.mjs` 227 个 GET 无 5xx → `test-modules` 19 项 → `smoke-write` 45 步 + 90 写路由 + 自检 10 类全 0 → `test-crossmonth` 16 项 → `test-apcat` 31 项 → `test-import-xlsx` 32 项 → `test-onboarding` 19 项，全绿。
    - ⚠️ 动了前端（首页引导卡、设置页入口、向导面板与样式）→ **小程序要重新上传发布**。
 
+293. ✅ **首屏拆成两波：先出数字，剩下的自己补**：用户贴了一份微信开发者工具的日志问「出现几个错误，是什么问题」。
+   - **日志里真正的报错只有一条**：`Error: SystemError (appServiceSDKScriptError)` / `[Page route 错误(system error)] appLaunch with non-empty page stack`。它**不是代码 bug**——报错栈全落在 `WAServiceMainContext.js` / `WASubContext.js`（微信框架文件），没有一行指向我们的 `index.js`，同一份日志里 `onShow` 还正常跑完了两次、请求也都发出去了。成因是「**自动热重载**」+「**灰度基础库 3.18.0**」：工具重新 `appLaunch` 时旧页面还在栈里。关掉自动热重载、或把调试基础库换成稳定版、或清缓存重编译即可。
+   - 其余几行都不是错：`工具未校验合法域名` 是本地设置勾了「不校验」；`The resource … preloaded … not used` 是工具自己的预加载提示；挂在 `doReq … loadCloudBackup … onShow` 的那段栈就是「不校验域名」提示附带的调用栈。
+   - **但 `Page.onShow took 915ms` 是真的**：`onShow` → `refresh()` 一次排 20 多个请求（首屏数字 + 体检分数 + 目标 + 在制 + 预收预付 + 资金预测 + 现金流 + 账本 + 分类 + 账期 + 我的活 + 本月提示），首屏要等这些全回来才算完。
+   - **改法：拆两波**。第一波只发首屏第一眼看的东西——`/dashboard`、`/reminders`、`/me`、`/accounts`、`/onboarding`、`/next-step`，加上 `enterTab(当前页)` 带出来的（首页是 `/ar`、`/ap`、`/ar-summary`、`/my-day`、`/ap-by-category`）；第二波 150 毫秒后再拉体检、目标、在制、预收预付、资金预测、现金流、账本、分类、账期、我的活、本月提示。去重后第一波 **11 条**（≤ 单批上限 16），第二波 10 条。
+   - **顺手修掉一个浪费**：`loadCloudBackup`（备份时间，只在设置页看）原来每次 `onShow` 都打一次 `/backup-list`，改成 `loadCloudBackupLazy()` —— 5 分钟内只问一次。
+   - **测试**：新增 `scripts/test-firstscreen.mjs`（5 项断言，已挂进 CI，排在 `test-key-queue` 之后）——第一波里不许混进第二波的路径、第一波去重后 ≤16（超了会被后端截断→整批作废）、首屏该有的都在第一波、第二波真的会来且把延后的补齐、备份时间 5 分钟内只问一次。注意 `/month-end`（本月提示）22 号之前根本不发请求，所以没列进断言。
+   - **验证**：`check.mjs` 全绿（406 路由 / 56 表 / 622 SQL / 255 调用 / 752 绑定）；`test-batch`、`test-key-queue`、`test-firstscreen` 三个前端测试全绿；新库按 CI 顺序全跑：`smoke` 227 GET 无 5xx → `test-modules` 19 项 → `smoke-write` 45 步 + 90 写路由 + 自检 10 类全 0 → `test-crossmonth` 16 项 → `test-apcat` 31 项 → `test-import-xlsx` 32 项 → `test-onboarding` 19 项，全绿。
+   - ⚠️ 动了前端（`onShow`/`refresh` 调度）→ **小程序要重新上传发布**。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
