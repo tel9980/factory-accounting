@@ -86,6 +86,11 @@ jobs:
       # 打开后立刻恢复；应收/应付/支出/导入这四块谁都不能关。
       - name: 功能模块开关回归
         run: node scripts/test-modules.mjs --base http://127.0.0.1:8791 --key 8888
+      # 应付分类：硫酸/磷酸/硝酸/染料/除油剂/包装/报纸/外发加工费这些分类要能导进去、
+      # 能按分类汇总；同时守两条老账：老模板（供应商,金额,备注）不能导坏，
+      # 名字里带数字（「王五金2店」）不能让金额悄悄变成 2 块。
+      - name: 应付分类回归（模板下拉 / 老模板兼容 / 名字带数字）
+        run: node scripts/test-apcat.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log

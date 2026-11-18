@@ -103,7 +103,7 @@ Page({
     today_income: 0, top_customer: '', top_unpaid: 0,
     o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_operator: '', o_date: '',
     mb_type: 'customer', mb_month: '', mb: null, ns: null,
-    p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '',
+    p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', p_category: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
     xp: null, xp_open: false,
     rcc: null, rcc_month: '',
@@ -188,6 +188,9 @@ Page({
     contact_show: false, contact_title: '', contact_text: '',
     trash_list: [],
     ar_filter: 'open', ar_sort: 'new', ar_sum: {}, ap_filter: 'open', ap_sort: 'new', ap_sum: {},
+    // 应付的分类：硫酸、磷酸、硝酸、染料、除油剂、包装、报纸、外发加工费…（和后台 AP_CATS 一致）
+    ap_cats: ['硫酸', '磷酸', '硝酸', '染料', '除油剂', '包装', '报纸', '外发加工费', '运费', '电费', '五金配件'],
+    ap_cat: '', ap_cat_rows: [], ap_cat_text: '',
     ar_view: 'order', ap_view: 'order', ar_groups: [], ap_groups: [], ar_open: '', ap_open: '',
     detail_show: false, detail_title: '', detail_head: '', detail_rows: [],
     ar_filters: [{ k: 'open', n: '全部未结' }, { k: 'overdue', n: '逾期 30 天+' }, { k: 'due', n: '7 天内到期' }, { k: 'closed', n: '已结清' }],
@@ -1613,6 +1616,25 @@ Page({
   loadArSummary() {
     this.req({ url: API_BASE + '/ar-summary?type=ar', success: (res) => this.setData({ ar_sum: res.data || {} }) })
     this.req({ url: API_BASE + '/ar-summary?type=ap', success: (res) => this.setData({ ap_sum: res.data || {} }) })
+    this.loadApCats()
+  },
+  // 应付按分类看：这个月硫酸/染料/外发加工费各花了多少、还欠多少
+  loadApCats() {
+    this.req({ url: API_BASE + '/ap-by-category', success: (res) => {
+      const d = res.data || {}
+      this.setData({ ap_cat_rows: d.rows || [], ap_cat_text: d.text || '' })
+    } })
+  },
+  // 表单里选分类（再点一下取消）
+  pickPCat(e) {
+    const c = e.currentTarget.dataset.c || ''
+    this.setData({ p_category: this.data.p_category === c ? '' : c })
+  },
+  // 列表按分类筛（再点一下看全部）
+  pickApCat(e) {
+    const c = e.currentTarget.dataset.c || ''
+    this.setData({ ap_cat: this.data.ap_cat === c ? '' : c })
+    this.loadAp()
   },
   pickArFilter(e) { this.setData({ ar_filter: e.currentTarget.dataset.k }); this.loadAr(); this.loadGroups('ar') },
   pickArSort(e) { this.setData({ ar_sort: e.currentTarget.dataset.k }); this.loadAr() },
@@ -1718,7 +1740,7 @@ Page({
   },
   loadAp(more) {
     const off = more ? this.data.ap_off : 0
-    const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort
+    const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort + (this.data.ap_cat ? '&cat=' + encodeURIComponent(this.data.ap_cat) : '')
     this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
       const all = more ? (this._apAll || []).concat(page) : page
@@ -2269,7 +2291,8 @@ Page({
         const d = r.data || {}
         this.setData({
           p_supplier: it.supplier || '', p_amount: String(d.amount || it.amount || ''),
-          p_remark: d.item || it.remark || '', p_operator: d.operator || it.operator || '', p_due: '', p_date: ''
+          p_remark: d.item || it.remark || '', p_operator: d.operator || it.operator || '', p_due: '', p_date: '',
+          p_category: it.category || ''
         })
         wx.pageScrollTo({ scrollTop: 0, duration: 200 })
         wx.showToast({ title: '填好了，核对后记一笔', icon: 'none' })
@@ -2322,12 +2345,12 @@ Page({
     })
   },
   addPayable() {
-    const { p_supplier, p_amount, p_remark, p_operator, p_due, p_date } = this.data
+    const { p_supplier, p_amount, p_remark, p_operator, p_due, p_date, p_category } = this.data
     if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/payables', method: 'POST', once: 'add-payable', queue: '记应付',
       queued: () => this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }),
-      data: { supplier: p_supplier, amount: Number(p_amount), remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid() }, dupRetry: true,
+      data: { supplier: p_supplier, amount: Number(p_amount), category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid() }, dupRetry: true,
       success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest(); this.showChecks(res) }
     })
   },

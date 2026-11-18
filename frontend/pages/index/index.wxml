@@ -677,6 +677,11 @@
       <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount" bindblur="loadSupplyPrice"/>
       <view class="aline warn" wx:if="{{sp_hint}}">🏷 {{sp_hint}}</view>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
+      <view class="chips">
+        <text class="chip-label">买的是什么：</text>
+        <text class="chip {{p_category==item?'on':''}}" wx:for="{{ap_cats}}" wx:key="*this" bindtap="pickPCat" data-c="{{item}}">{{item}}</text>
+      </view>
+      <view class="tip" wx:if="{{!p_category}}">选个分类（硫酸、染料、外发加工费…），月底能看「钱花在哪」；不选也能记，归到「未分类」</view>
       <input class="inp" placeholder="备注(可选)" value="{{p_remark}}" bindinput="onPRemark"/>
       <input class="inp" placeholder="约定付款日(可选，如07-20)" value="{{p_due}}" bindinput="onPDue"/>
       <view class="tip" wx:if="{{!p_due}}">{{term_default>0 ? '付款日留空：按账期自动算（默认 ' + term_default + ' 天）' : '付款日留空：这单就不会提醒你该付钱，去「设置 → 单位」设个默认账期更省事'}}</view>
@@ -709,6 +714,15 @@
       <view class="su"><view class="sun red">{{ap_sum.overdue_amount || 0}}</view><view class="sul">超30天没付 {{ap_sum.overdue_count || 0}} 笔</view></view>
       <view class="su"><view class="sun org">{{ap_sum.due_amount || 0}}</view><view class="sul">7天内要付 {{ap_sum.due_count || 0}} 笔</view></view>
       <view class="su"><view class="sun green">{{ap_sum.month_settled || 0}}</view><view class="sul">本月已付 · 新增 {{ap_sum.month_new || 0}}</view></view>
+    </view>
+    <view class="form" wx:if="{{ap_cat_rows.length}}">
+      <view class="tip">{{ap_cat_text}}　（点一行只看这类，再点一次看全部）</view>
+      <view class="tpl-row" wx:for="{{ap_cat_rows}}" wx:key="cat" bindtap="pickApCat" data-c="{{item.cat}}">
+        <view class="tpl-main">
+          <view class="tpl-n {{ap_cat==item.cat?'red':''}}">{{item.cat}}{{ap_cat==item.cat?' ✓':''}}</view>
+          <view class="tpl-d">本月新增 {{item.month_add}} · 本月已付 {{item.month_paid}} · 还欠 {{item.open}}（{{item.open_count}} 笔）</view>
+        </view>
+      </view>
     </view>
     <view class="form">
       <input class="inp" placeholder="搜索供应商/备注" value="{{ap_kw}}" bindinput="onApKw"/>
@@ -825,7 +839,7 @@
     <view class="list" wx:if="{{ap_view=='order'}}">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">付清</button>
           <button size="mini" bindtap="showDetail" data-id="{{item.id}}" data-type="ap">明细</button>

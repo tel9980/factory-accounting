@@ -3615,13 +3615,15 @@ const splitLoose = (line) => {
     if (!tok) continue
     const isNum = /^-?\d+(\.\d+)?$/.test(tok)
     if (isNum) nums.push(Number(tok))
-    else if (/\d/.test(tok)) {
-      // 如 5000.00元 或 3.5万 已处理；混合词里抽数字，剩下的当名字
-      const n = tok.match(/-?\d+(\.\d+)?/g)
-      if (n) nums.push(Number(n.join('')))
-      const rest = tok.replace(/-?\d+(\.\d+)?/g, '').trim()
-      if (rest) names.push(rest)
-    } else names.push(tok)
+    else if (/^-?\d+(\.\d+)?(元|块|万元|万)$/.test(tok)) {
+      // 5000元 / 3.5万 这种带单位的金额：数字取出来，单位扔掉
+      const m = tok.match(/^(-?\d+(?:\.\d+)?)(元|块|万元|万)$/)
+      nums.push(Number(m[1]) * (m[2].indexOf('万') === 0 ? 10000 : 1))
+    } else {
+      // 名字里带数字的（「王五金2店」「98%一吨」「分类测试k3f9」）整串都算名字。
+      // 以前这里会把里面的数字抽出来当金额，于是「王五金2店 硫酸 2000」会导成 ¥2 —— 金额悄悄错掉。
+      names.push(tok)
+    }
   }
   return { names, nums, date }
 }
@@ -3641,7 +3643,14 @@ const parseImportRows = (type, text) => {
       if (type === 'ar' && nums.length > 1 && names.length > 1) row.cost = nums[1]
     } else if (type === 'ap' || type === 'ap_init') {
       row.amount = nums[0] || 0
-      row.item = names[1] || (type === 'ap' ? '' : '期初欠款')
+      if (type === 'ap') {
+        // 应付这行可能是「供应商 分类 金额 备注」，也可能还是老写法「供应商 金额 备注」。
+        // 只有第二个词认得出来是常用分类（硫酸/染料/外发加工费…）才当分类，否则照旧当备注。
+        const cat = apCatOf(names[1])
+        if (cat) { row.category = cat; row.item = names[2] || '' } else row.item = names[1] || ''
+      } else {
+        row.item = names[1] || '期初欠款'
+      }
     } else if (type === 'expense') {
       row.amount = nums[0] || 0
       row.category = names[0] || '其他'
@@ -3711,7 +3720,7 @@ app.post('/import-rows', async (c) => {
     const date = r.date || ''
     if (type === 'ar') return [r.party, r.item || '批量导入', num(r.amount), num(r.cost) || '', date].filter((x, i) => !(i === 3 && (x === '' || x === 0)))
     if (type === 'ar_init') return [r.party, num(r.amount), date]
-    if (type === 'ap') return [r.party, num(r.amount), r.item || '', date]
+    if (type === 'ap') return [r.party, r.category || '', num(r.amount), r.item || '', date]
     if (type === 'ap_init') return [r.party, num(r.amount)]
     if (type === 'expense') return [num(r.amount), r.category || '', r.item || '', date]
     if (type === 'loan') return [r.party, num(r.amount), r.item || '', date]
@@ -5944,10 +5953,23 @@ function fromB64(b64) {
   return u8
 }
 
+// 应付的常用分类：按这家厂实际买的东西排的（硫酸、磷酸、硝酸、染料、除油剂、包装、报纸，外加发加工费）。
+// 分类只用来「看钱花在哪」，不参与算账；写错的分类不会影响欠款金额。
+const AP_CATS = ['硫酸', '磷酸', '硝酸', '染料', '除油剂', '包装', '报纸', '外发加工费', '运费', '电费', '五金配件', '其他']
+// 把「98硫酸」「硫酸(工业)」「染料费」这类写法归到标准分类上；归不上就返回空（当备注处理）
+const apCatOf = (s) => {
+  const t = String(s === null || s === undefined ? '' : s).trim()
+  if (!t) return ''
+  const exact = AP_CATS.find((c) => c === t)
+  if (exact) return exact
+  const hit = AP_CATS.find((c) => c !== '其他' && (t.includes(c) || (t.length >= 2 && c.includes(t))))
+  return hit || ''
+}
+
 const IMPORT_TEMPLATES = {
   ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '成本(可空)', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['张老板', '外壳加工', 5000, 3000, '12-05', '小王', '11-05'], ['李老板', '法兰件', 3200, '', '', '', '']] },
   ar_init: { name: '期初应收模板', rows: [['客户', '金额', '日期(可空)'], ['张老板', 5000, ''], ['李老板', 3000, '07-01']] },
-  ap: { name: '应付导入模板', rows: [['供应商', '金额', '备注', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['王五金', 2000, '螺丝款', '11-30', '小王', '11-05'], ['李钢材', 5000, '钢板', '', '', '']] },
+  ap: { name: '应付导入模板', rows: [['供应商', '分类', '金额', '备注', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['某某化工', '硫酸', 2000, '98% 一吨', '11-30', '小王', '11-05'], ['某某染料行', '染料', 5000, '', '', '', ''], ['某某外协厂', '外发加工费', 8000, '这批外发', '', '', '']] },
   ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
   expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '经手人(可空)', '日期(可空)'], [1200, '房租', '8月房租', '', '11-01'], [300, '水电', '电费', '', '']] },
   loan: { name: '员工借支模板', rows: [['员工', '金额', '备注', '日期(可空)'], ['张三', 1000, '买辅料', '11-05'], ['李四', 500, '加油', '']] },
@@ -5968,6 +5990,10 @@ app.get('/import-template-xlsx', async (c) => {
     } catch (e) { list = [] }
     if (!list.length) list = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
     dv = [{ sq: t === 'expense' ? 'B2:B200' : 'C2:C200', list }]
+  }
+  if (t === 'ap') {
+    // 应付模板第 2 列是「分类」，给个下拉，省得每天手打（也能自己写别的，写错不影响金额）
+    dv = [{ sq: 'B2:B200', list: AP_CATS }]
   }
   const xlsx = await makeXlsxSheets([{ name: t === 'expense' ? '支出' : t === 'reimb' ? '报销' : '导入', rows: T.rows, dv }])
   return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx), dv: dv.length > 0 })
@@ -6001,7 +6027,14 @@ async function previewImport(db, type, rawRows) {
     let party = '', item = '', amount = 0, cost = 0, category = '', extra = ''
     if (type === 'ar') { const [c, it, pr, co, dueC, operC] = p; party = c || ''; item = it || ''; amount = num(pr); cost = num(co); extra = [dueC ? '到期 ' + dueC : '', operC ? '经手 ' + operC : ''].filter(Boolean).join(' ') }
     else if (type === 'ar_init' || type === 'ap_init') { const [c, pr] = p; party = c || ''; amount = num(pr) }
-    else if (type === 'ap') { const [sp2, am, rm, dueP, operP] = p; party = sp2 || ''; item = rm || ''; amount = num(am); extra = [dueP ? '到期 ' + dueP : '', operP ? '经手 ' + operP : ''].filter(Boolean).join(' ') }
+    else if (type === 'ap') {
+      // 列序兼容两种模板：新「供应商, 分类, 金额, 备注…」，老「供应商, 金额, 备注…」。
+      // 第 2 列是纯数字就是老模板（金额），是文字就是分类。
+      const rawCat = String(p[1] === null || p[1] === undefined ? '' : p[1]).trim()
+      const catFirst = p.length > 1 && !(rawCat !== '' && /^-?[\d.,\s]+$/.test(rawCat))
+      const [sp2, ct, am, rm, dueP, operP] = catFirst ? p : [p[0], '', p[1], p[2], p[3], p[4]]
+      party = sp2 || ''; category = apCatOf(ct) || String(ct || '').trim(); item = rm || ''; amount = num(am); extra = [dueP ? '到期 ' + dueP : '', operP ? '经手 ' + operP : ''].filter(Boolean).join(' ')
+    }
     else if (type === 'expense') { const [am, cat, rm, operE] = p; amount = num(am); category = cat || ''; item = rm || ''; extra = operE ? '经手 ' + operE : '' }
     else if (type === 'loan') { const [sf, am, rm] = p; party = sf || ''; item = rm || ''; amount = num(am) }
     else if (type === 'reimb') { const [sf, am, cat, rm] = p; party = sf || ''; amount = num(am); category = cat || ''; item = rm || '' }
@@ -7224,6 +7257,37 @@ app.get('/ar-summary', async (c) => {
   })
 })
 
+// 应付按分类看：硫酸、磷酸、硝酸、染料、除油剂、包装、报纸、外发加工费各花了多少、还欠多少。
+// 分类是记账时手选（或导入模板里的下拉），没选的归到「未分类」，不影响欠款金额。
+app.get('/ap-by-category', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const CAT = "COALESCE(NULLIF(TRIM(category),''),'未分类')"
+  const [addR, paidR, openR] = await Promise.all([
+    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=? GROUP BY c ORDER BY t DESC`).bind(month).all(),
+    db.prepare(`SELECT ${CAT} c, COALESCE(SUM(l.amount),0) t FROM ledger l JOIN payables p ON p.id=l.ref_id WHERE l.ref_type='payable' AND l.direction='out' AND l.month=? GROUP BY c`).bind(month).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount GROUP BY c ORDER BY t DESC`).all().catch(() => ({ results: [] }))
+  ])
+  const paidMap = new Map((paidR.results || []).map((x) => [x.c, round2(num(x.t))]))
+  const openMap = new Map((openR.results || []).map((x) => [x.c, { n: num(x.n), t: round2(num(x.t)) }]))
+  const cats = new Set([...(addR.results || []).map((x) => x.c), ...paidMap.keys(), ...openMap.keys()])
+  const rows = [...cats].map((cat) => ({
+    cat,
+    month_add: round2(num((addR.results || []).find((x) => x.c === cat)?.t)),
+    month_count: num((addR.results || []).find((x) => x.c === cat)?.n),
+    month_paid: paidMap.get(cat) || 0,
+    open: (openMap.get(cat) || {}).t || 0,
+    open_count: (openMap.get(cat) || {}).n || 0
+  })).sort((a, b) => (b.month_add - a.month_add) || (b.open - a.open))
+  const totalAdd = round2(rows.reduce((a, x) => a + x.month_add, 0))
+  const totalOpen = round2(rows.reduce((a, x) => a + x.open, 0))
+  return c.json({
+    ok: true, month, rows,
+    total_add: totalAdd, total_open: totalOpen,
+    text: `${month} 应付共 ¥${totalAdd}，还欠 ¥${totalOpen}` + (rows.length ? `；花得最多的是「${rows[0].cat}」¥${rows[0].month_add}` : '')
+  })
+})
+
 // 单据明细：收款/付款流水 + 核销记录
 // 单据上的批次号 → 这批是什么时候、从哪种方式导进来的（手工录的单返回 null）
 async function importOrigin(db, batch) {
@@ -7313,9 +7377,11 @@ app.get('/ap', async (c) => {
     conds.push("due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) <= ?"); b.push(dayAfter(7))
   }
   if (kw) {
-    conds.push("(supplier LIKE ? OR COALESCE(remark,'') LIKE ? OR COALESCE(operator,'') LIKE ?)")
-    b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
+    conds.push("(supplier LIKE ? OR COALESCE(remark,'') LIKE ? OR COALESCE(operator,'') LIKE ? OR COALESCE(category,'') LIKE ?)")
+    b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
   }
+  const catAp = (new URL(c.req.url).searchParams.get('cat') || '').trim()
+  if (catAp) { conds.push("COALESCE(NULLIF(TRIM(category),''),'未分类') = ?"); b.push(catAp) }
   const payExpr = '(amount - paid - COALESCE(written_off,0))'
   const { results } = await db.prepare(`SELECT * FROM payables WHERE ${conds.join(' AND ')} ORDER BY ${orderBy.replace('{A}', payExpr)} LIMIT ? OFFSET ?`)
     .bind(...b, lim, off).all()
@@ -9305,14 +9371,19 @@ async function importRows(db, type, rows, opts) {
         n++
       }
     } else if (type === 'ap') {
-      const [supplier, amount, remark, dueP, operP] = p
+      // 列序兼容两种模板：新「供应商, 分类, 金额, 备注, 到期日, 经手人」，老「供应商, 金额, 备注, 到期日, 经手人」。
+      // 第 2 列是纯数字就是老模板（金额），是文字就是分类 —— 两种文件都能直接导。
+      const rawCat = String(p[1] === null || p[1] === undefined ? '' : p[1]).trim()
+      const catFirst = p.length > 1 && !(rawCat !== '' && /^-?[\d.,\s]+$/.test(rawCat))
+      const [supplier, catIn, amount, remark, dueP, operP] = catFirst ? p : [p[0], '', p[1], p[2], p[3], p[4]]
+      const category = apCatOf(catIn) || String(catIn || '').trim()
       if (supplier && num(amount) > 0) {
         const dk = (d || t).slice(0, 10)
         const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
         const dueIso = dueP && looksLikeDate(dueP) ? toIsoDate(dueP) : await due(supplier, d, 'ap')
         const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, operator, created_at, import_batch) VALUES (?,?,0,?,?,?,?,?,?)')
-          .bind(supplier, num(amount), '', remark || '', dueIso || null, operP ? String(operP).trim() : null, d, batch).run()
+          .bind(supplier, num(amount), category, remark || '', dueIso || null, operP ? String(operP).trim() : null, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
         n++
