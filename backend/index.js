@@ -817,7 +817,7 @@ const sigOf = async (keyOrDb, party, type) => {
 // ETag / 304：只处理 GET、200、JSON 或 HTML、且响应体不太大（/backup 那种 9MB 直接跳过）。
 // 只有客户端真的发了 if-none-match 才可能回 304 —— 小程序 wx.request 从来不发这个头，
 // 所以对现有前端只是「多一个响应头」，不会改变任何行为；浏览器打开打印页才真省流量。
-async function applyEtag(c) {
+async function applyEtag(c, noTransform) {
   const res = c.res
   if (c.req.method !== 'GET' || !res || res.status !== 200) return
   const cl = Number(res.headers.get('content-length') || 0)
@@ -830,6 +830,9 @@ async function applyEtag(c) {
     const etag = 'W/"' + body.length.toString(36) + '-' + fnv1a(body).toString(36) + '"'
     const h = new Headers(res.headers)
     h.set('ETag', etag)
+    // 打印页额外加 no-transform：Cloudflare 一旦压缩响应就会把 ETag 摘掉（线上实测），
+    // 这些页面就几 KB，重复打开时 304 比压缩更省。
+    if (noTransform) h.set('Cache-Control', 'no-cache, no-transform')
     const inm = c.req.header('if-none-match') || ''
     const hit = inm && (inm.trim() === '*' || inm.split(',').some((x) => x.trim() === etag))
     c.res = hit ? new Response(null, { status: 304, headers: h }) : new Response(body, { status: 200, headers: h })
@@ -839,7 +842,7 @@ async function applyEtag(c) {
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c); return }
+  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c, true); return }
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)

@@ -419,7 +419,9 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - **✅ `orders.status` 没有索引**：EXPLAIN 实测 `WHERE status=1` 是 `SCAN orders`，现在补了 `idx_orders_status`；材料流水按物料查再按日期排要走临时 B 树，补了 `(material, date)` 复合索引。
 - **✅ `/contacts` 没有 LIMIT**：两家大表全量 `GROUP BY` 再全量返回，客户上千家时小程序一次渲染几千行，现在按欠款倒序取前 500 家。
 - **✅ 员工 PIN 也是明文**：`staff_users.pin` 存原文，而且 `WHERE pin=?` 直接比。现在存 `sha256(staff_salt|sp|口令)`，登录按 `pin_hash` 查；**老库的明文 PIN 在第一次有人用它登录时自动迁移**（迁移完 `pin` 列只留 `'@'+id` 占位符，因为那列有 UNIQUE 不能都填空串）。用**全局盐**而不是每行随机盐，正是为了还能按口令直接索引查到人。代价是明文只在「新建 / 重设口令」那一次返回，列表里显示「口令已设」，忘了就重设——4 位数字本来就该当一次性凭证用。员工总口令 `settings.staff_key` 一起改成哈希（`verifySetting`）。
-- **✅ 没有 `ETag`/`304`**：全库 0 处 `ETag`。现在中间件给 GET 的 JSON/HTML 响应打 `W/"长度-哈希"`（FNV-1a，不算安全用途），**客户端带了 `if-none-match` 且对得上就回 304**；>256KB 的响应（`/backup` 那种 9MB）直接跳过不打。小程序 `wx.request` 从来不发这个头，所以对现有前端只是多一个响应头、不改任何行为；真正省流量的是浏览器打开打印页/对账单那些场景。
+- **✅ 没有 `ETag`/`304`**：全库 0 处 `ETag`。现在中间件给 GET 的 JSON/HTML 响应打 `W/"长度-哈希"`（FNV-1a，不算安全用途），**客户端带了 `if-none-match` 且对得上就回 304**；>256KB 的响应（`/backup` 那种 9MB）直接跳过不打。小程序 `wx.request` 从来不发这个头，所以对现有前端只是多一个响应头、不改任何行为。
+  - **线上实测踩到一个坑**：Cloudflare 一旦压缩响应就会把这个头**摘掉**——同一条 `/statement-ack`，本地有 `ETag`、线上没有（内容字节完全一致，1621 字节）。所以 17 个打印页（对账单/工资单/报价/订单/年结那些）额外加了 `Cache-Control: no-cache, no-transform`：这些页面就几 KB，客户会反复点同一条链接，304 比压缩更省。加完线上复测：`ETag` 保住了，带 `if-none-match` 第二次请求返回 **304**。
+  - 代价说清楚：JSON 接口仍走压缩（手机端省流量更重要），所以那部分的 `ETag` 在线上会被摘掉，等于只在本地开发时可见。
 - **⏸ D1 读复制：查过、能开，故意没开**。`wrangler d1 info factory-db` 现在是 `read_replication.mode = disabled`。不开的理由是这套系统到处是「刚记完一笔就刷新看」：开了 auto 模式，读会就近走副本，副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，**账就重了**。要安全用必须配 Sessions API（`env.DB.withSession('first-primary')` 把写后读钉回主库），399 个接口逐个改，改动面远大于收益；何况现在库才 594KB、每天读 3.3 万行，省下的延迟根本看不见。开启方法和注意事项写在 `backend/wrangler.toml` 的注释里（wrangler 3.114 还不支持 `read_replication` 配置键，得用 4.x）。
 
 > 审计方法：只读源码 + `node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN` 验证索引是否命中；行号对应 2026-11-18 的 `backend/index.js`（15164 行）版本。
@@ -1163,7 +1165,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 282. ✅ **员工 PIN 不再明文；响应带 ETag；读复制想清楚了没开**：把上一轮列的三项 ⏳ 收尾。
    - **员工 PIN 哈希**：`staff_users.pin_hash = sha256(staff_salt|sp|口令)`，登录按它查（`pinHash` / `staffSalt` / `migrateStaffPins` / `staffPinReady`）。用**全局盐**是为了还能按口令直接索引到人；每行随机盐就只能全表比对。老库明文 PIN 在第一次有人用它登录时自动迁移（迁移后 `pin` 列写 `'@'+id` 占位，因为该列有 UNIQUE 约束不能都填空串）。明文只在**新建账号 / 重设口令**那一次返回，列表改显示「口令已设（忘了点「换个口令」）」，前端 wxml 与改口令弹窗同步改了。员工总口令 `settings.staff_key` 同样改成哈希（新 `verifySetting`，老明文对上时顺手升级）。
    - **踩到的坑**：`_memoDdl` 那个记忆化包装器**只 `await` 不返回**，拿它包 `staffPinReady` 会把「有没有 pin_hash 列」这个返回值吞掉，导致所有员工 PIN 一律 401——改成自己用 `_pinReadyDb` 记；另外迁移必须和「结构就绪」拆开：结构只跑一次（记忆化），迁移在查不到人时再补跑一次，否则老库升级后第一次登录必然失败。
-   - **ETag / 304**：中间件 `applyEtag(c)`，GET + 200 + JSON/HTML + ≤256KB 才打 `W/"<len36>-<fnv36>"`；只有客户端真发了 `if-none-match` 才回 304。放行的打印页（`/quote-print`、`/statement-ack` 等 17 条白名单）也走同一个函数——原来白名单分支是 `return next()`，后面的后处理根本不会执行。
+   - **ETag / 304**：中间件 `applyEtag(c, noTransform)`，GET + 200 + JSON/HTML + ≤256KB 才打 `W/"<len36>-<fnv36>"`；只有客户端真发了 `if-none-match` 才回 304。放行的打印页（`/quote-print`、`/statement-ack` 等 17 条白名单）也走同一个函数——原来白名单分支是 `return next()`，后面的后处理根本不会执行。
+   - **线上才发现的问题**：第一次部署后线上**所有响应都没有 ETag**，而本地有。查下来是 Cloudflare 压缩响应时会摘掉 `ETag`（本地 workerd 压缩后仍保留，所以本地看不出来）。解法是给打印页加 `Cache-Control: no-cache, no-transform`（禁压缩），线上复测 `ETag` 保住、`if-none-match` 命中返回 304。JSON 接口维持压缩，其 ETag 线上会被摘掉——这点在文档里写明了，不装作有效。
    - **D1 读复制：没开，理由写在 `backend/wrangler.toml` 注释里**。`read_replication.mode` 实测 `disabled`；auto 模式会让「刚写完就读」读到滞后副本，这套系统里等于让人重复记账。要安全用得上 Sessions API（`withSession('first-primary')`），399 个接口逐个改不划算；且现在库 594KB、每天读 3.3 万行，收益为零。
    - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 607 SQL / 733 绑定）、`test-batch.mjs` 4 项全绿、`smoke.mjs` 224 个 GET 无 5xx；实测 5 个口令矩阵（老板 `9999` 200、员工新口令 200、两个老明文 PIN 迁移后 200、被轮换掉的旧口令 401）；`/dashboard` 首请求拿 ETag → 再请求 304、错误 ETag → 200；`/quote-print` 200 带 ETag → 304；`/backup` 9MB 不打 ETag；`/me`、`/access-guide` 在员工总口令开/关两种状态下都是 200。
    - **本轮动了前端**（员工列表文案 + 改口令弹窗）：小程序需要重新上传发布。

@@ -100,6 +100,8 @@ npx wrangler deploy
 
 **响应 ETag**：GET 的 JSON/HTML（≤256KB）都会带 `ETag`，客户端带 `if-none-match` 且对得上就回 304。小程序 `wx.request` 不发这个头，行为不变；浏览器打开打印页/对账单才省流量。`/backup` 这种大响应不打 ETag。
 
+⚠️ **Cloudflare 会摘掉 ETag**：只要响应被压缩（br/gzip），CF 就把 `ETag` 删掉，线上看起来像没生效（本地 workerd 压缩后仍保留，所以本地测不出来）。打印页因此加了 `Cache-Control: no-cache, no-transform` 禁压缩——这些页面只有几 KB，重复打开时 304 比压缩省。JSON 接口维持压缩，其 ETag 在线上会被摘掉。
+
 **D1 读复制（read replication）默认关闭**，理由和开启方法写在 `backend/wrangler.toml` 的注释里：开了之后「刚记完一笔就刷新」可能读到滞后副本，人会以为没存进去再记一遍。要开必须同时改造成 Sessions API（`env.DB.withSession('first-primary')`）。
 
 ### 1.6 前端（微信小程序）
