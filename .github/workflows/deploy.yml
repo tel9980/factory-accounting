@@ -78,6 +78,10 @@ jobs:
       # 按业务顺序跑 45 步，再把其余写路由用空 body 打一遍看有没有 5xx。
       - name: 写接口冒烟（POST/PATCH/DELETE 也跑一遍）
         run: node scripts/smoke-write.mjs --base http://127.0.0.1:8791 --key 8888
+      # 跨月/跨年：结账锁定以前按「单据是哪个月开的」拦，12 月一结账，
+      # 1 月收 12 月那笔单的尾款就被 403 挡住。这个脚本专门守这条线。
+      - name: 跨月 / 跨年回归（结账后还能收上月的尾款）
+        run: node scripts/test-crossmonth.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log

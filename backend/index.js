@@ -4823,6 +4823,10 @@ const normDate = (s) => {
   }
   return now()
 }
+// 收付款该锁哪个月：看「这笔钱是哪天发生的」，不看单据是哪个月开的。
+// 12 月结完账、1 月才收到 12 月那笔单的尾款，这是 1 月的账，不该被 12 月的锁拦住；
+// 反过来，12 月已经结账了还想补记一笔 12 月的收款，就该拦住。
+const payLockMonth = (date) => String(normDate(date) || now()).slice(0, 7)
 
 
 // ---------------- 微信订阅消息（到期提醒） ----------------
@@ -5493,7 +5497,7 @@ app.post('/payables/:id/apply-advance', async (c) => {
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
-  const unpaid = round2(num(p.amount) - num(p.paid))
+  const unpaid = round2(num(p.amount) - num(p.paid) - num(p.written_off))
   if (unpaid <= 0) return c.json({ error: '这笔已经付清了' }, 400)
   const list = (await db.prepare("SELECT * FROM advances WHERE type='out' AND party=? AND COALESCE(used,0) < amount ORDER BY created_at, id").bind(p.supplier).all()).results
   if (!list.length) return c.json({ error: `${p.supplier} 没有可用的预付款` }, 400)
@@ -7875,7 +7879,9 @@ app.post('/orders/:id/receive', async (c) => {
   if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
-  if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
+  // 锁「这笔收款是哪个月的」，不是「这张单是哪个月的」——跨月收上月的尾款是最常见的事
+  const payMonth = payLockMonth(date)
+  if (await isMonthLocked(db, payMonth)) return c.json({ error: `${payMonth} 已结账锁定，先解锁再记这笔收款` }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
   const leftOrder = round2(num(o.price) - num(o.paid) - num(o.written_off))
@@ -8064,7 +8070,9 @@ app.post('/payables/:id/pay', async (c) => {
   if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
-  if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
+  // 同上：锁的是这笔付款的月份，不是应付单开在哪个月
+  const payMonth = payLockMonth(date)
+  if (await isMonthLocked(db, payMonth)) return c.json({ error: `${payMonth} 已结账锁定，先解锁再记这笔付款` }, 403)
   const a = num(amount)
   if (a <= 0) return c.json({ error: '金额无效' }, 400)
   const leftPay = round2(num(p.amount) - num(p.paid) - num(p.written_off))
@@ -11605,11 +11613,20 @@ app.get('/year-print', async (c) => {
 async function yearOpenData(db, y) {
   const py = String(num(y) - 1)
   const yb = await yearBook(db, py)
+  // 「上年还欠几单」要按 12 月 31 日那天的口径数，不能用现在的 paid/written_off：
+  // 否则 1 月收掉上年尾款后，结转凭据会写成「应收 600 元（0 单）」这种自相矛盾的话。
+  const yEnd = py + '-12-31'
   const [bills, decLock, arCnt, apCnt, saved, live] = await Promise.all([
     db.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE substr(created_at,1,4)=?) + (SELECT COUNT(*) FROM payables WHERE substr(created_at,1,4)=?) + (SELECT COUNT(*) FROM ledger WHERE substr(created_at,1,4)=?) n").bind(y, y, y).first().catch(() => ({ n: 0 })),
     db.prepare('SELECT COUNT(*) n FROM month_lock WHERE month=?').bind(py + '-12').first().catch(() => ({ n: 0 })),
-    db.prepare('SELECT COUNT(*) n FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 AND substr(created_at,1,4)<=?').bind(py).first().catch(() => ({ n: 0 })),
-    db.prepare('SELECT COUNT(*) n FROM payables WHERE amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 AND substr(created_at,1,4)<=?').bind(py).first().catch(() => ({ n: 0 })),
+    db.prepare(`SELECT COUNT(*) n FROM orders o WHERE substr(o.created_at,1,10) <= ?
+      AND o.price
+        - COALESCE((SELECT SUM(l.amount) FROM ledger l WHERE l.ref_type='order' AND l.ref_id=o.id AND substr(l.created_at,1,10) <= ?),0)
+        - COALESCE((SELECT SUM(w.amount) FROM writeoffs w WHERE w.ref_type='order' AND w.ref_id=o.id AND substr(w.created_at,1,10) <= ?),0) > 0.005`).bind(yEnd, yEnd, yEnd).first().catch(() => ({ n: 0 })),
+    db.prepare(`SELECT COUNT(*) n FROM payables p WHERE substr(p.created_at,1,10) <= ?
+      AND p.amount
+        - COALESCE((SELECT SUM(l.amount) FROM ledger l WHERE l.ref_type='payable' AND l.ref_id=p.id AND substr(l.created_at,1,10) <= ?),0)
+        - COALESCE((SELECT SUM(w.amount) FROM writeoffs w WHERE w.ref_type='payable' AND w.ref_id=p.id AND substr(w.created_at,1,10) <= ?),0) > 0.005`).bind(yEnd, yEnd, yEnd).first().catch(() => ({ n: 0 })),
     db.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first().catch(() => null),
     netNow(db).catch(() => null)
   ])
@@ -11629,10 +11646,10 @@ async function yearOpenData(db, y) {
     tip: dec_closed ? '12 月已经结账锁定' : '12 月还没结账（建议先结，结转数才定得下来）',
     after: dec_closed ? '' : '没结也能结转，只是以后补记了 12 月的单，结转数会和现在不一样', go: 'report' })
   items.push({ k: 'open_ar', label: '上年没收回来的钱', count: ar_cnt, tone: ar_cnt ? 'info' : 'ok',
-    tip: ar_cnt ? `${ar_cnt} 张单共 ${round2(yb.ar_end)} 元会带到新年度继续追` : '上年欠款都收清了',
+    tip: ar_cnt ? `截至 ${py}-12-31 还有 ${ar_cnt} 张单共 ${round2(yb.ar_end)} 元没收回，会带到新年度继续追` : '上年 12 月 31 日欠款都收清了',
     after: '这些欠款不用重记，单据本来就在，新年度照常催、照常收', go: 'ar' })
   items.push({ k: 'open_ap', label: '上年没付完的钱', count: ap_cnt, tone: ap_cnt ? 'info' : 'ok',
-    tip: ap_cnt ? `${ap_cnt} 张单共 ${round2(yb.ap_end)} 元会带到新年度继续付` : '上年欠款都付清了',
+    tip: ap_cnt ? `截至 ${py}-12-31 还有 ${ap_cnt} 张单共 ${round2(yb.ap_end)} 元没付完，会带到新年度继续付` : '上年 12 月 31 日欠款都付清了',
     after: '', go: 'ap' })
   items.push({ k: 'new_bills', label: `新年度已经记了 ${new_bills} 笔`, count: new_bills, tone: new_bills ? 'info' : 'ok',
     tip: new_bills ? `已经在 ${y} 年记了 ${new_bills} 笔了` : `${y} 年还没开始记账`,
@@ -11650,7 +11667,7 @@ async function yearOpenData(db, y) {
     drift, opened: !!rec, record: rec, items, can_open: has_prev,
     text: !has_prev
       ? `${py} 年没有账，没什么可结转的。直接在 ${y} 年记账就行。`
-      : `${y} 年年初接着 ${py} 年：手头现金 ${round2(opening.cash)} 元、客户还欠 ${round2(opening.ar)} 元（${ar_cnt} 单）、欠供应商 ${round2(opening.ap)} 元（${ap_cnt} 单）、欠借款 ${round2(opening.debt)} 元，家底 ${round2(opening.net)} 元。` +
+      : `${y} 年年初接着 ${py} 年：手头现金 ${round2(opening.cash)} 元、客户还欠 ${round2(opening.ar)} 元（${ar_cnt} 单）、欠供应商 ${round2(opening.ap)} 元（${ap_cnt} 单）、欠借款 ${round2(opening.debt)} 元，家底 ${round2(opening.net)} 元。以上都是 ${py}-12-31 那天的数。` +
         (rec ? '（已经开过账了）' : `点「确认开账」把这几个数定下来，留一张凭据。`) +
         (bad ? `\n注意：${items.filter((x) => x.tone === 'warn').map((x) => x.tip).join('；')}` : '')
   }
@@ -11679,6 +11696,7 @@ app.post('/year-open', async (c) => {
   await logAudit(db, '开新年度', y, `结转 ${d.prev} 年：现金 ${rec.cash}，应收 ${rec.ar}（${rec.ar_cnt} 单），应付 ${rec.ap}，借款 ${rec.debt}，家底 ${rec.net}`)
   return c.json({ ok: true, record: rec,
     text: `${y} 年开账了：年初现金 ${rec.cash} 元、应收 ${rec.ar} 元（${rec.ar_cnt} 单）、应付 ${rec.ap} 元（${rec.ap_cnt} 单）、借款 ${rec.debt} 元、家底 ${rec.net} 元。` +
+      `\n（这些数都是 ${rec.from}-12-31 那天的口径，不是今天的）` +
       `\n这些欠款和借款不用重记——单据本来就在，新年度照常催、照常收。` +
       `\n想留一张纸：点「打印结转凭据」。` })
 })
