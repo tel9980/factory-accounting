@@ -8215,21 +8215,52 @@ app.post('/orders/:id/receive', async (c) => {
   const payMonth = payLockMonth(date)
   if (await isMonthLocked(db, payMonth)) return c.json({ error: `${payMonth} 已结账锁定，先解锁再记这笔收款` }, 403)
   const a = num(amount)
-  if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  // 实报实销：实际收到的钱跟当初记的常常不一样。
+  //   · 多收 → 不拦，多出来的记成这家的预收（下次开单可以直接抵）
+  //   · 少收 + settle → 差额记一条「尾差抹零」核销，这单算结清（钱没进来，不进现金流）
+  //   · 含税/不含税、税多税少都不在这里算，收到多少就记多少
+  const settle = !!body.settle
+  if (a <= 0 && !settle) return c.json({ error: '金额无效' }, 400)
   const leftOrder = round2(num(o.price) - num(o.paid) - num(o.written_off))
-  if (a > leftOrder + 0.005) return c.json({ error: `这单只剩 ¥${leftOrder} 没收，收不了 ¥${a}`, left: leftOrder }, 400)
+  if (leftOrder <= 0.005) return c.json({ error: '这单已经结清了', left: 0 }, 400)
   const acc = num(account_id) || (await defaultAccountId(db))
-  await db.batch([
-    db.prepare('UPDATE orders SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(a, id),
-    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
-      .bind(id, a, `收 ${o.customer} ${o.item_name}`, acc, normDate(date))
-  ])
-  await opMark(db, cid, 'receive', id)
-  await logAudit(db, '收款', o.customer, `${o.customer} 收 ¥${a}`, '', act(c))
-  const checks = []
   const d0 = String(normDate(date)).slice(0, 10)
+  const takeIn = a > leftOrder + 0.005 ? leftOrder : a
+  const overAmt = a > leftOrder + 0.005 ? round2(a - leftOrder) : 0
+  const woAdd = settle ? round2(leftOrder - Math.min(a, leftOrder)) : 0
+  if (takeIn > 0) {
+    await db.batch([
+      db.prepare('UPDATE orders SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(takeIn, id),
+      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
+        .bind(id, takeIn, `收 ${o.customer} ${o.item_name}`, acc, d0)
+    ])
+  }
+  if (overAmt > 0) {
+    const ar = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
+      .bind('in', o.customer, overAmt, `多收（${o.item_name || ''}）`, acc, d0).run()
+    const aid = ar && ar.meta && ar.meta.last_row_id ? ar.meta.last_row_id : 0
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','advance',?,?,?,?,1,?)")
+      .bind(aid, overAmt, `预收 ${o.customer}（多收的钱）`, acc, d0).run()
+  }
+  if (woAdd > 0) {
+    await db.batch([
+      db.prepare('UPDATE orders SET written_off=COALESCE(written_off,0)+? WHERE id=?').bind(woAdd, id),
+      db.prepare("INSERT INTO writeoffs (ref_type, ref_id, party, amount, reason, created_at) VALUES ('order',?,?,?,?,?)")
+        .bind(id, o.customer, woAdd, String(body.reason || '').trim() || '尾差抹零（按实际收款结清）', now())
+    ])
+  }
+  await opMark(db, cid, 'receive', id)
+  const bits = [`${o.customer} 收 ¥${round2(a)}`]
+  if (overAmt > 0) bits.push(`多收 ¥${overAmt} 记成预收`)
+  if (woAdd > 0) bits.push(`差额 ¥${woAdd} 记核销`)
+  await logAudit(db, '收款', o.customer, bits.join('，'), '', act(c))
+  const checks = []
   if (d0 && (o.created_at || '').slice(0, 10) && d0 < (o.created_at || '').slice(0, 10)) checks.push({ k: 'pay_early', text: `收款日期（${d0}）比开单日（${(o.created_at || '').slice(0, 10)}）还早，这单是先收钱后开单吗？不是的话改一下日期。` })
-  return c.json(checks.length ? { ok: true, checks } : { ok: true })
+  const out = { ok: true }
+  if (overAmt > 0) out.over = overAmt
+  if (woAdd > 0) out.settled = woAdd
+  if (checks.length) out.checks = checks
+  return c.json(out)
 })
 
 // 批量核销收款：客户一次打款，按「先老后新」自动抵掉多张未结单
@@ -8406,18 +8437,46 @@ app.post('/payables/:id/pay', async (c) => {
   const payMonth = payLockMonth(date)
   if (await isMonthLocked(db, payMonth)) return c.json({ error: `${payMonth} 已结账锁定，先解锁再记这笔付款` }, 403)
   const a = num(amount)
-  if (a <= 0) return c.json({ error: '金额无效' }, 400)
+  // 同收款：多付记成这家的预付，少付想结清就 settle（差额记尾差核销）
+  const settle = !!body.settle
+  if (a <= 0 && !settle) return c.json({ error: '金额无效' }, 400)
   const leftPay = round2(num(p.amount) - num(p.paid) - num(p.written_off))
-  if (a > leftPay + 0.005) return c.json({ error: `这笔只剩 ¥${leftPay} 没付，付不了 ¥${a}`, left: leftPay }, 400)
+  if (leftPay <= 0.005) return c.json({ error: '这笔已经付清了', left: 0 }, 400)
   const acc = num(account_id) || (await defaultAccountId(db))
-  await db.batch([
-    db.prepare('UPDATE payables SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(a, id),
-    db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,?,1,?)")
-      .bind(id, a, p.category || '', `付 ${p.supplier} ${p.remark}`, acc, normDate(date))
-  ])
+  const d0 = String(normDate(date)).slice(0, 10)
+  const paidOut = a > leftPay + 0.005 ? leftPay : a
+  const overAmt = a > leftPay + 0.005 ? round2(a - leftPay) : 0
+  const woAdd = settle ? round2(leftPay - Math.min(a, leftPay)) : 0
+  if (paidOut > 0) {
+    await db.batch([
+      db.prepare('UPDATE payables SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=?').bind(paidOut, id),
+      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,?,1,?)")
+        .bind(id, paidOut, p.category || '', `付 ${p.supplier} ${p.remark}`, acc, d0)
+    ])
+  }
+  if (overAmt > 0) {
+    const ar = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
+      .bind('out', p.supplier, overAmt, `多付（${p.remark || ''}）`, acc, d0).run()
+    const aid = ar && ar.meta && ar.meta.last_row_id ? ar.meta.last_row_id : 0
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','advance',?,?,?,?,?,1,?)")
+      .bind(aid, overAmt, p.category || '', `预付 ${p.supplier}（多付的钱）`, acc, d0).run()
+  }
+  if (woAdd > 0) {
+    await db.batch([
+      db.prepare('UPDATE payables SET written_off=COALESCE(written_off,0)+? WHERE id=?').bind(woAdd, id),
+      db.prepare("INSERT INTO writeoffs (ref_type, ref_id, party, amount, reason, created_at) VALUES ('payable',?,?,?,?,?)")
+        .bind(id, p.supplier, woAdd, String(body.reason || '').trim() || '尾差抹零（按实际付款结清）', now())
+    ])
+  }
   await opMark(db, cid, 'pay', id)
-  await logAudit(db, '付款', p.supplier, `${p.supplier} 付 ¥${a}`, '', act(c))
-  return c.json({ ok: true })
+  const bits = [`${p.supplier} 付 ¥${round2(a)}`]
+  if (overAmt > 0) bits.push(`多付 ¥${overAmt} 记成预付`)
+  if (woAdd > 0) bits.push(`差额 ¥${woAdd} 记核销`)
+  await logAudit(db, '付款', p.supplier, bits.join('，'), '', act(c))
+  const out = { ok: true }
+  if (overAmt > 0) out.over = overAmt
+  if (woAdd > 0) out.settled = woAdd
+  return c.json(out)
 })
 
 // 现付支出

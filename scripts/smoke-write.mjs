@@ -152,6 +152,37 @@ async function mainFlow() {
   const advId = advList[0] && advList[0].id
   if (advId && orderId) await step('预收抵扣到订单', 'POST', `/orders/${orderId}/apply-advance`, { advance_id: advId, amount: 100 })
 
+  // 实报实销（老板要的口径）：实际收付跟当初记的不一样，按实际记
+  //   · 多收/多付 → 多出来的记预收/预付
+  //   · 少收/少付 + settle → 差额记尾差核销，单子算结清（不进现金流）
+  await step('开一张应收单（实收有出入）', 'POST', '/orders', {
+    customer: TAG + '实收客户', item_name: '实收件', price: 1000, qty: 1, date: TODAY
+  })
+  const ar2 = await call('GET', '/ar?status=all&kw=' + encodeURIComponent(TAG + '实收客户') + '&limit=5')
+  const ar2List = Array.isArray(ar2.data) ? ar2.data : (ar2.data && ar2.data.rows) || []
+  const oid2 = ar2List[0] && ar2List[0].id
+  if (!oid2) no('实收客户能查回来', '/ar 里找不到刚开的单')
+  else {
+    const r1 = await step('客户多打钱 1200（单子只 1000）', 'POST', `/orders/${oid2}/receive`, { amount: 1200, account_id: accId, date: TODAY })
+    if (r1 && Math.abs(num0(r1.over) - 200) < 0.01) ok('多收的 200 记成预收', 'over=200')
+    else no('多收的 200 记成预收', r1 ? JSON.stringify(r1) : '接口失败')
+    await step('开第二张应收单（要抹零）', 'POST', '/orders', {
+      customer: TAG + '抹零客户', item_name: '抹零件', price: 1000, qty: 1, date: TODAY
+    })
+    const ar3 = await call('GET', '/ar?status=all&kw=' + encodeURIComponent(TAG + '抹零客户') + '&limit=5')
+    const ar3List = Array.isArray(ar3.data) ? ar3.data : (ar3.data && ar3.data.rows) || []
+    const oid3 = ar3List[0] && ar3List[0].id
+    if (oid3) {
+      await step('先收 900', 'POST', `/orders/${oid3}/receive`, { amount: 900, account_id: accId, date: TODAY })
+      const r2 = await step('剩下 100 差额抹零结清', 'POST', `/orders/${oid3}/receive`, { amount: 0, settle: true, account_id: accId, date: TODAY })
+      if (r2 && Math.abs(num0(r2.settled) - 100) < 0.01) ok('差额 100 记了核销', 'settled=100')
+      else no('差额 100 记了核销', r2 ? JSON.stringify(r2) : '接口失败')
+      const ar4 = await call('GET', '/ar?status=open&kw=' + encodeURIComponent(TAG + '抹零客户') + '&limit=5')
+      const left = (Array.isArray(ar4.data) ? ar4.data : (ar4.data && ar4.data.rows) || []).length
+      left === 0 ? ok('抹零后不再挂在未结清里') : no('抹零后不再挂在未结清里', `还剩 ${left} 张`)
+    } else no('抹零客户能查回来', '/ar 里找不到刚开的单')
+  }
+
   // 应付：进货 → 付款 → 核销
   await step('开一张应付单', 'POST', '/payables', {
     supplier: TAG + '供应商', item_name: '原材料', amount: 800, date: TODAY
@@ -163,6 +194,31 @@ async function mainFlow() {
     await step('付一笔款', 'POST', `/payables/${payId}/pay`, { amount: 300, account_id: accId, date: TODAY })
     await step('应付核销', 'POST', `/payables/${payId}/writeoff`, { amount: 50, reason: '冒烟核销' })
   } else no('应付单能查回来', '/ap 里找不到刚开的单')
+
+  // 应付也按实际：多付记预付、少付抹零结清
+  await step('开一张应付单（实付有出入）', 'POST', '/payables', {
+    supplier: TAG + '实付供应商', item_name: '实付款', amount: 600, date: TODAY
+  })
+  const ap2 = await call('GET', '/ap?status=all&kw=' + encodeURIComponent(TAG + '实付供应商') + '&limit=5')
+  const ap2List = Array.isArray(ap2.data) ? ap2.data : (ap2.data && ap2.data.rows) || []
+  const payId2 = ap2List[0] && ap2List[0].id
+  if (payId2) {
+    const p1 = await step('多付 700（单子只 600）', 'POST', `/payables/${payId2}/pay`, { amount: 700, account_id: accId, date: TODAY })
+    if (p1 && Math.abs(num0(p1.over) - 100) < 0.01) ok('多付的 100 记成预付', 'over=100')
+    else no('多付的 100 记成预付', p1 ? JSON.stringify(p1) : '接口失败')
+  } else no('实付供应商能查回来', '/ap 里找不到刚开的单')
+  await step('开第二张应付单（要抹零）', 'POST', '/payables', {
+    supplier: TAG + '抹零供应商', item_name: '抹零款', amount: 600, date: TODAY
+  })
+  const ap3 = await call('GET', '/ap?status=all&kw=' + encodeURIComponent(TAG + '抹零供应商') + '&limit=5')
+  const ap3List = Array.isArray(ap3.data) ? ap3.data : (ap3.data && ap3.data.rows) || []
+  const payId3 = ap3List[0] && ap3List[0].id
+  if (payId3) {
+    await step('先付 500', 'POST', `/payables/${payId3}/pay`, { amount: 500, account_id: accId, date: TODAY })
+    const p2 = await step('剩下 100 差额抹零结清', 'POST', `/payables/${payId3}/pay`, { amount: 0, settle: true, account_id: accId, date: TODAY })
+    if (p2 && Math.abs(num0(p2.settled) - 100) < 0.01) ok('应付差额 100 记了核销', 'settled=100')
+    else no('应付差额 100 记了核销', p2 ? JSON.stringify(p2) : '接口失败')
+  } else no('抹零供应商能查回来', '/ap 里找不到刚开的单')
 
   // 材料台账：入库 → 出库（出库有库存校验，先入后出）
   await step('建材料', 'POST', '/materials', { name: TAG + '钢板', unit: '张', min_qty: 1 })

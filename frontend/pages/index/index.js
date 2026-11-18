@@ -2401,24 +2401,48 @@ Page({
     wx.showModal({
       title: '收客户款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
       editable: true,
-      placeholderText: remain > 0 ? '不填=一次收清 ' + remain + '；也可填 金额,日期(5000,07-05)' : '填金额，可带日期(5000,07-05)',
+      placeholderText: remain > 0 ? '不填=一次收清 ' + remain + '；也可填 金额,日期(5000,07-05)；填「结清」= 差额抹零' : '填金额，可带日期(5000,07-05)',
       success: (r) => {
         if (!r.confirm) return
         const txt = String(r.content || '').trim()
+        // 实报实销：实际收的钱可能比记的少，剩的尾差不想再追，直接抹零结清
+        if (/^(结清|抹零|差额抹零|抹零结清)$/.test(txt)) return this._settleByDiff(id, 'ar')
         const parts = txt ? txt.split(/[,，\s]+/) : []
         const amt = parts[0] ? Number(parts[0]) : remain
         if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
-        if (remain > 0 && amt > remain + 0.005) {
-          return wx.showToast({ title: '比未收的还多（还剩 ' + remain + '）', icon: 'none' })
-        }
         this.req({
           url: API_BASE + '/orders/' + id + '/receive', method: 'POST', once: 'receive-' + id, queue: '收客户款',
           data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
+            const d = res.data || {}
             this.refresh()
             this.showChecks(res)
+            if (d.over) wx.showToast({ title: '多出的 ' + d.over + ' 元记成预收了', icon: 'none' })
             const noLeft = remain > 0 && Math.round((remain - amt) * 100) / 100 <= 0.005
-            this._afterPay(id, amt, remain, 'ar', noLeft)
+            this._afterPay(id, amt, remain, 'ar', noLeft || !!d.over)
+          }
+        })
+      }
+    })
+  },
+  // 差额抹零：剩下的钱不要了，记一条核销把这张单结清（不进现金流）
+  _settleByDiff(id, kind) {
+    const isAr = kind === 'ar'
+    wx.showModal({
+      title: '差额抹零',
+      content: (isAr ? '这单剩下的钱' : '这笔剩下的钱') + '当作尾差不要了，记一条核销结清？账上会显示「已核销」，不算收到钱。',
+      confirmText: '抹零结清',
+      success: (rr) => {
+        if (!rr.confirm) return
+        this.req({
+          url: API_BASE + (isAr ? '/orders/' : '/payables/') + id + (isAr ? '/receive' : '/pay'),
+          method: 'POST', once: 'settle-' + id,
+          data: { amount: 0, settle: true, account_id: this.data.acc_id, client_id: this.newCid() },
+          success: (res) => {
+            const d = res.data || {}
+            this.refresh()
+            wx.showToast({ title: d.settled ? '差额 ' + d.settled + ' 记了核销' : '已结清', icon: 'none' })
+            this._offerReceipt(id, kind)
           }
         })
       }
@@ -2434,10 +2458,10 @@ Page({
     if (left <= 0.005) return this._offerReceipt(id, kind)
     wx.showModal({
       title: '还差 ' + left + ' 元',
-      content: (kind === 'ar' ? '这张单还没收完' : '这笔还没付完') + '，剩下的一次结清吗？',
-      confirmText: '一次结清', cancelText: '先这样',
+      content: (kind === 'ar' ? '这张单还没收完' : '这笔还没付完') + '，剩下的一次结清吗？剩下的不要了就点「差额抹零」。',
+      confirmText: '一次结清', cancelText: '差额抹零',
       success: (rr) => {
-        if (!rr.confirm) return
+        if (!rr.confirm) return this._settleByDiff(id, kind)
         this.req({
           url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'), once: 'pay-' + id,
           method: 'POST',
@@ -2514,22 +2538,22 @@ Page({
     wx.showModal({
       title: '付供应商款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
       editable: true,
-      placeholderText: remain > 0 ? '不填=一次付清 ' + remain + '；也可填 金额,日期(5000,07-05)' : '填金额，可带日期(5000,07-05)',
+      placeholderText: remain > 0 ? '不填=一次付清 ' + remain + '；也可填 金额,日期(5000,07-05)；填「结清」= 差额抹零' : '填金额，可带日期(5000,07-05)',
       success: (r) => {
         if (!r.confirm) return
         const txt = String(r.content || '').trim()
+        if (/^(结清|抹零|差额抹零|抹零结清)$/.test(txt)) return this._settleByDiff(id, 'ap')
         const parts = txt ? txt.split(/[,，\s]+/) : []
         const amt = parts[0] ? Number(parts[0]) : remain
         if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
-        if (remain > 0 && amt > remain + 0.005) {
-          return wx.showToast({ title: '比未付的还多（还剩 ' + remain + '）', icon: 'none' })
-        }
         this.req({
           url: API_BASE + '/payables/' + id + '/pay', method: 'POST', once: 'payp-' + id, queue: '付供应商款',
           data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id, client_id: this.newCid() },
-          success: () => {
+          success: (res) => {
+            const d = res.data || {}
             this.refresh()
-            this._afterPay(id, amt, remain, 'ap')
+            if (d.over) wx.showToast({ title: '多出的 ' + d.over + ' 元记成预付了', icon: 'none' })
+            this._afterPay(id, amt, remain, 'ap', !!d.over)
           }
         })
       }
