@@ -18,7 +18,7 @@ for (const [k, v] of raw) { if (v.length >= 2) groups.push([k, v]); else misc.pu
 if (misc.length) groups.push(['其它（单个接口）', misc.slice().sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0))])
 const B = '<!-- API-LIST:BEGIN -->', E = '<!-- API-LIST:END -->'
 const lines = [B, '', '## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）', '',
-  `共 ${routes.length} 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。`, '']
+  `共 ${routes.length} 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。`, '']
 for (const [seg, items] of groups) {
   lines.push(`**${seg}**（${items.length}）`, '')
   for (const [m, p] of items) lines.push(`- \`${m} ${p}\``)

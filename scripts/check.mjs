@@ -94,7 +94,11 @@ try {
   say(true, `新库能建出 ${n} 张表`)
 } catch (e) {
   if (db) { say(false, 'schema.sql 能一次建起新库', `schema.sql 按新库执行失败：${e.message}（照 README 新装会卡在这里）`); db = null }
-  else { warn.push('本机 node 没有 node:sqlite（要 Node 22+），跳过建库检查'); console.log('  ⚠️ 跳过：本机 node:sqlite 不可用') }
+  else {
+    // 以前这里只 warn 一句就跳过：等于「建库检查」这一步永远绿。
+    // 没跑过就是没验过，必须红 —— CI 用 Node 24，本地缺就是环境不对。
+    fail('本机 node 没有 node:sqlite（要 Node 22+，CI 用 24），建库检查没法跑')
+  }
 }
 
 // ── 4. 代码要用的表和列，schema 里得有（线上是老库所以不报错，新装就空）──
@@ -158,7 +162,7 @@ if (db) {
     }
   }
   say(sqlBad === 0, `${checked} 条写死的 SQL 都能在真库上 prepare 通过`, `有 ${sqlBad} 条 SQL 在真库上跑不通`)
-} else console.log('  ⚠️ 跳过（没有 node:sqlite）')
+} else console.log('  ⚠️ 没有 node:sqlite，SQL 检查没法跑（上面已经记了一条失败）')
 
 // ── 4.6 /schema-check 自己列的那份「必须有」清单，schema.sql 得对得上 ──
 const reqBlock = beSrc.match(/const REQ_SCHEMA = \{([\s\S]*?)\n\}/)
@@ -188,7 +192,9 @@ const dead = [...calls].filter((p) => !routeSet.has(p) && p !== '/')
 // 逐段前缀匹配：/orders/:x/receipt 这种动态拼的，只要前缀族存在就算过
 const familyOk = (p) => [...routeSet].some((r) => r.startsWith(p) || p.startsWith(r.split('/:x')[0] + '/'))
 const really = dead.filter((p) => !familyOk(p))
-for (const p of really) warn.push(`前端调了 ${p}，后台没有这个路由（可能是动态拼的，人工看一眼）`)
+// 以前这里只 warn：「前端调了后台没有的路由」在 CI 里是黄的，没人管。
+// 这类问题的真实后果就是点一下报「url 不合法」—— 直接算失败。
+for (const p of really) fail(`前端调了 ${p}，后台没有这个路由（真机上点一下就是 404 / url 不合法）`)
 if (dead.length && !really.length) warn.push(`这 ${dead.length} 个前端路径没直接命中路由、但前缀族对得上（动态拼的）：${dead.join('、')}`)
 say(true, `${calls.size} 个前端调用，${dead.length} 个没直接命中（${really.length} 个需要人工看）`)
 

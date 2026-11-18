@@ -12,7 +12,7 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 600 条 SQL 在新库上跑不跑得通、
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 609 条 SQL 在新库上跑不跑得通、
 前端 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
@@ -44,7 +44,7 @@ npx wrangler d1 execute factory-db2 --remote --file=schema.sql   # 建了 DB2 �
 npx wrangler d1 execute factory-db3 --remote --file=schema.sql   # 建了 DB3 才要
 ```
 
-**一个 `schema.sql` 就够**：它会建出全部 54 张表、索引和 `month` 列的触发器，
+**一个 `schema.sql` 就够**：它会建出全部 55 张表、索引和 `month` 列的触发器，
 不用再手工 ALTER、也不用单独跑别的脚本。重复执行是安全的（都是 `IF NOT EXISTS`）。
 
 > 历史坑：2026-11 之前 `schema.sql` 是「线上库更新、文件没跟上」的状态，

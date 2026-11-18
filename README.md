@@ -76,8 +76,8 @@ docs/               需求文档
 
 ## 快速开始
 
-1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 54 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
-   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 600 条 SQL 在这种新库上跑不跑得通、前端的 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
+1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 55 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
+   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 609 条 SQL 在这种新库上跑不跑得通、前端的 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
 2. **前端**：微信开发者工具导入 `frontend` 目录，把 `frontend/pages/index/index.js` 顶部 `API_BASE` 改成你的 Worker 地址。
 3. **上线**：微信公众平台把该域名加进 `request` 合法域名；本地调试勾选「不校验合法域名」。
 
@@ -383,9 +383,9 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ### P2 · 前端体验与可靠性
 
-11. **⏳ 大列表一次塞给渲染层，越滚越卡**：`ui.js:1559,1655-1687` 的应收/应付/支出每次把累计数组整个 `setData`，`onReachBottom` 无上限累加；`/flows`（后端 `index.js:12814`）一次返回 300 条整包渲染；`/contacts`（`index.js:12896-12907`）SQL 连 `LIMIT` 都没有，WXML（`index.wxml:640,826,908,2912,3324`）对几千行做全量 `wx:for`。
+11. **✅ 大列表一次塞给渲染层，越滚越卡**（已改：全量数组留在页面实例上，`setData` 只给当前列表）：`ui.js:1559,1655-1687` 的应收/应付/支出每次把累计数组整个 `setData`，`onReachBottom` 无上限累加；`/flows`（后端 `index.js:12814`）一次返回 300 条整包渲染；`/contacts`（`index.js:12896-12907`）SQL 连 `LIMIT` 都没有，WXML（`index.wxml:640,826,908,2912,3324`）对几千行做全量 `wx:for`。
     → 修法：只把当前页/可见区交给 `setData`，全量数组留 JS 侧；长列表上虚拟列表或至少限制一次渲染条数。
-12. **⏳ 每次写操作都全量 `refresh()`**：`ui.js:500-535,1700-1727` 里 `onShow()` 必跑 18 个 loader，保存/删除后普遍直接 `this.refresh()`；首页分支第 1726 行还和 528 行重复调 `loadMyDay()`，联系人页重复调 `loadAccounts()`。合批只是把请求并起来了，查询量和渲染量一点没省。
+12. **🔶 每次写操作都全量 `refresh()`**（已做「同一轮同一条路径只发一次」，按变更域局部刷新还没做）：`ui.js:500-535,1700-1727` 里 `onShow()` 必跑 18 个 loader，保存/删除后普遍直接 `this.refresh()`；首页分支第 1726 行还和 528 行重复调 `loadMyDay()`，联系人页重复调 `loadAccounts()`。合批只是把请求并起来了，查询量和渲染量一点没省。
     → 修法：写后按变更域只刷相关 loader；`onShow` 加时间间隔门控 + 同一 GET 的 in-flight 去重。
 13. **✅ GET 缓存无 TTL，失败回放旧数据**：`ui.js:298-315,333-350,440,479-495` 里 `_cacheGet` 完全不校验时间戳；所有 GET 默认缓存；网络失败时把旧快照伪装成 `statusCode:200` 返回；`/batch` 成功路径对每个结果无条件缓存，**不检查 `opts.cache===false`**，缓存了带 `error` 的响应下次会被当数据渲染。
     → 修法：缓存加 TTL/版本、只白名单静态数据；写操作相关的 GET 显式 `cache:false`；缓存前校验 `ok/statusCode`。
@@ -396,8 +396,8 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ### P2 · 基建与可观测性
 
-16. **⏳ CI 不查线上表结构，也不防并发部署**：`.github/workflows/deploy.yml` 只在本地用 schema.sql 建一遍新库，部署前没有对 DB/DB2/DB3 做只读 `--remote` 结构对比（线上老库缺列不会被发现），部署后也没有 `/health-check` 冒烟；workflow 没有 `concurrency` 组，push 和手动触发可能同时部署造成版本回退。
-    → 修法：部署前加只读远程结构检查；deploy job 加 `concurrency: group`；部署后打一次 `/health-check`，失败通知到现有告警渠道。
+16. **🔶 CI 不查线上表结构**（`concurrency` 已加，剩下两项要额外凭证）：`.github/workflows/deploy.yml` 现在有 `concurrency` 组（连续 push 不会互相顶掉）；仍然只在本地用 schema.sql 建一遍新库，部署前没有对 DB/DB2/DB3 做只读 `--remote` 结构对比（线上老库缺列不会被发现），部署后也没有 `/health-check` 冒烟。
+    → 剩下两项的修法：部署前加只读远程结构检查（要往 CI 传一个只能读的 D1 token）；部署后打一次 `/health-check`，失败通知到现有告警渠道。
 17. **✅ 静默失败不进错误日志**：`index.js:39-56,78-85,14825-14831` 里 `noteFail` 只在 500 时落 `error_log`；`scheduled()` 的自愈失败被 `catch(e){}` 完全吞掉，只 `console.error`；账套 2/3 的定时备份/自愈失败时 `/error-log` 里查不到，用户只看到数字为 0 或「没备份」。
     → 修法：把 `noteFail` 和 scheduled 的 catch 统一写 `error_log`（带 book/cron 标签），恢复失败同时记审计/通知。
 
@@ -1186,11 +1186,24 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 609 SQL / 733 绑定）、`test-batch.mjs` 4 项、新写的 `scripts/test-key-queue.mjs` 8 项（老代码跑这个测试只送到 1/18，正好复现空白屏）、`smoke.mjs` 224 个 GET 无 5xx。业务实测：全额核销的单在 `/statement` 里显示「共 0 笔未结清」、`/contact-detail` 显示「累计应收 1000 已收 0 已核销 1000 未收 0」；10 月单 11 月还清 → 11 月对账单「期初 500 / 本月已收 500 / 期末 0」（旧算法是 −500）；导出对账单里那家单位「期初 999999、本期已收 400000、核销 100000、期末 499999」；整户收款 1000 只核销 500（该单已核销 300）；`2026-02-31` 建单落库为今天；粘贴 250 行 → 预览 `truncated: true` 且入账 250 条；`/import-log/1` 详情 `found 250 / missing 0`。
    - **本轮动了前端**（`req()` 兜底、401 排队、导入提示）：小程序需要重新上传发布。
 
+284. ✅ **性能收尾 + 写接口第一次进 CI（顺手挖出一个「改了却说没改」的雷）**：这一轮把审计 D（性能）和 E（工程化）里不需要额外凭证的部分做完。
+   - **`/settled`（已结清）不再「先截 3000 条再筛月份」**：原来 `LIMIT 3000` 把单据捞回来、再在 JS 里按月份和关键字过滤——单据一多，挑个老月份可能一单都筛不出来（明明有数据却显示「这个月还没有结清的单」）。现在月份和关键字都下推到 SQL（`substr(COALESCE(last_pay, created_at),1,7)=?` + `party||' '||item||' '||operator LIKE ?`），`LIMIT` 加在筛选之后；月份切换的桶改成一条 `GROUP BY m LIMIT 12`，账户名只为真正返回的那一页查（`chunkIds` 分批）。实测：`/settled?type=ar` 返回 4 条、月份桶 `2026-11 / 2026-10`；`month=2026-10` 精确命中 1 条（10-05 结清、账期 15 天）；`kw=` 也命中。
+   - **`/materials` 的「最近进货价」改窗口函数**：以前把整张 `material_moves` 的进货流水拉回 JS 去重，材料一多就是几万行；现在 `ROW_NUMBER() OVER (PARTITION BY material ORDER BY date DESC, id DESC)` 只回每家最新一条。
+   - **`migPreview`（导入预览）不再逐行查库**：500 行原来要 1000 次往返（每行两次：这单是不是已经记过、这家是不是老客户）。现在先按用到的单位名和日期各捞一次，行内只做内存比对。
+   - **前端 `setData` 减负**：`ar_all`/`ap_all`/`exp_all` 在 wxml 里从没被引用过，却每次 `setData` 都整包过桥——移到页面实例（`this._arAll` 等），只把当前列表交给渲染层。
+   - **同一轮里同一条路径只发一次**：`refresh()` 的 18 个 loader 加当前那一屏，有 3 条路径被重复请求。`_batchFlush()` 现在按 path 合并，后到的挂到先到的那条上，数据回来一起回调。`scripts/test-batch.mjs` 新增用例：21 条请求 → 实际发出 18 条、21 个回调全部收到数据。
+   - **ETag 那条决定不做**：Cloudflare 压缩响应时会摘掉 ETag（本地 workerd 不摘，所以本地测不出来），只有打印页加了 `Cache-Control: no-cache, no-transform` 才保住。要让 JSON 接口也能 304，就得放弃压缩——省下的字节还不够多花的流量，不划算。
+   - **写接口第一次进 CI**：新增 `scripts/smoke-write.mjs`——先按真实业务顺序跑 45 步（开单→改单→收款→进度→状态→核销→报价转单→预收抵扣→应付付款核销→材料进出→计件工资→发工资→固定支出→借款→借支→转账→固资→预付→返工→外协→框架价→开票→目标→账期→额度→催款→对账单→结论确认→一句话记账→粘贴导入→月报包→净值快照→预提→备份→清理→建了再删），再把其余 88 个写路由用空 body 打一遍只看有没有 5xx。CI 里对新库跑，`deploy` 依赖它。
+   - **🔴 冒烟抓到的真 bug：`run()` 的返回值不是 `{changes}` 而是 `{meta:{changes}}`**。我上一轮做资金安全时写的 6 处 `if (!info.changes)` 全部永远为假——后果不是「报错」，是「改成功了却当失败处理」：领料时库存已经扣了、却回一句「库存被别人领走了」；预收抵扣时 `used` 加上了、却没进流水、还回「没有可抵扣金额」。新增 `changesOf(r)`（优先读 `r.meta.changes`）把 6 处全换掉，并在注释里写明这个形状差异。这类 bug 只有真打接口才会露出来，静态检查看不出来。
+   - 顺手：`/materials` 的行里补 `id`（前端要删材料却没 id 可用）；`DELETE /materials/:id` 删不到时如实返回 404（原来一律回「删好了」）；`scripts/gen-api-list.py`（与 `.mjs` 重复）删掉。
+   - **`check.mjs` 该红的现在真会红**：没装 `node:sqlite` 时不再只 warning 跳过（跳过 = 永远绿）；前端调了后台不存在的路由从 warn 改成 fail。
+   - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 609 SQL / 251 调用 / 733 绑定）、`test-batch.mjs` 8 项（含去重用例）、`test-key-queue.mjs` 8 项、`smoke.mjs` 224 GET 无 5xx、`smoke-write.mjs` 45 步主流程 + 88 个写路由全通。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 399 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版脚本留在 scripts/gen-api-list.py，本机已无 python 时用 mjs 版）。
+共 399 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 

@@ -108,6 +108,15 @@ async function opMark(db, cid, kind, refId) {
 }
 // D1 一条语句最多 100 个绑定参数，IN (?,?,…) 用整批 id 会报 too many SQL variables（整页 500）。
 // 统一按 90 一批切开，调用方循环取。
+// D1 的 run() 回来的是 { success, meta: { changes } }，不是 { changes }。
+// 直接读 r.changes 永远是 undefined —— 会「明明改成功了却当失败处理」：
+// 领料时料已经扣了、却回一句「库存被别人领走了」；预收抵扣时 used 加了、却没进流水。
+function changesOf(r) {
+  if (!r) return 0
+  if (r.meta && r.meta.changes != null) return num(r.meta.changes)
+  if (r.changes != null) return num(r.changes)
+  return 0
+}
 function chunkIds(ids, n = 90) {
   const out = []
   for (let i = 0; i < ids.length; i += n) out.push(ids.slice(i, i + n))
@@ -1260,7 +1269,7 @@ app.get('/materials', async (c) => {
   const db = c.env.DB
   await matTable(db)
   const m = /^\d{4}-\d{2}$/.test(String(c.req.query('month') || '')) ? String(c.req.query('month')).slice(0, 7) : now().slice(0, 7)
-  const kinds = await db.prepare('SELECT name, unit, min_qty, note, active FROM materials ORDER BY name LIMIT 300').all().catch(() => ({ results: [] }))
+  const kinds = await db.prepare('SELECT id, name, unit, min_qty, note, active FROM materials ORDER BY name LIMIT 300').all().catch(() => ({ results: [] }))
   const agg = await db.prepare(`SELECT material,
       SUM(CASE WHEN kind='in' THEN qty ELSE 0 END) AS in_qty,
       SUM(CASE WHEN kind='out' THEN qty ELSE 0 END) AS out_qty,
@@ -1269,7 +1278,12 @@ app.get('/materials', async (c) => {
       SUM(CASE WHEN kind='out' AND month=? THEN amount ELSE 0 END) AS month_amt,
       MAX(date) AS last_day
     FROM material_moves GROUP BY material`).bind(m, m).all().catch((e) => { noteFail(e, '材料汇总'); return { results: [] } })
-  const lastPrice = await db.prepare(`SELECT material, price, date FROM material_moves WHERE kind='in' AND price>0 ORDER BY date DESC, id DESC`).all().catch(() => ({ results: [] }))
+  // 最近一次进货价：以前把「所有进货流水」整张表拉回 JS 再去重，材料一多就是几万行。
+  // 现在让 SQL 只回每家最新一条（ROW_NUMBER 分区取第 1 行，date 相同按 id 断后，和原来 JS 的顺序一致）。
+  const lastPrice = await db.prepare(`SELECT material, price, date FROM (
+      SELECT material, price, date, ROW_NUMBER() OVER (PARTITION BY material ORDER BY date DESC, id DESC) AS rn
+      FROM material_moves WHERE kind='in' AND price>0
+    ) WHERE rn=1`).all().catch(() => ({ results: [] }))
   const priceMap = {}
   for (const r of (lastPrice.results || [])) if (!priceMap[r.material]) priceMap[r.material] = { price: round2(num(r.price)), date: r.date }
   const aggMap = {}
@@ -1282,7 +1296,7 @@ app.get('/materials', async (c) => {
     const min = num(k.min_qty)
     const lp = priceMap[k.name] || null
     return {
-      name: k.name, unit: k.unit || '个', min_qty: min, note: k.note || '',
+      id: num(k.id), name: k.name, unit: k.unit || '个', min_qty: min, note: k.note || '',
       in_qty: round2(inQty), out_qty: round2(outQty), left,
       month_out: round2(num(a.month_out)), month_amt: round2(num(a.month_amt)),
       in_amt: round2(num(a.in_amt)), last_day: a.last_day || '',
@@ -1328,7 +1342,9 @@ app.delete('/materials/:id', async (c) => {
   const db = c.env.DB
   await matTable(db)
   const id = c.req.param('id')
-  await db.prepare('UPDATE materials SET active=0 WHERE id=?').bind(id).run()
+  const r = await db.prepare('UPDATE materials SET active=0 WHERE id=?').bind(id).run()
+  // 删不存在的（比如前端传了个 undefined）要如实说，别回「删好了」
+  if (!changesOf(r)) return c.json({ error: '没有这种材料' }, 404)
   return c.json({ ok: true })
 })
 app.get('/material-moves', async (c) => {
@@ -1393,7 +1409,7 @@ app.post('/material-moves', async (c) => {
       SELECT ?,?,?,?,?,?,?,?,?,?,?,?
       WHERE (SELECT COALESCE(SUM(CASE WHEN kind='in' THEN qty ELSE -qty END),0) FROM material_moves WHERE material=?) >= ?`)
       .bind(...moveVals, name, qty).run()
-    if (!num(moveInfo && moveInfo.changes)) {
+    if (!changesOf(moveInfo)) {
       const agg = await db.prepare("SELECT COALESCE(SUM(CASE WHEN kind='in' THEN qty ELSE -qty END),0) AS left FROM material_moves WHERE material=?").bind(name).first()
       return c.json({ error: `「${name}」库存刚刚被别人领走了，现在只剩 ${round2(num(agg && agg.left))}，请刷新后再记`, code: 'over_out', left: round2(num(agg && agg.left)) }, 409)
     }
@@ -2114,7 +2130,7 @@ app.post('/payroll/pay', async (c) => {
     const ts = stampOf(day)
     const payInfo = await db.prepare('INSERT OR IGNORE INTO wage_pays (month, worker, amount, account_id, note, by, created_at) VALUES (?,?,?,?,?,?,?)')
       .bind(mm, w, amt, acc, String(body.note || ''), act(c), ts).run()
-    if (!num(payInfo && payInfo.changes)) continue   // 已经发过了（并发/重复），跳过
+    if (!changesOf(payInfo)) continue   // 已经发过了（并发/重复），跳过
     const ledInfo = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at) VALUES ('out','expense',0,?,'工资',?,?,?,1,?)")
       .bind(amt, `${w} ${mm} 计件工资`, act(c), acc, ts).run()
     done.push({ worker: w, amount: amt })
@@ -5437,9 +5453,9 @@ app.post('/orders/:id/apply-advance', async (c) => {
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
-  const unpaid = round2(num(o.price) - num(o.paid))
+  const unpaid = round2(num(o.price) - num(o.paid) - num(o.written_off))
   if (unpaid <= 0) return c.json({ error: '这张单已经收清了' }, 400)
-  const list = (await db.prepare("SELECT * FROM advances WHERE type='in' AND party=? AND used < amount ORDER BY created_at, id").bind(o.customer).all()).results
+  const list = (await db.prepare("SELECT * FROM advances WHERE type='in' AND party=? AND COALESCE(used,0) < amount ORDER BY created_at, id").bind(o.customer).all()).results
   if (!list.length) return c.json({ error: `${o.customer} 没有可用的预收款` }, 400)
   let left = body.amount ? Math.min(num(body.amount), unpaid) : unpaid
   if (left <= 0) return c.json({ error: '金额无效' }, 400)
@@ -5452,8 +5468,8 @@ app.post('/orders/:id/apply-advance', async (c) => {
     const remain = round2(num(ad.amount) - num(ad.used))
     if (remain <= 0) continue
     const use = Math.min(remain, left)
-    const info = await db.prepare('UPDATE advances SET used=used+? WHERE id=? AND used + ? <= amount + 0.005').bind(use, ad.id, use).run()
-    if (!info.changes) continue
+    const info = await db.prepare('UPDATE advances SET used=COALESCE(used,0)+? WHERE id=? AND COALESCE(used,0) + ? <= amount + 0.005').bind(use, ad.id, use).run()
+    if (!changesOf(info)) continue
     usedRows.push(ad.id)
     total = round2(total + use)
     left = round2(left - use)
@@ -5465,7 +5481,7 @@ app.post('/orders/:id/apply-advance', async (c) => {
       .bind(id, total, `预收款抵扣 ${o.customer} ${o.item_name}`, 0, now())
   ]
   const done = await db.batch(stmts)
-  if (!num(done[0] && done[0].changes)) return c.json({ error: '单据金额已变化，请刷新后重试' }, 409)
+  if (!changesOf(done[0])) return c.json({ error: '单据金额已变化，请刷新后重试' }, 409)
   await logAudit(db, '预收抵扣', o.customer, `${o.customer} 用预收抵扣 ¥${total}`)
   return c.json({ ok: true, applied: total })
 })
@@ -5479,7 +5495,7 @@ app.post('/payables/:id/apply-advance', async (c) => {
   if (!p) return c.json({ error: '应付单不存在' }, 404)
   const unpaid = round2(num(p.amount) - num(p.paid))
   if (unpaid <= 0) return c.json({ error: '这笔已经付清了' }, 400)
-  const list = (await db.prepare("SELECT * FROM advances WHERE type='out' AND party=? AND used < amount ORDER BY created_at, id").bind(p.supplier).all()).results
+  const list = (await db.prepare("SELECT * FROM advances WHERE type='out' AND party=? AND COALESCE(used,0) < amount ORDER BY created_at, id").bind(p.supplier).all()).results
   if (!list.length) return c.json({ error: `${p.supplier} 没有可用的预付款` }, 400)
   let left = body.amount ? Math.min(num(body.amount), unpaid) : unpaid
   if (left <= 0) return c.json({ error: '金额无效' }, 400)
@@ -5490,8 +5506,8 @@ app.post('/payables/:id/apply-advance', async (c) => {
     const remain = round2(num(ad.amount) - num(ad.used))
     if (remain <= 0) continue
     const use = Math.min(remain, left)
-    const info = await db.prepare('UPDATE advances SET used=used+? WHERE id=? AND used + ? <= amount + 0.005').bind(use, ad.id, use).run()
-    if (!info.changes) continue
+    const info = await db.prepare('UPDATE advances SET used=COALESCE(used,0)+? WHERE id=? AND COALESCE(used,0) + ? <= amount + 0.005').bind(use, ad.id, use).run()
+    if (!changesOf(info)) continue
     usedRows.push(ad.id)
     total = round2(total + use)
     left = round2(left - use)
@@ -5503,7 +5519,7 @@ app.post('/payables/:id/apply-advance', async (c) => {
       .bind(id, total, `预付款抵扣 ${p.supplier}`, 0, now())
   ]
   const done = await db.batch(stmts)
-  if (!num(done[0] && done[0].changes)) return c.json({ error: '单据金额已变化，请刷新后重试' }, 409)
+  if (!changesOf(done[0])) return c.json({ error: '单据金额已变化，请刷新后重试' }, 409)
   await logAudit(db, '预付抵扣', p.supplier, `${p.supplier} 用预付抵扣 ¥${total}`)
   return c.json({ ok: true, applied: total })
 })
@@ -11305,6 +11321,24 @@ async function migPreview(db, body) {
   const amtCol = type === 'ar' ? 'price' : 'amount'
   const seen = new Set()
   const out = []
+  // 预览要判断「账上是不是已经有这一笔」「这家单位以前有没有过」。
+  // 以前是逐行两条查询：500 行 = 1000 次往返，预览要转十几秒。
+  // 现在先一次性把用到的单位名和日期捞回来，行内只做内存比对。
+  const wantParties = [...new Set(rows.map((r) => String(r.party || '').trim()).filter(Boolean))]
+  const wantDates = [...new Set(rows.map((r) => (toIsoDate(r.date) || gDate).slice(0, 10)).filter(Boolean))]
+  const knownSet = new Set()
+  for (const part of chunkIds(wantParties)) {
+    const ph = part.map(() => '?').join(',')
+    const rs = await db.prepare(`SELECT DISTINCT ${partyCol} AS p FROM ${table} WHERE ${partyCol} IN (${ph})`).bind(...part).all().catch(() => ({ results: [] }))
+    for (const x of (rs.results || [])) knownSet.add(String(x.p))
+  }
+  // 同一天的单据一般不多，按日期捞（一次带上单位名，省一次往返）
+  const existSet = new Set()
+  for (const part of chunkIds(wantDates)) {
+    const ph = part.map(() => '?').join(',')
+    const rs = await db.prepare(`SELECT ${partyCol} AS p, ${amtCol} AS a, substr(created_at,1,10) AS d FROM ${table} WHERE substr(created_at,1,10) IN (${ph})`).bind(...part).all().catch(() => ({ results: [] }))
+    for (const x of (rs.results || [])) existSet.add(String(x.p) + '|' + round2(num(x.a)) + '|' + String(x.d))
+  }
   for (const r of rows) {
     const row = { i: r.i, party: r.party, amount: round2(r.amount), cost: r.cost, date: (r.date || gDate).slice(0, 10), type, ok: true, error: '', dup: false, dup_text: '', known: false }
     if (!row.party) { row.ok = false; row.error = '没写名字' }
@@ -11317,11 +11351,12 @@ async function migPreview(db, body) {
       if (seen.has(key)) { row.dup = true; row.dup_text = '这一批里前面已经有一笔一样的' }
       seen.add(key)
       if (!row.dup) {
-        const hit = await db.prepare(`SELECT id FROM ${table} WHERE ${partyCol}=? AND ${amtCol}=? AND substr(created_at,1,10)=? LIMIT 1`).bind(row.party, row.amount, row.date).first()
-        if (hit) { row.dup = true; row.dup_text = '账上已经有一笔一样的（' + row.date + ' ¥' + row.amount + '）' }
+        if (existSet.has(row.party + '|' + round2(row.amount) + '|' + row.date)) {
+          row.dup = true
+          row.dup_text = '账上已经有一笔一样的（' + row.date + ' ¥' + row.amount + '）'
+        }
       }
-      const known = await db.prepare(`SELECT 1 AS x FROM ${table} WHERE ${partyCol}=? LIMIT 1`).bind(row.party).first()
-      row.known = !!known
+      row.known = knownSet.has(row.party)
     }
     out.push(row)
   }
@@ -13151,19 +13186,41 @@ app.get('/settled', async (c) => {
   const itemCol = isAr ? 'item_name' : 'remark'
   const refType = isAr ? 'order' : 'payable'
   const dir = isAr ? 'in' : 'out'
-  const docR = db.prepare(`SELECT id, COALESCE(${partyCol},'') AS party, COALESCE(${itemCol},'') AS item,
-      COALESCE(${amtCol},0) AS amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo,
-      created_at, COALESCE(operator,'') AS operator,
-      (SELECT MAX(l.created_at) FROM ledger l WHERE l.ref_type='${refType}' AND l.ref_id=${tbl}.id AND l.direction='${dir}') AS last_pay
-    FROM ${tbl}
-    WHERE COALESCE(paid,0) + COALESCE(written_off,0) >= COALESCE(${amtCol},0)
-    ORDER BY id DESC LIMIT 3000`).all().catch(() => ({ results: [] }))
-  const accR = db.prepare(`SELECT l.ref_id AS rid, GROUP_CONCAT(DISTINCT COALESCE(a.name,'')) AS accs
-    FROM ledger l LEFT JOIN accounts a ON a.id = l.account_id
-    WHERE l.ref_type='${refType}' AND l.direction='${dir}' GROUP BY l.ref_id`).all().catch(() => ({ results: [] }))
-  const [doc, acc] = await Promise.all([docR, accR])
+  // 「结清月份」= 最后一次收/付款所在月（没有流水就用建单日期），和原来 JS 里的 settle 一个口径。
+  // 以前是先 LIMIT 3000 把单据拉回来、再在 JS 里筛月份：单据一多，挑个老月份可能一单都筛不出来
+  // （明明有数据却显示「这个月还没有结清的单」）。现在月份和关键字都下推到 SQL，LIMIT 加在筛选之后。
+  const monthOn = month ? 1 : 0
+  const kwLike = kw ? '%' + kw + '%' : ''
+  const docR = db.prepare(`SELECT * FROM (
+      SELECT id, COALESCE(${partyCol},'') AS party, COALESCE(${itemCol},'') AS item,
+        COALESCE(${amtCol},0) AS amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo,
+        created_at, COALESCE(operator,'') AS operator,
+        (SELECT MAX(l.created_at) FROM ledger l WHERE l.ref_type='${refType}' AND l.ref_id=${tbl}.id AND l.direction='${dir}') AS last_pay
+      FROM ${tbl}
+      WHERE COALESCE(paid,0) + COALESCE(written_off,0) >= COALESCE(${amtCol},0)
+    )
+    WHERE (?=0 OR substr(COALESCE(last_pay, created_at),1,7)=?)
+      AND (?='' OR (party || ' ' || item || ' ' || operator) LIKE ?)
+    ORDER BY id DESC LIMIT 3000`).bind(monthOn, month, kw, kwLike).all().catch(() => ({ results: [] }))
+  // 月份切换的桶：整表按结清月分组只回十来行，不再从 3000 条里凑
+  const monR = db.prepare(`SELECT substr(COALESCE((SELECT MAX(l.created_at) FROM ledger l WHERE l.ref_type='${refType}' AND l.ref_id=t.id AND l.direction='${dir}'), t.created_at),1,7) AS m,
+      COUNT(*) AS cnt, SUM(COALESCE(t.${amtCol},0)) AS total
+    FROM ${tbl} t
+    WHERE COALESCE(t.paid,0) + COALESCE(t.written_off,0) >= COALESCE(t.${amtCol},0)
+    GROUP BY m ORDER BY m DESC LIMIT 12`).all().catch(() => ({ results: [] }))
+  const [doc, mon] = await Promise.all([docR, monR])
+  // 账户名只为这次真正返回的单据查（以前是对整张流水表 GROUP BY 一遍）
   const accMap = {}
-  for (const x of (acc.results || [])) accMap[num(x.rid)] = String(x.accs || '')
+  {
+    const ids = (doc.results || []).map((r) => num(r.id))
+    for (const part of chunkIds(ids)) {
+      const ph = part.map(() => '?').join(',')
+      const rs = await db.prepare(`SELECT l.ref_id AS rid, GROUP_CONCAT(DISTINCT COALESCE(a.name,'')) AS accs
+        FROM ledger l LEFT JOIN accounts a ON a.id = l.account_id
+        WHERE l.ref_type='${refType}' AND l.direction='${dir}' AND l.ref_id IN (${ph}) GROUP BY l.ref_id`).bind(...part).all().catch(() => ({ results: [] }))
+      for (const x of (rs.results || [])) accMap[num(x.rid)] = String(x.accs || '')
+    }
+  }
   const all = []
   for (const r of (doc.results || [])) {
     const created = String(r.created_at || '').slice(0, 10)
@@ -13180,14 +13237,8 @@ app.get('/settled', async (c) => {
   let rows = all
   if (month) rows = rows.filter((x) => x.month === month)
   if (kw) rows = rows.filter((x) => (x.party + ' ' + x.item + ' ' + x.operator).indexOf(kw) >= 0)
-  // 按月汇总（不受月份筛选影响，方便点月份切换）
-  const mM = {}
-  for (const x of all) {
-    const e = mM[x.month] || (mM[x.month] = { m: x.month, cnt: 0, total: 0 })
-    e.cnt++; e.total += x.amount
-  }
-  const months = Object.values(mM).sort((a, b) => (a.m < b.m ? 1 : -1)).slice(0, 12)
-    .map((x) => ({ m: x.m, label: x.m.slice(5) + ' 月', cnt: x.cnt, total: round2(x.total) }))
+  // 按月汇总（不受月份筛选影响，方便点月份切换）——直接来自 SQL 的分组结果
+  const months = (mon.results || []).filter((x) => x.m).map((x) => ({ m: x.m, label: String(x.m).slice(5) + ' 月', cnt: num(x.cnt), total: round2(num(x.total)) }))
   const cnt = rows.length
   const total = round2(rows.reduce((a, x) => a + x.amount, 0))
   const daysArr = rows.map((x) => x.days).sort((a, b) => a - b)
@@ -13483,6 +13534,9 @@ const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archi
 const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sign_secret', 'sealed', 'sealed_at', 'sealed_note']
 async function buildBackup(db) {
   const out = { exported_at: now(), version: 3 }
+  // 读不出来的表要留痕：以前 catch 里只写空数组，于是「备份成功」但少了一整块数据，
+  // /backup-verify 拿空数组和空表一比还是「完全一致」，等于主动给一个假的安心结论。
+  const failed = []
   for (const t of BACKUP_TABLES) {
     try {
       // settings 是 key/value 表，没有 id 列，统一按 rowid 排（SQLite 里 id INTEGER PRIMARY KEY 就是 rowid）
@@ -13490,8 +13544,13 @@ async function buildBackup(db) {
       let rows = r.results || []
       if (t === 'settings') rows = rows.filter((x) => !BACKUP_SETTINGS_SKIP.includes(String(x.key)))
       out[t] = rows
-    } catch (e) { noteFail(e, '备份 ' + t); out[t] = [] }
+    } catch (e) {
+      noteFail(e, '备份 ' + t)
+      out[t] = []
+      failed.push({ table: t, error: String((e && (e.message || e.error)) || e || 'unknown').slice(0, 200) })
+    }
   }
+  if (failed.length) out.failed = failed
   return JSON.stringify(out, null, 2)
 }
 
@@ -13806,6 +13865,8 @@ app.get('/backup-verify', async (c) => {
   const days = daysSince(String(row.created_at || '').slice(0, 10))
   const size = num(row.size)
   const warns = []
+  const failedIn = d && Array.isArray(d.failed) ? d.failed : []
+  if (failedIn.length) warns.push('这份备份导出时有 ' + failedIn.length + ' 张表没读出来（' + failedIn.map((x) => x.table).join('、') + '），恢复时这几块会是空的——请重新备份一次')
   if (!usable) warns.push('这份备份内容坏了（不是有效 JSON 或缺账目），恢复不了')
   if (missing.length) warns.push('这份备份是旧格式，缺 ' + missing.length + ' 类数据（' + missing.slice(0, 6).join('、') + '…），恢复完这些会空着——重新点一次「立即备份」就能补全')
   if (days > 7) warns.push('最近一份备份是 ' + days + ' 天前的，超过一周没备份了')
@@ -15443,9 +15504,12 @@ export default {
     }
     // 笔记站只同步主账套
     try {
-      await pushToNotes(env.DB, env)
+      // 返回值以前直接丢掉：pushToNotes 失败是 return {ok:false}，不会抛，于是「每天同步笔记站」
+      // 实际上可能天天失败而没人知道。现在失败写进 error_log，数据体检里能看到。
+      const nr = await pushToNotes(env.DB, env)
+      if (!nr || !nr.ok) await noteFailDb(env.DB, new Error((nr && nr.error) || '笔记站同步失败'), 'push-to-notes', 1)
     } catch (e) {
-      console.error('scheduled push-to-notes failed', e)
+      await noteFailDb(env.DB, e, 'push-to-notes', 1)
     }
   }
 }

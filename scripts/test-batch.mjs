@@ -24,6 +24,7 @@ const run = async ({ boot, serverCap, chunkHint }) => {
   const batches = []
   const singles = []
   const delivered = new Set()
+  let calls = 0
   const wx = {
     getStorageSync: (k) => (k in storage ? storage[k] : ''),
     setStorageSync: (k, v) => { storage[k] = v },
@@ -53,11 +54,11 @@ const run = async ({ boot, serverCap, chunkHint }) => {
     _send(o) { singles.push(String(o.url)); setTimeout(() => o.success && o.success({ statusCode: 200, data: { ok: true } }), 0) }
   })
 
-  ctx._bq = boot.map((p) => ({ path: p, opts: { url: 'https://x' + p, success: () => delivered.add(p) } }))
+  ctx._bq = boot.map((p) => ({ path: p, opts: { url: 'https://x' + p, success: () => { calls++; delivered.add(p) } } }))
   ctx._bt = 1
   ctx._batchFlush.call(ctx)
   await new Promise((ok) => setTimeout(ok, 60))
-  return { batches, singles, delivered, chunkHint }
+  return { batches, singles, delivered, calls, chunkHint }
 }
 
 const boot = ['/dashboard', '/reminders', '/me', '/books', '/accounts', '/categories', '/onboarding',
@@ -78,6 +79,21 @@ for (const [label, cap] of [['新后端（上限 24）', 24], ['老后端（上�
   check(maxChunk <= 16, `每批都不超过 16 条（最大 ${maxChunk} 条）`)
   check(r.batches.length >= 1, `确实走了批量（${r.batches.map((b) => b.length + '条').join(' + ')}）`)
   check(r.delivered.size === boot.length, `18 份数据都回到了各自的回调（${r.delivered.size}/${boot.length}）`)
+}
+
+// refresh() 里同一路径被重复请求（18 个 loader + 当前那一屏），这里钉住「同一条路径只发一次」
+{
+  console.log('\n[同一屏里 3 条重复路径]')
+  const dup = ['/dashboard', '/reminders', '/dashboard', '/me', '/books', '/me', '/accounts',
+    '/categories', '/onboarding', '/cashflow?days=45', '/target', '/pipeline', '/health-check',
+    '/my-work', '/my-day', '/funding', '/cash-forecast?days=14', '/next-step', '/month-end',
+    '/term-default', '/accounts']
+  const r = await run({ boot: dup, serverCap: 24 })
+  const sentPaths = r.batches.reduce((a, b) => a + b.length, 0)
+  const uniq = new Set(dup).size
+  check(r.singles.length === 0, `没有退回逐个发（实际 ${r.singles.length} 个）`)
+  check(sentPaths === uniq, `${dup.length} 条请求去重成 ${uniq} 条发出（实际发了 ${sentPaths} 条）`)
+  check(r.calls === dup.length, `${dup.length} 个回调都收到了数据（${r.calls}/${dup.length}）`)
 }
 
 if (bad) {

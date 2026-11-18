@@ -97,7 +97,7 @@ Page({
     overdue_count: 0, overdue: [],
     due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
     ar_list: [], ap_list: [], expense_list: [],
-    ar_all: [], ap_all: [], exp_all: [], onboard: null,
+    onboard: null,
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
@@ -463,9 +463,25 @@ Page({
   },
   _batchFlush() {
     this._bt = null
-    const q = this._bq || []
+    const raw = this._bq || []
     this._bq = []
-    if (!q.length) return
+    if (!raw.length) return
+    // 同一条路径只发一次：refresh() 一次调 18 个 loader，再加 enterTab 当前那一屏，
+    // 有 3 条路径被重复请求（同样的 URL 发两遍，回来的数据一模一样）。
+    // 后到的挂到先到的那一条上，数据回来时一起回调——少几个请求，界面行为不变。
+    const byPath = {}
+    const q = []
+    for (const it of raw) {
+      const hit = byPath[it.path]
+      if (!hit) { byPath[it.path] = it; q.push(it); continue }
+      const prev = hit.opts.success
+      const add = it.opts.success
+      hit.opts.success = (res) => {
+        try { prev && prev(res) } catch (e) {}
+        try { add && add(res) } catch (e) {}
+      }
+      if (it.opts.cache !== false) hit.wantCache = true
+    }
     // 一次 /batch 最多带 16 条（后端上限 24，但老版本后端是 16；这边按 16 分组，两边新旧都不会错）。
     // 为什么要分组：首屏 refresh() 一进来就是 18 条 GET，攒成一个 tick 后超了 16 → 后端截断成 16 条、
     // 这边发现「回来的条数对不上」就整批作废退回逐个发 —— 等于白跑一轮 16 次查询再发 18 个请求。
@@ -495,7 +511,7 @@ Page({
         d.results.forEach((val, i) => {
           const o = q[i].opts
           // 合批前 caller 明确说了 cache:false（动态数据），这里也要遵守，不能无脑缓存。
-          if (o.cache !== false && !(o.method && o.method.toUpperCase() !== 'GET')) this._cachePut(q[i].path, val)
+          if ((o.cache !== false || q[i].wantCache) && !(o.method && o.method.toUpperCase() !== 'GET')) this._cachePut(q[i].path, val)
           o.success && o.success({ data: val, statusCode: 200 })
         })
         if (this._offShown) { this._offShown = false; this.setData({ offline_at: '' }) }
@@ -1674,8 +1690,11 @@ Page({
     const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort
     this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
-      const all = more ? this.data.ar_all.concat(page) : page
-      this.setData({ ar_all: all, ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw) })
+      // 全量列表只留在页面实例上（this._arAll），不进 data：
+      // data 里的东西每次 setData 都要序列化过桥发给视图层，而 wxml 从来没用过 ar_all。
+      const all = more ? (this._arAll || []).concat(page) : page
+      this._arAll = all
+      this.setData({ ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw) })
     } })
   },
   loadAp(more) {
@@ -1683,16 +1702,18 @@ Page({
     const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort
     this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
-      const all = more ? this.data.ap_all.concat(page) : page
-      this.setData({ ap_all: all, ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw) })
+      const all = more ? (this._apAll || []).concat(page) : page
+      this._apAll = all
+      this.setData({ ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw) })
     } })
   },
   loadExpenses(more) {
     const off = more ? this.data.ex_off : 0
     this.req({ url: API_BASE + '/expenses?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
       const page = res.data || []
-      const all = more ? this.data.exp_all.concat(page) : page
-      this.setData({ exp_all: all, ex_off: all.length, ex_more: page.length >= this.PAGE, expense_list: this.filterEx(all, this.data.ex_kw) })
+      const all = more ? (this._expAll || []).concat(page) : page
+      this._expAll = all
+      this.setData({ ex_off: all.length, ex_more: page.length >= this.PAGE, expense_list: this.filterEx(all, this.data.ex_kw) })
     } })
   },
   // 上拉到底自动加载更多
@@ -1711,9 +1732,9 @@ Page({
   filterAr(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.customer + ' ' + (x.item_name || '')).indexOf(kw) >= 0) : list },
   filterAp(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.supplier + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
   filterEx(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => ((x.category || '') + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
-  onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this.data.ar_all, e.detail.value) }); this.loadGroups('ar') },
-  onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this.data.ap_all, e.detail.value) }); this.loadGroups('ap') },
-  onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this.data.exp_all, e.detail.value) }) },
+  onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this._arAll, e.detail.value) }); this.loadGroups('ar') },
+  onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this._apAll, e.detail.value) }); this.loadGroups('ap') },
+  onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this._expAll, e.detail.value) }) },
   // 切到某个页时才加载那一页要用的数据（一次 30 个请求太多，手机上慢）
   enterTab(t) {
     if (t === 'ar' || t === 'ap') {
@@ -2206,7 +2227,7 @@ Page({
   // 再来一单：把上次同样的客户/产品/单价带出来
   againOrder(e) {
     const id = e.currentTarget.dataset.id
-    const it = (this.data.ar_all || []).find((x) => String(x.id) === String(id)) || {}
+    const it = (this._arAll || []).find((x) => String(x.id) === String(id)) || {}
     this.req({
       url: API_BASE + '/last-deal?type=ar&party=' + encodeURIComponent(it.customer || ''),
       success: (r) => {
@@ -2222,7 +2243,7 @@ Page({
   },
   againPayable(e) {
     const id = e.currentTarget.dataset.id
-    const it = (this.data.ap_all || []).find((x) => String(x.id) === String(id)) || {}
+    const it = (this._apAll || []).find((x) => String(x.id) === String(id)) || {}
     this.req({
       url: API_BASE + '/last-deal?type=ap&party=' + encodeURIComponent(it.supplier || ''),
       success: (r) => {
@@ -2318,7 +2339,7 @@ Page({
   },
   payOrder(e) {
     const id = e.currentTarget.dataset.id
-    const remain = this._remainOf(this.data.ar_all, id)
+    const remain = this._remainOf(this._arAll, id)
     wx.showModal({
       title: '收客户款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
       editable: true,
@@ -2431,7 +2452,7 @@ Page({
   },
   payPayable(e) {
     const id = e.currentTarget.dataset.id
-    const remain = this._remainOf(this.data.ap_all, id)
+    const remain = this._remainOf(this._apAll, id)
     wx.showModal({
       title: '付供应商款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
       editable: true,
@@ -2461,8 +2482,8 @@ Page({
     const kind = e.currentTarget.dataset.kind
     const id = Number(e.currentTarget.dataset.id)
     let row = null
-    if (kind === 'ar') row = (this.data.ar_all || []).filter((x) => x.id === id)[0]
-    else if (kind === 'ap') row = (this.data.ap_all || []).filter((x) => x.id === id)[0]
+    if (kind === 'ar') row = (this._arAll || []).filter((x) => x.id === id)[0]
+    else if (kind === 'ap') row = (this._apAll || []).filter((x) => x.id === id)[0]
     else row = (this.data.expense_list || []).filter((x) => x.id === id)[0]
     if (!row) return wx.showToast({ title: '这张单没找到，下拉刷新再试', icon: 'none' })
     const title = kind === 'ar'
@@ -2582,7 +2603,7 @@ Page({
   },
   editOrder(e) {
     const id = e.currentTarget.dataset.id
-    const it = this.data.ar_all.find((x) => x.id === id) || {}
+    const it = (this._arAll || []).find((x) => x.id === id) || {}
     wx.showModal({
       title: '改应收单（客户,产品,金额,成本）', editable: true,
       placeholderText: '金额不能低于已收 ' + (it.paid || 0) + ' 元',
@@ -2604,7 +2625,7 @@ Page({
   },
   editProgress(e) {
     const id = e.currentTarget.dataset.id
-    const it = this.data.ar_all.find((x) => x.id === id) || {}
+    const it = (this._arAll || []).find((x) => x.id === id) || {}
     wx.showActionSheet({
       itemList: ['更新进度', '查看进度历史'],
       success: (r) => {
@@ -2645,7 +2666,7 @@ Page({
   },
   editPayable(e) {
     const id = e.currentTarget.dataset.id
-    const it = this.data.ap_all.find((x) => x.id === id) || {}
+    const it = (this._apAll || []).find((x) => x.id === id) || {}
     wx.showModal({
       title: '改应付单（供应商,金额,备注）', editable: true,
       placeholderText: '金额不能低于已付 ' + (it.paid || 0) + ' 元',
@@ -2667,7 +2688,7 @@ Page({
   },
   editExpense(e) {
     const id = e.currentTarget.dataset.id
-    const it = this.data.exp_all.find((x) => x.id === id) || {}
+    const it = (this._expAll || []).find((x) => x.id === id) || {}
     wx.showModal({
       title: '改支出', editable: true,
       placeholderText: '金额,分类,备注',
@@ -7512,7 +7533,7 @@ Page({
   },
   matchBankOrder(e) {
     const id = e.currentTarget.dataset.id
-    const list = (this.data.ar_all || []).filter((o) => Number(o.price) - Number(o.paid) > 0)
+    const list = (this._arAll || []).filter((o) => Number(o.price) - Number(o.paid) > 0)
     if (!list.length) return wx.showToast({ title: '没有未结的应收单', icon: 'none' })
     wx.showActionSheet({
       itemList: list.slice(0, 6).map((o) => `${o.customer} ${o.item_name} 欠${Math.round(Number(o.price) - Number(o.paid))}`),
@@ -7530,7 +7551,7 @@ Page({
   },
   matchBankPayable(e) {
     const id = e.currentTarget.dataset.id
-    const list = (this.data.ap_all || []).filter((p) => Number(p.amount) - Number(p.paid) > 0)
+    const list = (this._apAll || []).filter((p) => Number(p.amount) - Number(p.paid) > 0)
     if (!list.length) return wx.showToast({ title: '没有未结的应付单', icon: 'none' })
     wx.showActionSheet({
       itemList: list.slice(0, 6).map((p) => `${p.supplier} 欠${Math.round(Number(p.amount) - Number(p.paid))}`),
