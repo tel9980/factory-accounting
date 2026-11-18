@@ -870,6 +870,10 @@
         <text class="chip-label">常记：</text>
         <text class="chip" wx:for="{{sug_ex}}" wx:key="index" bindtap="fillSug" data-t="ex" data-i="{{index}}">{{item.party}} {{item.amount}}</text>
       </view>
+      <view class="chips">
+        <text class="chip-label">常用：</text>
+        <text class="chip" bindtap="presetWage">发工资（按实发数）</text>
+      </view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
@@ -1741,6 +1745,7 @@
         <button class="btn ghost" size="mini" bindtap="loadModules">🧩 功能模块（用不上的关掉）</button>
         <view wx:if="{{mods}}">
           <view class="tip">{{mods.text}}。关掉的模块：界面上入口会藏起来，接口也直接不让用；以后想用随时打开，数据一条不删。</view>
+          <view class="aline ok" wx:if="{{mods.hint}}">{{mods.hint}}</view>
           <view class="item" wx:for="{{mods.list}}" wx:key="k" bindtap="toggleModule" data-k="{{item.k}}">
             <view class="row1">
               <text class="nm">{{item.on?'☑':'☐'}} {{item.name}}</text>
@@ -2439,6 +2444,9 @@
           <button class="btn ghost" size="mini" bindtap="closeSupplyBook">收起</button>
         </view>
       </block>
+      <!-- 计件工资：默认关着（工资一般按实发数记在「支出 → 工资」里就够）。
+           要按件算钱时，去设置 → 功能模块 打开「计件工资」，这一块才会出来。 -->
+      <block wx:if="{{mod.wage!==false}}">
       <view class="tip">🧮 计件工资（记工 → 月底算钱 → 发工资 → 打工资单）</view>
       <view class="frow">
         <input class="inp half" placeholder="月份 YYYY-MM（留空本月）" value="{{pw_month}}" bindinput="onPwMonth" bindconfirm="loadPayroll"/>
@@ -2530,6 +2538,7 @@
           <button class="btn" size="mini" bindtap="addWageRate">＋ 加单价</button>
           <button class="btn ghost half" size="mini" bindtap="closeWageRates">收起单价表</button>
         </view>
+      </block>
       </block>
       <view class="tip">🎚 信用分档（谁可以宽限、谁只做现款）</view>
       <view class="frow">

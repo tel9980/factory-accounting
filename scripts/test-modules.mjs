@@ -46,15 +46,29 @@ async function main() {
   if (!await waitUp()) { console.log('❌ 后端没起来：' + BASE); process.exit(1) }
   console.log('功能模块开关：' + BASE)
 
-  // 先看默认状态：老账本没有 modules_off，应该全开
+  // 先看默认状态：从没改过开关的老账本，基础四块全开，计件工资默认关着
   const m0 = await call('GET', '/modules')
   if (m0.s !== 200 || !Array.isArray(m0.d && m0.d.list)) { console.log('❌ /modules 拿不到列表'); process.exit(1) }
   const keys = m0.d.list.map((x) => x.k)
   ok(`模块清单 ${keys.length} 个：${keys.join('、')}`)
   const keepOn = m0.d.list.filter((x) => x.keep && x.on).map((x) => x.k)
   eq('基础模块（应收/应付/支出/导入）默认开着', keepOn.sort().join(','), 'ap,ar,expense,import')
+  const wageRow = m0.d.list.find((x) => x.k === 'wage') || {}
+  eq('计件工资默认关着（工资按实发数走支出）', !!wageRow.on, false)
+  eq('默认关着时 /modules 会给一句替代做法', !!(m0.d.hint || ''), true)
+  const wageOff = await call('GET', '/wage-rates')
+  eq('默认关着时 /wage-rates 状态码', wageOff.s, 403)
+  eq('默认关着时返回的 code', wageOff.d && wageOff.d.code, 'module_off')
+  // 关着计件工资不能连累别的：支出/应收照常
+  eq('工资关着不影响支出', (await call('GET', '/expenses')).s, 200)
+  eq('工资关着不影响应收', (await call('GET', '/ar')).s, 200)
 
-  // 关掉「计件工资」，工资类接口必须 403
+  // 打开计件工资，工资类接口立刻恢复
+  const on = await call('POST', '/modules', { off: [] })
+  eq('打开计件工资', on.s, 200)
+  eq('打开后 /wage-rates 恢复', (await call('GET', '/wage-rates')).s, 200)
+
+  // 再关掉，必须 403
   const save = await call('POST', '/modules', { off: ['wage'] })
   eq('关掉计件工资', save.s, 200)
   const wage = await call('GET', '/wage-rates')

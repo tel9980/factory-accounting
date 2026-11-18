@@ -2360,6 +2360,16 @@ Page({
       success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest(); this.showChecks(res) }
     })
   },
+  // 「按实发数入账」：不开计件工资时，工资就是「这个月实际发出去多少钱」，
+  // 直接记一笔支出（分类=工资）就行——净利、现金流、月报全都认这一笔。
+  presetWage() {
+    const cats = this.data.categories || []
+    const idx = Math.max(0, cats.indexOf('工资'))
+    const d = new Date(Date.now() + 8 * 3600 * 1000)
+    const m = d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0')
+    this.setData({ e_category: idx, e_remark: m + ' 工资（实发）' })
+    wx.showToast({ title: '填上实发总额，点「记支出」', icon: 'none' })
+  },
   addExpense() {
     const { e_amount, e_remark, categories, e_category, e_operator, e_date } = this.data
     if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
@@ -4248,6 +4258,7 @@ Page({
   loadMyWork() {
     this.req({
       url: API_BASE + '/my-work',
+      silent: true,
       success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ mw: d }) }
     })
   },
@@ -4407,7 +4418,7 @@ Page({
         const map = {}
         d.list.forEach((m) => { map[m.k] = !!m.on })
         this._modOff = d.off || []
-        this.setData({ mods: { list: d.list, off: d.off || [], text: d.text || '' }, mod: map })
+        this.setData({ mods: { list: d.list, off: d.off || [], text: d.text || '', hint: d.hint || '' }, mod: map })
         this.applyModuleFilter()
       }
     })

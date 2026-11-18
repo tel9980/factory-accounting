@@ -338,7 +338,9 @@ const MODULES = [
   { k: 'ap', name: '应付（我欠供应商）', desc: '进货、付款、核销', keep: 1, routes: [/^\/payables/, /^\/ap(-|$)/] },
   { k: 'expense', name: '支出与报销', desc: '水电房租、员工报销冲抵', keep: 1, routes: [/^\/expenses?/, /^\/loans/, /^\/fixed/, /^\/ledger/, /^\/cashbook/, /^\/reimburse/] },
   { k: 'import', name: 'Excel 导入', desc: '模板导入应收应付、对账、报销', keep: 1, routes: [/^\/import/, /^\/parse-import/, /^\/detect-import/, /^\/migrate/, /^\/export/] },
-  { k: 'wage', name: '计件工资', desc: '单价、计件记录、发工资', routes: [/^\/wage-/, /^\/payroll/, /^\/my-work/] },
+  // 计件工资默认关着：小厂多数时候是「一个月发一次，发多少记多少」，
+  // 按件算钱的才需要开。关着的时候工资按实发数走「支出 → 分类=工资」入账。
+  { k: 'wage', name: '计件工资', desc: '按件算钱：单价、计件记录、发工资、扣宿舍水电', def: 0, routes: [/^\/wage-/, /^\/payroll/, /^\/my-work/] },
   { k: 'material', name: '材料台账', desc: '进出库、库存、框架价、在制', routes: [/^\/materials/, /^\/material-moves/, /^\/frame-prices/, /^\/wip$/] },
   { k: 'prod', name: '生产与返工', desc: '工序进度、返工、外协', routes: [/^\/process-log/, /^\/reworks?$/, /^\/rework-book/, /^\/outsourc/, /^\/schedule/, /^\/pipeline/] },
   { k: 'quote', name: '报价', desc: '报价单、转订单', routes: [/^\/quotes?$/, /^\/quotes\//, /^\/quote-/] },
@@ -353,11 +355,16 @@ const MODULES = [
 const MODULE_BY_KEY = {}
 for (const m of MODULES) MODULE_BY_KEY[m.k] = m
 const MODULE_OFF_NOTE = '这个模块没开（设置 → 功能模块 里可以打开）'
-// 存的是「关掉哪些」，没写的等于开着——这样以后新增模块对老账本默认就是开的
+// 存的是「关掉哪些」，没写的等于开着——这样以后新增模块对老账本默认就是开的。
+// 例外：带 def:0 的模块（计件工资）在「从没改过开关」的老账本里默认关着，
+// 想用的人点一下就开；一旦点过开关（settings 里有 modules_off 这一行，哪怕是空串），
+// 就完全按存下来的来，不再套默认值。
 async function modulesOff(db) {
   const r = await db.prepare("SELECT value FROM settings WHERE key='modules_off'").first().catch(() => null)
+  const touched = !!r
   const v = String((r && r.value) || '')
   const set = new Set(v.split(',').map((x) => x.trim()).filter((x) => x && MODULE_BY_KEY[x]))
+  if (!touched) for (const m of MODULES) if (m.def === 0 && !m.keep) set.add(m.k)
   for (const m of MODULES) if (m.keep) set.delete(m.k)
   return set
 }
@@ -4923,11 +4930,13 @@ app.post('/staff-perms', async (c) => {
 app.get('/modules', async (c) => {
   const db = c.env.DB
   const off = await modulesOff(db)
-  const list = MODULES.map((m) => ({ k: m.k, name: m.name, desc: m.desc || '', keep: !!m.keep, on: m.keep ? true : !off.has(m.k) }))
+  const list = MODULES.map((m) => ({ k: m.k, name: m.name, desc: m.desc || '', keep: !!m.keep, def: m.def === 0 ? 0 : 1, on: m.keep ? true : !off.has(m.k) }))
   const offList = list.filter((x) => !x.on).map((x) => x.name)
   return c.json({
     ok: true, list, off: list.filter((x) => !x.on).map((x) => x.k),
-    text: offList.length ? `关掉了 ${offList.length} 个模块：${offList.join('、')}` : '所有模块都开着'
+    text: offList.length ? `关掉了 ${offList.length} 个模块：${offList.join('、')}` : '所有模块都开着',
+    // 关掉计件工资时给一句替代做法，免得以为工资没地方记
+    hint: off.has('wage') ? '工资不用在这里算：直接「支出 → 分类选工资」记实际发出去的钱就行。哪天要按件算钱，把「计件工资」打开。' : ''
   })
 })
 app.post('/modules', async (c) => {

@@ -70,6 +70,7 @@ const brief = (d) => {
   const s = typeof d === 'string' ? d : JSON.stringify(d)
   return String(s || '').slice(0, 160)
 }
+const num0 = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 
 // 等服务器起来
 async function waitReady() {
@@ -176,6 +177,14 @@ async function mainFlow() {
   // 其它台账
   await step('固定支出', 'POST', '/fixed', { amount: 200, category: TAG + '房租', day: 5, remark: '冒烟' })
   await step('记一笔支出', 'POST', '/expenses', { amount: 66, category: TAG + '分类', remark: '冒烟', account_id: accId, date: TODAY })
+  // 「工资按实发数入账」这条路：不开计件工资时，工资就是一笔分类=工资的支出。
+  // 这条必须能记上、且分类不被改写（净利/现金流都靠它）。
+  await step('发工资（按实发数记支出）', 'POST', '/expenses', { amount: 3000, category: '工资', remark: `${TODAY.slice(0, 7)} 工资（实发）`, account_id: accId, date: TODAY })
+  const exW = await call('GET', '/expenses?kw=' + encodeURIComponent('工资（实发）'))
+  const exWrows = Array.isArray(exW.data) ? exW.data : ((exW.data && exW.data.rows) || [])
+  const wageRow = exWrows.find((x) => String(x.category || '') === '工资' && num0(x.amount) === 3000)
+  if (wageRow) ok('工资按实发数入账', `id=${wageRow.id} 分类=${wageRow.category} 金额=${wageRow.amount}`)
+  else no('工资按实发数入账', '记了 3000 的工资支出，/expenses 里找不到')
   await step('借款', 'POST', '/debts', { lender: TAG + '银行', kind: 'bank', principal: 10000, rate: 4.5, start_date: TODAY, term_months: 12, pay_kind: 'interest' })
   const dbs = await call('GET', '/debts')
   const dbList = (dbs.data && (dbs.data.rows || dbs.data)) || []
@@ -297,6 +306,9 @@ if (!(await waitReady())) {
   process.exit(1)
 }
 await ensureKey()
+// 模块开关：计件工资默认是关着的（工资一般按实发数记支出就够了），
+// 但这个脚本要把所有写接口都跑一遍 —— 先全打开，否则工资那几步会被 403 挡回来。
+await step('打开全部模块（冒烟要跑全部接口）', 'POST', '/modules', { off: [] })
 try {
   await mainFlow()
   await sweep()
