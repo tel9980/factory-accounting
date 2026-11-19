@@ -162,8 +162,24 @@ jobs:
           fi
       - name: 部署到 Cloudflare
         if: steps.token.outputs.can == 'true'
-        run: npx wrangler deploy
+        # 版本号必须带上去：wrangler.toml 里写的是 APP_VERSION="dev"，
+        # 以前光跑 `wrangler deploy`，线上 /version 永远是 dev，出了事分不清哪次部署。
+        run: >-
+          npx wrangler deploy
+          --var APP_VERSION:"$(date -u +%Y%m%d-%H%M)"
+          --var APP_BUILT:"$(date -u +%FT%TZ)"
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+
+      - name: 部署后验版本
+        if: steps.token.outputs.can == 'true'
+        run: |
+          sleep 5
+          curl -fsS https://jz.qy663.de5.net/version | tee /tmp/ver.json
+          echo
+          if grep -q '"version":"dev"' /tmp/ver.json; then
+            echo "::error title=版本号没带上去::线上 /version 还是 dev，说明 --var 没生效"
+            exit 1
+          fi

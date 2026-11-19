@@ -69,7 +69,7 @@ console.log('\n[1] 员工口令不能清库、不能导全量、不能覆盖恢�
   const made = await call('POST', '/staff-users', { name: TAG + '员工', modules: ['ar', 'ap', 'expense', 'import'] })
   const pin = made.d && made.d.pin && String(made.d.pin).length >= 4 ? String(made.d.pin) : null
   if (!pin) {
-    no('新建员工时后端没回明文口令，后面几条没法验', row)
+    no('新建员工时后端没回明文口令，后面几条没法验', '响应里没有 pin：' + JSON.stringify(made.d))
   } else {
     const checks = [
       ['POST', '/import-all', { mode: 'replace', confirm: '覆盖' }],

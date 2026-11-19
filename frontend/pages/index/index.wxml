@@ -183,6 +183,7 @@
         <view class="g4l" bindtap="explainProfit">本月净利 ⓘ</view>
       </view>
     </view>
+    <view class="aline bad" wx:if="{{dash_err}}" bindtap="loadDashboard">{{dash_err}}（点这里重试）</view>
     <view class="monthline">本月 收 {{month_income}} · 付 {{month_outcome}} · 结余 {{month_profit}}</view>
     <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="card" wx:if="{{ns || (mw && mw.count>0)}}">
@@ -1028,8 +1029,8 @@
     <view class="form">
       <view class="prev-h">📥 老账搬家（第一次用：把别的本子上的欠款一次搬进来）</view>
       <view class="tip">一行一笔：名字,金额[,成本][,开单日期]。日期留空就用下面填的统一日期；成本可以不填（毛利会偏高，之后能补）。</view>
-      <button class="btn ghost" size="mini" bindtap="openMigrate">{{mg? '收起' : '开始搬'}}</button>
-      <view wx:if="{{mg}}">
+      <button class="btn ghost" size="mini" bindtap="openMigrate">{{mg_open? '收起' : '开始搬'}}</button>
+      <view wx:if="{{mg_open}}">
         <view class="frow">
           <view class="seg {{mg_type=='ar'?'on':''}}" bindtap="migType" data-t="ar">客户欠我</view>
           <view class="seg {{mg_type=='ap'?'on':''}}" bindtap="migType" data-t="ap">我欠供应商</view>
@@ -2053,6 +2054,7 @@
         <view class="label">手里现金</view>
       </view>
     </view>
+    <view class="tip" wx:if="{{nw_latest}}">这个「家底」不算押金、借支、预付款：押金是要退回来的，借支会报销冲掉，预付是还没花掉的成本——算进去反而看不出真实家底。这三样在下面各自一行。</view>
     <view class="biz" wx:if="{{nw_latest}}">
       <text>别人欠我</text><text class="amt">{{nw_latest.ar}}</text>
     </view>
@@ -2980,7 +2982,7 @@
     <view class="form">
       <view class="tip">到期微信提醒（可选）：配好后，每天早上 9 点如果 7 天内有该收/该付的款，会自动给你发一条微信服务通知。微信这个功能免费。</view>
       <input class="inp" placeholder="小程序 AppID（wx 开头）" value="{{wx_appid}}" bindinput="onWxAppid"/>
-      <input class="inp" placeholder="小程序 AppSecret（只存服务器，不显示）" value="{{wx_secret}}" bindinput="onWxSecret"/>
+      <input class="inp" password placeholder="小程序 AppSecret（只存服务器，不显示）" value="{{wx_secret}}" bindinput="onWxSecret"/>
       <input class="inp" placeholder="订阅消息模板ID（公众平台复制）" value="{{wx_tpl}}" bindinput="onWxTpl"/>
       <input class="inp" placeholder="模板字段（默认 thing1,time2,thing3，不用改）" value="{{wx_fields}}" bindinput="onWxFields"/>
       <button class="btn" size="mini" bindtap="saveWx">保存配置</button>

@@ -110,6 +110,11 @@ CREATE TABLE IF NOT EXISTS fixed_expenses (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_fixed ON ledger(ref_type, ref_id);
+-- 自动记账（固定支出 / 摊销 / 折旧 / 预提利息）每月只该有一条。
+-- 以前靠「先 SELECT COUNT 再 INSERT」，两个 cron 或连点两次就会提两遍，成本凭空多一笔。
+-- 用条件唯一索引从数据库这层挡住，代码里改成 INSERT OR IGNORE 即可。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_once ON ledger(ref_type, ref_id, month)
+  WHERE ref_type IN ('fixed','amort','dep','debt_int');
 
 -- 月度结账锁定（锁定后该月账目不可增删改）
 CREATE TABLE IF NOT EXISTS month_lock (

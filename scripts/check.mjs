@@ -85,6 +85,105 @@ beSrc.split('\n').forEach((rawLine, i) => {
 for (const o of orphanAwaits) fail(o)
 say(orphanAwaits.length === 0, '没有「await 一个没声明过的变量」这种必崩写法')
 
+// [2.6] 双引号/单引号字符串里写 ${} —— 只有模板串（反引号）才会替换，普通字符串会原封不动
+// 交给 SQLite，报 unrecognized token: "$"。这坑真踩过：monthSnapshot 里那句
+// "… WHERE ${CASH_EXP_WHERE} AND month=?" 一调 /month-archive 就 500。
+function dollarInQuotes(src) {
+  const out = []
+  let i = 0
+  let line = 1
+  let inTpl = 0
+  let lineC = false
+  let blockC = false
+  while (i < src.length) {
+    const ch = src[i]
+    const nx = src[i + 1]
+    if (ch === '\n') { line += 1; lineC = false; i += 1; continue }
+    if (lineC) { i += 1; continue }
+    if (blockC) { if (ch === '*' && nx === '/') { blockC = false; i += 2 } else i += 1; continue }
+    if (inTpl > 0) {
+      if (ch === '\\') { i += 2; continue }
+      if (ch === '`') { inTpl -= 1; i += 1; continue }
+      i += 1
+      continue
+    }
+    if (ch === '/' && nx === '/') { lineC = true; i += 2; continue }
+    if (ch === '/' && nx === '*') { blockC = true; i += 2; continue }
+    if (ch === '`') { inTpl += 1; i += 1; continue }
+    if (ch === '"' || ch === "'") {
+      const q = ch
+      let j = i + 1
+      let hit = false
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue }
+        if (src[j] === '\n') break
+        if (src[j] === '$' && src[j + 1] === '{') hit = true
+        if (src[j] === q) break
+        j += 1
+      }
+      const lit = src.slice(i, j + 1)
+      // `"${x}"` 这种「给列名加引号」是故意的，不算
+      const identOnly = /^["']\$\{[A-Za-z_$][\w$.]*\}["']$/.test(lit)
+      if (hit && !identOnly) out.push(`${line}: ${src.slice(i, Math.min(j + 1, i + 90))}`)
+      i = j + 1
+      continue
+    }
+    i += 1
+  }
+  return out
+}
+{
+  const bad2 = []
+  for (const [f, src] of [[BE, beSrc], [FE, feSrc]]) {
+    for (const x of dollarInQuotes(src)) bad2.push(`${path.relative(ROOT, f)} 第 ${x}`)
+  }
+  for (const x of bad2) fail('把 ${} 写进了普通字符串（只有反引号才替换）：' + x)
+  say(bad2.length === 0, '没有把 ${} 写进普通字符串')
+}
+
+// [2.7] 页面 data 里不许有重复的顶层键 —— 重复声明时后一个把前一个悄悄覆盖掉，
+// 表现是「界面上某个开关点了没反应」「同一块数据一会儿是布尔一会儿是对象」。
+// 这坑真踩过：data 里同时有 `mg: null`（合并结算用）和 `mg: false`（老账搬家面板用），
+// 后者赢了，于是搬家面板的 wx:if="{{mg}}" 永远是 false。
+{
+  const src = fs.readFileSync(FE, 'utf8')
+  const at = src.indexOf('  data: {')
+  const start = at < 0 ? -1 : src.indexOf('{', at)
+  const dups = []
+  if (start >= 0) {
+    let depthBrace = 0
+    let endB = -1
+    for (let k = start; k < src.length; k += 1) {
+      if (src[k] === '{') depthBrace += 1
+      else if (src[k] === '}') { depthBrace -= 1; if (depthBrace === 0) { endB = k; break } }
+    }
+    const body = src.slice(start + 1, endB)
+    let depth = 0
+    let quote = null
+    const seen = new Set()
+    for (let k = 0; k < body.length; k += 1) {
+      const c = body[k]
+      if (quote) {
+        if (c === '\\') { k += 1; continue }
+        if (c === quote) quote = null
+        continue
+      }
+      if (c === '"' || c === "'" || c === '`') { quote = c; continue }
+      if ('{[('.includes(c)) { depth += 1; continue }
+      if ('}])'.includes(c)) { depth -= 1; continue }
+      if (depth === 0 && /[A-Za-z_$]/.test(c) && (k === 0 || /[,\s{]/.test(body[k - 1]))) {
+        const m = /^([A-Za-z_$][\w$]*)\s*:/.exec(body.slice(k, k + 60))
+        if (m) {
+          if (seen.has(m[1])) dups.push(m[1])
+          else seen.add(m[1])
+        }
+      }
+    }
+  }
+  for (const d of dups) fail(`页面 data 里「${d}」声明了两遍，后一个会把前一个覆盖掉`)
+  say(dups.length === 0, '页面 data 没有重复的顶层键')
+}
+
 // ── 3. schema.sql 按新库能不能一次建起来（新装唯一入口，坏了等于装不上）──
 console.log('\n[3] schema.sql 新装')
 let db = null

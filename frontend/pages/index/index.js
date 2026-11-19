@@ -93,10 +93,10 @@ Page({
     mg: null, mg_month: '',
     qt: null, qt_n: 0, qh: null, qt_party: '', qt_item: '', qt_cost: '', qt_margin: '', qt_qty: '', qt_price: '', qt_days: '',
     yrv: null, yrv_year: '',
-    mg: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
+    mg_open: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
     tab: 'home', group: 'home',
     ar_total: 0, ap_total: 0,
-    month_income: 0, month_outcome: 0, month_profit: 0,
+    month_income: 0, month_outcome: 0, month_profit: 0, dash_err: '',
     month_order_add: 0, month_payable_add: 0, profit_biz: 0,
     overdue_count: 0, overdue: [],
     due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
@@ -180,7 +180,7 @@ Page({
       ] }
     ],
     health: {}, health_done: false, err_shown: false, err_days: 7, err_count: 0, err_groups: [], err_rows: [],
-    hc: null, hc_open: false, hr: null, hr_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, mb_month: '', ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
+    hc: null, hc_open: false, hr: null, hr_open: false, cb: null, cb_month: '', cb2: null, cb2_month: '', yc: null, yc_year: '', cr: null, lb: null, lb_month: '', ec: null, ec_month: '', mbr: null, ns_open: false, bck: null, mtip: null, sb: null, sb_month: '', me: null, dbk: null, pb: null, pa: null, pb_kw: '', price_tip: '', price_warn: '', price_last: 0, ic: null, ic_month: '', import_type: 0, import_text: '', import_preview: null, recon: null, recon_log: null, rec_prog: null, rec_dun: null, import_log: null, imp_docs: null, dbst: null, term_default: '0', pipe: null, pbal: null, pbal_type: 'ar',
     terms: [], terms_unset: [], term_party: '', term_days: '30', term_cycle: '30', term_day: '', rc: null, collect: null, cp: null, rb: null, rb_month: '', dr: null, dr_month: '', tg: null, tadv: null, term_auto: false,
     packs: [], fc: null, due: null, risk: null,
     import_hint: '每行一条，用逗号分隔，末尾可带日期（如 07-05）\n应收：客户,产品,金额\n应付：供应商,金额,备注\n支出：金额,分类,备注\n借支：员工,金额,备注\n报销：员工,金额,分类,备注\n期初应收：客户,金额（不带日期默认记年初）\n期初应付：供应商,金额（不带日期默认记年初）',
@@ -229,7 +229,7 @@ Page({
     aging_type: 'ar', aging: null, wx_appid: '', wx_secret: '', wx_tpl: '', wx_fields: '', wx_info: null, wx_openid: '', wx_msg: '',
     kpi: null,
     mr_month: '', mr_text: '',
-    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', dy: null, dy_year: '', st_log: null, dp: null,
+    head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', dy: null, dy_year: '', st_log: null,
   },
   newCid() { return String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8) },
   enqueueOp(op) {
@@ -1620,12 +1620,16 @@ Page({
       url: API_BASE + '/dashboard',
       success: (res) => {
         if (res.data && !res.data.error) {
+          const N = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
           this.setData({
-            ar_total: res.data.ar_total, ap_total: res.data.ap_total,
-            month_income: res.data.month_income, month_outcome: res.data.month_outcome,
-            month_profit: res.data.month_profit,
-            month_order_add: res.data.month_order_add, month_payable_add: res.data.month_payable_add,
-            profit_biz: res.data.profit_biz,
+            // 一律转成数字：后端某个字段缺了的话，直接塞 undefined 首页那几个大数字会变成空白，
+            // 看着像「没有欠款」，比显示 0 危险。
+            ar_total: N(res.data.ar_total), ap_total: N(res.data.ap_total),
+            month_income: N(res.data.month_income), month_outcome: N(res.data.month_outcome),
+            month_profit: N(res.data.month_profit),
+            month_order_add: N(res.data.month_order_add), month_payable_add: N(res.data.month_payable_add),
+            profit_biz: N(res.data.profit_biz),
+            dash_err: '',
             month_amort: res.data.month_amort || 0, month_accrue_int: res.data.month_accrue_int || 0, month_dep: res.data.month_dep || 0,
             month_expense_cash: res.data.month_expense_cash || 0,
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
@@ -1644,8 +1648,11 @@ Page({
             issue_count: res.data.issue_count || 0, issue_at: res.data.issue_at || ''
           })
           if (res.data.role === 'staff') this.askStaffName()
+        } else {
+          this.setData({ dash_err: (res.data && res.data.error) || '首页数字没取到，下拉刷新试试' })
         }
-      }
+      },
+      fail: () => this.setData({ dash_err: '网断了，首页数字没更新（下拉刷新重试）' })
     })
   },
   PAGE: 60,
@@ -1765,7 +1772,10 @@ Page({
   },
   loadAr(more) {
     const off = more ? this.data.ar_off : 0
-    const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort
+    // 搜索词要下推给后端：以前只在前端筛「已经加载的那 60 条」，
+    // 单子一多，老的单在后台有、页面上搜不到，还提示「没有」。
+    const kwq = this.data.ar_kw ? '&kw=' + encodeURIComponent(this.data.ar_kw) : ''
+    const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort + kwq
     this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
       // 全量列表只留在页面实例上（this._arAll），不进 data：
@@ -1777,7 +1787,8 @@ Page({
   },
   loadAp(more) {
     const off = more ? this.data.ap_off : 0
-    const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort + (this.data.ap_cat ? '&cat=' + encodeURIComponent(this.data.ap_cat) : '')
+    const kwq = this.data.ap_kw ? '&kw=' + encodeURIComponent(this.data.ap_kw) : ''
+    const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort + (this.data.ap_cat ? '&cat=' + encodeURIComponent(this.data.ap_cat) : '') + kwq
     this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
       const all = more ? (this._apAll || []).concat(page) : page
@@ -1810,8 +1821,18 @@ Page({
   filterAr(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.customer + ' ' + (x.item_name || '')).indexOf(kw) >= 0) : list },
   filterAp(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => (x.supplier + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
   filterEx(list, kw) { kw = (kw || '').trim(); return kw ? list.filter((x) => ((x.category || '') + ' ' + (x.remark || '')).indexOf(kw) >= 0) : list },
-  onArKw(e) { this.setData({ ar_kw: e.detail.value, ar_list: this.filterAr(this._arAll, e.detail.value) }); this.loadGroups('ar') },
-  onApKw(e) { this.setData({ ap_kw: e.detail.value, ap_list: this.filterAp(this._apAll, e.detail.value) }); this.loadGroups('ap') },
+  onArKw(e) {
+    const kw = e.detail.value
+    this.setData({ ar_kw: kw, ar_list: this.filterAr(this._arAll, kw) })
+    clearTimeout(this._arT)
+    this._arT = setTimeout(() => this.loadAr(), 300)
+  },
+  onApKw(e) {
+    const kw = e.detail.value
+    this.setData({ ap_kw: kw, ap_list: this.filterAp(this._apAll, kw) })
+    clearTimeout(this._apT)
+    this._apT = setTimeout(() => this.loadAp(), 300)
+  },
   onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this._expAll, e.detail.value) }) },
   // 切到某个页时才加载那一页要用的数据（一次 30 个请求太多，手机上慢）
   enterTab(t) {
@@ -2232,18 +2253,24 @@ Page({
   },
   // 「💰 收钱」以前和「＋ 记一笔应收」是同一个动作，点下去直接落到「记应收」表单，
   // 最坏会把已经收到的钱记成一张新欠条。现在它只负责跳到「未结清」列表并提示怎么收。
+  // 「💰 收钱」：先切到应收未结清，再报「一共几张、多少钱」。
+  // 以前是拿列表里已经加载的前 60 条现算，客户一多就少报（金额和笔数都不对）。
   goCollect() {
-    const all = this._arAll || []
-    const open = all.filter((x) => !x.settled)
     this.setData({ tab: 'ar', group: 'bill', ar_filter: 'open' })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     this.enterTab('ar')
-    const sum = open.reduce((a, x) => a + (Number(x.unpaid) || 0), 0)
-    wx.showToast({
-      title: open.length ? `共 ${open.length} 张没结清，合计 ¥${Math.round(sum * 100) / 100}；点「整户收款」一次收清` : '现在没有未结清的单',
-      icon: 'none',
-      duration: 2600
-    })
+    const say = (d) => {
+      const n = Number((d && d.open_count) || 0)
+      const t = Number((d && d.open_amount) || 0)
+      wx.showToast({
+        title: n ? `共 ${n} 张没结清，合计 ¥${Math.round(t * 100) / 100}；点「整户收款」一次收清` : '现在没有未结清的单',
+        icon: 'none',
+        duration: 2600
+      })
+    }
+    const cached = this.data.ar_sum || {}
+    if (cached.open_count !== undefined) return say(cached)
+    this.req({ url: API_BASE + '/ar-summary?type=ar', silent: true, success: (res) => { const d = res.data || {}; this.setData({ ar_sum: d }); say(d) } })
   },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
@@ -2437,6 +2464,17 @@ Page({
       showCancel: false, confirmText: '知道了'
     })
   },
+  // 收付款输入框里的文字：可能是「5000」「5,000」「5000,07-05」「5000元」
+  // 以前直接 split(/[,，\s]+/) 取第一段，"5,000" 就变成了 5 —— 少收 4995 也不报错。
+  _payText(txt) {
+    let t = String(txt || '').trim()
+    const dm = t.match(/(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[-/月]\d{1,2}\s*日?)/)
+    const date = dm ? dm[0].replace(/[月日]/g, '-').replace(/-+$/, '') : ''
+    if (dm) t = t.replace(dm[0], ' ')
+    const numTxt = t.replace(/[^\d.]/g, '')
+    const amt = numTxt ? Number(numTxt) : 0
+    return { amt: Number.isFinite(amt) ? Math.round(amt * 100) / 100 : 0, date }
+  },
   // 找某一单还剩多少没结（先从当前列表里查）
   _remainOf(list, id) {
     const it = (list || []).find((x) => String(x.id) === String(id)) || {}
@@ -2454,12 +2492,12 @@ Page({
         const txt = String(r.content || '').trim()
         // 实报实销：实际收的钱可能比记的少，剩的尾差不想再追，直接抹零结清
         if (/^(结清|抹零|差额抹零|抹零结清)$/.test(txt)) return this._settleByDiff(id, 'ar')
-        const parts = txt ? txt.split(/[,，\s]+/) : []
-        const amt = parts[0] ? Number(parts[0]) : remain
+        const pt = this._payText(txt)
+        const amt = txt && pt.amt > 0 ? pt.amt : remain
         if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
         this.req({
           url: API_BASE + '/orders/' + id + '/receive', method: 'POST', once: 'receive-' + id, queue: '收客户款',
-          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id, client_id: this.newCid() },
+          data: { amount: amt, date: pt.date, account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
             const d = res.data || {}
             this.refresh()
@@ -2590,12 +2628,12 @@ Page({
         if (!r.confirm) return
         const txt = String(r.content || '').trim()
         if (/^(结清|抹零|差额抹零|抹零结清)$/.test(txt)) return this._settleByDiff(id, 'ap')
-        const parts = txt ? txt.split(/[,，\s]+/) : []
-        const amt = parts[0] ? Number(parts[0]) : remain
+        const pt = this._payText(txt)
+        const amt = txt && pt.amt > 0 ? pt.amt : remain
         if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
         this.req({
           url: API_BASE + '/payables/' + id + '/pay', method: 'POST', once: 'payp-' + id, queue: '付供应商款',
-          data: { amount: amt, date: parts[1] || '', account_id: this.data.acc_id, client_id: this.newCid() },
+          data: { amount: amt, date: pt.date, account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
             const d = res.data || {}
             this.refresh()
@@ -2730,25 +2768,49 @@ Page({
       }
     })
   },
+  // 改应收单：一项一项改。
+  // 以前是一个输入框里塞「客户,产品,金额,成本」，客户名里带逗号就错位，
+  // 手一抖把 8000 改成别的，客户名就变成了数字、金额变成 0，还不提示。
   editOrder(e) {
     const id = e.currentTarget.dataset.id
     const it = (this._arAll || []).find((x) => x.id === id) || {}
-    wx.showModal({
-      title: '改应收单（客户,产品,金额,成本）', editable: true,
-      placeholderText: '金额不能低于已收 ' + (it.paid || 0) + ' 元',
-      content: [it.customer, it.item_name, it.price, it.cost || ''].join(','),
+    const fields = [
+      { k: 'customer', t: '客户', v: String(it.customer || ''), num: false },
+      { k: 'item_name', t: '产品', v: String(it.item_name || ''), num: false },
+      { k: 'price', t: '金额', v: String(it.price || 0), num: true },
+      { k: 'cost', t: '成本', v: String(it.cost || 0), num: true }
+    ]
+    wx.showActionSheet({
+      itemList: fields.map((f) => `改${f.t}（现在 ${f.v || '空'}）`),
       success: (r) => {
-        if (r.confirm && r.content) {
-          const p = r.content.split(/[,，]/).map((s) => s.trim())
-          this.req({
-            url: API_BASE + '/orders/' + id, method: 'PATCH',
-            data: { customer: p[0], item_name: p[1], price: Number(p[2]), cost: p[3] === undefined || p[3] === '' ? undefined : Number(p[3]), rev: it.rev },
-            success: (res) => {
-              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
-              else this.refresh()
+        const f = fields[r.tapIndex]
+        if (!f) return
+        wx.showModal({
+          title: '改' + f.t, editable: true, content: f.v,
+          placeholderText: f.num ? '只能填数字' : '填新的' + f.t,
+          success: (m) => {
+            if (!m.confirm) return
+            const raw = String(m.content || '').trim()
+            const data = { rev: it.rev }
+            if (f.num) {
+              const n = Number(raw.replace(/[,，\s元]/g, ''))
+              if (!Number.isFinite(n) || n < 0) return wx.showToast({ title: f.t + '要填数字', icon: 'none' })
+              data[f.k] = n
+            } else {
+              if (!raw) return wx.showToast({ title: f.t + '不能空着', icon: 'none' })
+              data[f.k] = raw
             }
-          })
-        }
+            this.req({
+              url: API_BASE + '/orders/' + id, method: 'PATCH', data,
+              success: (res) => {
+                const d = res.data || {}
+                if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
+                wx.showToast({ title: d.changed ? '改好了：' + d.changed : '没变动', icon: 'none' })
+                this.refresh()
+              }
+            })
+          }
+        })
       }
     })
   },
@@ -6697,7 +6759,7 @@ Page({
     })
   },
   // 老账搬家
-  openMigrate() { this.setData({ mg: !this.data.mg, mgp: this.data.mg ? null : this.data.mgp }) },
+  openMigrate() { this.setData({ mg_open: !this.data.mg_open, mgp: this.data.mg_open ? null : this.data.mgp }) },
   migType(e) { this.setData({ mg_type: e.currentTarget.dataset.t, mgp: null }) },
   onMigText(e) { this.setData({ mg_text: e.detail.value }) },
   onMigDate(e) { this.setData({ mg_date: e.detail.value }) },
@@ -7532,7 +7594,7 @@ Page({
         if (!d.ok) return wx.showModal({ title: '没发成', content: d.error || '', showCancel: false })
         wx.showToast({ title: '发了 ¥' + d.total })
         this.loadPayroll()
-        if (this.loadHomeData) this.loadHomeData()
+        this.loadDashboard()
       } })
     } })
   },
@@ -7937,17 +7999,29 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         const v = (r.content || '').trim()
-        const amount = v ? Number(v) : unpaid
+        const amount = Number(String(v).replace(/[^\d.]/g, '')) || unpaid
         if (!(amount > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
-        this.req({
-          url: API_BASE + '/orders/' + id + '/writeoff', method: 'POST',
-          data: { amount: amount, reason: '联系不上客户/要不回来了' },
-          success: (res) => {
-            const d = res.data || {}
-            if (d.ok) {
-              wx.showToast({ title: '已核销 ' + d.amount, icon: 'success' })
-              this.loadAr(); this.loadDashboard(); this.loadWriteoffs()
-            } else wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+        // 不填金额就是整笔作废，这一步一定要再问一次，不然一点就把整笔单抹掉了
+        const full = amount >= unpaid - 0.005
+        wx.showModal({
+          title: '核销 ¥' + Math.round(amount * 100) / 100,
+          content: full ? `整笔 ${unpaid} 元都核销掉，这张单就结清了（核销不算收到钱，不进现金流）。` : `只核销 ${amount} 元，还剩 ${Math.round((unpaid - amount) * 100) / 100} 元。`,
+          editable: true, placeholderText: '原因（可不填，如：对方扣款/尾差/坏账）',
+          confirmText: '确定核销',
+          success: (r2) => {
+            if (!r2.confirm) return
+            const reason = String(r2.content || '').trim() || '联系不上客户/要不回来了'
+            this.req({
+              url: API_BASE + '/orders/' + id + '/writeoff', method: 'POST',
+              data: { amount: amount, reason: reason },
+              success: (res) => {
+                const d = res.data || {}
+                if (d.ok) {
+                  wx.showToast({ title: '已核销 ' + d.amount, icon: 'success' })
+                  this.loadAr(); this.loadDashboard(); this.loadWriteoffs()
+                } else wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+              }
+            })
           }
         })
       }
@@ -7964,17 +8038,28 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         const v = (r.content || '').trim()
-        const amount = v ? Number(v) : unpaid
+        const amount = Number(String(v).replace(/[^\d.]/g, '')) || unpaid
         if (!(amount > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
-        this.req({
-          url: API_BASE + '/payables/' + id + '/writeoff', method: 'POST',
-          data: { amount: amount, reason: '供应商免了/不用付了' },
-          success: (res) => {
-            const d = res.data || {}
-            if (d.ok) {
-              wx.showToast({ title: '已核销 ' + d.amount, icon: 'success' })
-              this.loadAp(); this.loadDashboard(); this.loadWriteoffs()
-            } else wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+        const full = amount >= unpaid - 0.005
+        wx.showModal({
+          title: '核销 ¥' + Math.round(amount * 100) / 100,
+          content: full ? `整笔 ${unpaid} 元都核销掉，这笔应付就不用再付了（核销不算付过钱）。` : `只核销 ${amount} 元，还剩 ${Math.round((unpaid - amount) * 100) / 100} 元。`,
+          editable: true, placeholderText: '原因（可不填，如：对方免了/尾差）',
+          confirmText: '确定核销',
+          success: (r2) => {
+            if (!r2.confirm) return
+            const reason = String(r2.content || '').trim() || '供应商免了/不用付了'
+            this.req({
+              url: API_BASE + '/payables/' + id + '/writeoff', method: 'POST',
+              data: { amount: amount, reason: reason },
+              success: (res) => {
+                const d = res.data || {}
+                if (d.ok) {
+                  wx.showToast({ title: '已核销 ' + d.amount, icon: 'success' })
+                  this.loadAp(); this.loadDashboard(); this.loadWriteoffs()
+                } else wx.showToast({ title: d.error || '核销失败', icon: 'none' })
+              }
+            })
           }
         })
       }
@@ -8170,6 +8255,20 @@ Page({
           }, fail: () => wx.showToast({ title: '读不到这张图', icon: 'none' }) })
         }
         wx.compressImage({ src: p, quality: 60, success: (c) => go(c.tempFilePath), fail: () => go(p) })
+      },
+      fail: (err) => {
+        // 以前没有 fail：用户第一次点了「不允许」之后，再点加照片一点反应都没有，以为坏了。
+        const msg = String((err && (err.errMsg || err.errmsg)) || '')
+        if (/auth|deny|permission|authorize/i.test(msg)) {
+          wx.showModal({
+            title: '要用相机/相册',
+            content: '刚才没给权限。点「去设置」把「相机」和「相册」打开，回来再点一次加照片就行。',
+            confirmText: '去设置',
+            success: (r) => { if (r.confirm && wx.openSetting) wx.openSetting({}) }
+          })
+        } else if (!/cancel/i.test(msg)) {
+          wx.showToast({ title: '没选到照片：' + (msg.slice(0, 40) || '再试一次'), icon: 'none' })
+        }
       }
     })
   },

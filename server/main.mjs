@@ -323,13 +323,19 @@ async function main() {
       const method = String(req.method || 'GET').toUpperCase()
       const body = method === 'GET' || method === 'HEAD' ? undefined : await readBody(req)
       const headers = new Headers()
+      // 不能信客户端自己报的 IP：本机版没有 Cloudflare 挡在前面，
+      // 谁都能塞一个 x-forwarded-for / cf-connecting-ip 把「试错锁定」绕过去（每换一个假 IP 又能试 10 次）。
+      // 这里统一丢掉这两个头，改成用真实连接的地址。
+      const SPOOF = new Set(['x-forwarded-for', 'x-real-ip', 'cf-connecting-ip', 'true-client-ip'])
       for (const k of Object.keys(req.headers)) {
         const lk = k.toLowerCase()
-        if (HOP.has(lk)) continue
+        if (HOP.has(lk) || SPOOF.has(lk)) continue
         const v = req.headers[k]
         if (Array.isArray(v)) v.forEach((x) => headers.append(k, x))
         else if (v != null) headers.set(k, v)
       }
+      // 用真实连接地址覆盖：这样「试错锁定」是按真 IP 算的，伪造头绕不过去
+      if (remote) headers.set('cf-connecting-ip', String(remote).replace(/^::ffff:/, ''))
       const request = new Request(url, { method, headers, body })
       const response = await worker.fetch(request, env, ctx)
 
@@ -424,36 +430,66 @@ async function main() {
     } catch (e) { /* 打不开就算了，用户自己点链接 */ }
   }
 
-  // 每日维护：Cloudflare 那边是 4 条 cron，本机这边简化成「每天 01:00–06:00 之间跑一次」。
-  // 这些任务本身是幂等的（固定支出/摊销/预提/折旧都先查有没有记过），多跑一次不会重复记账。
+  // 定时任务：Cloudflare 那边配了 4 条 cron，本机版以前只跑「0 1 * * *」这一条，
+  // 于是「周一汇总」和「每月 1 号的报表包」在本机版上永远不会发生（后端是靠 cron 字符串精确匹配分活的）。
+  // 现在四条都按 UTC 时间点各跑各的，并且带「错过了就补跑」：电脑关机/睡眠过了点，开机后补一次。
+  // 这些任务本身是幂等的（固定支出/摊销/预提/折旧都是 INSERT OR IGNORE + 按月份条件插入）。
   if (args.cron) {
     const stampFile = path.join(dataDir, 'last-cron.txt')
+    const CRONS = [
+      { c: '0 16 * * *', min: 0, hour: 16, dom: null, dow: null, what: '每日（备份/体检/记账兜底）' },
+      { c: '0 1 * * *', min: 0, hour: 1, dom: null, dow: null, what: '每日（固定支出/摊销/预提/折旧）' },
+      { c: '0 1 * * 1', min: 0, hour: 1, dom: null, dow: 1, what: '每周一汇总' },
+      { c: '0 2 1 * *', min: 0, hour: 2, dom: 1, dow: null, what: '每月 1 号报表包' }
+    ]
+    const loadStamp = () => {
+      try { return new Set(String(fs.readFileSync(stampFile, 'utf8') || '').split('\n').map((x) => x.trim()).filter(Boolean)) } catch (e) { return new Set() }
+    }
+    const saveStamp = (set) => {
+      try { fs.writeFileSync(stampFile, Array.from(set).slice(-200).join('\n') + '\n') } catch (e) { /* 写不了就算了，下次补跑 */ }
+    }
+    const slotKey = (cron, d) => `${cron}|${d.toISOString().slice(0, 10)}`
+    // 今天该跑的那一次（UTC），返回 { key, at } 或 null
+    const slotOf = (x, nowUtc) => {
+      const d = new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate(), x.hour, x.min, 0))
+      if (x.dom !== null && d.getUTCDate() !== x.dom) return null
+      if (x.dow !== null && d.getUTCDay() !== x.dow) return null
+      return { key: slotKey(x.c, d), at: d.getTime() }
+    }
     let running = false
     const tick = async () => {
       if (running) return
-      const nowBj = new Date(Date.now() + 8 * 3600 * 1000)
-      const day = nowBj.toISOString().slice(0, 10)
-      const hour = nowBj.getUTCHours()
-      if (hour < 1 || hour > 6) return
-      let last = ''
-      try { last = fs.readFileSync(stampFile, 'utf8').trim() } catch (e) { /* 第一次 */ }
-      if (last === day) return
-      running = true
-      try {
-        fs.writeFileSync(stampFile, day)
-        console.log(`  [定时] ${day} 跑每日任务（固定支出/摊销/预提/折旧/自检）…`)
-        if (typeof worker.scheduled === 'function') {
-          await worker.scheduled({ cron: '0 1 * * *', scheduledTime: Date.now() }, env, ctx)
-          console.log('  [定时] 跑完了')
-        }
-      } catch (e) {
-        console.log('  [定时] 出错（不影响记账）：' + String((e && e.message) || e))
-      } finally {
-        running = false
+      if (typeof worker.scheduled !== 'function') return
+      const nowUtc = new Date()
+      const stamps = loadStamp()
+      // 到点的（允许 15 分钟内算「刚过点」）或者已经过了点但没跑过的，都补上
+      const due = []
+      for (const x of CRONS) {
+        const sl = slotOf(x, nowUtc)
+        if (!sl) continue
+        if (stamps.has(sl.key)) continue
+        if (nowUtc.getTime() < sl.at) continue
+        due.push({ x, sl })
       }
+      if (!due.length) return
+      running = true
+      for (const { x, sl } of due) {
+        try {
+          stamps.add(sl.key)
+          saveStamp(stamps)
+          console.log(`  [定时] ${sl.key.split('|')[1]} 跑 ${x.c}（${x.what}）…`)
+          await worker.scheduled({ cron: x.c, scheduledTime: sl.at }, env, ctx)
+          console.log('  [定时] 跑完了')
+        } catch (e) {
+          stamps.delete(sl.key) // 出错就把戳撤掉，下一轮重试
+          saveStamp(stamps)
+          console.log('  [定时] 出错（不影响记账）：' + String((e && e.message) || e))
+        }
+      }
+      running = false
     }
     setTimeout(tick, 8000)
-    setInterval(tick, 30 * 60 * 1000)
+    setInterval(tick, 60 * 1000)
   }
 
   const bye = () => {

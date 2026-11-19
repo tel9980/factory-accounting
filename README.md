@@ -151,7 +151,7 @@ cd backend && npm install          # 要 Node 24（node:sqlite 是内置的）
 node scripts/build-exe.mjs --out dist
 ```
 
-打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 57 张表——
+打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 56 张表——
 不通就直接红，不会把坏文件发出去。CI 里三个平台各跑一次。
 
 ### 本机版和线上版的差别
@@ -1395,15 +1395,51 @@ node scripts/build-exe.mjs --out dist
 295. ✅ **能在 GitHub 上生成免安装 exe 和 Docker 镜像了**：用户说「最后本项目可以在github生成免安装exe和镜像」。
    - **为什么不是另写一份**：整个后端是照 Cloudflare Workers 写的（`env.DB` 走 D1、`scheduled` 走 cron），要让它在厂长自己电脑上跑，只有两条路——重写一套，或者把 D1 的接口面在本机实现一遍。选了后者：新增 `server/d1.mjs`，用 Node 24 内置的 `node:sqlite` 把 `prepare / bind / first / all / run / batch / exec` 补齐，业务代码一行不改。
    - **两个必须对上的细节**：①`batch()` 必须真包 `BEGIN`/`COMMIT`（D1 的 batch 是事务语义，「整户收款一次改多张单」靠的就是它）；②`run()` 要返回 `{ success, meta: { changes, last_row_id } }`，不是 `{ changes }`——README 迭代 285 记过那个坑（按 `{ changes }` 写会让「库存已扣却回 409」）。
-   - **`server/main.mjs`**：把 Node 的 `http` 请求转成 Web `Request` 交给 `worker.fetch`，准备好 `env`（三个本地库 + 版本号 + 可选笔记绑定），首次启动把 `backend/schema.sql` 整段跑一遍（全是 `IF NOT EXISTS`，重复执行安全，57 张表），再提供一个落地页。CORS、ETag、打印页白名单这些都在中间件里，等于免费继承。
+   - **`server/main.mjs`**：把 Node 的 `http` 请求转成 Web `Request` 交给 `worker.fetch`，准备好 `env`（三个本地库 + 版本号 + 可选笔记绑定），首次启动把 `backend/schema.sql` 整段跑一遍（全是 `IF NOT EXISTS`，重复执行安全，56 张表），再提供一个落地页。CORS、ETag、打印页白名单这些都在中间件里，等于免费继承。
    - **落地页**（`/`）：看状态（数据文件、大小、单数、客户数、流水数）、**首次设口令**（直接调 `/auth/setup`，把恢复码显示出来让用户抄）、**下载完整备份**（调 `/backup` 存成 `factory-backup-日期.json`）、以及「手机小程序该填哪个地址」（自动列出局域网 IP）。`/__local/status` 只允许本机/局域网访问。
    - **每日维护**：Cloudflare 那边是 4 条 cron，本机版简化成「每天 01:00–06:00 之间跑一次」`worker.scheduled()`（这些任务本身幂等：固定支出/摊销/预提/折旧都先查有没有记过）。`--no-cron` 可关。
    - **打包**（`scripts/build-exe.mjs`）：esbuild 把 `main.mjs` + `index.js` + hono 打成单个 CJS → `node --experimental-sea-config` 生成 blob（`schema.sql` 当资源塞进去）→ `postject` 注入到 node 二进制副本。macOS 要先 `codesign --remove-signature`、注入完再 `codesign --sign -`，且注入时必须带 `--macho-segment-name NODE_SEA`——少了这个参数 postject 照样说「Injection done」，但打出来的二进制一启动就被系统 SIGKILL、连一行输出都没有（第一次跑 CI 就是这么红的）。打完**自动自测**：起服务、`/version` 版本号对得上、落地页正常、建出 3 个库且主库有内容（WAL 下主库文件可能还是 4 KB，得把 `book1.db*` 一起算）。
    - **镜像**：`Dockerfile` 直接 `node server/main.mjs`（不需要打 exe），只装 `hono` 一个运行时依赖，`/data` 挂卷，健康检查打 `/version`。
    - **发布流程**（`.github/workflows/release.yml`）：先跑 `scripts/check.mjs`，再 matrix 打 Windows/Ubuntu/macOS 三个平台（每个平台都自测）、出 `SHA256SUMS.txt`、发 GitHub Release；另一个 job 用 buildx 推 `ghcr.io/tel9980/factory-accounting`（`linux/amd64` + `linux/arm64`，tag 是版本号 + `latest`）。
    - **CI 也管这一层了**：`.github/workflows/deploy.yml` 的冒烟 job 末尾新加「本机版（Node 直跑）冒烟」——用 `server/main.mjs` 起一个库，跑 `smoke.mjs` + `smoke-write.mjs`。这样本机适配层（事务、changes、日期）一旦退化，PR 阶段就红。
-   - **验证**（本机 Linux x64 真跑）：`node server/main.mjs` 建出 57 张表；`smoke.mjs` 227 个 GET 无 5xx；`smoke-write.mjs` 主流程 + 92 写路由 + `/run-cron` + 自检 10 类全 0；`test-crossmonth` 16 项、`test-apcat` 31 项、`test-import-xlsx` 32 项、`test-onboarding` 19 项、`test-safety` 39 项全绿。打成 exe 后又把 `smoke` / `smoke-write` / `test-crossmonth` / `test-safety` / `test-import-xlsx` 跑了一遍，同样全绿。
+   - **验证**（本机 Linux x64 真跑）：`node server/main.mjs` 建出 56 张表；`smoke.mjs` 227 个 GET 无 5xx；`smoke-write.mjs` 主流程 + 92 写路由 + `/run-cron` + 自检 10 类全 0；`test-crossmonth` 16 项、`test-apcat` 31 项、`test-import-xlsx` 32 项、`test-onboarding` 19 项、`test-safety` 39 项全绿。打成 exe 后又把 `smoke` / `smoke-write` / `test-crossmonth` / `test-safety` / `test-import-xlsx` 跑了一遍，同样全绿。
    - **新增文件**：`server/main.mjs`、`server/d1.mjs`、`scripts/build-exe.mjs`、`Dockerfile`、`.dockerignore`、`.github/workflows/release.yml`；`backend/package.json` 加 devDep `esbuild` / `postject`；`.gitignore` 加 `dist/ build/ data/`；`check.mjs` 把 `server/*.mjs` 也纳入语法检查。
+
+296. ✅ **第五轮审计 31 条全修：接口回 200、账却错了的那一类清干净**：用户问「本项目还有哪些优化空间」，我派三路只读审计（后端 / 前端 / 本机版与工程化）再逐条回代码核对行号，按「会不会算错钱 → 点不点得通 → 会不会静默失败」排序，用户答「好的，继续，净资产不算押金和借支」后全部实施。
+   - **A1 整户收款 / 付款：条件更新没成功就别写流水**：以前 `st.push(UPDATE orders …)` 之后**无条件** `st.push(INSERT INTO ledger …)`，两条都在同一个 batch 里、但收尾只看 batch 有没有抛错——双击一次就是「UPDATE 影响 0 行，流水照写一笔」。现在把流水写成带**同一条件**的插入（`INSERT … SELECT … WHERE (SELECT paid+written_off+? …) <= (SELECT price …) + 0.005`），并先插流水后更新单据；批后用 `plan` 里记的下标回查每张单的 `changesOf(done[i])`，全都没命中就 409「这些单刚被改过（可能刚收过款），刷新再看一眼」，部分命中就按命中的重算合计。多出来的钱记预收/预付、去重标记一起进**第二个** batch（失败只记日志，不影响已经收好的钱）。
+   - **A2 银行流水认领：三道闸**：①先 `UPDATE bank_flows SET matched_type=?, matched_id=? WHERE id=? AND matched_type IS NULL` 占位——占不到就是「这笔已经认领过了（可能刚在别处点过）」；②流水插入与单据更新都带金额条件，撞不上就撤回认领并提示「这张单已经收满了」；③认领前查月结锁，已结账的月份不许再记。异常路径统一 `unclaim()` 把流水放回未认领，并 `noteFail` 记日志。另外 `/bank-import` 加了整份文件的指纹去重（`fnv1a` 存进 `settings`），同一份账单再导一遍返回 `dup_file: true`。
+   - **A3 报销冲借支要进成本**：`cash=0` 的 `expense` 流水（借支报销冲账）原来完全不进成本，只有现金支出进——报完销当月利润偏高。新增 `COST_EXP_WHERE`（成本口径：算 `cash=0` 的报销）与 `CASH_EXP_WHERE`（现金口径）两个常量，`monthPL`、年度汇总、`dashboard`、月报、年审等 9 处成本聚合改用成本口径；月结快照多加一个 `loan_exp` 字段把这块单独列出来。
+   - **A4 借支报销退回有守卫也有月结锁**：`UPDATE loans SET used = used + ? WHERE id=? AND used + returned + ? <= amount + 0.005 RETURNING used`，条件不成立 409 `stale`；报销日期落在已结账月份直接 403。
+   - **A5 `reimburseStaff` 里那句 `c.json` 会让整个导入 500**：那个函数根本没有 `c` 参数，`ReferenceError` 一撞上（借支已被改过）整批粘贴导入就崩。改成抛带 `code='stale'` 的 Error，调用方 catch 住把这行记进 `stale` 名单、继续导剩下的。
+   - **A6 自动记账真正幂等**：`runFixed` / `runAmort` / `runAccrual` / `bookDepOne` 全部改成「按 `(ref_type, ref_id, month)` 唯一」的 `INSERT OR IGNORE`，配套在 `/schema.sql` 加 `CREATE UNIQUE INDEX idx_ledger_once ON ledger(ref_type, ref_id, month) WHERE ref_type IN ('fixed','amort','dep','debt_int')`（老库由 `ensureBaseTables` 自动补，建不上只记日志不拖垮建表）。
+   - **A12 锁着的月份不丢，解锁后补上**：遇月结锁不再「跳过就算」，改为写进 `settings.auto_pending_<kind>`，下一轮 cron 连同当月一起重跑；折旧返回 `locked_months` 清单，`/assets/run-depreciation` 直接告诉用户「有 N 个月因为已结账没提（某几个月），解锁后再跑一次会补上」。
+   - **A7 删单据不能抹掉已结账月份的流水**：删除前把它所有收款流水与核销记录的月份都过一遍 `anyMonthLocked`，任何一个月已结账就 403「这张单在 2026-09 有过收款/核销，那个月已结账，先把账解了再来删」；删除时把 `writeoffs` 里对应的核销记录一起删掉（以前漏了，核销合计会凭空多出来）。
+   - **A8 `/export-all` 真正导出全量**：`dumpAll` 从 `LIMIT 20000` 改成按 rowid 翻页（每页 2000，最多 30 万行），只有真翻满才标 `truncated`；单表预览上限降到 5000 并明确告知。
+   - **A9 `/import-all` 失败就是失败**：每张表把 `DELETE FROM t` 和第一批插入放进**同一个** batch（真的原子），插完 `SELECT COUNT(*)` 核对行数，任何一张表出错最后回 500 并给出「刚导入前已自动存了一份备份，可以挑那份退回去」。
+   - **A10 年结不再「报失败但已经锁了一半」**：先把 12 个月的 `closePrecheck` 全跑完收集 `blocked`，有任何一个月不合格就整体 409、**一个都不锁**，处理完再来。
+   - **A11 `/flows` 合计不再只算前 300 笔**：列表仍然 `LIMIT 300`，但合计改成对整个筛选范围做 `GROUP BY` 聚合，返回 `total_count` 与 `truncated`，截断时提示「列表只显示最近 300 笔，上面的合计是按 N 笔全算的」。
+   - **A13 净资产口径写清楚**：`net_worth` 维持 `现金 + 别人欠我 − 我欠别人 − 借款`，**不含**押金、借支、预付款（押金要退回、借支会报销冲掉、预付是还没花掉的成本）。家底页加了一行说明，`/help` 的对应词条同步。
+   - **B1 改单不再「一个框塞四个字段」**：`editOrder` 改成先选改哪一项、再单项弹框。以前「客户,产品,价格,成本」用逗号拼成一行，客户名里带逗号就错位——手一抖客户名变成数字、金额变成 0，还不提示。后端 `PATCH /orders/:id` 支持部分字段并返回 `changed` 文字，前端照它提示「改好了：金额 500→800」。
+   - **B2「5,000」不再记成 5**：新增 `_payText()`，先抓日期再剔掉所有非数字字符（`5,000` `/` 全角逗号 `1 200元` 都成 5000 / 1200）。收款、付款两处都用它。
+   - **B3「💰 收钱」不再自己算**：改用 `/ar-summary` 的 `open_count`/`open_amount`（以前拿已加载的前 60 条现算，客户多的时候数字是错的）。
+   - **B4 列表搜索搜全库**：`/ar` `/ap` 加 `kw` 参数（后端本来就支持），前端输入 300 毫秒防抖后重拉；以前只在已加载的 60 条里筛，老单永远搜不到。
+   - **B5 核销要确认、金额认得逗号**：跳掉「不填金额 = 整笔作废」的无声事故——弹框写清「整笔 3000 都核销掉 / 只核销 1000，还剩 2000」，并说明「核销不算收到钱」。
+   - **B6 每行 15 个按钮会换行了**：`.btns` 补 `flex-wrap: wrap`。
+   - **B7 首页四大数字取不到时给红字**：数值统一走 `Number.isFinite` 兜底成 0，失败写 `dash_err` 并显示「网断了…（点这里重试）」——以前失败就是空白，看不出是 0 还是没拿到。
+   - **B8 两个死代码**：`data` 里 `mg` 被重复声明（一个是筛选态、一个被 `setData` 成对象），改名 `mg_open`，**页面里两处 `wx:if="{{mg}}"`（老账搬家面板）也跟着改**——不然面板永远打不开；`this.loadHomeData` 全文件不存在（真名 `loadDashboard`）。另外 `check.mjs` 加了第 [2.7] 项：扫 `Page({ data })` 顶层键有没有重复声明（重复时后一个悄悄覆盖前一个，就是这次 B8 的病根）。
+   - **B9 相册权限被拒后能救回来**：`chooseImage` 补 `fail` 分支，被拒时弹「要用相机/相册…点「去设置」」并直接 `wx.openSetting()`（以前第一次点「不允许」之后，再点加照片永远没反应）。
+   - **B10 AppSecret 输入框变成密码框**。
+   - **C1 本机版真的会跑全部 4 条 cron**：原来写死「每天 01:00–06:00 之间跑一次 `cron:'0 1 * * *'`」，而「每周一汇总」和「每月 1 号报表包」靠精确匹配 cron 字符串——本机版永远跑不到。现在按 UTC 算出 4 条 cron 今天各自的时刻，用 `data/last-cron.txt` 按 `cron|日期` 记账，到点就跑、错过补跑（电脑关机/睡眠后开机补一次），出错撤戳下轮重试。
+   - **C2 本机版不能靠伪造请求头绕过口令锁定**：`x-forwarded-for` / `x-real-ip` / `cf-connecting-ip` / `true-client-ip` 一律丢弃，`cf-connecting-ip` 只由服务端按真实 socket 地址填。
+   - **C3 本机版会像线上一样报「参数太多」**：`server/d1.mjs` 模拟 D1 的三个上限——单语句 100 个绑定参数、SQL 100KB、一个 batch 100 条语句，超了抛与线上同款的错误文案（`FACTORY_D1_STRICT=0` 可关）。这样 `chunkIds` 那类问题在本机就能撞见。
+   - **C4 CI 部署带版本号**：部署步加 `--var APP_VERSION:"$(date -u +%Y%m%d-%H%M)"`，并新增一步「部署后打 `/version`」——只要线上还回 `"version":"dev"` 就红。
+   - **C5 release 不只跑静态自检**：`check.mjs` 之后加跑 `test-batch` / `test-key-queue` / `test-firstscreen`。
+   - **C6 `test-safety.mjs` 里一个未定义变量**（`row`）会让某条断言在特定分支抛错。
+   - **C7 `/batch` 超 24 条不再静默截断**：直接 400 `batch_too_many` 并说明「一次最多 24 条，这次给了 N 条」。前端本来就按 16 分批，正常不会撞上。
+   - **C8 文档数字对账**：57 张表 → 56 张（`schema.sql` 实测建出 56 张）、407 路由 / 625 SQL / 46 张备份表。
+   - **顺手抓到并修掉 3 个自己引入的 bug**（都是回归时撞出来的）：①`monthSnapshot` 里把 `${CASH_EXP_WHERE}` 写进了**双引号**字符串（普通字符串不做模板替换），`/month-archive` 直接 500 `unrecognized token: "$"`——顺手给 `check.mjs` 加了第 [2.6] 项，用状态机扫「普通字符串里写 `${}`」，把这一行改回双引号立刻能复现红灯；②`runFixed`/`runAmort`/`runAccrual`/`bookDepOne` 的 `INSERT OR IGNORE` **没带 `month` 列**，靠触发器补——而插入那一刻 `month` 还是 NULL，唯一索引里 NULL 互不冲突，于是 `OR IGNORE` 挡不住，第二次跑就多一条 `month=NULL` 的重复流水（`/selfcheck` 报「单据没记上月份」、`smoke-write` 变红）。四条 INSERT 显式绑 `month` 之后，`/run-cron` 连跑三次 `month_null` 稳定为 0；③本机版把 `headers.set('cf-connecting-ip', …)` 写在了 `const headers = new Headers()` 之前（TDZ 引用错误，`node --check` 查不出来）。
+   - **验证**：`check.mjs` 全绿（407 路由 / 56 表 / 623 SQL / 255 调用 / 754 绑定 + 新的第 [2.6] 项）；新库按 CI 顺序全跑：`smoke` **227** GET 无 5xx → `test-modules` 19 → `smoke-write` 45 步 + **92** 写路由 + `/run-cron` + 自检 **10 类全 0** → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` **39**，再加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
+   - ⚠️ 动了前端（改单弹框、收款金额解析、收钱按钮、搜索、核销确认、按钮换行、首页报错行、相册授权、密码框、家底说明）→ **小程序要重新上传发布**。
 
 <!-- API-LIST:BEGIN -->
 

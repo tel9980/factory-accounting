@@ -241,7 +241,7 @@ node scripts/build-exe.mjs --out dist
 ```
 
 脚本会 esbuild 打包 → 生成 SEA blob（`schema.sql` 作为资源塞进去）→ postject 注入 →
-**自己跑一遍自测**（`/version` 版本号、落地页、建库 57 张表），不通就报错退出。
+**自己跑一遍自测**（`/version` 版本号、落地页、建库 56 张表），不通就报错退出。
 macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签）。
 
 ### 4.4 本机版的注意事项

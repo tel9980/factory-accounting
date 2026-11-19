@@ -235,7 +235,8 @@ async function mainFlow() {
   await step('记一笔支出', 'POST', '/expenses', { amount: 66, category: TAG + '分类', remark: '冒烟', account_id: accId, date: TODAY })
   // 「工资按实发数入账」这条路：不开计件工资时，工资就是一笔分类=工资的支出。
   // 这条必须能记上、且分类不被改写（净利/现金流都靠它）。
-  await step('发工资（按实发数记支出）', 'POST', '/expenses', { amount: 3000, category: '工资', remark: `${TODAY.slice(0, 7)} 工资（实发）`, account_id: accId, date: TODAY })
+  // 金额带 TAG 后缀：同一天连跑两遍时不会撞上「今天已经记过一笔」的防重（409 dup）
+  await step('发工资（按实发数记支出）', 'POST', '/expenses', { amount: 3000, category: '工资', remark: `${TODAY.slice(0, 7)} 工资（实发）${TAG}`, account_id: accId, date: TODAY, confirm_dup: true, client_id: `smoke-wage-${TAG}-${Date.now()}` })
   const exW = await call('GET', '/expenses?kw=' + encodeURIComponent('工资（实发）'))
   const exWrows = Array.isArray(exW.data) ? exW.data : ((exW.data && exW.data.rows) || [])
   const wageRow = exWrows.find((x) => String(x.category || '') === '工资' && num0(x.amount) === 3000)

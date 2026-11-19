@@ -34,7 +34,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # 光跑静态自检不够：以前 release 只验「代码能解析」，打包出来的东西能不能跑完全没验。
+      # 这三个是纯离线的（不需要起服务、不连库），出错说明前端首屏/401 重放/分批这些真坏了。
       - run: node scripts/check.mjs
+      - run: node scripts/test-batch.mjs
+      - run: node scripts/test-key-queue.mjs
+      - run: node scripts/test-firstscreen.mjs
 
   exe:
     name: 打包 ${{ matrix.name }}

@@ -22,6 +22,16 @@ const bindable = (v) => {
   return v
 }
 
+// Cloudflare D1 的硬限制（超了线上直接报错，本机以前照单全收，于是「线上才炸」的坑永远测不出来）：
+//   · 一条语句最多绑 100 个参数
+//   · 一次 batch 最多 100 条语句
+//   · 单条语句 SQL 最大 100KB（页面/JSON 之类的大字段靠参数走，不靠拼 SQL）
+// 想临时关掉用 FACTORY_D1_STRICT=0（只在排障时用）。
+const D1_MAX_PARAMS = 100
+const D1_MAX_STMTS = 100
+const D1_MAX_SQL = 100 * 1024
+const STRICT = String(process.env.FACTORY_D1_STRICT || '1') !== '0'
+
 class D1Stmt {
   constructor(owner, sql, args) {
     this.owner = owner
@@ -30,6 +40,12 @@ class D1Stmt {
   }
 
   bind(...args) {
+    if (STRICT && args.length > D1_MAX_PARAMS) {
+      throw new Error(`D1_ERROR: too many SQL variables at offset 0: SQLITE_ERROR （这条语句绑了 ${args.length} 个参数，D1 上限 ${D1_MAX_PARAMS}，要分批）`)
+    }
+    if (STRICT && this.sql.length > D1_MAX_SQL) {
+      throw new Error(`D1_ERROR: statement too large: SQLITE_ERROR （这条 SQL ${this.sql.length} 字节，D1 上限 ${D1_MAX_SQL}）`)
+    }
     return new D1Stmt(this.owner, this.sql, args.map(bindable))
   }
 
@@ -95,6 +111,9 @@ export class LocalD1 {
   // 事务化批量执行：D1 的 batch 就是事务语义，中途失败整批回滚。
   async batch(stmts) {
     const list = Array.isArray(stmts) ? stmts : []
+    if (STRICT && list.length > D1_MAX_STMTS) {
+      throw new Error(`D1_ERROR: too many statements in batch: SQLITE_ERROR （这次 ${list.length} 条，D1 上限 ${D1_MAX_STMTS}，要分批）`)
+    }
     const out = []
     this.raw.exec('BEGIN')
     try {
@@ -124,9 +143,10 @@ export class LocalD1 {
 // 首次启动时把 schema.sql 整段跑一遍。schema 里全是 IF NOT EXISTS，重复执行安全，
 // 所以每次启动都跑（700 行、几毫秒），老版本升级时新表新列能自己补上。
 export async function ensureSchema(db, schemaSql) {
-  const has = await db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'").first()
+  const CNT = "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+  const has = await db.prepare(CNT).first()
   const before = Number((has && has.n) || 0)
   await db.exec(schemaSql)
-  const after = await db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'").first()
+  const after = await db.prepare(CNT).first()
   return { before, after: Number((after && after.n) || 0) }
 }
