@@ -1526,6 +1526,14 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+303. ✅ **别让同一份数据问两遍：切回来不整轮重拉、同一屏只要一次、模块开关能恢复出厂**：用户问「还有你可以决定而未完成的吗」，把上一轮剩下那些「我自己就能定」的收掉。
+   - **切走再切回来不整轮重拉**：`onShow()` 以前每次都跑一整轮 `refresh()`（第一波 11 条 + 150ms 后第二波 10 条）。现在记住上次刷新时间，**20 秒内回来只刷第一屏**（首页数字、提醒、当前这一屏），第二波那 10 个（体检分数、目标、在制、资金预测、账本、分类、账期…）等下次真进页面再说；隔久了（比如半小时后从别的应用切回来）照旧整轮。理由：用户原话是「切出去看一眼消息再回来，屏幕还转半天」。
+   - **同一个 GET 还在路上时不再发第二遍**：`req()` 里加在途表 `_flight`——同一条路径已经发出去了，后来的**挂到前面那一个上**，数据回来时两份回调一起收到（`opts.fresh === true` 的除外，比如用户明确点了刷新）。`refresh()` 与 `enterTab()` 撞在一起、切页签回来时，同一条路径经常被要两次（回来的数据一模一样）。另外给了 20 秒兜底：万一某个分支既没成功也没失败（比如口令弹窗被取消），把挂在上面的当成失败放掉，不会让那一屏永远转圈。
+   - **模块开关能恢复出厂**：`POST /modules { reset: true }` 删掉 `settings.modules_off` 这一行，回到「从没动过开关」的状态（`def: 0` 的计件工资仍然是关着的）。为什么需要：默认态跟「存了一行空串」在库里长得不一样，`smoke-write` 跑完会把模块全打开、之后 `test-modules` 的默认态断言就红了（这一轮之前是靠「CI 里顺序固定」蒙过去的）。现在 `test-modules` 开头先 reset、`smoke-write` 收尾也 reset，**两个脚本谁先谁后都能过**。
+   - **文档数字对账**：`DEPLOYMENT.md` 里的「`smoke.mjs`（227 个 GET）」改成实测的 230。
+   - **验证**：`check.mjs` 全绿（413 路由 / 57 表 / 632 SQL / 258 调用 / 772 绑定）；干净库按 CI 顺序 `smoke` 230 GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 95 写路由 + 备份闭环 + 恢复模块默认）→ `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` → `test-safety` 48 → `test-pack` 51 → `test-tax` 52 全绿；**把 `test-modules` 放在 `smoke-write` 之后再跑一遍也全绿**（以前必红 4 项）。离线三件套加了新断言：`test-batch` 钉住「同一路径在飞时只要一次、3 个回调都收到、回来后标记清空」，`test-firstscreen` 钉住「3 秒前刚刷过再进来不发第二波、30 分钟后进来要整轮重拉」。
+   - ⚠️ 动了前端（`onShow` 门控、在途去重）→ **小程序要重新上传发布**。
+
 302. ✅ **第六轮审计：钱和账不能分两次落库、备份不能偷偷截断、出事要能看见**：用户问「还有哪些可以优化的吗」，三路只读审计（后端 / 前端 / 工程化）加逐条回代码核对，按「A 会算错钱 / B 用户能感知 / C 线上出事没人知道 / D 文档与卫生」分组，用户说「全部由你来完成」。
    - **A 钱和账一次落库**（原来都是「先改单、再写流水」两次提交，中间失败就「单据显示已收、账上没有这笔钱」）：`/orders/:id/receive`、`/payables/:id/pay`、两个 `/writeoff`、两个 `/apply-advance` 全部改成**流水写在改单前面、条件与 UPDATE 一字不差**，塞进同一个 `db.batch`：`INSERT INTO ledger … SELECT … WHERE (SELECT COALESCE(paid,0)+COALESCE(written_off,0)+? FROM orders WHERE id=?) <= (SELECT price FROM orders WHERE id=?) + 0.005` 紧跟 `UPDATE orders … WHERE id=? AND paid + COALESCE(written_off,0) + ? <= price + 0.005`。D1 的 `batch` 是事务，要么都成要么都不成；批后按 `changesOf()` 判断，0 就 409 `stale`「这张单刚被改过」。
    - **A 备份不再偷偷截断**：整库备份原来是 `INSERT INTO backups (content…)` 一个 9MB 的字符串，而 D1 单行上限 2MB——线上会**静默失败**（本机 SQLite 不限制，永远测不出来）。现在超过 900KB 自动切片写 `backup_parts(bid, seq, data)`，取回统一走 `readBackupContent()` 拼回来；实测塞一条 1.2MB 的脏数据后备份出 2 片共 1230160 字节、`backups.content` 为空、`/backup-get` 长度一致、`/backup-restore` 200。

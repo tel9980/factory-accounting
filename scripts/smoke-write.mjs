@@ -411,6 +411,8 @@ try {
   await runCron()
   await consistency()
   await backupRoundTrip()
+  // 收尾把模块开关恢复出厂（计件工资默认关着），别把「全部打开」留给后面的脚本
+  await step('恢复模块开关默认', 'POST', '/modules', { reset: true })
 } catch (e) {
   no('脚本自身', String((e && e.stack) || e))
 }

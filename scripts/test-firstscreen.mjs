@@ -123,6 +123,32 @@ ok(storage.tax_kind_ar === '', '再点一下取消，应该记住「不标」而
 ctx.pickPTax({ currentTarget: { dataset: { k: '不含税' } } })
 ok(storage.tax_kind_ap === '不含税', `应付那边没记住：${storage.tax_kind_ap}`)
 
+// 8) 刚离开又马上回来（切到微信看消息再切回来）不必整轮重拉：20 秒内只刷第一屏
+//    用户的原话是「切一下再回来，屏幕转半天」——第二波那 10 个跟这一眼无关
+{
+  // 先把上一组 onShow 排下的「第二波」定时器放完，否则会算到这一组头上
+  await new Promise((r) => setTimeout(r, 250))
+  const b8 = paths.length
+  ctx._shownAt = Date.now() - 3000     // 3 秒前刚刷过
+  ctx.onShow()
+  const just = paths.slice(b8)
+  const slow8 = just.filter((p) => SLOW.some((s) => p.split('?')[0] === s))
+  ok(slow8.length === 0, `刚回来 3 秒又刷，不该再拉这些：${slow8.join('、')}`)
+  ok(just.some((p) => p.split('?')[0] === '/dashboard'), '刚回来这一下把首页数字也省了（数字要更新）')
+  await new Promise((r) => setTimeout(r, 250))
+  const tail8 = paths.slice(b8 + just.length)
+  ok(tail8.length === 0, `「刚回来」之后还偷偷发了 ${tail8.length} 个：${tail8.map((p) => p.split('?')[0]).join('、')}`)
+
+  // 隔久了（比如半小时后从别的应用切回来）就该整轮重拉，不能一直懒着
+  const b8b = paths.length
+  ctx._shownAt = Date.now() - 30 * 60 * 1000
+  ctx.onShow()
+  await new Promise((r) => setTimeout(r, 250))
+  const full8 = paths.slice(b8b)
+  const slow8b = full8.filter((p) => SLOW.some((s) => p.split('?')[0] === s))
+  ok(slow8b.length > 0, '隔了半小时回来还是只刷第一屏（该整轮重拉一次）')
+}
+
 const total = wave1.length + wave2.length
 console.log(`第一波 ${wave1.length} 次调用（去重 ${uniq1.length} 条）/ 第二波 ${wave2.length} 条（合计 ${total}）`)
 console.log(`  第一波：${wave1.map((p) => p.split('?')[0]).join(' ')}`)

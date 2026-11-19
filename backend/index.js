@@ -5019,6 +5019,14 @@ app.post('/modules', async (c) => {
   if (c.get('role') !== 'owner') return c.json({ error: '只有老板口令能改模块开关', code: 'owner_only' }, 403)
   const db = c.env.DB
   const b = await c.req.json().catch(() => ({}))
+  // reset:true = 回到「从没动过开关」的样子（默认关的还关着）。
+  // 为什么要有：默认态跟「存了一行空值」在库里长得不一样，测试和排查要能把这本账恢复成出厂状态。
+  if (b.reset === true) {
+    await db.prepare("DELETE FROM settings WHERE key='modules_off'").run()
+    await logAudit(db, '模块开关恢复默认', '设置', '回到出厂状态', '', act(c))
+    const off0 = await modulesOff(db)
+    return c.json({ ok: true, reset: true, off: Array.from(off0), text: '已恢复默认：' + (off0.size ? '关着 ' + Array.from(off0).map((k) => MODULE_BY_KEY[k].name).join('、') : '全部打开') })
+  }
   const want = Array.isArray(b.off) ? b.off.map((x) => String(x).trim()).filter((x) => x && MODULE_BY_KEY[x] && !MODULE_BY_KEY[x].keep) : []
   const val = want.join(',')
   await db.prepare("INSERT INTO settings (key,value) VALUES ('modules_off',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(val).run()

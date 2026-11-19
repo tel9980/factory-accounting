@@ -360,6 +360,42 @@ Page({
     const method = (opts.method || 'GET').toUpperCase()
     const rel = opts.url && opts.url.indexOf(API_BASE) === 0 ? opts.url.slice(API_BASE.length) : ''
     opts.__rel = rel
+    // 同一个 GET 还在路上时，不再发第二遍：切页签回来、enterTab 和 refresh 撞在一起时，
+    // 同一条路径经常被要两次（回来的数据一模一样）。后到的挂到前一个上，数据回来一起回调。
+    // opts.fresh === true 表示「我就要一次新的」（比如用户点了刷新），那种照发。
+    if (method === 'GET' && rel && opts.fresh !== true) {
+      this._flight = this._flight || {}
+      const cur = this._flight[rel]
+      if (cur) { cur.push({ success: opts.success, fail: opts.fail }); return }
+      this._flight[rel] = []
+      const pS = opts.success, pF = opts.fail
+      const drain = (arr, res, isFail) => {
+        arr.forEach((w) => { try { (isFail ? w.fail : w.success) && (isFail ? w.fail(res) : w.success(res)) } catch (e) {} })
+      }
+      opts = Object.assign({}, opts, {
+        success: (res) => {
+          const waits = (this._flight && this._flight[rel]) || []
+          if (this._flight) delete this._flight[rel]
+          try { pS && pS(res) } finally { drain(waits, res, false) }
+        },
+        fail: (err) => {
+          const waits = (this._flight && this._flight[rel]) || []
+          if (this._flight) delete this._flight[rel]
+          try { pF && pF(err) } finally { drain(waits, err, true) }
+        }
+      })
+      // 兜底：万一某个分支既没回调成功也没回调失败（比如标了 queue 走离线入队），
+      // 20 秒后把这个占位清掉，别让后来的请求永远挂在它身上。
+      const key0 = rel
+      setTimeout(() => {
+        if (!this._flight || !this._flight[key0]) return
+        const stuck = this._flight[key0]
+        delete this._flight[key0]
+        // 20 秒还没回来（比如口令弹窗里被取消了），把挂在后面的当成失败放掉，
+        // 不能让它们永远等在那里（会表现为「这一屏一直转圈」）。
+        drain(stuck, { statusCode: 0, timeout: true }, true)
+      }, 20000)
+    }
     const canBatch = method === 'GET' && rel && opts.batch !== false && !/^\/(batch|auth|track|statement-print|report-print|export|import-template|backup|restore)/.test(rel)
     if (canBatch) {
       this._bq = this._bq || []
@@ -640,7 +676,13 @@ Page({
     this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).length })
     this.flushPending(true)
     if (!this._modsLoaded) { this._modsLoaded = true; this.loadModules() }
-    this.refresh(); this.loadCloudBackupLazy()
+    // 刚离开又马上回来（切到微信看消息、点开又退回）不必整轮重拉：
+    // 20 秒内回来只刷第一屏，省掉第二波那 11 个跟这笔账无关的请求。
+    const nowMs = Date.now()
+    const gap = nowMs - (this._shownAt || 0)
+    this._shownAt = nowMs
+    this.refresh(gap > 0 && gap < 20000 ? { lite: true } : undefined)
+    this.loadCloudBackupLazy()
   },
   // opts.lite === true：记完一笔账之后用。写完只需要把「数字 + 当前这一屏」刷新回来，
   // 体检分数、目标、在制、资金预测、账本、分类这些跟这笔账无关，晚一点或下次进来再拉。

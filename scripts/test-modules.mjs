@@ -46,7 +46,12 @@ async function main() {
   if (!await waitUp()) { console.log('❌ 后端没起来：' + BASE); process.exit(1) }
   console.log('功能模块开关：' + BASE)
 
-  // 先看默认状态：从没改过开关的老账本，基础四块全开，计件工资默认关着
+  // 先恢复出厂：默认态是「从没动过开关」，而别的脚本（smoke-write）跑过之后库里会存一行 modules_off，
+  // 那样就变成「动过但存空串 = 全部打开」，默认态验不出来了。
+  const rs = await call('POST', '/modules', { reset: true })
+  eq('恢复出厂设置', rs.s, 200)
+
+  // 再看默认状态：从没改过开关的老账本，基础四块全开，计件工资默认关着
   const m0 = await call('GET', '/modules')
   if (m0.s !== 200 || !Array.isArray(m0.d && m0.d.list)) { console.log('❌ /modules 拿不到列表'); process.exit(1) }
   const keys = m0.d.list.map((x) => x.k)

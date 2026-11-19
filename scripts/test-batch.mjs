@@ -96,6 +96,47 @@ for (const [label, cap] of [['新后端（上限 24）', 24], ['老后端（上�
   check(r.calls === dup.length, `${dup.length} 个回调都收到了数据（${r.calls}/${dup.length}）`)
 }
 
+// 同一个 GET 还在路上时再要一次（切页签回来 / enterTab 与 refresh 撞一起），
+// 不能真发第二遍：钉住「后到的挂到前一个上，数据回来两份回调都收到」。
+{
+  console.log('\n[同一路径在飞时又点了同一屏]')
+  let page = null
+  const storage = { ak: 'test-key', book: 1 }
+  const batches = []
+  const singles = []
+  const got = []
+  const wx = {
+    getStorageSync: (k) => (k in storage ? storage[k] : ''),
+    setStorageSync: (k, v) => { storage[k] = v },
+    request: (o) => {
+      if (String(o.url).endsWith('/batch')) {
+        batches.push((o.data && o.data.qs) || [])
+        const results = ((o.data && o.data.qs) || []).map((p) => ({ ok: true, path: p }))
+        setTimeout(() => o.success({ statusCode: 200, data: { ok: true, results } }), 5)
+      } else {
+        singles.push(String(o.url))
+        setTimeout(() => o.success({ statusCode: 200, data: { ok: true } }), 5)
+      }
+    }
+  }
+  new Function('Page', 'wx', 'getApp', 'App', 'Component', 'console', src)(
+    (o) => { page = o }, wx, () => ({ globalData: {} }), () => {}, () => {}, { log() {}, warn() {}, error() {} })
+  const ctx = Object.assign(Object.create(page), {
+    data: {}, setData() {}, _cachePut() {}, _cacheGet() { return null }, _agoText() { return '' }
+  })
+  // 必须用真的 API_BASE 前缀：req() 靠它算出相对路径才知道能不能合批
+  const BS = (src.match(/const API_BASE = '([^']+)'/) || [])[1] || ''
+  ctx.req({ url: BS + '/ar', success: () => got.push('a') })
+  ctx.req({ url: BS + '/ar', success: () => got.push('b') })
+  ctx.req({ url: BS + '/ap', success: () => got.push('c') })
+  await new Promise((ok) => setTimeout(ok, 80))
+  const sent = batches.reduce((a, b) => a + b.length, 0)
+  check(singles.length === 0, `没有退回逐个发（实际 ${singles.length} 个）`)
+  check(sent === 2, `同一路径只要了一次，实际发出 ${sent} 条（期望 2：/ar + /ap）`)
+  check(got.length === 3, `3 个回调都收到数据（实际 ${got.length}）`)
+  check(ctx._flight && Object.keys(ctx._flight).length === 0, '请求回来后「在飞」标记已清空')
+}
+
 if (bad) {
   console.log(`\n❌ 合批回归测试失败：${bad} 项`)
   process.exit(1)
