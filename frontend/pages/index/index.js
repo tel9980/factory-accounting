@@ -122,6 +122,7 @@ Page({
     // 收付款面板：金额 / 日期 / 账户 / 有票没票 / 税额 / 只记税金
     pay_open: false, pay_kind: 'ar', pay_id: 0, pay_title: '', pay_remain: 0,
     pay_amt: '', pay_date: '', pay_inv: '', pay_tax: '', pay_taxonly: false, pay_busy: false,
+    pay_taxmode: false, pay_tax_extra: '', pay_extra_sug: 0,
     pay_invs: [{ k: 'yes', n: '有票' }, { k: 'no', n: '没票' }, { k: 'part', n: '部分开票' }],
     tax: null, tax_open: false, o_tax_kind: '', o_tax_rate: '', o_tax_hint: '', p_tax_kind: '', p_tax_rate: '', p_tax_hint: '',
     tr_from: -1, tr_to: -1, tr_amount: '', tr_remark: '', tr_rows: [],
@@ -2657,8 +2658,14 @@ Page({
     const acc = accs[this.data.acc_idx] || accs[0] || {}
     const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
     const name = k === 'ar' ? (row.customer || '') : (row.supplier || '')
+    // 不含税的单：货款不动，开票时另外收税点（用户的实际做法）
+    const isExcl = String(row.tax_kind || '') === '不含税'
+    const sug = isExcl ? Math.round(Number(row.tax_amt || 0) * 100) / 100 : 0
+    const inv0 = String(acc.inv_default || '')
     this.setData({
       pay_open: true, pay_kind: k, pay_id: id,
+      pay_taxmode: isExcl && sug > 0, pay_extra_sug: sug,
+      pay_tax_extra: (isExcl && sug > 0 && inv0 !== 'no') ? String(sug) : '',
       pay_title: (k === 'ar' ? '收 ' : '付 ') + name + (row.item_name ? ' · ' + row.item_name : ''),
       pay_remain: remain,
       pay_amt: ds.all ? String(remain) : '',
@@ -2680,7 +2687,11 @@ Page({
   },
   pickPayInv(e) {
     const k = String(e.currentTarget.dataset.k || '')
-    this.setData({ pay_inv: this.data.pay_inv === k ? '' : k })
+    const now = this.data.pay_inv === k ? '' : k
+    const d = { pay_inv: now }
+    // 不开票就不收税点（开了票才有税点这回事）
+    if (this.data.pay_taxmode) d.pay_tax_extra = now === 'no' ? '' : (now ? String(this.data.pay_extra_sug) : '')
+    this.setData(d)
   },
   togglePayTaxOnly() {
     this.setData({ pay_taxonly: !this.data.pay_taxonly })
@@ -2717,6 +2728,7 @@ Page({
       client_id: this.newCid(), inv: d.pay_inv, tax: d.pay_taxonly ? amt : tax
     }
     if (d.pay_taxonly) body.kind = 'tax'
+    if (d.pay_taxmode && !d.pay_taxonly) body.tax_extra = num2(d.pay_tax_extra)
     const url = API_BASE + (isAr ? '/orders/' : '/payables/') + d.pay_id + (isAr ? '/receive' : '/pay')
     this.setData({ pay_busy: true })
     this.req({
@@ -2734,6 +2746,7 @@ Page({
         }
         if (isAr) this.showChecks(res)
         if (r.over) wx.showToast({ title: '多出的 ' + r.over + ' 元记成' + (isAr ? '预收' : '预付') + '了', icon: 'none' })
+        else if (r.tax_extra) wx.showToast({ title: '货款 ' + amt + ' + 税点 ' + r.tax_extra + ' 都记好了', icon: 'none' })
         const left = Math.round((d.pay_remain - amt) * 100) / 100
         this._afterPay(d.pay_id, amt, d.pay_remain, d.pay_kind, left <= 0.005 || !!r.over)
       },

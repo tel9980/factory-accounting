@@ -3570,6 +3570,12 @@
       </view>
       <input class="inp full" type="digit" value="{{pay_tax}}" data-f="pay_tax" bindinput="onPayField"
         placeholder="{{pay_taxonly ? '这笔税金多少（单独收付）' : '这笔里的税额（可空，含税单填票面税额）'}}" />
+      <!-- 不含税的单：开票时另外收税点（货款 1000，税点可能 100，单独一笔，不冲这张单） -->
+      <block wx:if="{{pay_taxmode && !pay_taxonly}}">
+        <view class="tip">这单是<b>不含税</b>价：开票的话税点另外收（不开票就不用收）</view>
+        <input class="inp full" type="digit" value="{{pay_tax_extra}}" data-f="pay_tax_extra" bindinput="onPayField"
+          placeholder="税点另收多少（开单时填的 {{pay_extra_sug}}，不收就清空）" />
+      </block>
       <view class="chk" bindtap="togglePayTaxOnly">
         <text class="box">{{pay_taxonly ? '☑' : '☐'}}</text>
         <text>这是另外收付的税金，不冲这张单</text>

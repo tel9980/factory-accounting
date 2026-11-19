@@ -53,7 +53,11 @@ const apRows = async () => {
   return Array.isArray(r.d) ? r.d : ((r.d && (r.d.payables || r.d.rows)) || [])
 }
 const findAr = async (name, price) => {
-  const rows = await arRows()
+  // 结清的单不在默认列表里，所以要 ?status=all 才找得到
+  const rows = await (async () => {
+    const r = await call('GET', '/ar?status=all')
+    return Array.isArray(r.d) ? r.d : ((r.d && (r.d.orders || r.d.rows)) || [])
+  })()
   return rows.filter((o) => o.customer === name && (!price || r2(o.price) === r2(price))).sort((a, b) => Number(b.id) - Number(a.id))[0] || null
 }
 const findAp = async (name) => {
@@ -193,6 +197,31 @@ const main = async () => {
   else ok('没票的支出统计到了（' + ts.no_inv_out.count + ' 笔 ¥' + ts.no_inv_out.amount + '）')
   if (!Array.isArray(ts.by_account) || !ts.by_account.length) no('按账户分解是空的')
   else ok('按账户分解有 ' + ts.by_account.length + ' 个账户')
+
+  // ── 9.5 不开票收 1000、开票收 1000 + 税点 100（用户的原话口径）
+  //        货款照冲这张单，税点单独一笔，而且**不算收入**（代收的钱不是赚的钱）
+  const cD = '税点客户' + TAG
+  r = await call('POST', '/orders', { customer: cD, item_name: '加工', price: 1000, tax_kind: '不含税', tax_rate: 10 })
+  eq('不含税 10% 建单状态', r.status, 200)
+  const oD = await findAr(cD, 1000)
+  if (!oD) no('税点测试的单没找到')
+  else {
+    eq('开单时算出的税点（1000×10%）', oD.tax_amt, 100)
+    const incBefore = Number(((await call('GET', '/dashboard')).d || {}).month_income || 0)
+    r = await call('POST', '/orders/' + oD.id + '/receive', { amount: 1000, tax_extra: 100, inv: 'yes', account_id: accA.id, client_id: 'tex-' + TAG })
+    eq('货款+税点一起收的状态', r.status, 200)
+    eq('返回里带出另收的税点', r.d && r.d.tax_extra, 100)
+    const oD2 = await findAr(cD, 1000)
+    eq('货款 1000 全额冲掉这张单', oD2 && oD2.paid, 1000)
+    eq('这单结清了', oD2 && r2(Number(oD2.unpaid) || 0), 0)
+    const fr3 = await call('GET', '/flows')
+    const tRow = ((fr3.d && fr3.d.rows) || []).filter((x) => x.ref_type === 'tax_ar' && String(x.ref_id) === String(oD.id))[0]
+    if (!tRow) no('税点那笔流水没记上')
+    else eq('税点单独一笔 100', tRow.amount, 100)
+    // 代收的税点不算收入：收到 1100，收入只应该涨 1000
+    const incAfter = Number(((await call('GET', '/dashboard')).d || {}).month_income || 0)
+    eq('本月收入只涨货款 1000（税点不算收入）', r2(incAfter - incBefore), 1000)
+  }
 
   // ── 10. 删单连带删税金流水（否则流水里留孤儿）
   if (o) {

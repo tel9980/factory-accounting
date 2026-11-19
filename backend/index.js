@@ -7223,13 +7223,13 @@ app.get('/dashboard', async (c) => {
   const aggSql = `SELECT
     (SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) FROM orders WHERE paid + COALESCE(written_off,0) < price) AS ar,
     (SELECT COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) FROM payables WHERE paid + COALESCE(written_off,0) < amount) AS ap,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND month=?) AS inc,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND month=?) AS outt,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?) AS inc,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?) AS outt,
     (SELECT COUNT(*) FROM orders WHERE status < 2) AS pending,
     (SELECT COALESCE(SUM(price),0) FROM orders WHERE month=?) AS order_add,
     (SELECT COALESCE(SUM(amount),0) FROM payables WHERE month=?) AS payable_add,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${COST_EXP_WHERE} AND month=?) AS exp_cash,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND substr(created_at,1,10)=?) AS today_in,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND substr(created_at,1,10)=?) AS today_in,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='amort' AND month=?) AS amort,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='debt_int' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='debt_int' AND month=?) AS acr,
     (SELECT COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) FROM ledger WHERE ref_type='dep' AND month=?) AS dep,
@@ -8781,6 +8781,13 @@ app.post('/orders/:id/receive', async (c) => {
     await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('in','order',?,?,?,?,1,?,?,?,?)")
       .bind(id, takeIn, `收 ${o.customer} ${o.item_name}`, acc, d0, inv, invNo, Math.max(0, num(body.tax))).run()
   }
+  // 开票才收的税点：货款照冲这张单，税点单独记一笔（不冲 paid）。
+  // 用户的做法：货款 1000，不开票就收 1000；开票还是 1000，另外收税点，可能是 100。
+  const taxExtra = Math.max(0, num(body.tax_extra))
+  if (taxExtra > 0) {
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('in','tax_ar',?,?,?,?,?,1,?,?,?,?)")
+      .bind(id, taxExtra, '税金', `收 ${o.customer} 税点（开票另收）`, acc, d0, inv || 'yes', invNo, taxExtra).run()
+  }
   if (overAmt > 0) {
     const ar = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
       .bind('in', o.customer, overAmt, `多收（${o.item_name || ''}）`, acc, d0).run()
@@ -8805,6 +8812,7 @@ app.post('/orders/:id/receive', async (c) => {
   if (d0 && (o.created_at || '').slice(0, 10) && d0 < (o.created_at || '').slice(0, 10)) checks.push({ k: 'pay_early', text: `收款日期（${d0}）比开单日（${(o.created_at || '').slice(0, 10)}）还早，这单是先收钱后开单吗？不是的话改一下日期。` })
   const out = { ok: true }
   if (overAmt > 0) out.over = overAmt
+  if (taxExtra > 0) out.tax_extra = round2(taxExtra)
   if (woAdd > 0) out.settled = woAdd
   if (checks.length) out.checks = checks
   return c.json(out)
@@ -9076,6 +9084,12 @@ app.post('/payables/:id/pay', async (c) => {
     await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('out','payable',?,?,?,?,?,1,?,?,?,?)")
       .bind(id, paidOut, p.category || '', `付 ${p.supplier} ${p.remark}`, accP, dP, invP, invNoP, Math.max(0, num(body.tax))).run()
   }
+  // 开票才付的税点（同应收：货款付 1000，税点另外付）
+  const taxExtraP = Math.max(0, num(body.tax_extra))
+  if (taxExtraP > 0) {
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('out','tax_ap',?,?,?,?,?,1,?,?,?,?)")
+      .bind(id, taxExtraP, '税金', `付 ${p.supplier} 税点（开票另付）`, acc, d0, invP || 'yes', invNoP, taxExtraP).run()
+  }
   if (overAmt > 0) {
     const ar = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
       .bind('out', p.supplier, overAmt, `多付（${p.remark || ''}）`, acc, d0).run()
@@ -9096,6 +9110,7 @@ app.post('/payables/:id/pay', async (c) => {
   if (woAdd > 0) bits.push(`差额 ¥${woAdd} 记核销`)
   await logAudit(db, '付款', p.supplier, bits.join('，'), '', act(c))
   const out = { ok: true }
+  if (taxExtraP > 0) out.tax_extra = round2(taxExtraP)
   if (overAmt > 0) out.over = overAmt
   if (woAdd > 0) out.settled = woAdd
   return c.json(out)
@@ -11899,8 +11914,8 @@ app.get('/forecast', async (c) => {
 async function monthSum(db, m) {
   // 性能：原来 13 条查询串行（报表页要等 3.5 秒），现在 1 条聚合 + 3 条并发（约 1 秒）
   const aggSql = `SELECT
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND month=?) AS inc,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND month=?) AS outt,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?) AS inc,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?) AS outt,
     (SELECT COALESCE(SUM(price),0) FROM orders WHERE month=?) AS order_add,
     (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE month=?) AS order_cost,
     (SELECT COALESCE(SUM(amount),0) FROM payables WHERE month=?) AS payable_add,
