@@ -129,6 +129,11 @@ Page({
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
     mods: null, mod: {},
+    tp_packs: [
+      { p: 'open', n: '开账全套（新建账套一次装好）', d: '账户余额 · 默认账期 · 期初应收 · 期初应付 · 期初借支 · 期初借款' },
+      { p: 'daily', n: '日常台账（多页一次传）', d: '应收对账 · 应付对账 · 支出 · 报销 · 借支 · 付房东' }
+    ],
+    pk_open: false, pk_title: '', pk_text: '', pk_sheets: [], pk_busy: false, pk_force: false,
     tpls: [
       { t: 'ar_recon', n: '应收对账（按客户对账金额）', d: '客户, 对账金额, 月份 —— 一个月一家一条' },
       { t: 'ap_recon', n: '应付对账（按供应商/外发）', d: '供应商, 对账金额, 分类, 月份 —— 外发选「外发加工费」' },
@@ -1455,6 +1460,97 @@ Page({
           fail: () => wx.showToast({ title: '保存失败', icon: 'none' })
         })
       }
+    })
+  },
+  // ===== 模板包：一个工作簿好几个页签，一次下载、填完一次上传全导进去 =====
+  // 存文件 + 转发的流程和单张模板一样，抽出来两边共用。
+  _saveXlsx(b64, name) {
+    const dst = wx.env.USER_DATA_PATH + '/' + (name || '导入模板.xlsx')
+    wx.getFileSystemManager().writeFile({
+      filePath: dst, data: b64, encoding: 'base64',
+      success: () => {
+        wx.showToast({ title: '模板已生成', icon: 'success' })
+        if (wx.shareFileMessage) {
+          wx.shareFileMessage({
+            filePath: dst, fileName: name || '导入模板.xlsx',
+            fail: () => {
+              wx.openDocument({
+                filePath: dst, showMenu: true,
+                fail: () => wx.showToast({ title: '可先转发到文件传输助手', icon: 'none' })
+              })
+            }
+          })
+        } else {
+          wx.openDocument({ filePath: dst, showMenu: true, fail: () => {} })
+        }
+      },
+      fail: () => wx.showToast({ title: '保存失败', icon: 'none' })
+    })
+  },
+  packTemplate(e) {
+    const p = (e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.p : '') || 'daily'
+    wx.showLoading({ title: '生成中…' })
+    this.req({
+      url: API_BASE + '/import-template-pack?tpl=' + p,
+      success: (res) => {
+        wx.hideLoading()
+        const d = res.data || {}
+        if (!d.b64) return wx.showToast({ title: '生成失败', icon: 'none' })
+        this._saveXlsx(d.b64, d.name || '模板.xlsx')
+      },
+      fail: () => { wx.hideLoading(); wx.showToast({ title: '生成失败，看看网', icon: 'none' }) }
+    })
+  },
+  // 选填好的整本表：先预览每一页要导什么，确认了才真导
+  packPick(e) {
+    const p = (e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.p : '') || 'daily'
+    if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，用不了这个', icon: 'none' })
+    wx.chooseMessageFile({ count: 1, type: 'file', extension: ['xlsx', 'XLSX'], success: (r) => {
+      const f = (r.tempFiles || [])[0]
+      if (!f) return
+      if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+      wx.showLoading({ title: '看一眼每页…' })
+      wx.getFileSystemManager().readFile({ filePath: f.path, encoding: 'base64', success: (fr) => {
+        this._pkB64 = fr.data
+        this._pkName = f.name || '模板包'
+        this.req({
+          url: API_BASE + '/import-pack', method: 'POST', data: { b64: fr.data, dry: true },
+          success: (res) => {
+            wx.hideLoading()
+            const d = res.data || {}
+            if (!d.ok) return wx.showToast({ title: d.error || '读不了这个表', icon: 'none' })
+            this.setData({
+              pk_open: true, pk_title: this._pkName, pk_text: d.text || '', pk_sheets: d.sheets || [], pk_force: false,
+              pk_dry: true, pk_total: d.total_amount || 0
+            })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '上传失败，看看网', icon: 'none' }) }
+        })
+      }, fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) } })
+    } })
+  },
+  packClose() { this.setData({ pk_open: false }) },
+  packConfirm() {
+    if (this.data.pk_busy) return
+    this.setData({ pk_busy: true })
+    this.req({
+      url: API_BASE + '/import-pack', method: 'POST', data: { b64: this._pkB64 || '', name: this._pkName || '', force: !!this.data.pk_force },
+      success: (res) => {
+        this.setData({ pk_busy: false })
+        const d = res.data || {}
+        if (d.dup_file) {
+          return wx.showModal({
+            title: '这份表导过了', content: d.error || '同一个文件不会重复入账。',
+            confirmText: '还是再导一次', cancelText: '知道了',
+            success: (m) => { if (m.confirm) { this.setData({ pk_force: true }); this.packConfirm() } }
+          })
+        }
+        if (!d.ok) return wx.showToast({ title: d.error || '导入失败', icon: 'none' })
+        this.setData({ pk_open: false, pk_sheets: [], pk_text: '', pk_force: false })
+        wx.showModal({ title: '导完了', content: d.text || '', showCancel: false })
+        this.refresh({ lite: true })
+      },
+      fail: () => { this.setData({ pk_busy: false }); wx.showToast({ title: '导入失败，看看网', icon: 'none' }) }
     })
   },
   // 直接选 .xlsx 文件导入（不用管编码，Excel 存什么都能读）

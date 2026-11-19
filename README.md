@@ -23,7 +23,9 @@
 |---|---|---|
 | **每天** | 记一笔应收 / 收钱 / 记应付 / 记支出 | 记账 → 应收 · 应付 · 支出 |
 | **每天** | 今天要做什么（谁该付我、我该付谁） | 工作台 → 今天要做的事 |
+| **一次性** | 开新账套：账户余额 / 账期 / 期初应收应付借支借款 | 记账 → 导入 → 📦 开账全套（一页签一块，填完整本上传） |
 | **每天** | 客户/供应商给的对账金额导进来 | 记账 → 导入 → 📋 每天要用的模板 → 应收对账 · 应付对账 |
+| **每天** | 省事做法：对账 + 支出 + 报销 + 借支 + 付房东一本全填，一次传 | 记账 → 导入 → 📦 日常台账 |
 | **每周** | 批量导入（Excel 模板 / 粘贴多行，先看预览） | 记账 → 导入 |
 | **每周** | 对账核对（拿对方的余额比，差异可一键补记） | 记账 → 导入 → 对账（对方的余额） |
 | **每周** | 催款清单 / 发对账单 / 记送达 | 应收 → 生成催款清单 · 对账单（分组底） |
@@ -1464,11 +1466,23 @@ node scripts/build-exe.mjs --out dist
    - **顺带核实的两条事实**（写进教程）：`scheduled` 里 `runFixed/runAmort/runAccrual/runDepreciation` + `saveBackup` 每次 cron 都跑（`0 16 * * *` = 北京 0 点），所以「每天自动备份一次」是真的；`trash` 保留 30 天、`audit_log` 保留 180 天，所以「删错 30 天内能找回」也是真的。员工侧确认 `denyStaff` 直接拦 `PATCH`/`DELETE`，所以「改单删单要老板口令」没写错。
    - **验证**：`node scripts/check.mjs` 全绿（408 路由 / 56 表 / 623 SQL / 255 调用 / 755 绑定，3 个动态路径 warn）。这轮只动 `docs/`、`README.md`、`index.wxml` 文案，后端与 `schema.sql` 一行没改 → 不需要重新 `wrangler deploy`；但前端文案改了 → **小程序要重新上传发布**才会看到新的「怎么用」浮层。
 
+299. ✅ **开账和日常都能「一本模板搞定」：开账全套 + 日常台账两个多页签模板包，一次上传按页签自动分发**：用户说「最好从新建账套，期初数据、日常数据都有相关模板，这样，一个人的小财务，日常就维护几个模板，可以提高工作效率」。以前一个人管账要在导入页的下拉框里一样一样选：期初应收一个文件、期初应付再一个、账户余额还得去设置页手填；每天做完对账表，支出、报销、借支、付房东又是四个文件。现在压成两本：
+   - **📦 开账全套模板**（7 个页签）：`说明 / 账户期初 / 默认账期 / 期初应收 / 期初应付 / 期初借支 / 期初借款`。新建账套只下这一本，填完一次上传，账户余额、账期、期初欠款、期初借支、期初借款全部就位。
+   - **📦 日常台账模板**（7 个页签）：`说明 / 应收对账 / 应付对账 / 支出 / 借支 / 报销 / 付房东`。每天只维护这一本，一次上传把五类日常数据一起导进去。**页签顺序有讲究**：借支排在报销前面——一包是按页签顺序导的，先借出去才有得报。
+   - **技术上做了什么**：①新增 `xlsxToSheets(buf)`（原来 `xlsxToRows` 只读第一个 sheet），按 `xl/workbook.xml` + `xl/_rels/workbook.xml.rels` 的 `r:id → Target` 映射还原页签顺序，没有 workbook.xml 就退回 `sheetN` 文件名顺序；②新增 4 个导入类型 `acc_open`（账户期初，**语义是「设成这个数」不是「加上这个数」**，点两次不会翻倍；账户名不存在按名字猜类型新建：含「银行/卡」→ 银行卡、「微信」→ 微信、「支付宝」→ 支付宝，其余现金）、`term`（默认账期天数，1~365 才认）、`loan_open`（期初借支）、`debt_open`（期初借款）；③`IMPORT_PACKS` 定义两个包，`packTypeOf(页签名)` 认别名（「账户余额」「员工借支」「预付」这类都认，直接写类型名也认），页签里**只放表头不放示例行**（示例写在「说明」页，免得用户忘删被导进账）；④`GET /import-template-pack?tpl=open|daily` 用已有的 `makeXlsxSheets` 生成多页签工作簿，分类列仍带下拉（支出 `B2:B200`、报销 `C2:C200`、应付/应付对账/付房东各自的下拉）；⑤`POST /import-pack {b64, dry?, force?}` 逐页解析 → 去表头 → `previewImport`（dry，只看不写）或 `importRows`（真导），返回每一页「认了 N 行 / 有问题 M 行 / 重复 K 行」+ 总计；整包内容做指纹存 `settings['packf_…']`，**同一份文件重传会被拦下**（`force` 可强制）。
+   - **两个关键口径决定**：①**期初借支和期初借款不写现金流水**——这笔钱是过去发生的事，写进流水会把「本月收支」凭空抬高（借支 800 元的流水会让当月支出多 800，但它并不是这个月花出去的）；它们只进 `loans` / `debts` 台账，从「家底」里的欠款一侧体现。②**账户期初是「设」不是「加」**：`UPDATE accounts SET opening=?`，重复导入同一本表不会把余额加两遍。
+   - **顺手扩了表头识别词**（两处 `stripHeader` 与 `importRows` 共用的 `KW` 正则加了 `账户|余额|本金|出借方|账期`）：否则空模板下载回来直接传，表头「期初余额」会被当成一条「金额不是数字」的记录报错——这是「只放表头不放示例」带来的副作用，扩词才是正解。
+   - 🔴 **修掉一个上一轮埋下的 500**：`fnv1a()` 返回的是**数字**（`return h >>> 0`），而我上一轮的 `/bank-import` 和这一轮的模板包指纹都写了 `fnv1a(x).slice(0, 16)` —— 数字没有 `.slice`，`/bank-import` 一调就 `TypeError` 500。两处统一改成 `fnv1a(x).toString(36) + '-' + String(x.length).toString(36)`。
+   - **新增 `scripts/test-pack.mjs`（51 项断言，已在 CI 里，排在 `test-safety` 之后）**：两个包能下载且页签名逐字一致 → **服务器生成的包能自己读回来**（下载再 `dry` 上传，认出 6 页、只有「默认账期」有数据）→ 预览不写库 → 开账整包导入 8 行（现金 3000 / 银行卡 20000 / 账期 45 / 期初应收 2 家 / 期初应付 2000 / 借支 800 / 借款 10 万 4.5%）→ **借支借款没动现金收支** → 同文件重传被拦且导 0 行 → `force` 重导后账户仍 3000（是「设」不是「加」）→ 日常台账导 9 行（应收对账记到 `2091-03-31`、「外发加工费/硫酸」分类正确、支出进流水且 `dir=out`、押金 `deposit:true/per_month:0/remain:6000`、租金 1 个月摊 12000、报销冲借支 300）。
+     - **写测试时踩的坑**（都值得记）：`/accounts` 返回 `{accounts:[…]}`、`/loans` 返回 `{list,staff,open_total}`、`/debts` 返回 `{debts:[…]}`、`/prepaids` 返回 `{prepaids:[…]}`、`/term-default` 字段叫 `days`、`/flows` 方向字段叫 `dir`、分类小计叫 `by_cat`；**「付·厂房租金」里也含「房租」两个字**，按 `indexOf('房租')` 找分类会先撞上它，改成精确匹配；共享库上断言必须落到「本次 TAG 的数据」或基线增量上（支出金额改成 `1200 + 时间戳取余` 避开同日同分类同额防重；自检不能要求 `ok===true`——`test-safety` 会**故意**留一条不一致的数据来验回收站）。
+   - **验证**：`check.mjs` 全绿（**410** 路由 / 56 表 / **624** SQL / 255 调用 / **759** 绑定）；干净库按 CI 顺序全跑：`smoke` **228** GET 无 5xx → `test-modules` → `smoke-write` 45 步 + 写路由 + 自检 10 类全 0 → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` 48 → **`test-pack` 51**，加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
+   - ⚠️ 动了前端（模板中心加了两个包的行 + 整包预览面板）→ **小程序要重新上传发布**。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 408 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 410 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1852,7 +1866,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（212）
+**其它（单个接口）**（214）
 
 - `GET /`
 - `GET /access-guide`
@@ -1933,8 +1947,10 @@ node scripts/build-exe.mjs --out dist
 - `GET /history`
 - `POST /import`
 - `POST /import-all`
+- `POST /import-pack`
 - `POST /import-rows`
 - `GET /import-template`
+- `GET /import-template-pack`
 - `GET /import-template-xlsx`
 - `POST /import-undo/:id`
 - `POST /import-xlsx`

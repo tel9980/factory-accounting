@@ -993,8 +993,35 @@
 
   <block wx:if="{{tab=='import'}}">
     <view class="form">
+      <view class="prev-h">📦 两个模板包（一个文件好几页，一次传全导进去）</view>
+      <view class="tip">新建账套用「开账全套」走一遍；日常就维护「日常台账」这一个文件，哪天哪页有新的就填哪页，填完整本传上来，程序按页签名自己分。</view>
+      <view class="tpl-row" wx:for="{{tp_packs}}" wx:key="p">
+        <view class="tpl-main">
+          <view class="tpl-n">📦 {{item.n}}</view>
+          <view class="tpl-d">{{item.d}}</view>
+        </view>
+        <button class="btn ghost" size="mini" bindtap="packTemplate" data-p="{{item.p}}">下</button>
+        <button class="btn" size="mini" bindtap="packPick" data-p="{{item.p}}">传</button>
+      </view>
+    </view>
+    <view class="form" wx:if="{{pk_open}}">
+      <view class="prev-h">📦 {{pk_title}}</view>
+      <view class="tip">{{pk_text}}</view>
+      <view class="row2" wx:for="{{pk_sheets}}" wx:key="sheet">
+        <text class="tpl-n">{{item.sheet}}</text>
+        <text wx:if="{{item.empty}}" class="tip"> 没填，跳过</text>
+        <text wx:elif="{{item.error}}" class="red"> 出错：{{item.error}}</text>
+        <text wx:else> {{item.type_name || ''}}：{{item.text || item.note || ''}}</text>
+        <view class="tip" wx:for="{{item.errors}}" wx:for-item="er" wx:key="*this">{{er}}</view>
+      </view>
+      <view class="btns">
+        <button class="btn ghost" size="mini" bindtap="packClose">先不导</button>
+        <button class="btn" size="mini" bindtap="packConfirm" loading="{{pk_busy}}">确认导入</button>
+      </view>
+    </view>
+    <view class="form">
       <view class="prev-h">📋 每天要用的模板（下下来填，填完直接传）</view>
-      <view class="tip">一天做几个表就传几个：应收按接单，应付按进货，对账按对方的余额，报销按员工报的。每行右边是「传」。</view>
+      <view class="tip">只想导其中一类就下这一张：应收按接单，应付按进货，对账按对方的余额，报销按员工报的。每行右边是「传」。</view>
       <view class="tpl-row" wx:for="{{tpls}}" wx:key="t">
         <view class="tpl-main">
           <view class="tpl-n">{{item.n}}</view>
@@ -3514,7 +3541,7 @@
       <view class="help-p">1. 首页「今天要做的事」：该催的、快到期的、超预算的，一条条点掉。</view>
       <view class="help-p">2. 「记账 → 应收」上面点「生成催款清单」，话术抄下来直接发微信。</view>
       <view class="help-h">每月（20 分钟）</view>
-      <view class="help-p">1. 对方发来对账金额：到「记账 → 导入」→「📋 每天要用的模板」→ 下「应收对账」/「应付对账」→ 填完点「传」→ 看预览 → 确认导入（一家一条，重复传不会翻倍）。</view>
+      <view class="help-p">1. 对方发来对账金额：到「记账 → 导入」→ 下「📦 日常台账」（一本 6 页，对账/支出/借支/报销/付房东都在里面，空页不用管）→ 填完点「传」→ 看预览 → 确认导入。只传一样也行：用下面「📋 每天要用的模板」挑那一行（一家一条，重复传不会翻倍）。</view>
       <view class="help-p">2. 拿对方的余额核一遍：同一个模板区里「对账（对方的余额）」→ 传进去 → 差异可以「＋ 补记这笔」或「✂ 核销差额」。</view>
       <view class="help-p">3. 「报表 → 🗓 月底收尾」：七步走完（单据、对账、差异、发对账单、小结、备份、结账）→ 「结转归档」，结完这个月不能改。</view>
       <view class="help-p">4. 备份：「报表」往下滑 →「云端备份」。每天已经自动备份一次，点一下只是多存一份。</view>

@@ -5067,6 +5067,13 @@ const stampOf = (date) => {
   return iso ? iso : now()
 }
 const looksLikeDate = (s) => !!toIsoDate(s)
+// 单元格必须是「纯数字」才算金额。表头里的「期初余额」「默认账期(天)」不是数字，
+// 这样开账模板的表头行就不会被当成一条 0 元的记录建进去。
+const cellNumber = (v) => {
+  const s = String(v === null || v === undefined ? '' : v).trim().replace(/,/g, '')
+  if (!s || !/^-?\d+(\.\d+)?$/.test(s)) return null
+  return Number(s)
+}
 // 收款/付款日期补录：支持 YYYY-MM-DD 或 MM-DD，否则用当前时间
 const normDate = (s) => {
   const t = String(s || '').trim()
@@ -5999,44 +6006,10 @@ function xlSerialToIso(v) {
   return new Date(ms).toISOString().slice(0, 10)
 }
 
-async function xlsxToRows(buf) {
-  const files = await unzipAll(buf)
-  const dec = new TextDecoder()
-  const sheets = Object.keys(files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()
-  if (!sheets.length) throw new Error('这个文件里没有工作表')
-  let shared = []
-  if (files['xl/sharedStrings.xml']) {
-    const sx = dec.decode(files['xl/sharedStrings.xml'])
-    shared = (sx.match(/<si[\s>][\s\S]*?<\/si>/g) || []).map((si) => {
-      const ts = si.match(/<t[^>]*>[\s\S]*?<\/t>/g) || []
-      return xmlUnesc(ts.map((x) => x.replace(/<[^>]+>/g, '')).join(''))
-    })
-  }
-  // 哪些单元格样式是「日期」：只有日期格式的数字才按 Excel 序号转成 YYYY-MM-DD。
-  // 以前不看样式、见到 20000~60000 的数字就当日期，于是「押金 20000」被读成 1954-09-13、
-  // 「应付 30000」直接变成空值丢掉 —— 金额正好落在 2 万~6 万的文件都会中招。
-  const dateXf = new Set()
-  if (files['xl/styles.xml']) {
-    const st = dec.decode(files['xl/styles.xml'])
-    const custom = {}
-    for (const m of st.matchAll(/<numFmt[^>]*numFmtId="(\d+)"[^>]*formatCode="([^"]*)"/g)) {
-      custom[m[1]] = xmlUnesc(m[2])
-    }
-    const builtinDate = new Set(['14', '15', '16', '17', '18', '19', '20', '21', '22', '27', '30', '36', '45', '46', '47', '50', '57'])
-    const xfs = (st.match(/<cellXfs[\s>][\s\S]*?<\/cellXfs>/) || [''])[0]
-    let i = 0
-    for (const m of xfs.matchAll(/<xf[^>]*>/g)) {
-      const fid = (m[0].match(/numFmtId="(\d+)"/) || [])[1] || '0'
-      const code = custom[fid] || ''
-      // 自定义格式里带 y/m/d 的才算日期（m 单独出现是数字占位，得排除掉纯数字格式）
-      const isDate = builtinDate.has(fid) || (!!code && /[yd]/i.test(code) && !/^[#0.,%\s]+$/.test(code))
-      if (isDate) dateXf.add(String(i))
-      i++
-    }
-  }
-  const sheet = dec.decode(files[sheets[0]])
+// 把一个 worksheet 的 XML 解析成二维数组（空单元格补空串，整行空丢掉）
+function rowsOfSheetXml(xml, shared, dateXf) {
   const rows = []
-  for (const rx of sheet.match(/<row[\s>][\s\S]*?<\/row>/g) || []) {
+  for (const rx of xml.match(/<row[\s>][\s\S]*?<\/row>/g) || []) {
     const cells = []
     for (const cx of rx.match(/<c[\s>][\s\S]*?<\/c>|<c[^>]*\/>/g) || []) {
       const ref = (cx.match(/r="([A-Z]+)\d+"/) || [])[1] || ''
@@ -6063,6 +6036,77 @@ async function xlsxToRows(buf) {
     if (cells.some((x) => x !== '')) rows.push(cells)
   }
   return rows
+}
+
+// 共享字符串 + 「哪些样式是日期」：整个文件只解析一次，多页签共用。
+// 以前不看样式、见到 20000~60000 的数字就当日期，于是「押金 20000」被读成 1954-09-13、
+// 「应付 30000」直接变成空值丢掉 —— 金额正好落在 2 万~6 万的文件都会中招。
+function xlsxMeta(dec, files) {
+  let shared = []
+  if (files['xl/sharedStrings.xml']) {
+    const sx = dec.decode(files['xl/sharedStrings.xml'])
+    shared = (sx.match(/<si[\s>][\s\S]*?<\/si>/g) || []).map((si) => {
+      const ts = si.match(/<t[^>]*>[\s\S]*?<\/t>/g) || []
+      return xmlUnesc(ts.map((x) => x.replace(/<[^>]+>/g, '')).join(''))
+    })
+  }
+  const dateXf = new Set()
+  if (files['xl/styles.xml']) {
+    const st = dec.decode(files['xl/styles.xml'])
+    const custom = {}
+    for (const m of st.matchAll(/<numFmt[^>]*numFmtId="(\d+)"[^>]*formatCode="([^"]*)"/g)) {
+      custom[m[1]] = xmlUnesc(m[2])
+    }
+    const builtinDate = new Set(['14', '15', '16', '17', '18', '19', '20', '21', '22', '27', '30', '36', '45', '46', '47', '50', '57'])
+    const xfs = (st.match(/<cellXfs[\s>][\s\S]*?<\/cellXfs>/) || [''])[0]
+    let i = 0
+    for (const m of xfs.matchAll(/<xf[^>]*>/g)) {
+      const fid = (m[0].match(/numFmtId="(\d+)"/) || [])[1] || '0'
+      const code = custom[fid] || ''
+      // 自定义格式里带 y/m/d 的才算日期（m 单独出现是数字占位，得排除掉纯数字格式）
+      const isDate = builtinDate.has(fid) || (!!code && /[yd]/i.test(code) && !/^[#0.,%\s]+$/.test(code))
+      if (isDate) dateXf.add(String(i))
+      i++
+    }
+  }
+  return { shared, dateXf }
+}
+
+async function xlsxToRows(buf) {
+  const files = await unzipAll(buf)
+  const dec = new TextDecoder()
+  const sheets = Object.keys(files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()
+  if (!sheets.length) throw new Error('这个文件里没有工作表')
+  const { shared, dateXf } = xlsxMeta(dec, files)
+  return rowsOfSheetXml(dec.decode(files[sheets[0]]), shared, dateXf)
+}
+
+// 多页签：按 xl/workbook.xml 里的顺序和名字读回每一个工作表（整包导入用）。
+// 名字很重要 —— 「日常台账」这个包里，页签名就决定了这页是应收对账还是支出。
+async function xlsxToSheets(buf) {
+  const files = await unzipAll(buf)
+  const dec = new TextDecoder()
+  const anySheet = Object.keys(files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()
+  if (!anySheet.length) throw new Error('这个文件里没有工作表')
+  const { shared, dateXf } = xlsxMeta(dec, files)
+  const wb = files['xl/workbook.xml'] ? dec.decode(files['xl/workbook.xml']) : ''
+  const rels = files['xl/_rels/workbook.xml.rels'] ? dec.decode(files['xl/_rels/workbook.xml.rels']) : ''
+  const ridToFile = {}
+  for (const m of rels.matchAll(/<Relationship[^>]*?Id="([^"]+)"[^>]*?Target="([^"]+)"/g)) {
+    const t = String(m[2]).replace(/^\/?xl\//, '').replace(/^\.\//, '')
+    ridToFile[m[1]] = 'xl/' + t.replace(/^xl\//, '')
+  }
+  const order = []
+  for (const m of wb.matchAll(/<sheet[^>]*?name="([^"]*)"[^>]*?r:id="([^"]+)"/g)) {
+    order.push({ name: xmlUnesc(m[1]), file: ridToFile[m[2]] })
+  }
+  if (!order.length) anySheet.forEach((n, i) => order.push({ name: 'Sheet' + (i + 1), file: n }))
+  const out = []
+  for (const o of order) {
+    if (!o.file || !files[o.file]) continue
+    out.push({ name: o.name, rows: rowsOfSheetXml(dec.decode(files[o.file]), shared, dateXf) })
+  }
+  return out
 }
 
 async function zipMake(entries) {
@@ -6197,7 +6241,86 @@ const IMPORT_TEMPLATES = {
   recon: { name: '对账模板（客户/供应商对账单）', rows: [['单位', '金额'], ['张老板', 5000], ['李老板', 4000], ['王老板', 35000]] },
   reimb: { name: '报销模板', rows: [['员工', '金额', '分类', '备注', '日期(可空)'], ['张三', 800, '采购', '买螺丝', '11-06'], ['张三', 200, '运费', '送货油费', '']] },
   // 付房东的钱：租金/水电按月摊，押金月数填 0（不摊，退租收回）
-  prepaid: { name: '房东预付模板（租金/押金/水电）', rows: [['名称', '金额', '月数(0=押金不摊)', '分类', '起始日(可空)', '备注(可空)'], ['11月厂房租金', 12000, 1, '厂房租金', '2026-11-01', ''], ['宿舍押金', 6000, 0, '押金', '2026-11-01', '退租收回'], ['11月宿舍水电', 1800, 1, '水费', '', '宿舍表按人头分']] }
+  prepaid: { name: '房东预付模板（租金/押金/水电）', rows: [['名称', '金额', '月数(0=押金不摊)', '分类', '起始日(可空)', '备注(可空)'], ['11月厂房租金', 12000, 1, '厂房租金', '2026-11-01', ''], ['宿舍押金', 6000, 0, '押金', '2026-11-01', '退租收回'], ['11月宿舍水电', 1800, 1, '水费', '', '宿舍表按人头分']] },
+  // 开账用的四样底数：账户里现在有多少钱、默认账期几天、员工手上还欠多少借支、还欠谁借款
+  acc_open: { name: '账户期初模板', rows: [['账户', '期初余额', '备注(可空)'], ['现金', 3000, ''], ['银行卡', 20000, '']] },
+  term: { name: '默认账期模板', rows: [['默认账期(天)'], [30]] },
+  loan_open: { name: '期初借支模板（员工手上还没报销的）', rows: [['员工', '未还金额', '备注(可空)'], ['张三', 800, '上月买辅料'], ['李四', 500, '']] },
+  debt_open: { name: '期初借款模板（还没还的借款）', rows: [['出借方', '本金', '年利率%', '起始日(可空)', '期限(月,可空)'], ['某银行', 200000, 4.5, '2026-01-01', 36], ['老板朋友', 50000, 0, '', '']] }
+}
+
+// ===== 模板包：一个工作簿多个页签，一次下载填完、一次上传全导进去 =====
+// 「开账全套」= 新账本要填的底数；「日常台账」= 每天/每周要填的那几页。
+// 页签里只放表头（示例写在「说明」页）：放了示例数据，用户忘了删就会真被导进账里。
+const IMPORT_PACKS = {
+  open: {
+    name: '开账全套模板',
+    desc: '新建账套一次装好：账户余额、默认账期、期初应收、期初应付、期初借支、期初借款',
+    sheets: [
+      { sheet: '说明', type: '', rows: [
+        ['开账全套模板 —— 怎么用'],
+        ['1. 每个页签一行一条，只填你有的；没有的页签留空就行，不用删。'],
+        ['2. 填完保存，回小程序：记账 → 导入 → 📦 开账全套 → 传，整包一次导进去。'],
+        ['3. 「账户期初」填的是「现在这个账户里有多少钱」。这是“设”不是“加”，重复导不会翻倍。'],
+        ['4. 「期初应收 / 期初应付」= 到昨天为止别人还欠我的 / 我还欠别人的，一家一行。'],
+        ['5. 「期初借支」= 员工手上还没报销的钱；「期初借款」= 还没还的借款。这两样不产生现金流水。'],
+        ['6. 页签名别改、页签别删 —— 程序按页签名认这一页是什么账。'],
+        ['7. 「默认账期」那页的 30 是“开单后 30 天到期”，改成你们的习惯天数就行。']
+      ] },
+      { sheet: '账户期初', type: 'acc_open', rows: [['账户', '期初余额', '备注(可空)']] },
+      { sheet: '默认账期', type: 'term', rows: [['默认账期(天)'], [30]] },
+      { sheet: '期初应收', type: 'ar_init', rows: [['客户', '金额', '日期(可空)']] },
+      { sheet: '期初应付', type: 'ap_init', rows: [['供应商', '金额', '日期(可空)']] },
+      { sheet: '期初借支', type: 'loan_open', rows: [['员工', '未还金额', '备注(可空)']] },
+      { sheet: '期初借款', type: 'debt_open', rows: [['出借方', '本金', '年利率%', '起始日(可空)', '期限(月,可空)']] }
+    ]
+  },
+  daily: {
+    name: '日常台账模板',
+    desc: '日常就维护这一个文件：应收对账、应付对账、支出、报销、借支、付房东，一次上传全导进去',
+    sheets: [
+      { sheet: '说明', type: '', rows: [
+        ['日常台账模板 —— 怎么用'],
+        ['1. 一天/一周记一次都行：哪一页有新的就填一行，没有的页签空着。'],
+        ['2. 填完保存，回小程序：记账 → 导入 → 📦 日常台账 → 传，整包一次导进去。'],
+        ['3. 「应收对账 / 应付对账」是跟客户、供应商对完账的结果，一家一行，不用拆成一张张单。'],
+        ['4. 月份可以写 2026-11、202611、11月，也可以不写（不写就算当月）。'],
+        ['5. 「付房东」的月数填 0 表示押金不摊；租金/水电填要摊几个月。'],
+        ['6. 页签名别改、页签别删 —— 程序按页签名认这一页是什么账。'],
+        ['7. 想只导某一类，也可以去「每天要用的模板」里单独下那一张。']
+      ] },
+      { sheet: '应收对账', type: 'ar_recon', rows: [['客户', '对账金额', '月份(可空)', '备注(可空)']] },
+      { sheet: '应付对账', type: 'ap_recon', rows: [['供应商', '对账金额', '分类(可空)', '月份(可空)', '备注(可空)']], dv: ['C2:C200', AP_CATS] },
+      { sheet: '支出', type: 'expense', rows: [['金额', '分类', '备注', '经手人(可空)', '日期(可空)']] },
+      // 借支要排在报销前面：这一包是一次按页签顺序导的，先借出去才有得报
+      { sheet: '借支', type: 'loan', rows: [['员工', '金额', '备注', '日期(可空)']] },
+      { sheet: '报销', type: 'reimb', rows: [['员工', '金额', '分类', '备注', '日期(可空)']] },
+      { sheet: '付房东', type: 'prepaid', rows: [['名称', '金额', '月数(0=押金不摊)', '分类', '起始日(可空)', '备注(可空)']], dv: ['D2:D200', PREPAID_CATS] }
+    ]
+  }
+}
+
+// 页签名 → 导入类型。用户可能顺手改个名（「账户余额」「预付」），常见写法都认；
+// 也允许直接把类型名当页签名（ar_recon / expense …）。
+const PACK_SHEET_TYPE = {
+  账户期初: 'acc_open', 账户余额: 'acc_open', 账户: 'acc_open', 期初账户: 'acc_open',
+  默认账期: 'term', 账期: 'term',
+  期初应收: 'ar_init', 应收期初: 'ar_init', 期初欠款: 'ar_init',
+  期初应付: 'ap_init', 应付期初: 'ap_init',
+  期初借支: 'loan_open', 借支期初: 'loan_open',
+  期初借款: 'debt_open', 借款期初: 'debt_open', 借款: 'debt_open',
+  应收对账: 'ar_recon', 应付对账: 'ap_recon',
+  支出: 'expense', 日常支出: 'expense', 报销: 'reimb',
+  借支: 'loan', 员工借支: 'loan',
+  付房东: 'prepaid', 房东: 'prepaid', 预付: 'prepaid',
+  应收: 'ar', 应付: 'ap'
+}
+function packTypeOf(name) {
+  const t = String(name || '').trim()
+  if (!t) return ''
+  if (PACK_SHEET_TYPE[t]) return PACK_SHEET_TYPE[t]
+  if (IMPORT_TEMPLATES[t]) return t
+  return ''
 }
 
 // 下载 Excel 模板（base64 返回，小程序存文件后可直接用 Excel/WPS 打开编辑）
@@ -6225,11 +6348,113 @@ app.get('/import-template-xlsx', async (c) => {
   return c.json({ ok: true, name: T.name + '.xlsx', b64: toB64(xlsx), dv: dv.length > 0 })
 })
 
+// 下载「模板包」：一个工作簿里好几个页签（开账全套 / 日常台账）
+app.get('/import-template-pack', async (c) => {
+  const p = String(c.req.query('tpl') || 'daily')
+  const P = IMPORT_PACKS[p]
+  if (!P) return c.json({ error: '没有这个模板包（tpl 只能是 open 或 daily）' }, 400)
+  // 分类下拉：省得每天手打，写错了也不影响金额
+  let cats = []
+  try {
+    const r = await c.env.DB.prepare("SELECT name FROM categories WHERE type='out' ORDER BY sort, id").all()
+    cats = (r.results || []).map((x) => String(x.name || '').trim()).filter((x) => x && x.indexOf(',') < 0)
+  } catch (e) { cats = [] }
+  if (!cats.length) cats = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
+  const sheets = P.sheets.map((s) => {
+    let dv = []
+    if (s.dv) dv = [{ sq: s.dv[0], list: s.dv[1] }]
+    else if (s.type === 'expense') dv = [{ sq: 'B2:B200', list: cats }]
+    else if (s.type === 'reimb') dv = [{ sq: 'C2:C200', list: cats }]
+    else if (s.type === 'ap') dv = [{ sq: 'B2:B200', list: AP_CATS }]
+    return { name: s.sheet, rows: s.rows, dv }
+  })
+  const xlsx = await makeXlsxSheets(sheets)
+  return c.json({ ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc, sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })), b64: toB64(xlsx) })
+})
+
+// 整包导入：一个工作簿里几个页签，按页签名分别当成应收对账 / 支出 / …，一次全导
+app.post('/import-pack', async (c) => {
+  const db = c.env.DB
+  const body = await c.req.json().catch(() => ({}))
+  const b64 = String(body.b64 || body.file || '')
+  if (!b64) return c.json({ error: '没有收到文件内容' }, 400)
+  const dry = body.dry === true || body.preview === true
+  const force = body.force === true || body.confirm_dup === true
+  let sheets
+  try {
+    sheets = await xlsxToSheets(fromB64(b64).buffer)
+  } catch (e) {
+    return c.json({ error: '读不了这个 Excel：' + String(e.message || e) }, 400)
+  }
+  if (!sheets.length) return c.json({ error: '这个文件里没有工作表' }, 400)
+  // 同一份文件重传一遍：整包跳过（内容一模一样，再导只会重复记账）。改过内容就是新文件，照常导。
+  const fpKey = 'packf_' + fnv1a(b64).toString(36) + '-' + String(b64.length).toString(36)
+  if (!dry && !force) {
+    const seen = await db.prepare('SELECT value FROM settings WHERE key=?').bind(fpKey).first().catch(() => null)
+    if (seen && seen.value) {
+      return c.json({ ok: true, imported: 0, dup_file: true, sheets: [], total_imported: 0, total_amount: 0, error: '这份表已经导过了（同一个文件不会重复入账）。改过内容再传，或点「再导一次」。' })
+    }
+  }
+  const out = []
+  let totalImported = 0
+  let totalAmount = 0
+  for (const sh of sheets) {
+    const type = packTypeOf(sh.name)
+    const rows = (sh.rows || []).filter((r) => (r || []).some((x) => String(x == null ? '' : x).trim() !== ''))
+    if (!type) {
+      if (rows.length > (sh.name === '说明' ? 0 : 1)) out.push({ sheet: sh.name, type: '', skipped: true, note: '这个页签不用导（说明页或没认出来）' })
+      continue
+    }
+    // 只有表头没有数据：这页没填，跳过（别报错，用户本来就留空）
+    const bodyRows = stripHeader(rows).rows.filter((r) => (r || []).some((x) => String(x == null ? '' : x).trim() !== ''))
+    if (!bodyRows.length) { out.push({ sheet: sh.name, type, empty: true, note: '这页没填数据' }); continue }
+    const tName = (IMPORT_TEMPLATES[type] && IMPORT_TEMPLATES[type].name) || type
+    try {
+      if (dry) {
+        const pv = await previewImport(db, type, bodyRows)
+        out.push({
+          sheet: sh.name, type, type_name: tName,
+          count: pv.count, ok_count: pv.ok_count, dup_count: pv.dup_count, bad_count: pv.bad_count, locked_count: pv.locked_count, total: pv.total,
+          errors: (pv.rows || []).filter((x) => !x.ok || x.locked).slice(0, 3).map((x) => `第 ${x.i} 行：${x.error || '导不进去'}`),
+          text: pv.text
+        })
+      } else {
+        const r = await importRows(db, type, bodyRows, { confirmDup: force, by: act(c) })
+        totalImported += num(r.imported)
+        totalAmount = round2(totalAmount + num(r.total))
+        try { await logImport(db, type, r, 'pack') } catch (e) { noteFail(e, '整包导入·记批次') }
+        out.push({
+          sheet: sh.name, type, type_name: tName,
+          count: bodyRows.length, imported: num(r.imported), dup_count: num(r.dup_count), locked_count: num(r.skipped_locked), total: num(r.total),
+          errors: [...(r.dup || []).slice(0, 3).map((x) => `像重复没导：${x.party} ¥${x.amount}（${x.date} 已有一笔）`), ...(r.stale || []).slice(0, 3).map((x) => `借支对不上没报成：${x}`)],
+          text: `导进 ${num(r.imported)} 行${num(r.dup_count) ? `，${num(r.dup_count)} 行像重复没导` : ''}${num(r.skipped_locked) ? `，${num(r.skipped_locked)} 行在已结账月份` : ''}`
+        })
+      }
+    } catch (e) {
+      noteFail(e, '整包导入·' + sh.name)
+      out.push({ sheet: sh.name, type, type_name: tName, error: String(e.message || e), text: '这页出错了，其它页照常导' })
+    }
+  }
+  if (!dry && !force && totalImported > 0) {
+    try { await db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').bind(fpKey, now()).run() } catch (e) { noteFail(e, '整包导入·记指纹') }
+  }
+  if (!dry) await logAudit(db, '整包导入', String(body.name || 'Excel'), `共 ${totalImported} 行，合计 ¥${totalAmount}`, '', act(c))
+  const lines = out.map((x) => `${x.sheet}：${x.text || x.note || x.error || ''}`).filter((x) => x.indexOf('：') < x.length - 1)
+  return c.json({
+    ok: true, dry, sheets: out, total_imported: totalImported, total_amount: totalAmount,
+    text: dry
+      ? '看一遍对不对，没问题点「确认导入」：' + lines.join('；')
+      : `导完了，一共 ${totalImported} 行、合计 ¥${totalAmount}。` + (lines.length ? '（' + lines.join('；') + '）' : '')
+  })
+})
+
 // 直接上传 Excel 文件导入
 // 表头判定（与 importRows 内部规则一致，抽出来给预览用）
 function stripHeader(rows) {
   if (rows.length && rows[0] && rows[0].length) {
-    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要/
+    // 关键词也认「账户 / 余额 / 本金 / 出借方 / 账期」：开账模板是空表下载的，
+    // 只有表头没有数据，认不出表头就会把表头当成一条「金额不是数字」的记录报错。
+    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要|账户|余额|本金|出借方|账期/
     const first = rows[0]
     const numish = first.filter((x) => /^[\d.,%\-\s]*$/.test(String(x === null || x === undefined ? '' : x).trim()) && String(x === null || x === undefined ? '' : x).trim() !== '').length
     const wordy = first.filter((x) => KW.test(String(x === null || x === undefined ? '' : x))).length
@@ -6251,6 +6476,7 @@ async function previewImport(db, type, rawRows) {
     if (p.length > 1 && looksLikeDate(p[p.length - 1])) { d = toIsoDate(p.pop()); dateGiven = true }
     else if (type === 'ar_init' || type === 'ap_init') d = `${todayIso().slice(0, 4)}-01-01T00:00:00.000Z`
     let party = '', item = '', amount = 0, cost = 0, category = '', extra = '', months = 0
+    let hardErr = ''
     if (type === 'ar') { const [c, it, pr, co, dueC, operC] = p; party = c || ''; item = it || ''; amount = num(pr); cost = num(co); extra = [dueC ? '到期 ' + dueC : '', operC ? '经手 ' + operC : ''].filter(Boolean).join(' ') }
     else if (type === 'ar_init' || type === 'ap_init') { const [c, pr] = p; party = c || ''; amount = num(pr) }
     else if (type === 'ap') {
@@ -6286,7 +6512,45 @@ async function previewImport(db, type, rawRows) {
       extra = num(mo) > 0 ? `${num(mo)} 个月，每月摊 ${round2(num(am) / num(mo))}` : '押金/不摊，钱挂在待摊里'
       if (sd && looksLikeDate(sd)) { d = toIsoDate(sd); dateGiven = true }
     }
-    parsed.push({ party: String(party).trim(), item: String(item).trim(), amount: round2(amount), cost: round2(cost), category: String(category).trim(), months: num(months), date: (d || t).slice(0, 10), date_given: dateGiven, extra })
+    else if (type === 'acc_open') {
+      // 账户期初：账户, 期初余额, 备注(可空)
+      const [nm, v, rm] = p
+      party = nm || ''
+      const amt = cellNumber(v)
+      if (!String(party).trim()) hardErr = '没写账户名'
+      else if (amt === null) hardErr = '期初余额不是数字'
+      else { amount = round2(amt); extra = '把这个账户的期初设成 ¥' + round2(amt) + '（反复导不会翻倍）' + (rm ? '，' + String(rm) : '') }
+    }
+    else if (type === 'term') {
+      // 默认账期：整页只有一个数
+      const v = cellNumber(p[0] !== undefined && p[0] !== '' ? p[0] : p[1])
+      party = '默认账期'
+      if (v === null || !(v > 0) || v > 365) hardErr = '要填 1~365 之间的天数'
+      else { amount = v; extra = '以后开单默认 ' + v + ' 天到期' }
+    }
+    else if (type === 'loan_open') {
+      // 期初借支：员工, 未还金额, 备注(可空)
+      const [sf, v, rm] = p
+      party = sf || ''
+      const amt = cellNumber(v)
+      if (!String(party).trim()) hardErr = '没写员工名'
+      else if (!(amt > 0)) hardErr = '金额不是数字'
+      else { amount = round2(amt); extra = '只记还欠着多少，不扣今天的现金' + (rm ? '，' + String(rm) : '') }
+    }
+    else if (type === 'debt_open') {
+      // 期初借款：出借方, 本金, 年利率%, 起始日(可空), 期限月(可空)
+      const [ln, v, rt, sdt, tm] = p
+      party = ln || ''
+      const amt = cellNumber(v)
+      if (!String(party).trim()) hardErr = '没写借给咱的一方'
+      else if (!(amt > 0)) hardErr = '本金不是数字'
+      else {
+        amount = round2(amt)
+        if (sdt && looksLikeDate(sdt)) { d = toIsoDate(sdt); dateGiven = true }
+        extra = [cellNumber(rt) ? '年息 ' + cellNumber(rt) + '%' : '', cellNumber(tm) ? cellNumber(tm) + ' 个月' : '', '不写现金流水'].filter(Boolean).join('，')
+      }
+    }
+    parsed.push({ party: String(party).trim(), item: String(item).trim(), amount: round2(amount), cost: round2(cost), category: String(category).trim(), months: num(months), date: (d || t).slice(0, 10), date_given: dateGiven, extra, hardErr: hardErr ? String(hardErr) : '' })
   }
   // 一次把 7 天窗口内的老单据捞出来，避免逐行查库
   const dates = parsed.map((x) => x.date).filter(Boolean).sort()
@@ -6308,8 +6572,11 @@ async function previewImport(db, type, rawRows) {
   const seen = new Map()
   const out = parsed.map((x, i) => {
     const r = { i: i + 1, ...x, ok: true, error: '', dup: false, dup_text: '', locked: false }
-    if (type === 'expense') { if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' } }
+    delete r.hardErr
+    if (x.hardErr) { r.ok = false; r.error = x.hardErr }
+    else if (type === 'expense') { if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' } }
     else if (!x.party) { r.ok = false; r.error = '没写单位名' }
+    else if (type === 'acc_open') { if (!(x.amount >= 0)) { r.ok = false; r.error = '期初余额不是数字' } }
     else if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' }
     const m = x.date.slice(0, 7)
     if (lockSet.has(m)) { r.locked = true; r.error = m + ' 已结账锁定，这一行导不进去' }
@@ -9806,7 +10073,9 @@ async function importRows(db, type, rows, opts) {
   // 第一行像表头才跳过（Excel 模板带表头）。判定要严：整行没有任何数字、且至少 2 个表头关键词，
   // 否则像“甲客户,加工,1000”这种正常数据行会被误当成表头吃掉。
   if (rows.length && rows[0] && rows[0].length) {
-    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要/
+    // 关键词也认「账户 / 余额 / 本金 / 出借方 / 账期」：开账模板是空表下载的，
+    // 只有表头没有数据，认不出表头就会把表头当成一条「金额不是数字」的记录报错。
+    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要|账户|余额|本金|出借方|账期/
     const first = rows[0]
     const numish = first.filter((x) => /^[\d.,%\-\s]*$/.test(String(x === null || x === undefined ? '' : x).trim()) && String(x === null || x === undefined ? '' : x).trim() !== '').length
     const wordy = first.filter((x) => KW.test(String(x === null || x === undefined ? '' : x))).length
@@ -9923,6 +10192,55 @@ async function importRows(db, type, rows, opts) {
           .bind(supplier, num(amount), '', '期初欠款', d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
+        n++
+      }
+    } else if (type === 'acc_open') {
+      // 账户期初：这是「设」不是「加」——填的是「现在这个账户里有多少钱」，重复导不会翻倍。
+      // 账户名按名字找，找不到就按名字猜个类型新建一个（手机银行 / 微信 / 支付宝 / 现金）。
+      const [nm, v, remark] = p
+      const amt = cellNumber(v)
+      const name = String(nm || '').trim()
+      if (name && amt !== null) {
+        const hit = await db.prepare('SELECT id FROM accounts WHERE name=?').bind(name).first()
+        if (hit) await db.prepare('UPDATE accounts SET opening=? WHERE id=?').bind(round2(amt), hit.id).run()
+        else {
+          const kind = /银行|卡/.test(name) ? 'bank' : /微信/.test(name) ? 'wechat' : /支付宝/.test(name) ? 'alipay' : 'cash'
+          const w = await db.prepare('INSERT INTO accounts (name, kind, opening, created_at) VALUES (?,?,?,?)').bind(name, kind, round2(amt), now()).run()
+          if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        }
+        total += round2(amt)
+        n++
+      }
+    } else if (type === 'term') {
+      // 默认账期：开单后几天到期。1~365 天才算数，防止手滑写成 0 或 10000
+      const v = cellNumber(p[0] !== undefined && p[0] !== '' ? p[0] : p[1])
+      if (v !== null && v > 0 && v <= 365) {
+        const sv = String(Math.round(v))
+        await db.prepare("INSERT INTO settings (key,value) VALUES ('default_term',?) ON CONFLICT(key) DO UPDATE SET value=?").bind(sv, sv).run()
+        n++
+      }
+    } else if (type === 'loan_open') {
+      // 期初借支：员工手上还没报销的钱。只记「还欠着多少」，不写现金流水
+      // （钱是以前就借出去的，今天再记一笔支出等于重复扣一次现金）。
+      const [staff, v, remark] = p
+      const amt = cellNumber(v)
+      if (staff && amt !== null && amt > 0) {
+        const w = await db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at, import_batch) VALUES (?,?,0,0,?,0,?,?)')
+          .bind(String(staff).trim(), round2(amt), String(remark || ''), d, batch).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += round2(amt)
+        n++
+      }
+    } else if (type === 'debt_open') {
+      // 期初借款：还没还的借款，同样只记余额不写流水
+      const [lender, v, rate, startIn, termIn] = p
+      const amt = cellNumber(v)
+      if (lender && amt !== null && amt > 0) {
+        const sd = startIn && looksLikeDate(startIn) ? toIsoDate(startIn).slice(0, 10) : (d || t).slice(0, 10)
+        const w = await db.prepare("INSERT INTO debts (lender, kind, principal, rate, start_date, term_months, pay_kind, account_id, remark, status, created_at) VALUES (?,?,?,?,?,?,?,0,'','open',?)")
+          .bind(String(lender).trim(), 'bank', round2(amt), round2(cellNumber(rate) || 0), sd, Math.max(0, Math.round(cellNumber(termIn) || 0)), 'interest', batch).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += round2(amt)
         n++
       }
     } else if (type === 'expense') {
@@ -15759,7 +16077,7 @@ app.post('/bank-import', async (c) => {
   const acc = num(account_id) || 0
   // 同一份账单文件重复导入会变成两倍流水、认领两次就是两倍收款。按文件内容记一笔指纹拦住。
   // （只拦「同一个文件」，不同文件里金额相同的两笔照常入账。）
-  const fpKey = 'bankf_' + fnv1a(String(text || '')).slice(0, 16)
+  const fpKey = 'bankf_' + fnv1a(String(text || '')).toString(36) + '-' + String(String(text || '').length).toString(36)
   const fpPrev = await db.prepare('SELECT value FROM settings WHERE key=?').bind(fpKey).first().catch(() => null)
   if (fpPrev) {
     return c.json({ ok: true, imported: 0, dup_file: true, rows: [], layout: parsed.layout, skipped: parsed.skipped,
