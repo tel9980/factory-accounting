@@ -99,7 +99,10 @@ if (plat === 'darwin') {
   // macOS 的 node 二进制带签名，签名不动的话注入完会被系统直接杀掉
   try { spawnSync('codesign', ['--remove-signature', target], { stdio: 'inherit' }) } catch (e) { /* 本来就没签名 */ }
 }
-sh(process.execPath, [postjectCli, target, 'NODE_SEA_BLOB', blob, '--sentinel-fuse', FUSE])
+// macOS 上必须指定新增的 segment 名（Node 官方文档那条命令里的 --macho-segment-name）。
+// 少了它 postject 也会说「Injection done」，但打出来的二进制一启动就被系统 SIGKILL（连一行输出都没有）。
+const machoArgs = plat === 'darwin' ? ['--macho-segment-name', 'NODE_SEA'] : []
+sh(process.execPath, [postjectCli, target, 'NODE_SEA_BLOB', blob, '--sentinel-fuse', FUSE, ...machoArgs])
 if (plat === 'darwin') {
   sh('codesign', ['--sign', '-', target])
 } else if (plat !== 'win32') {
@@ -150,7 +153,8 @@ if (!flag('no-test')) {
     console.log(`  ✅ 跑通了：/version=200，落地页正常，建出 3 个库（主库 ${(sz / 1024).toFixed(0)} KB）`)
   } catch (e) {
     console.log('  ❌ 自测失败：' + String(e && e.message || e))
-    console.log('  程序输出：\n' + log.split('\n').slice(-20).join('\n'))
+    console.log(`  子进程状态：exitCode=${child.exitCode} signalCode=${child.signalCode}`)
+    console.log('  程序输出：\n' + (log ? log.split('\n').slice(-20).join('\n') : '（一个字都没有：多半是一启动就被系统杀掉了）'))
     try { child.kill('SIGKILL') } catch (_) {}
     process.exit(1)
   }
