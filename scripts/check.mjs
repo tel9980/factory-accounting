@@ -12,6 +12,8 @@ const BE = path.join(ROOT, 'backend/index.js')
 const SCHEMA = path.join(ROOT, 'backend/schema.sql')
 const FE = path.join(ROOT, 'frontend/pages/index/index.js')
 const WXML = path.join(ROOT, 'frontend/pages/index/index.wxml')
+// 本机版（免安装 exe / Docker 镜像）的入口：同一份 backend/index.js 换成本机 SQLite 跑
+const SERVER = ['server/main.mjs', 'server/d1.mjs'].map((f) => path.join(ROOT, f))
 
 const bad = []   // 必须修，修了才能部署
 const warn = []  // 知道了但先不动
@@ -30,7 +32,7 @@ const wxmlSrc = fs.readFileSync(WXML, 'utf8')
 
 // ── 1. 语法能不能过 ──
 console.log('\n[1] 语法')
-for (const f of [BE, FE]) {
+for (const f of [BE, FE, ...SERVER]) {
   const r = spawnSync(process.execPath, ['--check', f], { encoding: 'utf8' })
   say(r.status === 0, `${path.relative(ROOT, f)} 能解析`, `${path.relative(ROOT, f)} 语法过不去：` + (r.stderr || '').split('\n').filter(Boolean).slice(0, 3).join(' '))
 }

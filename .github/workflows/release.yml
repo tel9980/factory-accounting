@@ -1,0 +1,162 @@
+name: 发布（免安装程序 / Docker 镜像）
+
+# 打「不用装任何东西就能跑」的两个版本：
+#   ① 单文件可执行程序（Windows / Linux / macOS）：Node SEA，把 node 运行时和整份后端
+#      塞进一个文件里，双击就起服务，数据是旁边 data/ 里的 SQLite；
+#   ② Docker 镜像（ghcr.io）：扔到服务器/群晖上 `docker run` 就完事，数据挂在 /data。
+#
+# 两者跟线上 Cloudflare Worker 跑的是同一份 backend/index.js，只是数据库换成
+# 本机 SQLite（server/d1.mjs 是那层适配）。所以先跑仓库自检，再打包。
+#
+# 触发：
+#   - 推一个 tag（v1.0.0 / v1.1 …）→ 打包 + 发 GitHub Release + 推镜像 :版本号 和 :latest
+#   - 手动 workflow_dispatch → 只打包并留成 Actions 产物（不发 Release、镜像打 :latest）
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 先跑自检：语法 / 路由重名 / schema 建库 / SQL / 前端绑定。红了就别打包出去害人。
+  check:
+    name: 自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/check.mjs
+
+  exe:
+    name: 打包 ${{ matrix.name }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: macos-latest
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: 安装构建依赖
+        run: npm ci
+        working-directory: backend
+      # 这一步里自带自测：打完会真的跑一遍（/version、落地页、建库 57 张表），
+      # 不通就让整个 job 红掉，不会把坏文件发出去。
+      - name: 打包（并自测）
+        run: node scripts/build-exe.mjs --out dist
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+      - name: 算校验和
+        shell: bash
+        run: |
+          cd dist
+          for f in *; do
+            node -e "const c=require('node:crypto'),fs=require('fs');const h=c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex');console.log(h+'  '+process.argv[1])" "$f" >> SHA256SUMS.txt
+          done
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 发 Release
+    needs: exe
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          merge-multiple: true
+          path: bins
+      - name: 合并校验和
+        run: cat bins/SHA256SUMS.txt > SHA256SUMS.txt && rm bins/SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bins/*
+            SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            ## 怎么用
+
+            **Windows**：下载 `factory-accounting-windows-x64.exe`，双击。浏览器会自己打开
+            `http://127.0.0.1:8787`，先设一个口令，然后就能记账了。数据在 exe 旁边的
+            `data/` 目录里，把这个目录拷走就是备份。
+
+            **Linux / macOS**：下载对应文件，`chmod +x` 后直接跑。macOS 第一次打开如果提示
+            「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。
+
+            **手机小程序**：手机和电脑连同一个 Wi-Fi，把小程序的 `API_BASE` 改成
+            `http://<电脑IP>:8787` 即可（电脑 IP 在程序启动的窗口里和落地页上都写着）。
+
+            **Docker**（推荐服务器/群晖）：
+            ```
+            docker run -d --name factory -p 8787:8787 -v factory-data:/data \
+              ghcr.io/tel9980/factory-accounting:latest
+            ```
+
+            免安装版跑的是和线上同一份后端，只是数据库换成本机 SQLite；账目、备份、
+            导出、打印页全都在。第一次启动会自动建好 57 张表，不用手工初始化。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    name: 推镜像到 GHCR
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

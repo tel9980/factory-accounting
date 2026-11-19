@@ -193,6 +193,67 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 
 ---
 
+## 4. 不装 Cloudflare：跑在自己电脑上（免安装 exe / Docker 镜像）
+
+不想开 Cloudflare 账号也能用。两种跑法用的是**同一份后端**，只把 D1 换成了本机 SQLite 文件
+（`server/d1.mjs`），账目规则、备份、导出、打印页都在。
+
+### 4.1 免安装 exe（Windows 最省事）
+
+1. 打开仓库的 **Releases** 页，下载 `factory-accounting-windows-x64.exe`（约 120 MB）。
+2. 双击。浏览器会自己打开 `http://127.0.0.1:8787`。
+3. 页面上设一个口令（小程序里要输的那个），**把显示的恢复码抄下来**。
+4. 数据在 exe 旁边的 `data/book1.db`。拷走 `data/` 就是备份，换电脑拷回来接着用。
+
+命令行用法（想换端口/只给本机访问）：
+
+```bash
+factory-accounting-windows-x64.exe --port 8788 --host 127.0.0.1 --data D:\factory-data
+```
+
+macOS / Linux 一样，先 `chmod +x`；macOS 若提示「无法验证开发者」，右键 → 打开，
+或 `xattr -d com.apple.quarantine <文件>`。
+
+**手机小程序连上来**：手机和电脑同一个 Wi-Fi，把 `frontend/pages/index/index.js` 顶部的
+`API_BASE` 改成 `http://<电脑IP>:8787`（IP 在启动窗口和落地页上都写着）。
+正式发布的小程序要在微信后台把该域名加进 request 合法域名——局域网 IP 过不了审核，
+所以**本机版适合自己/车间内部用**，对外发布还是走 Cloudflare 那套。
+
+### 4.2 Docker 镜像（服务器 / 群晖 / NAS）
+
+```bash
+docker run -d --name factory -p 8787:8787 -v factory-data:/data \
+  ghcr.io/tel9980/factory-accounting:latest
+```
+
+- 数据在卷 `factory-data` 里（容器内 `/data`）。
+- 支持 `linux/amd64` 和 `linux/arm64`（群晖 ARM 机型也行）。
+- 想接笔记站同步：`-e NOTES_BASE=https://... -e NOTES_SLUG=... -e NOTES_PASS=...`。
+- 升级：`docker pull` 新镜像后删掉旧容器重建（卷不删，数据不动）。启动时会自动补新表、新列。
+- 看日志：`docker logs factory`；健康状态：`docker inspect --format '{{.State.Health.Status}}' factory`。
+
+### 4.3 自己打一个（改了代码想立刻验证）
+
+```bash
+cd backend && npm install       # 需要 Node 24（node:sqlite 是内置模块）
+node scripts/build-exe.mjs --out dist
+```
+
+脚本会 esbuild 打包 → 生成 SEA blob（`schema.sql` 作为资源塞进去）→ postject 注入 →
+**自己跑一遍自测**（`/version` 版本号、落地页、建库 57 张表），不通就报错退出。
+macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签）。
+
+### 4.4 本机版的注意事项
+
+- **没有网页版记账界面**：落地页只做「看状态 / 设口令 / 下载完整备份」，记账仍然用小程序。
+- **别把 `data/` 放进网盘同步目录**（OneDrive / 坚果云 / iCloud）。SQLite 有 WAL 日志，
+  边写边同步容易把库同步坏。要备份就用落地页的「下载完整备份」，或定时把 `data/` 拷出来。
+- 本机版没有 Cloudflare 的那 4 条 cron，改成「每天 01:00–06:00 之间跑一次」每日维护；
+  `--no-cron` 可以关掉（关了之后固定支出/摊销/预提/折旧要手动点）。
+- 多账套照样能用（`book1.db` / `book2.db` / `book3.db`），口令各管各的。
+
+---
+
 ## 推送遇到 TLS 报错（本机代理问题）
 
 如果 `git push` 报 `gnutls_handshake() failed: The TLS connection was non-properly terminated`，是本机 `http_proxy`（192.168.2.22:20172）对 GitHub 的 TLS 握手不稳，不是仓库问题。绕过代理推即可：

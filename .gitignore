@@ -2,3 +2,8 @@ node_modules/
 .wrangler/
 .DS_Store
 *.log
+
+# 本机版打包产物（exe 在 dist/，中间文件在 build/；本机数据在 data/）
+dist/
+build/
+data/

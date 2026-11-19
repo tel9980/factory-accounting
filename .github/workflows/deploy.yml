@@ -12,6 +12,8 @@ on:
       - 'backend/**'
       - 'frontend/**'
       - 'scripts/**'
+      # 本机版（exe / Docker）的入口在这一层，改它必须跑冒烟
+      - 'server/**'
       # 改工作流本身也要跑一遍：不然 YAML 写错了没人发现（本次就是靠这条才验证到的）
       - '.github/**'
   pull_request:
@@ -19,6 +21,7 @@ on:
       - 'backend/**'
       - 'frontend/**'
       - 'scripts/**'
+      - 'server/**'
       - '.github/**'
   workflow_dispatch:
 
@@ -113,9 +116,20 @@ jobs:
       # 首页逾期笔数被 LIMIT 截断、撤销核销绕过月结锁。只能真打接口才看得见。
       - name: 钱不能算错回归（守卫 / 预收 / 补发工资 / 月结锁 / 回收站 / 收据）
         run: node scripts/test-safety.mjs --base http://127.0.0.1:8791 --key 8888
+      # 免安装版（exe / Docker 镜像）跑的是同一份 backend/index.js，只是把 Cloudflare 的 D1
+      # 换成了本机 SQLite（server/d1.mjs）。这层适配最容易悄悄坏：batch 不是事务、
+      # run() 返回的形状不对（README 迭代 285 那个「库存已扣却回 409」），都会让账记歪但不报错。
+      # 所以每个 push 都用本机模式再跑一遍冒烟，坏在合并前、不是坏在厂长电脑上。
+      - name: 本机版（Node 直跑）冒烟
+        run: |
+          rm -rf /tmp/fa-ci
+          node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron > /tmp/fa-local.log 2>&1 &
+          sleep 3
+          node scripts/smoke.mjs --base http://127.0.0.1:8792 --key 8888
+          node scripts/smoke-write.mjs --base http://127.0.0.1:8792 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
-        run: tail -80 /tmp/wd.log
+        run: tail -80 /tmp/wd.log; echo ---; tail -40 /tmp/fa-local.log || true
 
   deploy:
     name: 部署到 Cloudflare

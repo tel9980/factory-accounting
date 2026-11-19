@@ -71,6 +71,10 @@ backend/            Cloudflare Worker 后端
   package.json      依赖
 frontend/           微信小程序
   pages/index/      记账主页面（js/wxml/wxss/json）
+server/             本机版入口（免安装 exe / Docker 镜像用）
+  main.mjs          HTTP 服务 + 落地页（把 Worker 那份 index.js 原样挂上去）
+  d1.mjs            D1 兼容层（把 Cloudflare 的 D1 换成本机 SQLite）
+Dockerfile          本机版镜像
 docs/               需求文档
 ```
 
@@ -92,6 +96,69 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 ```
 
 `wrangler.toml` 的 `[vars]` 里填 `NOTES_BASE`（笔记站地址）和 `NOTES_SLUG`（笔记 slug）。部署后，小程序「报表」页点「备份到笔记站」手动同步，Worker 每日 cron 也会自动同步一次。
+
+## 本机版（不想连 Cloudflare，就跑在自己电脑上）
+
+线上默认跑在 Cloudflare（Worker + D1）。如果只想在自己电脑上记账，有两种「不用装环境」的用法。
+两种跑的都是**同一份 `backend/index.js`**，只把 Cloudflare 的 D1 换成了本机 SQLite 文件
+（`server/d1.mjs` 是这层适配）——所以账目规则、备份、导出、打印链接全都在，不会变成另一个系统。
+
+### 1. 免安装单文件程序（Windows / Linux / macOS）
+
+在 GitHub 的 **Releases** 页下载对应系统的文件。推一个 `v*` tag 时由
+`.github/workflows/release.yml` 自动构建（Node SEA：node 运行时和整份后端打成一个文件，约 120 MB）。
+
+- **Windows**：双击 `factory-accounting-windows-x64.exe`。浏览器会自己打开 `http://127.0.0.1:8787`，
+  先设一个口令（就是小程序里要输的那个），下面会给出恢复码，抄下来。
+- **Linux / macOS**：`chmod +x factory-accounting-linux-x64` 后直接跑；macOS 第一次打开如果提示
+  「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。
+- 数据在**程序旁边的 `data/` 目录**（`book1.db` / `book2.db` / `book3.db`，对应三本账）。
+  把整个 `data/` 拷走就是备份；换电脑时拷回来接着用。
+- 命令行参数：`--port 8787`（换端口）、`--host 127.0.0.1`（只允许本机访问）、
+  `--data <目录>`（换数据位置）、`--no-cron`（不跑每日维护）、`--no-open`（不自动开浏览器）。
+- **手机小程序怎么连**：手机和电脑连同一个 Wi-Fi，把 `frontend/pages/index/index.js` 顶部的
+  `API_BASE` 改成 `http://<电脑IP>:8787`（IP 在启动窗口和落地页上都写着），
+  微信开发者工具里勾「不校验合法域名」后重新编译。
+
+### 2. Docker 镜像（服务器 / 群晖 / NAS）
+
+```bash
+docker run -d --name factory -p 8787:8787 -v factory-data:/data \
+  ghcr.io/tel9980/factory-accounting:latest
+```
+
+镜像 `linux/amd64` + `linux/arm64` 都推了（群晖 ARM 也能跑），数据在容器里的 `/data`。
+`docker logs factory` 能看到启动信息；健康检查打的是 `/version`。
+
+### 自己打一个（本地验证用）
+
+```bash
+cd backend && npm install          # 要 Node 24（node:sqlite 是内置的）
+node scripts/build-exe.mjs --out dist
+```
+
+打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 57 张表——
+不通就直接红，不会把坏文件发出去。CI 里三个平台各跑一次。
+
+### 本机版和线上版的差别
+
+| | 线上（Cloudflare） | 本机版（exe / 镜像） |
+|---|---|---|
+| 数据库 | D1（三库绑定 DB/DB2/DB3） | `data/book1.db` 等本地 SQLite（WAL 模式） |
+| 每日维护 | 4 条 cron（16:00 / 01:00 / 周一 / 每月 1 号） | 每天 01:00–06:00 之间跑一次（`--no-cron` 关掉） |
+| 升级 | `wrangler deploy` | 换新的 exe/镜像，数据目录不动；启动时自动补新表、新列 |
+| 附件照片 | 可接 R2（没开通就存库） | 存库（`/data` 里） |
+| 备份到笔记站 | 配 `NOTES_BASE`/`NOTES_SLUG` 即用 | 容器里用 `-e NOTES_BASE=...` 同样可用 |
+| 口令 | 每个库独立 | 同左（`data/book1.db` 里那份 settings） |
+
+### 已知限制（先说清楚）
+
+- **没有网页版记账界面**。落地页只做三件事：看状态、首次设口令、下载完整备份。
+  真正记账的界面仍然是微信小程序——本机版只是把后端搬到你自己的机器上。
+- exe 约 120 MB（node 运行时塞在里面了），Windows 第一次运行可能弹 SmartScreen 提示，
+  点「更多信息 → 仍要运行」。
+- **别把 `data/` 放进网盘同步目录**（OneDrive / 坚果云 / iCloud 这类）。SQLite 有 WAL 日志，
+  边写边同步容易把库同步坏；要备份用落地页的「下载完整备份」或定时把 `data/` 拷出来。
 
 ## 数据模型
 
@@ -1309,6 +1376,20 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **工程化**：新增 `/version`（免口令，返回 `version`/`built`/`cf-ray`）与 `POST /run-cron`（老板手动跑一遍固定支出/摊销/预提/折旧 + 自检）；`smoke.mjs` 加 6 条**形状断言**（不再只看状态码）；新增 `scripts/test-safety.mjs`（39 项，专测「接口 200 但账错了」这一类的守卫）；CI 加 `npm audit` 与 `dependabot`；`DEPLOYMENT.md` 补 `wrangler rollback`、`wrangler d1 time-travel restore`（30 天时间点恢复）和部署后打 `/version` 验证的步骤。
    - **验证**：`check.mjs` 全绿（**407** 条 `app.*` 路由 + 1 条走中间件的 `/version` / 56 表 / **625** SQL / 255 调用 / **753** 绑定）；新库按 CI 顺序全跑：`smoke` 227 GET 无 5xx → `test-modules` 19 项 → `smoke-write` 45 步 + **92** 写路由 + `/run-cron` + 自检 10 类全 0 → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` **39**，再加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
    - ⚠️ 动了前端（收钱按钮、交付确认、删除确认、`client_id`）→ **小程序要重新上传发布**。
+
+
+295. ✅ **能在 GitHub 上生成免安装 exe 和 Docker 镜像了**：用户说「最后本项目可以在github生成免安装exe和镜像」。
+   - **为什么不是另写一份**：整个后端是照 Cloudflare Workers 写的（`env.DB` 走 D1、`scheduled` 走 cron），要让它在厂长自己电脑上跑，只有两条路——重写一套，或者把 D1 的接口面在本机实现一遍。选了后者：新增 `server/d1.mjs`，用 Node 24 内置的 `node:sqlite` 把 `prepare / bind / first / all / run / batch / exec` 补齐，业务代码一行不改。
+   - **两个必须对上的细节**：①`batch()` 必须真包 `BEGIN`/`COMMIT`（D1 的 batch 是事务语义，「整户收款一次改多张单」靠的就是它）；②`run()` 要返回 `{ success, meta: { changes, last_row_id } }`，不是 `{ changes }`——README 迭代 285 记过那个坑（按 `{ changes }` 写会让「库存已扣却回 409」）。
+   - **`server/main.mjs`**：把 Node 的 `http` 请求转成 Web `Request` 交给 `worker.fetch`，准备好 `env`（三个本地库 + 版本号 + 可选笔记绑定），首次启动把 `backend/schema.sql` 整段跑一遍（全是 `IF NOT EXISTS`，重复执行安全，57 张表），再提供一个落地页。CORS、ETag、打印页白名单这些都在中间件里，等于免费继承。
+   - **落地页**（`/`）：看状态（数据文件、大小、单数、客户数、流水数）、**首次设口令**（直接调 `/auth/setup`，把恢复码显示出来让用户抄）、**下载完整备份**（调 `/backup` 存成 `factory-backup-日期.json`）、以及「手机小程序该填哪个地址」（自动列出局域网 IP）。`/__local/status` 只允许本机/局域网访问。
+   - **每日维护**：Cloudflare 那边是 4 条 cron，本机版简化成「每天 01:00–06:00 之间跑一次」`worker.scheduled()`（这些任务本身幂等：固定支出/摊销/预提/折旧都先查有没有记过）。`--no-cron` 可关。
+   - **打包**（`scripts/build-exe.mjs`）：esbuild 把 `main.mjs` + `index.js` + hono 打成单个 CJS → `node --experimental-sea-config` 生成 blob（`schema.sql` 当资源塞进去）→ `postject` 注入到 node 二进制副本。macOS 要先 `codesign --remove-signature`、注入完再 `codesign --sign -`，否则系统直接杀进程。打完**自动自测**：起服务、`/version` 版本号对得上、落地页正常、建出 3 个库且主库有内容（WAL 下主库文件可能还是 4 KB，得把 `book1.db*` 一起算）。
+   - **镜像**：`Dockerfile` 直接 `node server/main.mjs`（不需要打 exe），只装 `hono` 一个运行时依赖，`/data` 挂卷，健康检查打 `/version`。
+   - **发布流程**（`.github/workflows/release.yml`）：先跑 `scripts/check.mjs`，再 matrix 打 Windows/Ubuntu/macOS 三个平台（每个平台都自测）、出 `SHA256SUMS.txt`、发 GitHub Release；另一个 job 用 buildx 推 `ghcr.io/tel9980/factory-accounting`（`linux/amd64` + `linux/arm64`，tag 是版本号 + `latest`）。
+   - **CI 也管这一层了**：`.github/workflows/deploy.yml` 的冒烟 job 末尾新加「本机版（Node 直跑）冒烟」——用 `server/main.mjs` 起一个库，跑 `smoke.mjs` + `smoke-write.mjs`。这样本机适配层（事务、changes、日期）一旦退化，PR 阶段就红。
+   - **验证**（本机 Linux x64 真跑）：`node server/main.mjs` 建出 57 张表；`smoke.mjs` 227 个 GET 无 5xx；`smoke-write.mjs` 主流程 + 92 写路由 + `/run-cron` + 自检 10 类全 0；`test-crossmonth` 16 项、`test-apcat` 31 项、`test-import-xlsx` 32 项、`test-onboarding` 19 项、`test-safety` 39 项全绿。打成 exe 后又把 `smoke` / `smoke-write` / `test-crossmonth` / `test-safety` / `test-import-xlsx` 跑了一遍，同样全绿。
+   - **新增文件**：`server/main.mjs`、`server/d1.mjs`、`scripts/build-exe.mjs`、`Dockerfile`、`.dockerignore`、`.github/workflows/release.yml`；`backend/package.json` 加 devDep `esbuild` / `postject`；`.gitignore` 加 `dist/ build/ data/`；`check.mjs` 把 `server/*.mjs` 也纳入语法检查。
 
 <!-- API-LIST:BEGIN -->
 
