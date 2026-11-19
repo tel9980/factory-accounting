@@ -165,9 +165,9 @@ docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
 
 镜像 `linux/amd64` + `linux/arm64` 都推了（群晖 ARM 也能跑），数据在容器里的 `/data`。
 `docker logs factory` 能看到启动信息；健康检查打的是 `/version`。
-v1.0.0 的镜像 digest 是 `sha256:644744fdafb766cdf51a32a7d4f628382ab6293ca9566727e3b91cee88ad42ac`
-（多架构索引，`docker pull` 时按机器自动挑）。要是 `docker pull` 报无权限，
-先 `echo <PAT> | docker login ghcr.io -u tel9980 --password-stdin`（PAT 勾 `read:packages`）。
+v1.1.0 的镜像 digest 是 `sha256:548da807e66be5cc92b8c0d9f357842ba6bbd16bfab4d7ae8ce918f214244ee9`
+（多架构索引，`docker pull` 时按机器自动挑 amd64 / arm64）。这个包是**公开**的，直接 pull 就行、不用登录；
+万一哪天改成私有，再 `echo <PAT> | docker login ghcr.io -u tel9980 --password-stdin`（PAT 勾 `read:packages`）。
 
 ### 自己打一个（本地验证用）
 
