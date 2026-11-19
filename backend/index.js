@@ -74,6 +74,33 @@ const month = () => now().slice(0, 7)
 const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) && Math.abs(n) <= 1e12 ? n : d }
 const round2 = (x) => Math.round(x * 100) / 100
 
+// ===== 税（口径在这一个地方定，别处只调用） =====
+// 用户原话：「有些应收应付是含税金的，有些是不含税金的，税率是不固定的，有些税金是另外收付的」。
+// 所以：kind = '含税' | '不含税'（空=没标，就当不含税、税额 0）；
+//       rate = 税率百分比（可以填 13 / 9 / 6 / 3 / 1，也可以填 3.5 这种点数）；
+//       manual = 手填的税额（有值就用它，因为票面常常跟算出来的差几分钱）。
+// 含税单：总额里已经含着税 → 税 = 总额 - 总额/(1+税率)
+// 不含税单：总额是货款，税在外面另收 → 税 = 总额 × 税率
+const TAX_KINDS = ['含税', '不含税']
+const taxOf = (kind, rate, manual, total) => {
+  const t = num(total)
+  const m = num(manual)
+  if (m > 0) return round2(m)
+  const r = num(rate)
+  if (!r || !t) return 0
+  const k = String(kind || '').trim() === '含税' ? '含税' : '不含税'
+  return k === '含税' ? round2(t - t / (1 + r / 100)) : round2((t * r) / 100)
+}
+// 不含税金额：含税单要扣掉税，不含税单本身就是不含税（税在外面）
+const taxNet = (kind, tax, total) => {
+  const t = num(total)
+  const k = String(kind || '').trim() === '含税' ? '含税' : '不含税'
+  return k === '含税' ? round2(t - num(tax)) : round2(t)
+}
+// 流水上的「有没有票」：yes / no / part / ''（空=没标）。前端存 'yes'|'no'|'part'。
+const INV_STATES = { yes: '有票', no: '没票', part: '部分开票' }
+const invOf = (v) => { const s = String(v || '').trim(); return INV_STATES[s] ? s : '' }
+
 // ===== 统一口径（全站同一个"赚了多少"，避免不同页面数字打架）=====
 // 净利（权责）= 本月接单额 − 本月单子上的材料·外协成本 − 本月现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息
 // 赊购（应付）只影响欠款和现金流，不重复算成本；付给供应商的钱若已算在单子成本里也不再算一次。
@@ -214,9 +241,13 @@ async function ensureBaseTables(db) {
 const EXTRA_COLS = {
   attachments: [['r2_key', 'TEXT']],
   statement_log: [['ack', "TEXT DEFAULT ''"], ['ack_at', 'TEXT'], ['resolved_at', 'TEXT']],
-  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT']],
-  payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT']],
-  ledger: [['account_id', 'INTEGER DEFAULT 0'], ['cash', 'INTEGER DEFAULT 1'], ['import_batch', 'TEXT']],
+  // 税相关三列：税率不固定（13/9/6/3/1 都见，也有按点数谈的），所以 kind 记「含税/不含税」，
+  // rate 记税率%、amt 记税额。amt 有值时以手填为准（票面就是这样），否则按 kind+rate 推。
+  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
+  payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
+  // 有没有票是收付款那一刻才知道的（用户原话），所以记在流水上，不记在单上。
+  ledger: [['account_id', 'INTEGER DEFAULT 0'], ['cash', 'INTEGER DEFAULT 1'], ['import_batch', 'TEXT'], ['inv_state', "TEXT DEFAULT ''"], ['inv_no', "TEXT DEFAULT ''"], ['tax', 'REAL DEFAULT 0']],
+  accounts: [['inv_default', "TEXT DEFAULT ''"]],
   dunning_log: [['promise_date', 'TEXT']],
   import_log: [['batch', 'TEXT']],
   loans: [['import_batch', 'TEXT']],
@@ -316,7 +347,7 @@ const STAFF_MONEY_DENY = /^\/(margin-by|cost-hint|report-data|report$|cashbook|h
 // ② 员工干活时会打开的台账（领料、外协、返工、在制、框架价、采购比价）→ 照常返回，只把金额抹空，页面照旧能用
 const STAFF_MONEY_SCRUB = /^\/(wip|materials|supply-price|frame-prices|rework-book|outsource-book)/
 // 字段名归一化后比对，total_cost / totalCost / in_amt / monthAmt 都能命中
-const STAFF_MONEY_KEYS = new Set(['price', 'cost', 'totalcost', 'wagetotal', 'wage', 'wageqty', 'amount', 'amt', 'fee', 'loss', 'margin', 'profit', 'left', 'unitprice', 'inamt', 'outamt', 'monthamt', 'unpaid', 'paid', 'tax', 'balance', 'matcost', 'revenue', 'total', 'subtotal', 'income', 'outcome', 'cash', 'value', 'avg', 'avgprice', 'lastprice', 'minprice', 'maxprice'])
+const STAFF_MONEY_KEYS = new Set(['price', 'cost', 'totalcost', 'wagetotal', 'wage', 'wageqty', 'amount', 'amt', 'fee', 'loss', 'margin', 'profit', 'left', 'unitprice', 'inamt', 'outamt', 'monthamt', 'unpaid', 'paid', 'tax', 'tax_amt', 'tax_net', 'tax_rate', 'balance', 'matcost', 'revenue', 'total', 'subtotal', 'income', 'outcome', 'cash', 'value', 'avg', 'avgprice', 'lastprice', 'minprice', 'maxprice'])
 // 人话里也带钱（「这张单压了两万三」），一并抹掉
 const STAFF_TEXT_KEYS = new Set(['text', 'tip', 'note', 'hint', 'verdict'])
 const STAFF_HIDDEN_NOTE = '员工口令看不到金额（材料单价、外协费、返工损失、在制成本这类只有老板能看）'
@@ -5335,7 +5366,7 @@ const accountBalances = async (db) => {
     // 未指定账户的老流水（account_id 为 0 或空）归到第一个账户，保证总余额对得上
     const i = round2(own.i + (a.id === firstId ? zero.i : 0))
     const o = round2(own.o + (a.id === firstId ? zero.o : 0))
-    return { id: a.id, name: a.name, kind: a.kind, opening: round2(num(a.opening)), in: i, out: o, balance: round2(num(a.opening) + i - o) }
+    return { id: a.id, name: a.name, kind: a.kind, opening: round2(num(a.opening)), in: i, out: o, balance: round2(num(a.opening) + i - o), inv_default: String(a.inv_default || ''), inv_text: INV_STATES[String(a.inv_default || '')] || '' }
   })
 }
 
@@ -5346,31 +5377,35 @@ app.get('/accounts', async (c) => {
 })
 
 app.post('/accounts', async (c) => {
-  const { name, kind, opening } = await c.req.json()
+  const ab = await c.req.json()
+  const { name, kind, opening } = ab
   const nm = String(name || '').trim()
+  const invDef0 = invOf(ab.inv_default)
   if (!nm) return c.json({ error: '账户名称必填' }, 400)
   if (nm.length > 12) return c.json({ error: '名称最多 12 个字' }, 400)
   const db = c.env.DB
   await ensureAccounts(db)
   const has = await db.prepare('SELECT 1 FROM accounts WHERE name=?').bind(nm).first()
   if (has) return c.json({ error: '已经有同名账户了' }, 400)
-  await db.prepare('INSERT INTO accounts (name, kind, opening, created_at) VALUES (?,?,?,?)')
-    .bind(nm, String(kind || 'cash'), num(opening), now()).run()
+  await db.prepare('INSERT INTO accounts (name, kind, opening, created_at, inv_default) VALUES (?,?,?,?,?)')
+    .bind(nm, String(kind || 'cash'), num(opening), now(), invDef0).run()
   await logAudit(db, '新增账户', nm, `${nm} 期初 ¥${num(opening)}`)
   return c.json({ ok: true })
 })
 
 app.patch('/accounts/:id', async (c) => {
   const id = c.req.param('id')
-  const { name, opening } = await c.req.json()
+  const pb = await c.req.json()
+  const { name, opening } = pb
   const db = c.env.DB
   const a = await db.prepare('SELECT * FROM accounts WHERE id=?').bind(id).first()
   if (!a) return c.json({ error: '账户不存在' }, 404)
   const nm = name !== undefined ? String(name).trim() || a.name : a.name
-  await db.prepare('UPDATE accounts SET name=?, opening=? WHERE id=?')
-    .bind(nm, opening !== undefined ? num(opening) : num(a.opening), id).run()
-  await logAudit(db, '改账户', nm, `${nm} 期初 ${num(opening)}`)
-  return c.json({ ok: true })
+  const invNext = pb.inv_default !== undefined ? invOf(pb.inv_default) : String(a.inv_default || '')
+  await db.prepare('UPDATE accounts SET name=?, opening=?, inv_default=? WHERE id=?')
+    .bind(nm, opening !== undefined ? num(opening) : num(a.opening), invNext, id).run()
+  await logAudit(db, '改账户', nm, `${nm} 期初 ${num(opening)}${invNext ? '，平时' + INV_STATES[invNext] : ''}`)
+  return c.json({ ok: true, inv_default: invNext })
 })
 
 app.delete('/accounts/:id', async (c) => {
@@ -7550,7 +7585,13 @@ const fmtOrder = (r) => ({
   written_off: round2(num(r.written_off)),
   due_short: (r.due_date || '').slice(0, 10),
   days: daysSince(r.created_at),
-  settled: round2(num(r.paid) + num(r.written_off)) >= round2(num(r.price))
+  settled: round2(num(r.paid) + num(r.written_off)) >= round2(num(r.price)),
+  // 税：net 是不含税金额（含税单要扣掉税），真的赚的钱按 net 算
+  tax_kind: String(r.tax_kind || ''),
+  tax_rate: num(r.tax_rate),
+  tax_amt: round2(num(r.tax_amt)),
+  tax_net: taxNet(r.tax_kind, r.tax_amt, r.price),
+  gross_net: round2(taxNet(r.tax_kind, r.tax_amt, r.price) - num(r.cost))
 })
 const fmtPayable = (r) => ({
   ...r,
@@ -7558,7 +7599,11 @@ const fmtPayable = (r) => ({
   written_off: round2(num(r.written_off)),
   due_short: (r.due_date || '').slice(0, 10),
   days: daysSince(r.created_at),
-  settled: round2(num(r.paid) + num(r.written_off)) >= round2(num(r.amount))
+  settled: round2(num(r.paid) + num(r.written_off)) >= round2(num(r.amount)),
+  tax_kind: String(r.tax_kind || ''),
+  tax_rate: num(r.tax_rate),
+  tax_amt: round2(num(r.tax_amt)),
+  tax_net: taxNet(r.tax_kind, r.tax_amt, r.amount)
 })
 const listOpts = (c) => {
   const sp = new URL(c.req.url).searchParams
@@ -7898,6 +7943,70 @@ app.get('/ap-by-category', async (c) => {
     total_add: totalAdd, total_open: totalOpen,
     text: `${month} 应付共 ¥${totalAdd}，还欠 ¥${totalOpen}` + (rows.length ? `；花得最多的是「${rows[0].cat}」¥${rows[0].month_add}` : '')
   })
+})
+
+// ===== 税金台账（一个月一张） =====
+// 为什么单独一张表：这家厂的税率不固定（13/9/6/3/1 都有，也有按点数谈的），
+// 有的单含税、有的不含税，有票没票要等到实际收付款才知道，税金有时还单独打一笔。
+// 所以「交多少税」只能从流水反算：销项税 = 收进来那几笔里的税，进项税 = 付出去那几笔里的税。
+// 另外把「没票」的收支单列出来——这块才是真风险（没票的支出不能抵，没票的收入容易被查）。
+app.get('/tax-summary', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || '').slice(0, 7) || month()
+  const one = async (sql) => (await db.prepare(sql).bind(m).first()) || {}
+  const [sin, sout, nin, nout] = await Promise.all([
+    one("SELECT COALESCE(SUM(tax),0) AS t, COALESCE(SUM(amount),0) AS a, COUNT(*) AS n FROM ledger WHERE direction='in' AND month=?"),
+    one("SELECT COALESCE(SUM(tax),0) AS t, COALESCE(SUM(amount),0) AS a, COUNT(*) AS n FROM ledger WHERE direction='out' AND month=?"),
+    one("SELECT COUNT(*) AS n, COALESCE(SUM(amount),0) AS a FROM ledger WHERE direction='in' AND month=? AND inv_state='no'"),
+    one("SELECT COUNT(*) AS n, COALESCE(SUM(amount),0) AS a FROM ledger WHERE direction='out' AND month=? AND inv_state='no'")
+  ])
+  const salesTax = round2(num(sin.t))
+  const buyTax = round2(num(sout.t))
+  // 账户维度：G行（对公）大部分有票、N行（个人户）多半没票，一眼能看出钱从哪走、票跟没跟
+  const byAcc = (await db.prepare(`SELECT COALESCE(a.name,'现金') AS name,
+      COALESCE(SUM(CASE WHEN l.direction='in' THEN l.amount ELSE 0 END),0) AS in_amt,
+      COALESCE(SUM(CASE WHEN l.direction='out' THEN l.amount ELSE 0 END),0) AS out_amt,
+      COALESCE(SUM(CASE WHEN l.direction='in' THEN l.tax ELSE 0 END),0) AS tax_in,
+      COALESCE(SUM(CASE WHEN l.direction='out' THEN l.tax ELSE 0 END),0) AS tax_out,
+      SUM(CASE WHEN l.inv_state='no' THEN 1 ELSE 0 END) AS no_inv
+    FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id WHERE l.month=? GROUP BY name ORDER BY name`).bind(m).all()).results || []
+  // 没票的明细（最多 20 条）：这才是要盯的
+  const noRows = (await db.prepare(`SELECT l.id, l.direction, l.amount, l.category, l.remark, COALESCE(a.name,'现金') AS account,
+      substr(l.created_at,1,10) AS date, l.ref_type, l.ref_id
+    FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id
+    WHERE l.month=? AND l.inv_state='no' ORDER BY l.created_at DESC, l.id DESC LIMIT 20`).bind(m).all()).results || []
+  const noOutAmt = round2(num(nout.a))
+  const noInAmt = round2(num(nin.a))
+  const net = round2(salesTax - buyTax)
+  const parts = [`${m} 销项税 ¥${salesTax}（收 ${num(sin.n)} 笔）、进项税 ¥${buyTax}（付 ${num(sout.n)} 笔）`]
+  if (net > 0) parts.push(`这个月大概要交 ¥${net}`)
+  else if (net < 0) parts.push(`进项比销项多 ¥${round2(-net)}，留到下个月抵`)
+  if (num(nout.n)) parts.push(`⚠️ 没票的支出 ${num(nout.n)} 笔共 ¥${noOutAmt}（不能抵税）`)
+  if (num(nin.n)) parts.push(`没票的收入 ${num(nin.n)} 笔共 ¥${noInAmt}`)
+  return c.json({
+    ok: true, month: m,
+    sales_tax: salesTax, buy_tax: buyTax, net,
+    sales_amt: round2(num(sin.a)), buy_amt: round2(num(sout.a)),
+    no_inv_in: { count: num(nin.n), amount: noInAmt },
+    no_inv_out: { count: num(nout.n), amount: noOutAmt },
+    by_account: byAcc.map((r) => ({ name: r.name, in_amt: round2(num(r.in_amt)), out_amt: round2(num(r.out_amt)), tax_in: round2(num(r.tax_in)), tax_out: round2(num(r.tax_out)), no_inv: num(r.no_inv) })),
+    rows: noRows.map((r) => ({ id: r.id, dir: r.direction, dir_text: r.direction === 'in' ? '收' : '付', amount: round2(num(r.amount)), category: r.category || '', remark: r.remark || '', account: r.account, date: r.date, ref_type: r.ref_type || '', ref_id: num(r.ref_id) })),
+    text: parts.join('；')
+  })
+})
+
+// 单据上的税：开单时标了含税/税率，这里能看「标了多少税」
+app.get('/tax-by-party', async (c) => {
+  const db = c.env.DB
+  const m = String(c.req.query('month') || '').slice(0, 7) || month()
+  const ar = (await db.prepare(`SELECT customer AS party, COUNT(*) AS cnt, COALESCE(SUM(price),0) AS total,
+      COALESCE(SUM(tax_amt),0) AS tax, COALESCE(SUM(price - tax_amt),0) AS net
+    FROM orders WHERE month=? GROUP BY customer ORDER BY tax DESC LIMIT 50`).bind(m).all()).results || []
+  const ap = (await db.prepare(`SELECT supplier AS party, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS total,
+      COALESCE(SUM(tax_amt),0) AS tax, COALESCE(SUM(amount - tax_amt),0) AS net
+    FROM payables WHERE month=? GROUP BY supplier ORDER BY tax DESC LIMIT 50`).bind(m).all()).results || []
+  const mk = (arr, kind) => arr.map((r) => ({ kind, party: r.party || '', cnt: num(r.cnt), total: round2(num(r.total)), tax: round2(num(r.tax)), net: round2(num(r.net)) }))
+  return c.json({ ok: true, month: m, ar: mk(ar, 'ar'), ap: mk(ap, 'ap'), ar_tax: round2(ar.reduce((a, r) => a + num(r.tax), 0)), ap_tax: round2(ap.reduce((a, r) => a + num(r.tax), 0)) })
 })
 
 // 单据明细：收款/付款流水 + 核销记录
@@ -8604,8 +8713,12 @@ app.post('/orders', async (c) => {
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   const due = toIsoDate(due_date) || (await termDue(db, customer, created, 'ar'))
   const checks = await orderChecks(db, { table: 'orders', who: 'customer', amtcol: 'price', itemcol: 'item_name', party: customer, item: item_name || '', amount: price, cost, created: created, due })
-  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by, deliver_date) VALUES (?,?,?,0,0,?,?,?,?,?,?)')
-    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c), toIsoDate(deliver_date) || null).run()
+  // 税：开单时可以先标「含税/不含税 + 税率」，也可以先不标（收到票再补）
+  const tk = String(body.tax_kind || '').trim() === '含税' ? '含税' : (String(body.tax_kind || '').trim() === '不含税' ? '不含税' : '')
+  const trate = Math.max(0, Math.min(100, num(body.tax_rate)))
+  const tAmt = taxOf(tk, trate, body.tax_amt, price)
+  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by, deliver_date, tax_kind, tax_rate, tax_amt) VALUES (?,?,?,0,0,?,?,?,?,?,?,?,?,?)')
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c), toIsoDate(deliver_date) || null, tk, trate, tAmt).run()
   await opMark(db, cid, 'order', 0)
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`, '', act(c))
   // 超信用额度提醒（不拦，只提醒）
@@ -8640,10 +8753,21 @@ app.post('/orders/:id/receive', async (c) => {
   //   · 含税/不含税、税多税少都不在这里算，收到多少就记多少
   const settle = !!body.settle
   if (a <= 0 && !settle) return c.json({ error: '金额无效' }, 400)
-  const leftOrder = round2(num(o.price) - num(o.paid) - num(o.written_off))
-  if (leftOrder <= 0.005) return c.json({ error: '这单已经结清了', left: 0 }, 400)
   const acc = num(account_id) || (await defaultAccountId(db))
   const d0 = String(normDate(date)).slice(0, 10)
+  // 有没有票是这一刻才知道的（票跟着这一笔钱走），所以记在流水上
+  const inv = invOf(body.inv)
+  const invNo = String(body.inv_no || '').trim().slice(0, 40)
+  // 税金另外收：不冲这张单的已收金额（钱是税，不是货款），单独一条流水挂在这张单上
+  if (String(body.kind || '') === 'tax') {
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('in','tax_ar',?,?,?,?,?,1,?,?,?,?)")
+      .bind(id, a, '税金', `收 ${o.customer} 税金${o.item_name ? '（' + o.item_name + '）' : ''}`, acc, d0, inv, invNo, a).run()
+    await opMark(db, cid, 'tax', id)
+    await logAudit(db, '收税金', o.customer, `${o.customer} 税金 ¥${round2(a)}${inv === 'yes' ? '（有票）' : inv === 'no' ? '（没票）' : ''}`, `order:${id}`)
+    return c.json({ ok: true, tax_only: true, amount: round2(a) })
+  }
+  const leftOrder = round2(num(o.price) - num(o.paid) - num(o.written_off))
+  if (leftOrder <= 0.005) return c.json({ error: '这单已经结清了', left: 0 }, 400)
   const takeIn = a > leftOrder + 0.005 ? leftOrder : a
   const overAmt = a > leftOrder + 0.005 ? round2(a - leftOrder) : 0
   const woAdd = settle ? round2(leftOrder - Math.min(a, leftOrder)) : 0
@@ -8654,8 +8778,8 @@ app.post('/orders/:id/receive', async (c) => {
     const upd = await db.prepare('UPDATE orders SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=? AND paid + COALESCE(written_off,0) + ? <= price + 0.005 RETURNING paid')
       .bind(takeIn, id, takeIn).all()
     if (!(upd.results || []).length) return c.json({ error: '这张单的金额刚被改过（可能刚收过款），刷新再看一眼', code: 'stale' }, 409)
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) VALUES ('in','order',?,?,?,?,1,?)")
-      .bind(id, takeIn, `收 ${o.customer} ${o.item_name}`, acc, d0).run()
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('in','order',?,?,?,?,1,?,?,?,?)")
+      .bind(id, takeIn, `收 ${o.customer} ${o.item_name}`, acc, d0, inv, invNo, Math.max(0, num(body.tax))).run()
   }
   if (overAmt > 0) {
     const ar = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
@@ -8898,8 +9022,11 @@ app.post('/payables', async (c) => {
     if (d) return c.json({ error: `${supplier} 7 天内已经有一笔 ${num(amount)} 的应付了，确认再记一笔吗？`, dup: true }, 409)
   }
   const checks = await orderChecks(db, { table: 'payables', who: 'supplier', amtcol: 'amount', itemcol: 'remark', party: supplier, item: remark || '', amount, cost: 0, created: stampOf(date), due: toIsoDate(due_date) })
-  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at, created_by) VALUES (?,?,0,?,?,?,?,?,?)')
-    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created, 'ap')) || null, created, act(c)).run()
+  const apk = String(body.tax_kind || '').trim() === '含税' ? '含税' : (String(body.tax_kind || '').trim() === '不含税' ? '不含税' : '')
+  const apr = Math.max(0, Math.min(100, num(body.tax_rate)))
+  const apt = taxOf(apk, apr, body.tax_amt, amount)
+  await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at, created_by, tax_kind, tax_rate, tax_amt) VALUES (?,?,0,?,?,?,?,?,?,?,?,?)')
+    .bind(supplier, num(amount), category || '', remark || '', String(operator || '').trim() || null, toIsoDate(due_date) || (await termDue(db, supplier, created, 'ap')) || null, created, act(c), apk, apr, apt).run()
   await opMark(db, cid, 'payable', 0)
   await logAudit(db, '新增应付', supplier, `${supplier} ${remark || ''} ¥${num(amount)}`, '', act(c))
   return c.json(Object.assign({ ok: true }, checks.length ? { checks } : {}))
@@ -8922,6 +9049,18 @@ app.post('/payables/:id/pay', async (c) => {
   // 同收款：多付记成这家的预付，少付想结清就 settle（差额记尾差核销）
   const settle = !!body.settle
   if (a <= 0 && !settle) return c.json({ error: '金额无效' }, 400)
+  const accP = num(account_id) || (await defaultAccountId(db))
+  const dP = String(normDate(date)).slice(0, 10)
+  const invP = invOf(body.inv)
+  const invNoP = String(body.inv_no || '').trim().slice(0, 40)
+  // 税金另外付：不进这张应付单的已付金额，单独一条流水挂着
+  if (String(body.kind || '') === 'tax') {
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('out','tax_ap',?,?,?,?,?,1,?,?,?,?)")
+      .bind(id, a, '税金', `付 ${p.supplier} 税金${p.remark ? '（' + p.remark + '）' : ''}`, accP, dP, invP, invNoP, a).run()
+    await opMark(db, cid, 'tax', id)
+    await logAudit(db, '付税金', p.supplier, `${p.supplier} 税金 ¥${round2(a)}`, `payable:${id}`)
+    return c.json({ ok: true, tax_only: true, amount: round2(a) })
+  }
   const leftPay = round2(num(p.amount) - num(p.paid) - num(p.written_off))
   if (leftPay <= 0.005) return c.json({ error: '这笔已经付清了', left: 0 }, 400)
   const acc = num(account_id) || (await defaultAccountId(db))
@@ -8934,8 +9073,8 @@ app.post('/payables/:id/pay', async (c) => {
     const upd = await db.prepare('UPDATE payables SET paid=paid+?, rev=COALESCE(rev,0)+1 WHERE id=? AND paid + COALESCE(written_off,0) + ? <= amount + 0.005 RETURNING paid')
       .bind(paidOut, id, paidOut).all()
     if (!(upd.results || []).length) return c.json({ error: '这笔单的金额刚被改过（可能刚付过款），刷新再看一眼', code: 'stale' }, 409)
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','payable',?,?,?,?,?,1,?)")
-      .bind(id, paidOut, p.category || '', `付 ${p.supplier} ${p.remark}`, acc, d0).run()
+    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at, inv_state, inv_no, tax) VALUES ('out','payable',?,?,?,?,?,1,?,?,?,?)")
+      .bind(id, paidOut, p.category || '', `付 ${p.supplier} ${p.remark}`, accP, dP, invP, invNoP, Math.max(0, num(body.tax))).run()
   }
   if (overAmt > 0) {
     const ar = await db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
@@ -14005,7 +14144,8 @@ app.post('/edit-requests/:id/cancel', async (c) => {
 
 app.patch('/orders/:id', async (c) => {
   const id = c.req.param('id')
-  const { customer, item_name, price, due_date, operator, rev, cost, deliver_date } = await c.req.json()
+  const body = await c.req.json()
+  const { customer, item_name, price, due_date, operator, rev, cost, deliver_date } = body
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
@@ -14024,13 +14164,23 @@ app.patch('/orders/:id', async (c) => {
   const ncust = customer || o.customer
   const nitem = item_name || o.item_name
   const ndd = deliver_date !== undefined ? (toIsoDate(deliver_date) || null) : (o.deliver_date || null)
-  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, deliver_date=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(ncust, nitem, p, nd, op, nc, ndd, id).run()
+  // 税：改单时也能补标（票到了才知道含不含税是常事）
+  const ntkind = body.tax_kind !== undefined ? (String(body.tax_kind || '').trim() === '含税' ? '含税' : (String(body.tax_kind || '').trim() === '不含税' ? '不含税' : '')) : String(o.tax_kind || '')
+  const ntrate = body.tax_rate !== undefined ? Math.max(0, Math.min(100, num(body.tax_rate))) : num(o.tax_rate)
+  // 税额三种来源，优先级：手填税额 > 这次改了税率/含税标记（按新税率重算）> 金额没变就留原值 > 按税率算
+  const touchedTax = body.tax_amt !== undefined || body.tax_rate !== undefined || body.tax_kind !== undefined
+  const ntamt = body.tax_amt !== undefined
+    ? taxOf(ntkind, ntrate, body.tax_amt, p)
+    : (touchedTax ? taxOf(ntkind, ntrate, 0, p)
+      : (round2(num(o.tax_amt)) > 0 && p === round2(num(o.price)) ? round2(num(o.tax_amt)) : taxOf(ntkind, ntrate, 0, p)))
+  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, deliver_date=?, tax_kind=?, tax_rate=?, tax_amt=?, rev=COALESCE(rev,0)+1 WHERE id=?')
+    .bind(ncust, nitem, p, nd, op, nc, ndd, ntkind, ntrate, ntamt, id).run()
   const d = diffText([
     ['客户', o.customer, ncust], ['产品', o.item_name, nitem],
     ['金额', round2(num(o.price)), p], ['成本', round2(num(o.cost)), nc],
     ['经手人', o.operator, op], ['到期日', (o.due_date || '').slice(0, 10), (nd || '').slice(0, 10)],
-    ['交货日', (o.deliver_date || '').slice(0, 10), (ndd || '').slice(0, 10)]
+    ['交货日', (o.deliver_date || '').slice(0, 10), (ndd || '').slice(0, 10)],
+    ['含税', o.tax_kind || '没标', ntkind || '没标'], ['税额', round2(num(o.tax_amt)), ntamt]
   ])
   await logAudit(db, '编辑应收', ncust, d || '（没改动）', `order:${id}`)
   return c.json({ ok: true, changed: d })
@@ -14165,7 +14315,8 @@ app.get('/orders/:id/processes', async (c) => {
 // 编辑应付单
 app.patch('/payables/:id', async (c) => {
   const id = c.req.param('id')
-  const { supplier, amount, remark, due_date, operator, rev } = await c.req.json()
+  const apbody = await c.req.json()
+  const { supplier, amount, remark, due_date, operator, rev } = apbody
   const db = c.env.DB
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
@@ -14182,12 +14333,21 @@ app.patch('/payables/:id', async (c) => {
   const nsup = supplier || p.supplier
   const nremark = remark !== undefined ? remark : p.remark
   const nop = operator !== undefined ? (String(operator).trim() || null) : (p.operator || null)
-  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=?, due_date=?, operator=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(nsup, a, nremark, nd, nop, id).run()
+  const aptk = apbody.tax_kind !== undefined ? (String(apbody.tax_kind || '').trim() === '含税' ? '含税' : (String(apbody.tax_kind || '').trim() === '不含税' ? '不含税' : '')) : String(p.tax_kind || '')
+  const aptr = apbody.tax_rate !== undefined ? Math.max(0, Math.min(100, num(apbody.tax_rate))) : num(p.tax_rate)
+  // 同应收：手填税额 > 这次改了税率/含税标记就重算 > 金额没变就留原值 > 按税率算
+  const apTouchedTax = apbody.tax_amt !== undefined || apbody.tax_rate !== undefined || apbody.tax_kind !== undefined
+  const apta = apbody.tax_amt !== undefined
+    ? taxOf(aptk, aptr, apbody.tax_amt, a)
+    : (apTouchedTax ? taxOf(aptk, aptr, 0, a)
+      : (round2(num(p.tax_amt)) > 0 && a === round2(num(p.amount)) ? round2(num(p.tax_amt)) : taxOf(aptk, aptr, 0, a)))
+  await db.prepare('UPDATE payables SET supplier=?, amount=?, remark=?, due_date=?, operator=?, tax_kind=?, tax_rate=?, tax_amt=?, rev=COALESCE(rev,0)+1 WHERE id=?')
+    .bind(nsup, a, nremark, nd, nop, aptk, aptr, apta, id).run()
   const d = diffText([
     ['供应商', p.supplier, nsup], ['金额', round2(num(p.amount)), a],
     ['备注', p.remark, nremark], ['经手人', p.operator, nop],
-    ['到期日', (p.due_date || '').slice(0, 10), (nd || '').slice(0, 10)]
+    ['到期日', (p.due_date || '').slice(0, 10), (nd || '').slice(0, 10)],
+    ['含税', p.tax_kind || '没标', aptk || '没标'], ['税额', round2(num(p.tax_amt)), apta]
   ])
   await logAudit(db, '编辑应付', nsup, d || '（没改动）', `payable:${id}`)
   return c.json({ ok: true, changed: d })
@@ -14224,7 +14384,7 @@ app.delete('/orders/:id', async (c) => {
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
-  const pays = await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id=?").bind(id).all()
+  const pays = await db.prepare("SELECT * FROM ledger WHERE ref_type IN ('order','tax_ar') AND ref_id=?").bind(id).all()
   const wos = await db.prepare("SELECT * FROM writeoffs WHERE ref_type='order' AND ref_id=?").bind(id).all()
   // 这笔单的收款/核销分散在好几个月，只要有一个月结了账，删单就会把那个月的明细抹掉
   const lockM = await anyMonthLocked(db, [...pays.results.map((l) => l.month), ...wos.results.map((w) => w.month)])
@@ -14236,7 +14396,7 @@ app.delete('/orders/:id', async (c) => {
   for (const p of procs.results) await intoTrash(db, 'process', p.id, p, b)
   await db.batch([
     db.prepare('DELETE FROM process_log WHERE order_id=?').bind(id),
-    db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('order', id),
+    db.prepare("DELETE FROM ledger WHERE ref_type IN ('order','tax_ar') AND ref_id=?").bind(id),
     db.prepare("DELETE FROM writeoffs WHERE ref_type='order' AND ref_id=?").bind(id),
     db.prepare('DELETE FROM orders WHERE id=?').bind(id)
   ])
@@ -14251,7 +14411,7 @@ app.delete('/payables/:id', async (c) => {
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
   if (await isMonthLocked(db, (p.created_at || '').slice(0, 7))) return c.json({ error: '该应付单所在月份已结账锁定' }, 403)
-  const pays = await db.prepare("SELECT * FROM ledger WHERE ref_type='payable' AND ref_id=?").bind(id).all()
+  const pays = await db.prepare("SELECT * FROM ledger WHERE ref_type IN ('payable','tax_ap') AND ref_id=?").bind(id).all()
   const wos2 = await db.prepare("SELECT * FROM writeoffs WHERE ref_type='payable' AND ref_id=?").bind(id).all()
   const lockM2 = await anyMonthLocked(db, [...pays.results.map((l) => l.month), ...wos2.results.map((w) => w.month)])
   if (lockM2) return c.json({ error: `这笔单在 ${lockM2} 有过付款/核销，那个月已结账锁定，删了报表就对不上了（先解锁 ${lockM2}）`, code: 'month_locked' }, 403)
@@ -14259,7 +14419,7 @@ app.delete('/payables/:id', async (c) => {
   await intoTrash(db, 'payable', p.id, p, b)
   for (const l of pays.results) await intoTrash(db, 'ledger', l.id, l, b)
   await db.batch([
-    db.prepare('DELETE FROM ledger WHERE ref_type=? AND ref_id=?').bind('payable', id),
+    db.prepare("DELETE FROM ledger WHERE ref_type IN ('payable','tax_ap') AND ref_id=?").bind(id),
     db.prepare("DELETE FROM writeoffs WHERE ref_type='payable' AND ref_id=?").bind(id),
     db.prepare('DELETE FROM payables WHERE id=?').bind(id)
   ])
@@ -14534,7 +14694,7 @@ app.get('/flows', async (c) => {
   if (dir) { cond.push('l.direction=?'); b.push(dir) }
   if (kw) { cond.push("(COALESCE(l.category,'') LIKE ? OR COALESCE(l.remark,'') LIKE ? OR COALESCE(a.name,'') LIKE ?)"); b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%') }
   const where = cond.join(' AND ')
-  const sql = "SELECT l.id, l.direction, l.amount, l.category, l.remark, l.ref_type, l.ref_id, l.created_at, COALESCE(a.name,'') AS account, (l.account_id IS NULL OR l.account_id=0) AS no_acc FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id WHERE " + where + ' ORDER BY l.created_at DESC, l.id DESC LIMIT 300'
+  const sql = "SELECT l.id, l.direction, l.amount, l.category, l.remark, l.ref_type, l.ref_id, l.created_at, l.inv_state, l.inv_no, l.tax, COALESCE(a.name,'') AS account, (l.account_id IS NULL OR l.account_id=0) AS no_acc FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id WHERE " + where + ' ORDER BY l.created_at DESC, l.id DESC LIMIT 300'
   const st = b.length ? db.prepare(sql).bind(...b) : db.prepare(sql)
   const raw = (await st.all()).results || []
   const rows = raw.map((r) => ({
@@ -14547,6 +14707,10 @@ app.get('/flows', async (c) => {
     category: r.category || '',
     cat_text: r.category || (r.ref_type === 'order' ? '货款' : (r.ref_type === 'payable' ? '货款' : (r.ref_type === 'advance' ? '预收预付' : (r.ref_type === 'loan' ? '借支' : (r.ref_type === 'debt' ? '借款' : '未分类'))))),
     remark: r.remark || '',
+    inv_state: String(r.inv_state || ''),
+    inv_text: INV_STATES[String(r.inv_state || '')] || '',
+    inv_no: String(r.inv_no || ''),
+    tax: round2(num(r.tax)),
     account: r.account || '现金',
     ref_type: r.ref_type || '',
     ref_id: r.ref_id || 0,
@@ -14558,7 +14722,7 @@ app.get('/flows', async (c) => {
     COALESCE(SUM(l.amount),0) AS s, COUNT(*) AS n
     FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id WHERE ${where} GROUP BY l.direction, c, rt`
   const agg = ((await (b.length ? db.prepare(aggSql).bind(...b) : db.prepare(aggSql)).all()).results) || []
-  const catOf = (rt) => (rt === 'order' ? '货款' : rt === 'payable' ? '货款' : rt === 'advance' ? '预收预付' : rt === 'loan' ? '借支' : rt === 'debt' ? '借款' : '未分类')
+  const catOf = (rt) => (rt === 'order' ? '货款' : rt === 'payable' ? '货款' : rt === 'advance' ? '预收预付' : rt === 'loan' ? '借支' : rt === 'debt' ? '借款' : (rt === 'tax_ar' || rt === 'tax_ap') ? '税金' : '未分类')
   let ti = 0
   let to = 0
   let totalN = 0

@@ -119,6 +119,11 @@ Page({
     l_staff: '', l_amount: '', l_remark: '', loans: [], loan_staff: [], loan_open: 0,
     cur_loan: 0, cur_loan_name: '', rl_amount: '', rl_category: 0, rl_remark: '',
     cash_balance: 0, accounts: [], acc_names: [], acc_idx: 0, acc_id: 0, acc_name: '',
+    // 收付款面板：金额 / 日期 / 账户 / 有票没票 / 税额 / 只记税金
+    pay_open: false, pay_kind: 'ar', pay_id: 0, pay_title: '', pay_remain: 0,
+    pay_amt: '', pay_date: '', pay_inv: '', pay_tax: '', pay_taxonly: false, pay_busy: false,
+    pay_invs: [{ k: 'yes', n: '有票' }, { k: 'no', n: '没票' }, { k: 'part', n: '部分开票' }],
+    tax: null, tax_open: false, o_tax_kind: '', o_tax_rate: '', o_tax_hint: '', p_tax_kind: '', p_tax_rate: '', p_tax_hint: '',
     tr_from: -1, tr_to: -1, tr_amount: '', tr_remark: '', tr_rows: [],
     wf_rows: [], wf_bad: 0, wf_waived: 0,
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
@@ -1964,7 +1969,7 @@ Page({
     } else if (t === 'report') {
       this.loadFixed(); this.loadMonthLocks(); this.loadArchives(); this.loadAuditLogs()
       this.loadTrash(); this.loadPhrases(); this.loadBudgets()
-      this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks()
+      this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks(); this.loadTaxSummary()
     } else if (t === 'asset') {
       this.loadAsset(); this.loadInvoices(); this.loadAssets(); this.loadBankFlows()
       this.loadWriteoffs(); this.loadTransfers(); this.loadDebts(); this.loadPrepaids()
@@ -2518,13 +2523,49 @@ Page({
   clearDate(e) { this.setData({ [e.currentTarget.dataset.f]: '' }) },
   onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
   onImportText(e) { this.setData({ import_text: e.detail.value }) },
+  // 这张单是含税价还是不含税价（税率不固定，13/9/6/3/1 都见过，自己填）
+  pickOTax(e) {
+    const k = String(e.currentTarget.dataset.k || '')
+    const d = { o_tax_kind: this.data.o_tax_kind === k ? '' : k }
+    if (!d.o_tax_kind) d.o_tax_rate = ''
+    const c = this._taxCalc(d.o_tax_kind, d.o_tax_kind ? this.data.o_tax_rate : '', this.data.o_price)
+    d.o_tax_hint = c ? ('税额 ¥' + c.tax + '，不含税 ¥' + c.net) : ''
+    this.setData(d)
+  },
+  onOTaxRate(e) {
+    const r = e.detail.value
+    const c = this._taxCalc(this.data.o_tax_kind, r, this.data.o_price)
+    this.setData({ o_tax_rate: r, o_tax_hint: c ? ('税额 ¥' + c.tax + '，不含税 ¥' + c.net) : '' })
+  },
+  pickPTax(e) {
+    const k = String(e.currentTarget.dataset.k || '')
+    const d = { p_tax_kind: this.data.p_tax_kind === k ? '' : k }
+    if (!d.p_tax_kind) d.p_tax_rate = ''
+    const c = this._taxCalc(d.p_tax_kind, d.p_tax_kind ? this.data.p_tax_rate : '', this.data.p_amount)
+    d.p_tax_hint = c ? ('税额 ¥' + c.tax + '，不含税 ¥' + c.net) : ''
+    this.setData(d)
+  },
+  onPTaxRate(e) {
+    const r = e.detail.value
+    const c = this._taxCalc(this.data.p_tax_kind, r, this.data.p_amount)
+    this.setData({ p_tax_rate: r, p_tax_hint: c ? ('税额 ¥' + c.tax + '，不含税 ¥' + c.net) : '' })
+  },
+  // 算给用户看一眼：这张单里含多少税、不含税是多少
+  _taxCalc(kind, rate, total) {
+    const t = Number(total) || 0
+    const r = Number(rate) || 0
+    if (!t || !r) return null
+    const tax = kind === '含税' ? Math.round((t - t / (1 + r / 100)) * 100) / 100 : Math.round((t * r) / 100) * 1
+    const net = kind === '含税' ? Math.round((t - tax) * 100) / 100 : t
+    return { tax, net }
+  },
   addOrder() {
     const { o_customer, o_item, o_price, o_cost, o_due, o_deliver, o_operator, o_date } = this.data
     if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
       queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }),
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid() },
+      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' })
@@ -2546,7 +2587,7 @@ Page({
     this.req({
       url: API_BASE + '/payables', method: 'POST', once: 'add-payable', queue: '记应付',
       queued: () => this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }),
-      data: { supplier: p_supplier, amount: Number(p_amount), category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid() }, dupRetry: true,
+      data: { supplier: p_supplier, amount: Number(p_amount), category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid(), tax_kind: this.data.p_tax_kind || '', tax_rate: Number(this.data.p_tax_rate || 0) }, dupRetry: true,
       success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh({ lite: true }); this.loadSuggest(); this.showChecks(res) }
     })
   },
@@ -2596,34 +2637,107 @@ Page({
     const it = (list || []).find((x) => String(x.id) === String(id)) || {}
     return Math.max(0, Math.round(Number(it.unpaid || 0) * 100) / 100)
   },
+  // ===== 收付款面板 =====
+  // 一个输入框问不出「有没有票、这笔里的税多少、这笔是不是单独收的税金」，
+  // 所以收/付款改成一块面板：金额、日期、账户、有票没票、税额、只记税金。
   payOrder(e) {
-    const id = e.currentTarget.dataset.id
-    const remain = this._remainOf(this._arAll, id)
-    wx.showModal({
-      title: '收客户款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
-      editable: true,
-      placeholderText: remain > 0 ? '不填=一次收清 ' + remain + '；也可填 金额,日期(5000,07-05)；填「结清」= 差额抹零' : '填金额，可带日期(5000,07-05)',
-      success: (r) => {
-        if (!r.confirm) return
-        const txt = String(r.content || '').trim()
-        // 实报实销：实际收的钱可能比记的少，剩的尾差不想再追，直接抹零结清
-        if (/^(结清|抹零|差额抹零|抹零结清)$/.test(txt)) return this._settleByDiff(id, 'ar')
-        const pt = this._payText(txt)
-        const amt = txt && pt.amt > 0 ? pt.amt : remain
-        if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
-        this.req({
-          url: API_BASE + '/orders/' + id + '/receive', method: 'POST', once: 'receive-' + id, queue: '收客户款',
-          data: { amount: amt, date: pt.date, account_id: this.data.acc_id, client_id: this.newCid() },
-          success: (res) => {
-            const d = res.data || {}
-            this.refresh({ lite: true })
-            this.showChecks(res)
-            if (d.over) wx.showToast({ title: '多出的 ' + d.over + ' 元记成预收了', icon: 'none' })
-            const noLeft = remain > 0 && Math.round((remain - amt) * 100) / 100 <= 0.005
-            this._afterPay(id, amt, remain, 'ar', noLeft || !!d.over)
-          }
-        })
-      }
+    this.openPay(e, 'ar')
+  },
+  payPayable(e) {
+    this.openPay(e, 'ap')
+  },
+  openPay(e, kind) {
+    const ds = (e && e.currentTarget && e.currentTarget.dataset) || {}
+    const k = kind || ds.kind || 'ar'
+    const id = ds.id
+    const list = k === 'ar' ? this._arAll : this._apAll
+    const row = (list || []).find((x) => String(x.id) === String(id)) || {}
+    const remain = this._remainOf(list, id)
+    const accs = this.data.accounts || []
+    const acc = accs[this.data.acc_idx] || accs[0] || {}
+    const today = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
+    const name = k === 'ar' ? (row.customer || '') : (row.supplier || '')
+    this.setData({
+      pay_open: true, pay_kind: k, pay_id: id,
+      pay_title: (k === 'ar' ? '收 ' : '付 ') + name + (row.item_name ? ' · ' + row.item_name : ''),
+      pay_remain: remain,
+      pay_amt: ds.all ? String(remain) : '',
+      pay_date: today,
+      // 账户平时有没有票：工行对公一般有票、农行个人一般没票，跟着账户带出来，可以改
+      pay_inv: String(acc.inv_default || ''),
+      pay_tax: '', pay_taxonly: false, pay_busy: false
+    })
+  },
+  onPayField(e) {
+    const o = {}
+    o[e.currentTarget.dataset.f] = e.detail.value
+    this.setData(o)
+  },
+  onPayAcc(e) {
+    const i = Number(e.detail.value) || 0
+    const a = (this.data.accounts || [])[i] || {}
+    this.setData({ acc_idx: i, acc_id: a.id || 0, acc_name: a.name || '', pay_inv: String(a.inv_default || '') })
+  },
+  pickPayInv(e) {
+    const k = String(e.currentTarget.dataset.k || '')
+    this.setData({ pay_inv: this.data.pay_inv === k ? '' : k })
+  },
+  togglePayTaxOnly() {
+    this.setData({ pay_taxonly: !this.data.pay_taxonly })
+  },
+  closePay() {
+    if (this.data.pay_busy) return
+    this.setData({ pay_open: false })
+  },
+  paySettle() {
+    const d = this.data
+    this.setData({ pay_open: false })
+    this._settleByDiff(d.pay_id, d.pay_kind)
+  },
+  submitPay() {
+    const d = this.data
+    if (d.pay_busy) return
+    const isAr = d.pay_kind === 'ar'
+    const num2 = (v) => {
+      const n = Number(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, ''))
+      return Number.isFinite(n) ? n : 0
+    }
+    const tax = num2(d.pay_tax)
+    let amt = num2(d.pay_amt)
+    if (d.pay_taxonly) {
+      // 单独收付的税金：金额就是税额，原单金额一分不动
+      if (!(tax > 0)) return wx.showToast({ title: '先填这笔税金多少', icon: 'none' })
+      amt = tax
+    } else if (!(amt > 0)) {
+      amt = d.pay_remain
+    }
+    if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
+    const body = {
+      amount: amt, date: d.pay_date, account_id: this.data.acc_id,
+      client_id: this.newCid(), inv: d.pay_inv, tax: d.pay_taxonly ? amt : tax
+    }
+    if (d.pay_taxonly) body.kind = 'tax'
+    const url = API_BASE + (isAr ? '/orders/' : '/payables/') + d.pay_id + (isAr ? '/receive' : '/pay')
+    this.setData({ pay_busy: true })
+    this.req({
+      url, method: 'POST',
+      once: (d.pay_taxonly ? 'tax-' : isAr ? 'receive-' : 'payp-') + d.pay_id,
+      queue: isAr ? '收客户款' : '付供应商款',
+      data: body,
+      success: (res) => {
+        const r = res.data || {}
+        this.setData({ pay_open: false, pay_busy: false })
+        this.refresh({ lite: true })
+        if (d.pay_taxonly) {
+          wx.showToast({ title: '税金 ' + amt + ' 记好了（不冲这张单）', icon: 'none' })
+          return
+        }
+        if (isAr) this.showChecks(res)
+        if (r.over) wx.showToast({ title: '多出的 ' + r.over + ' 元记成' + (isAr ? '预收' : '预付') + '了', icon: 'none' })
+        const left = Math.round((d.pay_remain - amt) * 100) / 100
+        this._afterPay(d.pay_id, amt, d.pay_remain, d.pay_kind, left <= 0.005 || !!r.over)
+      },
+      fail: () => this.setData({ pay_busy: false })
     })
   },
   // 差额抹零：剩下的钱不要了，记一条核销把这张单结清（不进现金流）
@@ -2731,33 +2845,6 @@ Page({
         })
       },
       fail: () => wx.hideLoading()
-    })
-  },
-  payPayable(e) {
-    const id = e.currentTarget.dataset.id
-    const remain = this._remainOf(this._apAll, id)
-    wx.showModal({
-      title: '付供应商款' + (remain > 0 ? '（还剩 ' + remain + ' 元）' : ''),
-      editable: true,
-      placeholderText: remain > 0 ? '不填=一次付清 ' + remain + '；也可填 金额,日期(5000,07-05)；填「结清」= 差额抹零' : '填金额，可带日期(5000,07-05)',
-      success: (r) => {
-        if (!r.confirm) return
-        const txt = String(r.content || '').trim()
-        if (/^(结清|抹零|差额抹零|抹零结清)$/.test(txt)) return this._settleByDiff(id, 'ap')
-        const pt = this._payText(txt)
-        const amt = txt && pt.amt > 0 ? pt.amt : remain
-        if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
-        this.req({
-          url: API_BASE + '/payables/' + id + '/pay', method: 'POST', once: 'payp-' + id, queue: '付供应商款',
-          data: { amount: amt, date: pt.date, account_id: this.data.acc_id, client_id: this.newCid() },
-          success: (res) => {
-            const d = res.data || {}
-            this.refresh({ lite: true })
-            if (d.over) wx.showToast({ title: '多出的 ' + d.over + ' 元记成预付了', icon: 'none' })
-            this._afterPay(id, amt, remain, 'ap', !!d.over)
-          }
-        })
-      }
     })
   },
   // ===== 员工提「改单申请」，老板点同意才生效（第63轮）=====
@@ -8249,10 +8336,12 @@ Page({
 
   // 一键收清 / 付清（先选资金账户，再确认）
   receiveAll(e) {
-    this.settleAll(e, 'ar')
+    const ds = Object.assign({}, e.currentTarget.dataset, { all: 1 })
+    this.openPay({ currentTarget: { dataset: ds } }, 'ar')
   },
   payAll(e) {
-    this.settleAll(e, 'ap')
+    const ds = Object.assign({}, e.currentTarget.dataset, { all: 1 })
+    this.openPay({ currentTarget: { dataset: ds } }, 'ap')
   },
   settleAll(e, type) {
     const { id, unpaid } = e.currentTarget.dataset
@@ -8404,6 +8493,45 @@ Page({
       if (!r.confirm) return
       this.req({ url: API_BASE + '/attachment/' + id, method: 'DELETE', success: () => { this.loadAttach(detail_type, detail_id); wx.showToast({ title: '删了' }) } })
     } })
+  },
+  // 账户平时有没有票（工行对公一般有票、农行个人一般没票）：设一次，以后收付款自动带出来
+  pickAccInv(e) {
+    const id = Number(e.currentTarget.dataset.id)
+    const cur = String(e.currentTarget.dataset.v || '')
+    const opts = [
+      { k: 'yes', n: '有票（对公户，开票走这里）' },
+      { k: 'no', n: '没票（个人户，收付一般没票）' },
+      { k: 'part', n: '部分开票' },
+      { k: '', n: '不设（每次收付时再问）' }
+    ]
+    wx.showActionSheet({
+      itemList: opts.map((x) => x.n + (x.k === cur ? ' ✓' : '')),
+      success: (r) => {
+        const k = (opts[r.tapIndex] || {}).k
+        if (k === undefined) return
+        this.req({
+          url: API_BASE + '/accounts/' + id, method: 'PATCH', data: { inv_default: k },
+          success: () => {
+            wx.showToast({ title: '记下了', icon: 'success' })
+            this.loadAccounts()
+          }
+        })
+      }
+    })
+  },
+  // 本月税金：销项 / 进项 / 差 / 没票的支出
+  loadTaxSummary() {
+    const m = (this.data.rv_month || '').trim()
+    this.req({
+      url: API_BASE + '/tax-summary' + (m ? '?month=' + encodeURIComponent(m) : ''),
+      batch: false, silent: true,
+      success: (res) => {
+        const d = res.data || {}
+        if (!d.ok) return
+        this.setData({ tax: d })
+      },
+      fail: () => {}
+    })
   },
   noop() {},
   closeDetail() { this.setData({ detail_show: false }) },

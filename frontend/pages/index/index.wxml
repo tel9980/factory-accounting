@@ -374,6 +374,14 @@
       <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem" bindblur="blurOItem"/>
       <view class="tip" wx:if="{{price_tip}}">{{price_tip}}</view>
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice" bindblur="onOPriceBlur"/>
+      <view class="chips">
+        <text class="chip-label">金额是：</text>
+        <text class="chip {{o_tax_kind==='含税'?'on':''}}" bindtap="pickOTax" data-k="含税">含税</text>
+        <text class="chip {{o_tax_kind==='不含税'?'on':''}}" bindtap="pickOTax" data-k="不含税">不含税</text>
+        <text class="chip {{!o_tax_kind?'on':''}}" bindtap="pickOTax" data-k="">不标</text>
+        <input class="inp half" wx:if="{{o_tax_kind}}" type="digit" placeholder="税率% 如13" value="{{o_tax_rate}}" bindinput="onOTaxRate"/>
+      </view>
+      <view class="tip" wx:if="{{o_tax_hint}}">{{o_tax_hint}}</view>
       <view class="duesoon" wx:if="{{price_warn}}">{{price_warn}} —— 确认是这个价再记</view>
       <view class="{{chint && chint.level=='red' ? 'duesoon red' : 'tip'}}" wx:if="{{chint && chint.text}}">{{chint.text}}</view>
       <view class="tip" wx:if="{{chint && chint.processes.length}}">人工估算：{{chint.processes[0].process}} ¥{{chint.processes[0].amount}} 等 {{chint.processes.length}} 道工序，平均每张单 ¥{{chint.labor}}</view>
@@ -661,7 +669,7 @@
     <view class="list" wx:if="{{ar_view=='order'}}">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.price}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.price}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="row2" wx:if="{{item.cost>0}}">成本 {{item.cost}} · 毛利 {{item.gross}}（{{item.gross_pct}}%）</view>
         <view class="row2">{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.settled?' · 已结清':''}}</view>
         <view class="btns">
@@ -697,6 +705,14 @@
       </view>
       <view class="tip" wx:if="{{last_tip}}">{{last_tip}}</view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount" bindblur="loadSupplyPrice"/>
+      <view class="chips">
+        <text class="chip-label">金额是：</text>
+        <text class="chip {{p_tax_kind==='含税'?'on':''}}" bindtap="pickPTax" data-k="含税">含税</text>
+        <text class="chip {{p_tax_kind==='不含税'?'on':''}}" bindtap="pickPTax" data-k="不含税">不含税</text>
+        <text class="chip {{!p_tax_kind?'on':''}}" bindtap="pickPTax" data-k="">不标</text>
+        <input class="inp half" wx:if="{{p_tax_kind}}" type="digit" placeholder="税率% 如13" value="{{p_tax_rate}}" bindinput="onPTaxRate"/>
+      </view>
+      <view class="tip" wx:if="{{p_tax_hint}}">{{p_tax_hint}}</view>
       <view class="aline warn" wx:if="{{sp_hint}}">🏷 {{sp_hint}}</view>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
       <view class="chips">
@@ -861,7 +877,7 @@
     <view class="list" wx:if="{{ap_view=='order'}}">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总{{item.amount}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总{{item.amount}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" bindtap="payAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">付清</button>
           <button size="mini" bindtap="showDetail" data-id="{{item.id}}" data-type="ap">明细</button>
@@ -1245,6 +1261,18 @@
       <view class="frow">
         <button class="btn" size="mini" bindtap="loadReportView">看这个月</button>
         <button class="btn ghost" size="mini" bindtap="loadAnomaly">🔎 异常提醒</button>
+        <button class="btn ghost" size="mini" bindtap="loadTaxSummary">💰 本月税金</button>
+      </view>
+      <!-- 税金：有这个月才知道要交多少、有多少没票不能抵 -->
+      <view wx:if="{{tax}}">
+        <view class="prev-h">税金　{{tax.month}}</view>
+        <view class="plrow"><text class="pll">销项税（收进来的税）</text><text class="plv">{{tax.sales_tax}}</text></view>
+        <view class="plrow"><text class="pll">进项税（付出去的税）</text><text class="plv">{{tax.buy_tax}}</text></view>
+        <view class="plrow"><text class="pll strong">这个月大概要交</text><text class="plv ok">¥{{tax.net}}</text></view>
+        <view class="plrow"><text class="pll">没票的支出</text><text class="plv bad">{{tax.no_inv_out.count}} 笔 ¥{{tax.no_inv_out.amount}}</text></view>
+        <view class="plrow"><text class="pll">没票的收入</text><text class="plv">{{tax.no_inv_in.count}} 笔 ¥{{tax.no_inv_in.amount}}</text></view>
+        <view class="tip">{{tax.text}}</view>
+        <view class="tip" wx:if="{{tax.by_account.length}}">按账户：<text wx:for="{{tax.by_account}}" wx:key="account">{{item.account}}　收{{item.in_amt}} / 付{{item.out_amt}} / 税{{item.tax_in}}·{{item.tax_out}}；</text></view>
       </view>
       <view wx:if="{{rv}}">
         <view class="prev-h">利润表　{{rv.month}}</view>
@@ -3318,9 +3346,10 @@
       <view class="tip">资金账户（手头现金合计 ¥{{cash_balance}}）</view>
       <view class="item" wx:for="{{accounts}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.name}}{{item.id==acc_id?'（默认）':''}}</text><text class="amt {{item.balance<0?'red':''}}">¥{{item.balance}}</text></view>
-        <view class="row2">期初{{item.opening}} · 进{{item.in}} · 出{{item.out}}</view>
+        <view class="row2">期初{{item.opening}} · 进{{item.in}} · 出{{item.out}}{{item.inv_text ? ' · 平时' + item.inv_text : ' · 收付时再问有票没票'}}</view>
         <view class="btns">
           <button size="mini" wx:if="{{item.id!=acc_id}}" bindtap="setDefaultAcc" data-i="{{index}}">设为默认</button>
+          <button size="mini" bindtap="pickAccInv" data-id="{{item.id}}" data-v="{{item.inv_default||''}}">平时有无票</button>
           <button size="mini" bindtap="editOpening" data-id="{{item.id}}">改期初</button>
           <button size="mini" bindtap="renameAccount" data-id="{{item.id}}">改名</button>
           <button size="mini" bindtap="delAccount" data-id="{{item.id}}">删</button>
@@ -3526,6 +3555,33 @@
     </view>
   </view>
 
+  <!-- 收付款面板：金额 / 日期 / 账户（选账户自动带出这户有没有票）/ 有票没票 / 税额 / 只记税金 -->
+  <view class="mask" wx:if="{{pay_open}}" bindtap="closePay">
+    <view class="paycard" catchtap="noop">
+      <view class="paytt">{{pay_title}}</view>
+      <view class="tip" wx:if="{{pay_remain > 0}}">这张单还剩 ¥{{pay_remain}}</view>
+      <input class="inp full" type="digit" value="{{pay_amt}}" data-f="pay_amt" bindinput="onPayField"
+        placeholder="{{pay_taxonly ? '不用填（税金看下面）' : '收/付多少（不填=一次结清 ' + pay_remain + '）'}}" disabled="{{pay_taxonly}}" />
+      <picker range="{{acc_names}}" bindchange="onPayAcc"><view class="picker">账户：{{acc_names[acc_idx] || '现金'}} ▾</view></picker>
+      <view class="tip">这笔有票吗？（选了账户会带出这户平时的习惯，可以改）</view>
+      <view class="chips">
+        <text class="chip {{pay_inv===item.k?'on':''}}" wx:for="{{pay_invs}}" wx:key="k" data-k="{{item.k}}" bindtap="pickPayInv">{{item.n}}</text>
+        <text class="chip {{pay_inv===''?'on':''}}" data-k="" bindtap="pickPayInv">不标</text>
+      </view>
+      <input class="inp full" type="digit" value="{{pay_tax}}" data-f="pay_tax" bindinput="onPayField"
+        placeholder="{{pay_taxonly ? '这笔税金多少（单独收付）' : '这笔里的税额（可空，含税单填票面税额）'}}" />
+      <view class="chk" bindtap="togglePayTaxOnly">
+        <text class="box">{{pay_taxonly ? '☑' : '☐'}}</text>
+        <text>这是另外收付的税金，不冲这张单</text>
+      </view>
+      <view class="tip">税和票只影响「税金」那块统计，不影响这张单的欠款；含税或不含税在开单时就定了。</view>
+      <view class="btns">
+        <button class="btn ghost" bindtap="closePay">取消</button>
+        <button class="btn ghost" wx:if="{{pay_remain > 0 && !pay_taxonly}}" bindtap="paySettle">差额抹零</button>
+        <button class="btn" bindtap="submitPay" loading="{{pay_busy}}">确认</button>
+      </view>
+    </view>
+  </view>
   <view class="mask" wx:if="{{help_open}}" bindtap="closeHelp">
     <view class="modal" catchtap="noop">
       <view class="modal-title">怎么用（一页纸）<text class="sheet-x" bindtap="closeHelp">✕</text></view>

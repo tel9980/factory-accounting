@@ -18,7 +18,12 @@ CREATE TABLE IF NOT EXISTS orders (
   written_off REAL DEFAULT 0,         -- 已核销（坏账/抹零），算欠款时要扣掉
   rev INTEGER DEFAULT 0,              -- 反结账标记：1 = 这单是红冲的倒记账
   no_invoice INTEGER DEFAULT 0,       -- 客户说不要票，不进「待开票」清单
-  import_batch TEXT                   -- 从 Excel 一次导入的批次号，导错了整批撤回
+  import_batch TEXT,                  -- 从 Excel 一次导入的批次号，导错了整批撤回
+  -- 税：税率不固定（13/9/6/3/1 都有，也有按点数谈的），所以记「含税/不含税 + 税率 + 税额」三样。
+  -- 税额有值时以手填为准（票面常跟算出来的差几分），否则按 kind+rate 推：含税单 tax=总额-总额/(1+r)。
+  tax_kind TEXT DEFAULT '',           -- '含税' / '不含税' / 空=没标
+  tax_rate REAL DEFAULT 0,            -- 税率百分比，如 13
+  tax_amt REAL DEFAULT 0              -- 这一单的税额
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
@@ -57,7 +62,10 @@ CREATE TABLE IF NOT EXISTS payables (
   created_by TEXT,                    -- 谁录的（'老板' / '员工·小王'）
   written_off REAL DEFAULT 0,         -- 已核销，算欠款时要扣掉
   rev INTEGER DEFAULT 0,              -- 反结账标记
-  import_batch TEXT                   -- 导入批次号
+  import_batch TEXT,                  -- 导入批次号
+  tax_kind TEXT DEFAULT '',           -- 含税 / 不含税 / 空=没标（同 orders）
+  tax_rate REAL DEFAULT 0,
+  tax_amt REAL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);
 CREATE INDEX IF NOT EXISTS idx_payables_created ON payables(created_at);
@@ -80,7 +88,11 @@ CREATE TABLE IF NOT EXISTS ledger (
   month TEXT,                -- =substr(created_at,1,7)，触发器自动填
   account_id INTEGER DEFAULT 0,   -- 哪张卡/哪个钱包（0 = 没指定，算默认账户）
   cash INTEGER DEFAULT 1,         -- 1 = 真金白银进出；0 = 预收预付抵扣/摊销，不动现金
-  import_batch TEXT               -- 导入批次号
+  import_batch TEXT,              -- 导入批次号
+  -- 有没有票 / 税金：用户说「有些是要等到实际收付才知道的」，所以票和税记在流水上，不记在单上。
+  inv_state TEXT DEFAULT '',      -- 'yes' 有票 / 'no' 没票 / 'part' 部分 / 空=没标
+  inv_no TEXT DEFAULT '',         -- 票号（有就填，没有不影响）
+  tax REAL DEFAULT 0              -- 这一笔里的税额（含税单 = 金额里的税；税金单独收付时 = 金额本身）
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_month ON ledger(month);
@@ -172,7 +184,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   name TEXT NOT NULL,            -- 现金 / 银行卡 / 微信 / 支付宝 / 自定义
   kind TEXT DEFAULT 'cash',
   opening REAL DEFAULT 0,        -- 期初余额
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- 这个账户平时收付「有没有票」的习惯：'yes' 有票 / 'no' 没票 / 'part' 部分 / 空=每次现问。
+  -- 对公户一般有票、个人户一般没票，收付款时按它带出默认值，省得每笔都点。
+  inv_default TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS categories (

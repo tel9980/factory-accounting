@@ -1478,11 +1478,28 @@ node scripts/build-exe.mjs --out dist
    - **验证**：`check.mjs` 全绿（**410** 路由 / 56 表 / **624** SQL / 255 调用 / **759** 绑定）；干净库按 CI 顺序全跑：`smoke` **228** GET 无 5xx → `test-modules` → `smoke-write` 45 步 + 写路由 + 自检 10 类全 0 → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` 48 → **`test-pack` 51**，加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
    - ⚠️ 动了前端（模板中心加了两个包的行 + 整包预览面板）→ **小程序要重新上传发布**。
 
+300. ✅ **含税 / 不含税、有票 / 没票、税金另外收付**：用户说「有些应收应付是含了税金的，有些是不含税金的，G行收付大部分有票，N行收付没票，有些税金是另外收付的」。这四句其实是四件不同的事，一件一件落到账上：
+   - **G行 / N行 = 工行对公户 / 农行个人户**（问过用户确认）。所以「有没有票」是**账户的习惯**，不是单据的属性：`accounts.inv_default`（`yes`/`no`/`part`）在每个账户上设一次（设置 → 单位 · 账户 → 「平时有无票」），收付款面板选账户时自动带出来，还能当场改。工行标「有票」、农行标「没票」，一天几十笔就不用每笔想。
+   - **税率不固定**（用户原话「税率是不固定的」，13/9/6/3/1 都见过，还可能是 3.5），所以每张单自己填：`orders` / `payables` 加 `tax_kind`（含税 / 不含税 / 不标）、`tax_rate`、`tax_amt`。算税只有一条规则 `taxOf(kind, rate, manual, total)`：
+     - 含税单：税额 = 金额 − 金额 ÷ (1 + 税率)；不含税 = 金额 − 税额
+     - 不含税单：税额 = 金额 × 税率；不含税 = 金额（税在价外）
+     - **手填税额优先**（票面常跟算出来的差几分）；什么都不填就是 0
+   - **手填过税额的单，改金额不重算、改税率才重算**：`PATCH` 里区分「这次到底动没动税」——只改客户名不动税；改税率按新税率重算（这条是测试抓出来的：第一版改税率仍保留手填的 87.5，红了一项才补上）。
+   - **有票 / 没票记在流水上，不记在单据上**：用户说「有些是要等到实际收付才知道的」，所以 `ledger` 加 `inv_state`（`yes`/`no`/`part`）、`inv_no`、`tax`。收付款面板里三个 chip 一选就跟着这笔钱走，`/flows` 每行显示「有票 / 没票 / 部分开票」。单据上只有「含税 / 不含税 + 税额」，因为那是开单时就说定的。
+   - **税金另外收付**：收/付款面板勾「这是另外收付的税金，不冲这张单」，后端走 `kind: 'tax'` 分支——写一条 `ref_type='tax_ar'`（应付是 `tax_ap`）、`category='税金'` 的流水，**`paid` 一分不动**。这样「货款 1000 收了 800，税 130 另外收」不会被当成收了 930 导致这张单提前结清。
+   - **删单连带删税金流水**：`DELETE /orders/:id` 与 `/payables/:id` 的 `ref_type` 从 `= 'order'` 改成 `IN ('order','tax_ar')`，否则单删了、税金那笔流水还在流水页里飘着。
+   - **新增 `GET /tax-summary?month=`**：一次给全 —— 销项税（本月收到的税）、进项税（本月付出去的税）、差额（正数是大概要交、负数是留抵）、**没票的支出几笔多少钱**（不能抵税，这是这类小厂最容易吃亏的地方）、按账户分解（哪张卡收了多少、标了多少没票）。报表页「💰 本月税金」一键看。
+   - **新增 `GET /tax-by-party?month=`**：按客户 / 供应商汇总「总额 / 税额 / 不含税」，对账时不用再翻单。
+   - **员工看不到这些数**：`STAFF_MONEY_KEYS` 补了 `tax / tax_amt / tax_net / tax_rate`，员工口令下这几个字段一律 `null`。
+   - **新增 `scripts/test-tax.mjs`（44 项断言，已挂进 CI，排在 `test-pack` 之后）**：不含税 1000×13% → 税额 130、不含税 1000 → 含税 1130 → 税额 130、不含税 1000 → 手填 87.5 优先 → 改税率 6% 重算 56.6 → 账户标有票/没票能带出 → 收款标「没票」+ 税额 46 落到流水 → 单独收税金 130 不动 `paid`（还是 400）→ 应付含税 9% 1090 → 税额 90 → 单独付税金不动 `paid` → `/tax-summary` 销项 ≥176、进项 ≥131、净额 = 差、没票支出统计到 → 删单后这张单的流水（含税金）归零。
+   - **验证**：`check.mjs` 全绿（**412** 路由 / 56 表 / **627** SQL / **258** 调用 / **772** 绑定）；干净库按 CI 顺序全跑：`smoke` **230** GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 写路由 + `/run-cron` + 自检 10 类全 0）→ `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` 48 → `test-pack` 51 → **`test-tax` 44**，加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
+   - ⚠️ 动了前端（收付款面板、开单的含税/不含税、账户「平时有无票」、报表「本月税金」）→ **小程序要重新上传发布**。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 410 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 412 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1866,7 +1883,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（214）
+**其它（单个接口）**（216）
 
 - `GET /`
 - `GET /access-guide`
@@ -2055,7 +2072,9 @@ node scripts/build-exe.mjs --out dist
 - `GET /target-forecast`
 - `GET /target-history`
 - `GET /target-weeks`
+- `GET /tax-by-party`
 - `GET /tax-pack`
+- `GET /tax-summary`
 - `GET /track`
 - `GET /track-link`
 - `GET /track-log`
