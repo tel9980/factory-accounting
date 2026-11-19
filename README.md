@@ -68,6 +68,11 @@
 - **备份**：一键全量备份（复制文本）、每日自动云端快照（保留 30 份）、自动同步到 Markdown 笔记站、一键恢复（粘贴备份文本，恢复前自动留快照）
 - **访问口令**：首次使用自设口令，所有数据接口需口令访问，可改口令
 
+## 许可证
+
+MIT（见 [LICENSE](LICENSE)）。自己厂里用、改了再分发都行，出事不担责。
+这个仓库里没有你的账：口令、账目、备份全在你自己的 Cloudflare 账号 / 本机硬盘里。
+
 ## 目录结构
 
 ```
@@ -89,8 +94,8 @@ docs/               文档
 
 ## 快速开始
 
-1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 56 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
-   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 625 条 SQL 在这种新库上跑不跑得通、前端的 255 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
+1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 57 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
+   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 632 条 SQL 在这种新库上跑不跑得通、前端的 258 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
 2. **前端**：微信开发者工具导入 `frontend` 目录，把 `frontend/pages/index/index.js` 顶部 `API_BASE` 改成你的 Worker 地址。
 3. **上线**：微信公众平台把该域名加进 `request` 合法域名；本地调试勾选「不校验合法域名」。
 
@@ -176,7 +181,7 @@ cd backend && npm install          # 要 Node 24（node:sqlite 是内置的）
 node scripts/build-exe.mjs --out dist
 ```
 
-打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 56 张表——
+打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 57 张表——
 不通就直接红，不会把坏文件发出去。CI 里三个平台各跑一次。
 
 ### 本机版和线上版的差别
@@ -535,7 +540,7 @@ node scripts/build-exe.mjs --out dist
 ## 说明
 
 - **「赚了多少」只有一个算法（权责口径）**：净利 = 本月接单额 − 单子上的材料·外协成本 − 现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息。赊购只算欠款、不重复算成本。想看「按收付现金算赚多少」，用报表页「两口径」（现金口径 = 实收 − 实付）。
-- **新账套怎么开始**：**不用初始化**。第一次打开时自动建好 56 张表、9 个支出分类、3 个收入分类、4 个账户（现金/银行卡/微信/支付宝），你只需要做一件事——**设个口令**（新账本第一次进去会提示，同时给一串恢复码，只显示这一次，记得截图）。然后把底数填上：首页开账引导里点「⚡ 一屏填完」，一屏填完账户余额、默认账期、期初应收、期初应付（一家一行：`张老板 12000`），点保存就开始记账了。账套二、账套三各自独立，**口令也是各自独立的**。
+- **新账套怎么开始**：**不用初始化**。第一次打开时自动建好 57 张表、9 个支出分类、3 个收入分类、4 个账户（现金/银行卡/微信/支付宝），你只需要做一件事——**设个口令**（新账本第一次进去会提示，同时给一串恢复码，只显示这一次，记得截图）。然后把底数填上：首页开账引导里点「⚡ 一屏填完」，一屏填完账户余额、默认账期、期初应收、期初应付（一家一行：`张老板 12000`），点保存就开始记账了。账套二、账套三各自独立，**口令也是各自独立的**。
 - **工资怎么记**：默认就按**实发数**记一笔支出（支出页「发工资（按实发数）」一键预设，分类=工资）。要按件算钱（单价表、记工、月底算、扣宿舍水电、打工资单）再去 设置 → 功能模块 把「计件工资」打开；关着的时候那块界面和接口都不出现，数据一条不删。
 - **含税 / 不含税怎么记**：**不拆税**。金额就是你实际收到/付出去的钱——含税就记含税的数，不含税就记不含税的数，税多税少系统不替你算。`invoices` 里的 `tax` 只是登记备注，不进利润也不进现金流。
 - **实际收付跟当初记的不一样**：按实际的记。多收/多付的部分自动记成这家的预收/预付（下次开单可以直接抵）；剩下的尾差不想要了，收款弹窗里填「结清」或点「差额抹零」，系统记一条核销把单子结清——**抹零不进现金流**（钱确实没收到），但「被欠多少」不再挂着它。
@@ -1521,11 +1526,22 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+302. ✅ **第六轮审计：钱和账不能分两次落库、备份不能偷偷截断、出事要能看见**：用户问「还有哪些可以优化的吗」，三路只读审计（后端 / 前端 / 工程化）加逐条回代码核对，按「A 会算错钱 / B 用户能感知 / C 线上出事没人知道 / D 文档与卫生」分组，用户说「全部由你来完成」。
+   - **A 钱和账一次落库**（原来都是「先改单、再写流水」两次提交，中间失败就「单据显示已收、账上没有这笔钱」）：`/orders/:id/receive`、`/payables/:id/pay`、两个 `/writeoff`、两个 `/apply-advance` 全部改成**流水写在改单前面、条件与 UPDATE 一字不差**，塞进同一个 `db.batch`：`INSERT INTO ledger … SELECT … WHERE (SELECT COALESCE(paid,0)+COALESCE(written_off,0)+? FROM orders WHERE id=?) <= (SELECT price FROM orders WHERE id=?) + 0.005` 紧跟 `UPDATE orders … WHERE id=? AND paid + COALESCE(written_off,0) + ? <= price + 0.005`。D1 的 `batch` 是事务，要么都成要么都不成；批后按 `changesOf()` 判断，0 就 409 `stale`「这张单刚被改过」。
+   - **A 备份不再偷偷截断**：整库备份原来是 `INSERT INTO backups (content…)` 一个 9MB 的字符串，而 D1 单行上限 2MB——线上会**静默失败**（本机 SQLite 不限制，永远测不出来）。现在超过 900KB 自动切片写 `backup_parts(bid, seq, data)`，取回统一走 `readBackupContent()` 拼回来；实测塞一条 1.2MB 的脏数据后备份出 2 片共 1230160 字节、`backups.content` 为空、`/backup-get` 长度一致、`/backup-restore` 200。
+   - **A 现金桥三个口径错**（这个页面就是给老板解释「利润和现金差在哪」，错了等于白解释）：`loanBack` 找 `ref_type='loan'` 而退回实际写 `'loan_return'`（恒为 0）、`cashIn/cashOut` 只排了 `transfer` 没排代收税点、`advIn` 用 `SUM(amount-used)` 按预收创建月分组（未来月份的抵扣倒扣本月）。改完新增「预收抵扣（不动现金）」「代收/代付的税点」两行，残差能对平。
+   - **B 用户能感知的**：非法日期（`2026-02-31`）以前静默记成今天、污染当月报表，现在 11 个写入接口一律 400 `bad_date` 并说清「2 月没有 31 号」；离线补发把 4xx 也当成功（最后把队列清空，等于丢单），现在 4xx 留在队列里并逐条列出原因；`/quick` 一句话记账从「取第一个数字」改成「带元/块/¥ 的优先，否则取最大的」，并加 `client_id` 与 loading 挡双击；快捷金额按钮从「累加」改成「设为」；`addOrder/addPayable/addExpense` 的金额改走 `toAmount()`（认 `8,000` / `8000元` / `1.2万`）；收款面板金额留空不再默默按全额记；`.amt`/`.qgrid` 两个样式类撞名导致 126 处金额显示成一坨蓝底药丸、首页三个大按钮样式互相覆盖，已改名隔离；小字从 18–20rpx 提到 ≥22rpx、颜色由 `#999` 提到 `#777`。
+   - **C 出事要能看见**：`wrangler.toml` 开 `[observability]`（采样 10%，DEPLOYMENT 补了 `wrangler tail` / `--status error` 用法）；`scheduled` 每个账套末尾写 `settings.cron_at` 心跳，`healthScan` 新增第 12 项「定时任务没在跑」（超过 2 天没心跳就报），4 条 cron 失败不再只 `console.error`，统一 `noteFailDb` 写 `error_log`；`error_log` / `slow_log` 留 90 天（原来无限长）；`/version` 多回一个 `commit`，CI 部署带上 `APP_COMMIT`；线上体检那步不再挂在「有没有 CF token」上（本机部署也能体检）。
+   - **D 文档与卫生**：`check.mjs` 数字全线纠偏（413 路由 / 57 表 / 632 SQL / 258 调用 / 772 绑定）、备份 46 张 + 11 张按设计不进（DEPLOYMENT 补了分片说明）、按钮名改成界面上真实的名字（「数据自检」「备份全部数据」「🔍 查一下备份能不能用」——原来文档写的是「结构自检」「立即备份」「备份自检」，界面上根本没有）、补 `LICENSE`（MIT）。
+   - **测试补强（这几条以前是「假绿」）**：`test-safety.mjs` 里「已结账月份不再补摊销」原来用 `locked>0 || added===0` 的「或」，两边都为 0 也绿——而且月份写的是未来的 2086-02，摊销根本不会跑，等于没测；改成过去的 2024-03 并只认「明确报出被锁住」。`smoke.mjs` 的 404 现在分清「框架 404（路由没了）→ 坏」和「接口自己 return 的 JSON 404（数据确实没有）→ 正常」。`smoke-write.mjs` 补了**备份→校验→取回→二次确认→恢复**闭环（`/backup-restore`、`/restore`、`/backup-get` 以前在 CI 里零覆盖）。
+   - **验证**：`check.mjs` 全绿（413 路由 / 57 表 / 632 SQL / 258 调用 / 772 绑定）；干净库按 CI 顺序 `smoke` 230 GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 95 写路由 + `/run-cron` + 自检 10 类全 0 + 备份恢复闭环）→ `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` → `test-safety` 48 → `test-pack` 51 → `test-tax` 52，加离线 `test-batch` / `test-key-queue` / `test-firstscreen` 全绿。
+   - ⚠️ 动了前端（金额输入、收款面板提示、样式改名、字号）→ **小程序要重新上传发布**。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 412 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 413 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1554,11 +1570,12 @@ node scripts/build-exe.mjs --out dist
 - `DELETE /attachment/:id`
 - `GET /attachment/:id`
 
-**bank-flows**（3）
+**bank-flows**（4）
 
 - `DELETE /bank-flows/:id`
 - `GET /bank-flows`
 - `POST /bank-flows/:id/match`
+- `POST /bank-flows/:id/unmatch`
 
 **budgets**（3）
 

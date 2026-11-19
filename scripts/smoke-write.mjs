@@ -369,6 +369,33 @@ async function runCron() {
   ok(`自动记账（固定支出/摊销/预提/折旧）跑通，自检 ${d.selfcheck ? d.selfcheck.bad : 0} 处问题`)
 }
 
+// ── 备份 / 恢复闭环 ───────────────────────────────────────────
+// 以前这几个接口在 CI 里零覆盖：备份写不进去（D1 单行 2MB）、恢复把表清空、
+// 恢复一半失败没有回滚 —— 全是「真出事那天才发现」的类型。
+// 这里做一次「备份 → 校验 → 取回 → 恢复到刚备的那份」，恢复到同一刻所以数据不变。
+async function backupRoundTrip() {
+  console.log('\n[备份 / 恢复闭环]')
+  const bk = await step('备份一份', 'POST', '/cloud-backup', {})
+  if (!bk || bk.error) return no('备份一份', brief(bk))
+  const id = bk.id || (bk.backup && bk.backup.id)
+  if (!id) return no('备份一份', '没回备份 id：' + brief(bk))
+  const ver = await call('GET', '/backup-verify')
+  if (ver.status !== 200 || !ver.data || ver.data.ok === false) return no('校验备份', `→ ${ver.status} ${brief(ver.data)}`)
+  ok('校验备份：' + String(ver.data.text || '').slice(0, 40))
+  const got = await call('GET', '/backup-get?id=' + id)
+  if (got.status !== 200 || !got.data || !got.data.text) return no('取回备份', `→ ${got.status} ${brief(got.data)}`)
+  let parsed = null
+  try { parsed = JSON.parse(got.data.text) } catch (e) { return no('取回备份', '取回来的不是合法 JSON') }
+  if (!parsed || !parsed.version) return no('取回备份', '备份里没有 version')
+  ok(`取回备份：${(got.data.text.length / 1024).toFixed(0)} KB，${Object.keys(parsed).length} 个键`)
+  // 不带 confirm 必须拒绝（否则误点一下就把账换成旧的了）
+  const noConf = await call('POST', '/backup-restore', { id })
+  if (noConf.status !== 409 || !noConf.data || !noConf.data.need_confirm) return no('恢复必须二次确认', `→ ${noConf.status} ${brief(noConf.data)}`)
+  ok('恢复必须二次确认：不带 confirm 回 409 need_confirm')
+  const done = await step('恢复到刚备的那份', 'POST', '/backup-restore', { id, confirm: 1 })
+  if (done && done.error) return no('恢复到刚备的那份', brief(done))
+}
+
 // ── 跑 ───────────────────────────────────────────────────────
 if (!(await waitReady())) {
   console.log(`❌ 服务器没起来：${BASE}`)
@@ -383,6 +410,7 @@ try {
   await sweep()
   await runCron()
   await consistency()
+  await backupRoundTrip()
 } catch (e) {
   no('脚本自身', String((e && e.stack) || e))
 }

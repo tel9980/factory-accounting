@@ -12,8 +12,8 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 625 条 SQL 在新库上跑不跑得通、
-前端 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 632 条 SQL 在新库上跑不跑得通、
+前端 258 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
 
@@ -44,7 +44,7 @@ npx wrangler d1 execute factory-db2 --remote --file=schema.sql   # 建了 DB2 �
 npx wrangler d1 execute factory-db3 --remote --file=schema.sql   # 建了 DB3 才要
 ```
 
-**一个 `schema.sql` 就够**：它会建出全部 56 张表、索引和 `month` 列的触发器，
+**一个 `schema.sql` 就够**：它会建出全部 57 张表、索引和 `month` 列的触发器，
 不用再手工 ALTER、也不用单独跑别的脚本。重复执行是安全的（都是 `IF NOT EXISTS`）。
 
 > 历史坑：2026-11 之前 `schema.sql` 是「线上库更新、文件没跟上」的状态，
@@ -110,7 +110,27 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 「线上那个库缺不缺列」——这两个 secret 都不配时，CI 只能保证「代码能跑」，保证不了「线上是对的」。
 
 > 早期文档写的是「把 index.js 粘进 Cloudflare 编辑器」，那是 2025 年的做法，
-> 现在只有一个 1.6 万行的单文件，别再粘贴了——用 `wrangler deploy`。
+> 现在只有一个 1.7 万行的单文件，别再粘贴了——用 `wrangler deploy`。
+
+**部署后怎么确认跑的是哪一版**：`curl https://你的域名/version` 会回
+`{"ok":true,"version":"20261119-2140","built":"2026-11-19T13:40:12Z","commit":"a1b2c3d","ray":"..."}`
+（`/version` 不要口令）。`commit` 只有 CI 部署时才有值——本机部署时手动带上：
+`npx wrangler deploy --var APP_VERSION:"$(date -u +%Y%m%d-%H%M)" --var APP_BUILT:"$(date -u +%FT%TZ)" --var APP_COMMIT:"$(git rev-parse --short HEAD)"`。
+
+**出问题看日志**（不用登 Cloudflare 后台）：
+
+```bash
+cd backend
+npx wrangler tail                      # 实时看请求与异常，Ctrl+C 退出
+npx wrangler tail --status error       # 只看 5xx
+npx wrangler tail --format pretty      # 带表格线，人看着舒服些
+```
+
+`wrangler.toml` 里已开 `[observability] enabled = true`（采样 10%），
+所以也能在 Cloudflare 后台 Workers → 你的 Worker → Logs 里翻最近 3 天的请求；
+不想用或嫌占免费额度就把它改成 `enabled = false`。
+另外后端自己会把 5xx 写进 `error_log` 表（界面：报表 → 数据体检 → 🐞 运行日志），
+留最近 90 天；定时任务出错也会写进去（以前只 `console.error`，线上没人看得见）。
 
 ### 1.5 设口令（第一次进去要设）
 
@@ -145,13 +165,13 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
    `npx wrangler d1 execute factory-db --remote --file=schema.sql`
    —— 只补缺的表/索引，已有表和数据不动。
 3. `npx wrangler deploy`（或推 main 走 CI）。
-4. 进去点「设置 → 数据体检 → 结构自检」（`GET /schema-check`）：三本账缺哪张表、缺哪一列都会列出来。
-5. 顺手点一次「立即备份」（`POST /cloud-backup`），再看备份自检（`GET /backup-verify`）：
+4. 进去点「报表 → 数据自检」（面板里那条 `GET /schema-check`，界面上叫「数据自检」）：三本账缺哪张表、缺哪一列都会列出来。
+5. 顺手点一次「报表 → 备份全部数据」（`POST /cloud-backup`），再看「🔍 查一下备份能不能用」（`GET /backup-verify`）：
    它会告诉你这份备份覆盖多少张表、哪些表按设计不进备份（以及原因）、有没有哪张表被漏登记。
 
 > 有一部分列是**运行时兜底**建的（`ensureMonthCols()` 补 `month` 列和触发器、
 > `ensureBaseTables()` 补那 11 张老表），所以老库即使不补灌 schema 也不会当场崩；
-> 但补灌一次更干净，结构自检也就绿了。
+> 但补灌一次更干净，数据自检也就绿了。
 
 ---
 
@@ -177,6 +197,8 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 
 - **备份在哪**：`backups` 表，每天 cron 自动存一份，保留最近 30 份；`GET /backup` 可当场导出一份 JSON。
 - **备份了什么**：46 张表（账目、客户、材料、工钱、外协、返工、待摊、银行流水…），标 `version: 3`。
+  单份备份超过 900KB 会自动切成几片存进 `backup_parts`（D1 单行上限 2MB），取回时自动拼回来，用起来感觉不到。
+  另有 11 张表**按设计不进备份**（附件照片、月度报表 xlsx、员工口令、试错计数、运行日志…），`/backup-verify` 会把它们和原因一起列出来。
 - **什么不进备份、为什么**：图片（`attachments`）、月报 xlsx（`month_report`）、员工 PIN（`staff_users`）、
   审计流水（`audit_log`）、报错与慢接口日志、备份自己（`backups`）、去重标记（`op_dedupe`）、
   小程序试用额度（`wx_users`）。`GET /backup-verify` 会把这张清单**原样列给用户看**。
@@ -277,7 +299,7 @@ node scripts/build-exe.mjs --out dist
 ```
 
 脚本会 esbuild 打包 → 生成 SEA blob（`schema.sql` 作为资源塞进去）→ postject 注入 →
-**自己跑一遍自测**（`/version` 版本号、落地页、建库 56 张表），不通就报错退出。
+**自己跑一遍自测**（`/version` 版本号、落地页、建库 57 张表），不通就报错退出。
 macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签）。
 
 ### 4.4 本机版的注意事项

@@ -28,6 +28,8 @@ const TIMEOUT_MS = Number(argOf('timeout', '20000')) || 20000
 const src = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
 const routes = [...new Set([...src.matchAll(/\bapp\.get\(\s*'([^']+)'/g)].map((m) => m[1]))]
 const paths = routes.map((p) => p.replace(/:[a-z_]+/g, '1'))
+// 哪些路径本来是带参数的（查 1 号单确实「不存在」，404 是正常的）
+const HAS_PARAM = new Set(routes.filter((p) => /:[a-z_]+/.test(p)).map((p) => p.replace(/:[a-z_]+/g, '1')))
 
 const hit = async (p, opt = {}) => {
   const ac = new AbortController()
@@ -66,6 +68,16 @@ const worker = async () => {
     const p = paths[i++]
     const r = await hit(p, { headers: { 'x-access-key': KEY } })
     if (r.status === 0) bad.push([0, p, '请求失败：' + r.text.slice(0, 120)])
+    // 404 也算坏：路由表里有、实际打不通，通常是改名了没同步前端（历史上真出过）。
+    // 带 :id 的路径除外 —— 空库里查 1 号单确实是「不存在」，那是对的。
+    else if (r.status === 404 && !HAS_PARAM.has(p)) {
+      // 分清两种 404：
+      //   · 框架自己吐的「404 Not Found」纯文本 = 路由根本不存在（改名了、被删了）→ 算坏
+      //   · 接口自己 return 的 JSON（{"error":"备份不存在"}）= 数据确实没有 → 正常
+      let isJson = false
+      try { JSON.parse(r.text); isJson = true } catch (e) { isJson = false }
+      if (!isJson) bad.push([404, p, '路由不在（改名了？）' + r.text.replace(/\s+/g, ' ').slice(0, 120)])
+    }
     else if (r.status >= 500) bad.push([r.status, p, r.text.replace(/\s+/g, ' ').slice(0, 160)])
   }
 }

@@ -21,6 +21,12 @@ database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
 [triggers]
 crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1", "0 2 1 * *"]
 
+# Workers Logs：把 console.log/error 留在 Cloudflare 里可以翻（默认不保留，出事只能靠 error_log 表）。
+# 这块在 wrangler 3.114 上是支持的；如果哪天部署报「unexpected field」，删掉这一段不影响别的。
+[observability]
+enabled = true
+head_sampling_rate = 0.1   # 采样 10%，免费额度按事件计费，全采太贵
+
 [vars]
 NOTES_BASE = "https://md.1211.cc.cd"
 NOTES_SLUG = "factory-ledger-backup"
@@ -28,6 +34,7 @@ NOTES_SLUG = "factory-ledger-backup"
 # 留着默认值是为了本地 dev 不报错。
 APP_VERSION = "dev"
 APP_BUILT = ""
+APP_COMMIT = ""
 # NOTES_PASS 用 secret 存：npx wrangler secret put NOTES_PASS
 
 # 多账套：每个账套一个独立 D1 数据库（表结构完全一致）

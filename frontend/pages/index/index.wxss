@@ -1,3 +1,4 @@
+/* 小字最小 22rpx（约 11px）：18–20rpx 在手机上基本看不清，厂里 45 岁以上更费劲 */
 .page { padding: 20rpx; background: #f5f6f8; min-height: 100vh; box-sizing: border-box; }
 .stats { display: flex; gap: 12rpx; margin-bottom: 12rpx; }
 .stat { flex: 1; background: #fff; border-radius: 12rpx; padding: 16rpx; text-align: center; }
@@ -31,7 +32,7 @@
 .seg.on { background: #3d7bf5; color: #fff; }
 .amt.ok { color: #2a9d57; }
 .biz { background: #fff; border-radius: 12rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 24rpx; color: #1a1a1a; display: flex; justify-content: space-between; align-items: center; }
-.biz-sub { color: #999; font-size: 20rpx; }
+.biz-sub { color: #787878; font-size: 22rpx; }
 .overdue { background: #fdeaea; color: #c0392b; border-radius: 12rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 26rpx; font-weight: 600; }
 .duesoon { background: #fff6e0; color: #b8860b; border-radius: 12rpx; padding: 14rpx 16rpx; margin-bottom: 12rpx; font-size: 26rpx; font-weight: 600; }
 .chips { width: 100%; display: flex; flex-wrap: wrap; gap: 8rpx; align-items: center; }
@@ -45,7 +46,7 @@
 .bar { height: 22rpx; border-radius: 6rpx; min-width: 2rpx; }
 .bar-in { background: #3d7bf5; }
 .bar-out { background: #e0711e; }
-.bar-num { font-size: 20rpx; color: #888; width: 88rpx; flex-shrink: 0; }
+.bar-num { font-size: 22rpx; color: #777; width: 96rpx; flex-shrink: 0; }
 .restore-ta { width: 100%; min-height: 120rpx; font-size: 24rpx; box-sizing: border-box; }
 .report-canvas { position: fixed; left: -9999px; top: 0; width: 750px; height: 1200px; }
 .mask { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,.55); z-index: 90; display: flex; align-items: center; justify-content: center; }
@@ -80,7 +81,7 @@
 /* 全局搜索结果 */
 .searchres { background: #fff; border-radius: 12rpx; padding: 8rpx 12rpx; margin-bottom: 12rpx; }
 .searchres .item { padding: 10rpx 0; border-bottom: 1rpx solid #f0f0f0; }
-.tag { font-size: 20rpx; padding: 2rpx 8rpx; border-radius: 6rpx; margin-right: 8rpx; color: #fff; }
+.tag { font-size: 22rpx; padding: 2rpx 8rpx; border-radius: 6rpx; margin-right: 8rpx; color: #fff; }
 .tag-ar { background: #3d7bf5; }
 .tag-ap { background: #f56c6c; }
 .tag-ex { background: #e6a23c; }
@@ -107,7 +108,7 @@
 .sun.red { color: #e04b4b; }
 .sun.org { color: #e08a1e; }
 .sun.green { color: #2a9d5c; }
-.sul { font-size: 19rpx; color: #999; margin-top: 4rpx; }
+.sul { font-size: 22rpx; color: #777; margin-top: 4rpx; }
 .chip.on { background: #3d7bf5; color: #fff; border-color: #3d7bf5; }
 .chip-label { font-size: 22rpx; color: #999; margin-right: 8rpx; align-self: center; }
 .detail-line { font-size: 24rpx; color: #444; padding: 5rpx 0; border-bottom: 1rpx solid #f2f2f2; }
@@ -129,11 +130,11 @@
 .subtabs { display: flex; background: #fff; border-radius: 12rpx; padding: 8rpx; margin-bottom: 12rpx; }
 .sub { flex: 1; text-align: center; padding: 14rpx 0; font-size: 25rpx; color: #666; border-radius: 10rpx; }
 .sub.on { background: #eaf2ff; color: #1f6feb; font-weight: 700; }
-.sbadge { display: inline-block; margin-left: 6rpx; background: #e64646; color: #fff; font-size: 18rpx; line-height: 1; padding: 4rpx 8rpx; border-radius: 20rpx; vertical-align: top; }
+.sbadge { display: inline-block; margin-left: 6rpx; background: #e64646; color: #fff; font-size: 22rpx; line-height: 1; padding: 4rpx 8rpx; border-radius: 20rpx; vertical-align: top; }
 /* 卡片 */
 .card { background: #fff; border-radius: 14rpx; box-shadow: 0 2rpx 10rpx rgba(0,0,0,.05); margin-bottom: 16rpx; padding: 20rpx 24rpx 8rpx; }
 .card-h { font-size: 28rpx; font-weight: 700; color: #222; padding-bottom: 12rpx; }
-.card-n { display: inline-block; margin-left: 12rpx; background: #e64646; color: #fff; font-size: 20rpx; padding: 2rpx 12rpx; border-radius: 20rpx; }
+.card-n { display: inline-block; margin-left: 12rpx; background: #e64646; color: #fff; font-size: 22rpx; padding: 2rpx 12rpx; border-radius: 20rpx; }
 /* 待办行 */
 .todo { display: flex; align-items: center; padding: 18rpx 0; border-top: 1rpx solid #f2f3f5; }
 .todo-dot { width: 12rpx; height: 12rpx; border-radius: 6rpx; background: #f0a020; margin-right: 14rpx; flex: none; }
@@ -193,9 +194,9 @@
 .cfwarn { margin-top: 10rpx; padding: 12rpx 16rpx; font-size: 24rpx; line-height: 1.5; color: #b45309; background: #fff7e6; border-radius: 10rpx; }
 .cfwarn.ok { color: #12805c; background: #eaf7f0; }
 
-/* 常用面额 */
+/* 常用面额（.amtx 是那个蓝底药丸；.amt 是金额本身的样式，别撞名） */
 .amts { display: flex; flex-wrap: wrap; gap: 12rpx; margin: 4rpx 0 12rpx; }
-.amt { padding: 8rpx 22rpx; font-size: 24rpx; color: #1f6feb; background: #eef4ff; border-radius: 999rpx; }
+.amtx { padding: 8rpx 22rpx; font-size: 24rpx; color: #1f6feb; background: #eef4ff; border-radius: 999rpx; }
 
 /* 数据自检红条 */
 .issuebar { margin: 12rpx 0; padding: 16rpx 22rpx; background: #fdecea; color: #b3261e; border-radius: 12rpx; font-size: 25rpx; border-left: 8rpx solid #d93025; }
@@ -447,15 +448,18 @@
 .page.big .ct { font-size: 32rpx; }
 
 /* ===== 首页三个大按钮（常用动作一步到位） ===== */
-.qgrid { display: flex; gap: 12rpx; margin-bottom: 12rpx; }
-.qbtn { flex: 1; border-radius: 14rpx; padding: 20rpx 12rpx; text-align: center; color: #fff; }
-.qbtn.blue { background: #3d7bf5; }
-.qbtn.green { background: #2a9d57; }
-.qbtn.orange { background: #e0711e; }
-.qbtn .qb-t { font-size: 28rpx; font-weight: 700; }
-.qbtn .qb-d { font-size: 22rpx; opacity: .85; margin-top: 6rpx; }
-.page.big .qbtn .qb-t { font-size: 32rpx; }
-.page.big .qbtn .qb-d { font-size: 26rpx; }
+/* 注意：这三个类以前叫 .qgrid/.qbtn，和上面「常用宫格」「报价行内按钮」撞名，
+   后被覆盖的还是这后一份，于是九宫格变成不换行、报价行的按钮被撑成三个大色块。
+   现在改成 .qgrid3/.qbtn3，各管各的。 */
+.qgrid3 { display: flex; gap: 12rpx; margin-bottom: 12rpx; }
+.qbtn3 { flex: 1; border-radius: 14rpx; padding: 20rpx 12rpx; text-align: center; color: #fff; }
+.qbtn3.blue { background: #3d7bf5; }
+.qbtn3.green { background: #2a9d57; }
+.qbtn3.orange { background: #e0711e; }
+.qbtn3 .qb-t { font-size: 28rpx; font-weight: 700; }
+.qbtn3 .qb-d { font-size: 22rpx; opacity: .85; margin-top: 6rpx; }
+.page.big .qbtn3 .qb-t { font-size: 32rpx; }
+.page.big .qbtn3 .qb-d { font-size: 26rpx; }
 .red { color: #d93025; }
 .ri-d { font-size: 22rpx; color: #666; }
 .page.big .ri-d { font-size: 26rpx; }

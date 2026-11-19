@@ -54,10 +54,10 @@
   </view>
 
   <block wx:if="{{tab=='home'}}">
-    <view class="qgrid">
-      <view class="qbtn blue" bindtap="quickGo" data-t="ar"><view class="qb-t">＋ 记一笔应收</view><view class="qb-d">客户又给活了</view></view>
-      <view class="qbtn green" bindtap="goCollect"><view class="qb-t">💰 收钱</view><view class="qb-d">看谁还欠，点一下收清</view></view>
-      <view class="qbtn orange" bindtap="quickGo" data-t="expense"><view class="qb-t">－ 记一笔支出</view><view class="qb-d">当场花的钱</view></view>
+    <view class="qgrid3">
+      <view class="qbtn3 blue" bindtap="quickGo" data-t="ar"><view class="qb-t">＋ 记一笔应收</view><view class="qb-d">客户又给活了</view></view>
+      <view class="qbtn3 green" bindtap="goCollect"><view class="qb-t">💰 收钱</view><view class="qb-d">看谁还欠，点一下收清</view></view>
+      <view class="qbtn3 orange" bindtap="quickGo" data-t="expense"><view class="qb-t">－ 记一笔支出</view><view class="qb-d">当场花的钱</view></view>
     </view>
     <view class="form">
       <input class="inp qinp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
@@ -386,7 +386,7 @@
       <view class="{{chint && chint.level=='red' ? 'duesoon red' : 'tip'}}" wx:if="{{chint && chint.text}}">{{chint.text}}</view>
       <view class="tip" wx:if="{{chint && chint.processes.length}}">人工估算：{{chint.processes[0].process}} ¥{{chint.processes[0].amount}} 等 {{chint.processes.length}} 道工序，平均每张单 ¥{{chint.labor}}</view>
       <input class="inp" placeholder="材料·外协成本(可选，填了才算真实毛利)" type="digit" value="{{o_cost}}" bindinput="onOCost" bindblur="onOCostBlur"/>
-<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
+<view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="o_price" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="约定收款日(可选，如07-20)" value="{{o_due}}" bindinput="onODue"/>
       <view class="tip" wx:if="{{!o_due}}">{{term_default>0 ? '收款日留空：按账期自动算（默认 ' + term_default + ' 天）' : '收款日留空：这单就不会提醒你收钱，去「设置 → 单位」设个默认账期更省事'}}</view>
       <input class="inp" placeholder="约定交货日(可选，排产用)" value="{{o_deliver}}" bindinput="onODeliver"/>
@@ -714,7 +714,7 @@
       </view>
       <view class="tip" wx:if="{{p_tax_hint}}">{{p_tax_hint}}</view>
       <view class="aline warn" wx:if="{{sp_hint}}">🏷 {{sp_hint}}</view>
-<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
+<view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="p_amount" data-v="{{item}}">{{item}}</view></view>
       <view class="chips">
         <text class="chip-label">买的是什么：</text>
         <text class="chip {{p_category==item?'on':''}}" wx:for="{{ap_cats}}" wx:key="*this" bindtap="pickPCat" data-c="{{item}}">{{item}}</text>
@@ -913,7 +913,7 @@
         <text class="chip" bindtap="presetWage">发工资（按实发数）</text>
       </view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
-<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
+<view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
       <view class="dateRow">

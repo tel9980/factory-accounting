@@ -129,20 +129,21 @@ console.log('\n[3] 发工资允许分次补发')
 }
 
 // ── 4. 已结账的月份不再补摊销 ──
+// 必须用「过去」的月份：摊销只摊到「今天为止」，起始日排在未来的待摊根本不会跑
+// （以前这条写的是 2086-02，其实是未来月，`locked` 恒为 0，靠一个「或」断言蒙过去的）。
 console.log('\n[4] 已结账月份不再补摊销')
 {
-  const mm = '2086-02'
-  // 先把 2086-02 结掉（空月也能结，快照为 0）
+  const mm = '2024-03'
   const c1 = await call('POST', '/month-close', { month: mm, confirm: true })
-  eq('结账 2086-02 状态码', c1.status, 200)
-  const r = await call('POST', '/prepaids', { name: TAG + '房租', total: 1200, months: 12, category: '厂房租金', start_date: mm + '-01' })
+  eq('结账 ' + mm + ' 状态码', c1.status, 200)
+  const r = await call('POST', '/prepaids', { name: TAG + '房租', total: 1200, months: 2, category: '厂房租金', start_date: mm + '-01' })
   eq('建待摊状态码', r.status, 200)
   const amort = (r.d && r.d.amort) || {}
-  eq('已结账月份被跳过（locked 计数 > 0 或没往里写）', num0(amort.locked) > 0 || num0(amort.added) === 0, true)
+  eq('已结账月份被记成「锁住了」', num0(amort.locked) > 0, true)
   const led = await call('GET', '/ledger?month=' + mm)
   const rows = (led.d && (led.d.rows || led.d)) || []
   const amortIn = rows.filter((x) => x.ref_type === 'amort').length
-  eq('2086-02 里没有摊销流水', amortIn, 0)
+  eq(mm + ' 里没有摊销流水', amortIn, 0)
 }
 
 // ── 5. 回收站恢复保住核销金额 ──

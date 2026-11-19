@@ -202,6 +202,7 @@ Page({
     flows: null, flows_month: '', flows_kw: '', flows_dir: '', profile_edit: false, pf_party: '', pf_contact: '', pf_phone: '', pf_addr: '', pf_note: '', profiles: [],
     th: null, thTips: [], tw: null, tf: null,
     q_text: '',
+  q_busy: false,
     history_type: 'ar', history_ar_list: [], history_ap_list: [], st: null, st_month: '', st_kw: '',
     contact_type: 'ar', contacts_ar: [], contacts_ap: [],
     sug_ar: [], sug_ap: [], sug_ex: [], last_tip: '',
@@ -243,6 +244,19 @@ Page({
     head_title: '', head_note: '', head_phone: '', head_addr: '', head_bank: '', collect_min: '', dun_for: '', dun_log: null, dfx: null, dfx_text: '', dsum: null, dsum_text: '', dy: null, dy_year: '', st_log: null,
   },
   newCid() { return String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8) },
+  // 金额解析：把「8,000」「8000元」「1.2万」都认成数字；认不出来返回 null。
+  // 以前直接用 Number()：从微信聊天里复制「8,000」粘进来 → NaN → 后端归 0，
+  // 于是她填了金额却收到「客户和金额必填」，或者成本静默变 0、毛利显示 100%。
+  toAmount(v) {
+    const raw = String(v === null || v === undefined ? '' : v).trim()
+    if (!raw) return null
+    const s2 = raw.replace(/[,，\s]/g, '').replace(/元|块|人民币|¥/g, '')
+    const m = s2.match(/^(-?\d+(?:\.\d+)?)(万)?$/)
+    if (!m) return null
+    const n = Number(m[1]) * (m[2] ? 10000 : 1)
+    if (!Number.isFinite(n)) return null
+    return Math.round(n * 100) / 100
+  },
   enqueueOp(op) {
     const q = wx.getStorageSync('pending_ops') || []
     op.data = op.data || {}
@@ -252,7 +266,10 @@ Page({
     wx.setStorageSync('pending_ops', q)
     this.setData({ pending_count: q.length })
   },
-  // 联网后把存着的单子补发上去（success 里 4xx 视为服务端已明确拒绝，不再重试；网络失败就停，等下次）
+  // 联网后把存着的单子补发上去。
+  // 判成功的标准是 2xx。4xx（口令失效 401、已结账锁定 403、被规则驳回 400）说明服务端明确拒绝了，
+  // 这条**留在队列里**并把原因告诉用户——以前一律算「补上了」然后清空队列，那几笔就永远消失了，
+  // 界面还轻飘飘一句「补上了 2 笔」，她以为全补上了。
   flushPending(silent) {
     if (this._flushing) return
     const q = wx.getStorageSync('pending_ops') || []
@@ -260,31 +277,43 @@ Page({
     this._flushing = true
     const ak = wx.getStorageSync('ak') || ''
     const bk = String(wx.getStorageSync('book') || 1)
+    const keep = []
     let done = 0
-    const stop = () => {
+    const finish = () => {
       this._flushing = false
-      wx.setStorageSync('pending_ops', q.slice(done))
-      this.setData({ pending_count: q.length - done })
+      wx.setStorageSync('pending_ops', keep)
+      this.setData({ pending_count: keep.length })
+      const bad = keep.filter((x) => x && x._err)
+      if (done && !silent) wx.showToast({ title: '补上了 ' + done + ' 笔' + (bad.length ? '，' + bad.length + ' 笔没补上' : ''), icon: 'none' })
+      if (bad.length && !silent) {
+        wx.showModal({
+          title: '有 ' + bad.length + ' 笔没补上',
+          content: bad.slice(0, 5).map((x) => '· ' + (x.label || '记账') + '：' + x._err).join('\n') +
+            (bad.length > 5 ? '\n…共 ' + bad.length + ' 笔' : '') + '\n\n这些还留在「待补」里，改好再发一次。',
+          showCancel: false, confirmText: '知道了'
+        })
+      }
+      if (done) this.refresh()
     }
     const step = (i) => {
-      if (i >= q.length) {
-        this._flushing = false
-        wx.setStorageSync('pending_ops', [])
-        this.setData({ pending_count: 0 })
-        if (done) {
-          if (!silent) wx.showToast({ title: '补上了 ' + done + ' 笔', icon: 'none' })
-          this.refresh()
-        }
-        return
-      }
+      if (i >= q.length) return finish()
       const it = q[i]
       wx.request({
         url: it.url, method: it.method || 'POST', data: it.data,
         header: { 'X-Access-Key': ak, 'X-Book': bk },
         success: (res) => {
-          if (res.statusCode < 500) { done++; step(i + 1) } else stop()
+          if (res.statusCode >= 200 && res.statusCode < 300) { done++; step(i + 1); return }
+          if (res.statusCode >= 400 && res.statusCode < 500) {
+            const msg = (res.data && (res.data.error || res.data.msg)) || ('被拒绝（' + res.statusCode + '）')
+            keep.push(Object.assign({}, it, { _err: String(msg).slice(0, 90) }))
+            step(i + 1)
+            return
+          }
+          // 5xx：服务器那边的事，剩下的原样留着等下次；不能当成功
+          keep.push.apply(keep, q.slice(i))
+          finish()
         },
-        fail: () => stop()
+        fail: () => { keep.push.apply(keep, q.slice(i)); finish() }
       })
     }
     step(0)
@@ -294,7 +323,7 @@ Page({
     if (!q.length) return wx.showToast({ title: '没有待补的记录', icon: 'none' })
     wx.showModal({
       title: '还有 ' + q.length + ' 笔没发出去',
-      content: q.slice(0, 8).map((x) => '· ' + (x.label || '记账') + ' ' + ((x.data && (x.data.customer || x.data.supplier || x.data.remark || x.data.amount)) || '')).join('\n') + '\n\n现在重发吗？',
+      content: q.slice(0, 8).map((x) => '· ' + (x.label || '记账') + ' ' + ((x.data && (x.data.customer || x.data.supplier || x.data.remark || x.data.amount)) || '') + (x._err ? '（上次没补上：' + x._err + '）' : '')).join('\n') + '\n\n现在重发吗？',
       confirmText: '重发', cancelText: '等一下',
       success: (r) => { if (r.confirm) this.flushPending(false) }
     })
@@ -1902,40 +1931,57 @@ Page({
       }
     })
   },
+  // 追加分页：手机滑到底会连着触发好几次 onReachBottom（滑得快 3 次都有），
+  // 以前每次都发请求、每次都 offset=同一个数，回来三份一样的行 —— 列表里同一张单出现三遍，
+  // 点哪一行都不知道点的是哪一份。现在：一次只发一个请求，回来的按 id 去重。
+  _appendPage(cur, page, more) {
+    const base = more ? (cur || []) : []
+    const seen = new Set(base.map((x) => String(x.id)))
+    const add = []
+    for (const row of page || []) if (!seen.has(String(row.id))) { seen.add(String(row.id)); add.push(row) }
+    return base.concat(add)
+  },
+  _loading(key, on) { this._pagBusy = this._pagBusy || {}; this._pagBusy[key] = !!on },
   loadAr(more) {
+    if (more && this._pagBusy && this._pagBusy.ar) return
     const off = more ? this.data.ar_off : 0
     // 搜索词要下推给后端：以前只在前端筛「已经加载的那 60 条」，
     // 单子一多，老的单在后台有、页面上搜不到，还提示「没有」。
     const kwq = this.data.ar_kw ? '&kw=' + encodeURIComponent(this.data.ar_kw) : ''
     const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort + kwq
+    if (more) this._loading('ar', true)
     this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
       // 全量列表只留在页面实例上（this._arAll），不进 data：
       // data 里的东西每次 setData 都要序列化过桥发给视图层，而 wxml 从来没用过 ar_all。
-      const all = more ? (this._arAll || []).concat(page) : page
+      const all = this._appendPage(this._arAll, page, more)
       this._arAll = all
       this.setData({ ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw) })
-    } })
+    }, fail: () => this._loading('ar', false), complete: () => this._loading('ar', false) })
   },
   loadAp(more) {
+    if (more && this._pagBusy && this._pagBusy.ap) return
     const off = more ? this.data.ap_off : 0
     const kwq = this.data.ap_kw ? '&kw=' + encodeURIComponent(this.data.ap_kw) : ''
     const q = '&status=' + this.data.ap_filter + '&sort=' + this.data.ap_sort + (this.data.ap_cat ? '&cat=' + encodeURIComponent(this.data.ap_cat) : '') + kwq
+    if (more) this._loading('ap', true)
     this.req({ url: API_BASE + '/ap?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
       const page = res.data || []
-      const all = more ? (this._apAll || []).concat(page) : page
+      const all = this._appendPage(this._apAll, page, more)
       this._apAll = all
       this.setData({ ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw) })
-    } })
+    }, fail: () => this._loading('ap', false), complete: () => this._loading('ap', false) })
   },
   loadExpenses(more) {
+    if (more && this._pagBusy && this._pagBusy.ex) return
     const off = more ? this.data.ex_off : 0
+    if (more) this._loading('ex', true)
     this.req({ url: API_BASE + '/expenses?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
       const page = res.data || []
-      const all = more ? (this._expAll || []).concat(page) : page
+      const all = this._appendPage(this._expAll, page, more)
       this._expAll = all
       this.setData({ ex_off: all.length, ex_more: page.length >= this.PAGE, expense_list: this.filterEx(all, this.data.ex_kw) })
-    } })
+    }, fail: () => this._loading('ex', false), complete: () => this._loading('ex', false) })
   },
   // 上拉到底自动加载更多
   onReachBottom() {
@@ -2469,12 +2515,11 @@ Page({
     }
     wx.showToast({ title: '已填好，核对金额即可', icon: 'none' })
   },
-  // 常用面额一键填金额
+  // 常用面额：点一下 = 把金额设成这个数（以前是往上**加**：想从 8000 改成 2000，
+  // 点一下变 10000，直接记上去了）
   fillAmt(e) {
     const { f, v } = e.currentTarget.dataset
-    const cur = String(this.data[f] || '')
-    const nv = cur && Number(cur) ? String(Number(cur) + Number(v)) : String(v)
-    this.setData({ [f]: nv })
+    this.setData({ [f]: String(v) })
   },
   // 再来一单：把上次同样的客户/产品/单价带出来
   againOrder(e) {
@@ -2574,11 +2619,15 @@ Page({
   },
   addOrder() {
     const { o_customer, o_item, o_price, o_cost, o_due, o_deliver, o_operator, o_date } = this.data
-    if (!o_customer || !o_price) return wx.showToast({ title: '客户和金额必填', icon: 'none' })
+    if (!o_customer) return wx.showToast({ title: '客户必填', icon: 'none' })
+    const priceN = this.toAmount(o_price)
+    if (priceN === null || priceN <= 0) return wx.showToast({ title: '金额只能填数字（8000 或 8,000）', icon: 'none' })
+    const costN = String(o_cost === null || o_cost === undefined ? '' : o_cost).trim() === '' ? 0 : this.toAmount(o_cost)
+    if (costN === null) return wx.showToast({ title: '成本只能填数字，不填就留空', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
       queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }),
-      data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
+      data: { customer: o_customer, item_name: o_item, price: priceN, cost: costN, due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' })
@@ -2596,11 +2645,13 @@ Page({
   },
   addPayable() {
     const { p_supplier, p_amount, p_remark, p_operator, p_due, p_date, p_category } = this.data
-    if (!p_supplier || !p_amount) return wx.showToast({ title: '供应商和金额必填', icon: 'none' })
+    if (!p_supplier) return wx.showToast({ title: '供应商必填', icon: 'none' })
+    const pAmt = this.toAmount(p_amount)
+    if (pAmt === null || pAmt <= 0) return wx.showToast({ title: '金额只能填数字（8000 或 8,000）', icon: 'none' })
     this.req({
       url: API_BASE + '/payables', method: 'POST', once: 'add-payable', queue: '记应付',
       queued: () => this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }),
-      data: { supplier: p_supplier, amount: Number(p_amount), category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid(), tax_kind: this.data.p_tax_kind || '', tax_rate: Number(this.data.p_tax_rate || 0) }, dupRetry: true,
+      data: { supplier: p_supplier, amount: pAmt, category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid(), tax_kind: this.data.p_tax_kind || '', tax_rate: Number(this.data.p_tax_rate || 0) }, dupRetry: true,
       success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh({ lite: true }); this.loadSuggest(); this.showChecks(res) }
     })
   },
@@ -2616,11 +2667,12 @@ Page({
   },
   addExpense() {
     const { e_amount, e_remark, categories, e_category, e_operator, e_date } = this.data
-    if (!e_amount) return wx.showToast({ title: '金额必填', icon: 'none' })
+    const eAmt = this.toAmount(e_amount)
+    if (eAmt === null || eAmt <= 0) return wx.showToast({ title: '金额只能填数字（8000 或 8,000）', icon: 'none' })
     this.req({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true, once: 'add-expense', queue: '记支出',
       queued: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_date: '' }) },
-      data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date, client_id: this.newCid() },
+      data: { amount: eAmt, category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date, client_id: this.newCid() },
       success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh({ lite: true }); this.loadSuggest() }
     })
   },
@@ -2732,7 +2784,9 @@ Page({
       if (!(tax > 0)) return wx.showToast({ title: '先填这笔税金多少', icon: 'none' })
       amt = tax
     } else if (!(amt > 0)) {
-      amt = d.pay_remain
+      // 金额空着不再默默按「全额」记：她本来想改金额，清空后手一抖点确认，
+      // 就把这张单整笔收掉了。要说清楚。
+      return wx.showToast({ title: '填一下这次收付多少（整笔收清请点行上的「收清」）', icon: 'none' })
     }
     if (!(amt > 0)) return wx.showToast({ title: '金额不对', icon: 'none' })
     const body = {
@@ -2999,15 +3053,10 @@ Page({
   // 改应收单：一项一项改。
   // 以前是一个输入框里塞「客户,产品,金额,成本」，客户名里带逗号就错位，
   // 手一抖把 8000 改成别的，客户名就变成了数字、金额变成 0，还不提示。
-  editOrder(e) {
-    const id = e.currentTarget.dataset.id
-    const it = (this._arAll || []).find((x) => x.id === id) || {}
-    const fields = [
-      { k: 'customer', t: '客户', v: String(it.customer || ''), num: false },
-      { k: 'item_name', t: '产品', v: String(it.item_name || ''), num: false },
-      { k: 'price', t: '金额', v: String(it.price || 0), num: true },
-      { k: 'cost', t: '成本', v: String(it.cost || 0), num: true }
-    ]
+  // 改一张单：先选「改哪一项」，再单独填这一项。
+  // 以前是一个输入框塞「客户,产品,金额,成本」四个字段：客户名里带个逗号就全串位，
+  // 改金额顺手多打一个字，客户名就变成数字、金额变 0，还不报错。
+  _editFields(fields, url, extra) {
     wx.showActionSheet({
       itemList: fields.map((f) => `改${f.t}（现在 ${f.v || '空'}）`),
       success: (r) => {
@@ -3019,21 +3068,21 @@ Page({
           success: (m) => {
             if (!m.confirm) return
             const raw = String(m.content || '').trim()
-            const data = { rev: it.rev }
+            const data = Object.assign({}, extra || {})
             if (f.num) {
               const n = Number(raw.replace(/[,，\s元]/g, ''))
               if (!Number.isFinite(n) || n < 0) return wx.showToast({ title: f.t + '要填数字', icon: 'none' })
               data[f.k] = n
             } else {
-              if (!raw) return wx.showToast({ title: f.t + '不能空着', icon: 'none' })
+              if (!raw && !f.empty) return wx.showToast({ title: f.t + '不能空着', icon: 'none' })
               data[f.k] = raw
             }
             this.req({
-              url: API_BASE + '/orders/' + id, method: 'PATCH', data,
+              url, method: 'PATCH', data,
               success: (res) => {
                 const d = res.data || {}
                 if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
-                wx.showToast({ title: d.changed ? '改好了：' + d.changed : '没变动', icon: 'none' })
+                wx.showToast({ title: d.changed ? '改好了：' + d.changed : '改好了', icon: 'none' })
                 this.refresh({ lite: true })
               }
             })
@@ -3041,6 +3090,17 @@ Page({
         })
       }
     })
+  },
+  editOrder(e) {
+    const id = e.currentTarget.dataset.id
+    const it = (this._arAll || []).find((x) => x.id === id) || {}
+    const fields = [
+      { k: 'customer', t: '客户', v: String(it.customer || ''), num: false },
+      { k: 'item_name', t: '产品', v: String(it.item_name || ''), num: false },
+      { k: 'price', t: '金额', v: String(it.price || 0), num: true },
+      { k: 'cost', t: '成本', v: String(it.cost || 0), num: true }
+    ]
+    this._editFields(fields, API_BASE + '/orders/' + id, { rev: it.rev })
   },
   editProgress(e) {
     const id = e.currentTarget.dataset.id
@@ -3086,46 +3146,22 @@ Page({
   editPayable(e) {
     const id = e.currentTarget.dataset.id
     const it = (this._apAll || []).find((x) => x.id === id) || {}
-    wx.showModal({
-      title: '改应付单（供应商,金额,备注）', editable: true,
-      placeholderText: '金额不能低于已付 ' + (it.paid || 0) + ' 元',
-      content: [it.supplier, it.amount, it.remark || ''].join(','),
-      success: (r) => {
-        if (r.confirm && r.content) {
-          const p = r.content.split(/[,，]/).map((s) => s.trim())
-          this.req({
-            url: API_BASE + '/payables/' + id, method: 'PATCH',
-            data: { supplier: p[0], amount: Number(p[1]), remark: p[2] || '', rev: it.rev },
-            success: (res) => {
-              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
-              else this.refresh({ lite: true })
-            }
-          })
-        }
-      }
-    })
+    const fields = [
+      { k: 'supplier', t: '供应商', v: String(it.supplier || ''), num: false },
+      { k: 'amount', t: '金额', v: String(it.amount || 0), num: true },
+      { k: 'remark', t: '备注', v: String(it.remark || ''), num: false, empty: true }
+    ]
+    this._editFields(fields, API_BASE + '/payables/' + id, { rev: it.rev })
   },
   editExpense(e) {
     const id = e.currentTarget.dataset.id
     const it = (this._expAll || []).find((x) => x.id === id) || {}
-    wx.showModal({
-      title: '改支出', editable: true,
-      placeholderText: '金额,分类,备注',
-      content: [it.amount, it.category, it.remark || ''].join(','),
-      success: (r) => {
-        if (r.confirm && r.content) {
-          const p = r.content.split(/[,，]/).map((s) => s.trim())
-          this.req({
-            url: API_BASE + '/ledger/' + id, method: 'PATCH',
-            data: { amount: Number(p[0]), category: p[1] || '', remark: p[2] || '' },
-            success: (res) => {
-              if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
-              else this.refresh({ lite: true })
-            }
-          })
-        }
-      }
-    })
+    const fields = [
+      { k: 'amount', t: '金额', v: String(it.amount || 0), num: true },
+      { k: 'category', t: '分类', v: String(it.category || ''), num: false },
+      { k: 'remark', t: '备注', v: String(it.remark || ''), num: false, empty: true }
+    ]
+    this._editFields(fields, API_BASE + '/ledger/' + id)
   },
   finishOrder(e) {
     const id = e.currentTarget.dataset.id
@@ -5271,17 +5307,26 @@ Page({
   quick() {
     const t = this.data.q_text.trim()
     if (!t) return
+    // 一句话记账：以前点两下会记两笔（没有 client_id、也没有 loading 挡一下）
+    if (this.data.q_busy) return
+    this.setData({ q_busy: true })
+    wx.showLoading({ title: '记账中', mask: true })
     this.req({
       url: API_BASE + '/quick', method: 'POST',
-      data: { text: t },
+      data: { text: t, client_id: this.newCid() },
       success: (res) => {
-        if (res.data && res.data.error) {
-          wx.showToast({ title: res.data.error, icon: 'none' })
+        const d = res.data || {}
+        if (d.error) {
+          wx.showToast({ title: d.error, icon: 'none' })
         } else {
-          wx.showToast({ title: '已记：' + res.data.summary, icon: 'none' })
+          wx.showToast({ title: d.dup_ok ? '这笔刚记过了' : '已记：' + d.summary, icon: 'none' })
           this.setData({ q_text: '' })
-          this.refresh()
+          this.refresh({ lite: true })
         }
+      },
+      complete: () => {
+        wx.hideLoading()
+        this.setData({ q_busy: false })
       }
     })
   },

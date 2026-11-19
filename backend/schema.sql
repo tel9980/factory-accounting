@@ -109,7 +109,19 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS backups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
+  -- 真实字符数。内容超过 90 万字符（D1 单行上限 2MB 的一半）就切成多片存 backup_parts，
+  -- content 留空、长度记在这里，读的时候按 seq 拼回去（对外还是同一份 JSON）。
+  size INTEGER DEFAULT 0,
   created_at TEXT NOT NULL
+);
+
+-- 备份分片：整库备份到几千单就超过 D1 单行上限，超了 INSERT 直接被拒 →
+-- 表现是「每天备份静默失败、列表里只剩很久以前那份」，而本机 SQLite 没这个限制、测不出来。
+CREATE TABLE IF NOT EXISTS backup_parts (
+  bid INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (bid, seq)
 );
 
 -- 固定支出（每月自动记一笔：工资、房租等）
