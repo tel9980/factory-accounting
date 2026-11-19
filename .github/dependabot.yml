@@ -1,0 +1,24 @@
+version: 2
+# 依赖全写的是 ^（hono ^4.6.14、wrangler ^3.99.0），实际装到什么版本取决于当时的最新版。
+# 以前没人看这件事：线上跑的是 4.13.18 / 3.114.17，和 package.json 写的差了一个大版本。
+# 每周开一个 PR 告诉我们有新版本，人再决定要不要升（不自动合）。
+updates:
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"
+    # wrangler 大版本会改 CLI 参数（比如 d1 的 read_replication、--var 语法），
+    # 单独放一个 PR 方便单独回滚
+    groups:
+      workers-tooling:
+        patterns:
+          - wrangler
+          - "@cloudflare/*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

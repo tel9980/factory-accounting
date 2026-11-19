@@ -76,8 +76,8 @@ docs/               需求文档
 
 ## 快速开始
 
-1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 55 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
-   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 609 条 SQL 在这种新库上跑不跑得通、前端的 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
+1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 56 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
+   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 625 条 SQL 在这种新库上跑不跑得通、前端的 255 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
 2. **前端**：微信开发者工具导入 `frontend` 目录，把 `frontend/pages/index/index.js` 顶部 `API_BASE` 改成你的 Worker 地址。
 3. **上线**：微信公众平台把该域名加进 `request` 合法域名；本地调试勾选「不校验合法域名」。
 
@@ -1293,11 +1293,28 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
    - **验证**：`check.mjs` 全绿（406 路由 / 56 表 / 622 SQL / 255 调用 / 752 绑定）；`test-batch`、`test-key-queue`、`test-firstscreen` 三个前端测试全绿；新库按 CI 顺序全跑：`smoke` 227 GET 无 5xx → `test-modules` 19 项 → `smoke-write` 45 步 + 90 写路由 + 自检 10 类全 0 → `test-crossmonth` 16 项 → `test-apcat` 31 项 → `test-import-xlsx` 32 项 → `test-onboarding` 19 项，全绿。
    - ⚠️ 动了前端（`onShow`/`refresh` 调度）→ **小程序要重新上传发布**。
 
+294. ✅ **把「接口返回 200、账却错了」这一类清掉**：用户问「本项目还有哪些优化空间」，我派了三路只读审计（后端 / 前端 / 工程化）再逐条回代码核对行号，按「会不会算错钱、丢数据」排序，然后全部修掉。
+   - **员工 4 位口令能清库**（最严重）：`denyStaff` 只挡了 `/backup`、`/restore` 这些**精确路径**，`/import-all`（一句 `{mode:'replace',confirm:'覆盖'}` 就逐表 `DELETE FROM`）、`/export-all`、`/backup-restore`、`/db-clean`、`/month-pack-run` 全放行。现在一律 403 `staff_denied`。
+   - **收款 / 付款 / 核销不再能把单据冲过头**：以前 `UPDATE orders SET paid=paid+?` 是无条件加，两次请求同时到（或批量 + 单笔撞一起）就会 `paid` 超过 `price`；而列表用的是 `WHERE paid+written_off < price`，超了那张单直接从「没结清」里消失——界面看着正常，钱对不上。现在写成 `UPDATE … WHERE id=? AND paid + COALESCE(written_off,0) + ? <= price + 0.005 RETURNING paid`，条件不成立就 409 `stale`「这张单的金额刚被改过，刷新再看一眼」。四个地方都改了（应收收款、应付付款、应收核销、应付核销）。
+   - **整户批量收付变成一笔事务**：`/receive-batch`、`/pay-batch` 原来在 `for` 循环里逐张 `await db.batch(...)`，中途失败就是「一半记了一半没记」；现在所有语句攒进**一个** `db.batch`（D1 的 batch 是事务），要么全成要么全不成。顺手补了三件：查月结锁（`payLockMonth`）、多出来的钱记成预收/预付（以前只 `return { rest }` 就没了）、`client_id` 去重标记也进同一个事务。
+   - **备份读不出来就报失败，不再假装成功**：`buildBackup` 某张表查询失败时原来写 `out[t] = []`，而 `restoreCore` 拿到 `[]` 会先 `DELETE FROM t` 再插 0 行——**一次失败的备份，恢复时把那整张表清空**。现在失败直接抛错、`/backup` 与 `/cloud-backup` 回 500，且备份文件里带 `failed` 名单；`restoreCore` 见到 `failed` 直接拒绝恢复并说明原因。
+   - **工资可以分次补发**：`UNIQUE(month, worker)` 把「先发 2000、月底再补 3000」整条挡掉（`INSERT OR IGNORE` 后 `changes=0` 被当成失败）。改成写前按「已发金额 + 本次 ≤ 实发」做条件插入，防重复靠 `client_id`。老库的这条唯一索引由代码自动 `DROP`。
+   - **摊销 / 折旧 / 预提不再往已结账月份插成本**：这三样原来不看月结锁，补跑一次就往已归档的月份塞一笔流水，报表读的是 `month_archive`、明细读的是 `ledger`，两边永久差一笔。现在都查 `isMonthLocked`，跳过时返回 `locked` 计数。
+   - **回收站恢复整行还原**：以前手写列清单，删一张已核销的单再恢复，`written_off` 就丢了（坏账变回欠款）；流水恢复不写 `cash`/`account_id`，非现金流水会变成现金支出。现在按 `PRAGMA table_info` 拿全部列、`INSERT OR REPLACE` 整行写回。
+   - **收据「期末欠」减核销**：`/receipt-text` 原来 `left = price - paid`，已核销的单会印「期末欠 3000」。现在减掉 `written_off`，并单独一行「已核销：300 元（不算收款，是这笔不用再收了）」。
+   - **首页笔数用真实 `COUNT(*)`**：以前直接拿 `LIMIT 5/8` 的列表长度当笔数，逾期 20 单首页也只写「5 单」。现在三条独立 `COUNT(*)`（逾期 / 7 天内到期应收 / 应付），明细列表仍然只给 5/8 条。
+   - **押金待摊存不进去**：前端点「押金」把月数设成 0，校验却要求 `>= 1`，直接弹「摊几个月要填」；后端和 placeholder 都写着「0 = 押金不摊」。校验改成 `>= 0`。
+   - **撤销核销受月结锁保护**：撤一张老单的核销同样会改动老月份的核销合计（核销不写流水，月报是实时从 `writeoffs` 算的），所以核销记录自己的月份和被核销单据的月份**两个都要查**。
+   - **前端 11 处**：「💰 收钱」原来和「＋ 记一笔应收」是同一个动作（最坏把收到的钱记成新欠条），改成 `goCollect()` 直接跳到「没结清的应收」并提示合计；记完应收清空交货日；「交付」按钮加确认和提示；6 个删除加二次确认；支出页重复的快捷金额条删掉一行；说明文字 22rpx/#999 → 24rpx/#777；非 GET 请求自动带 `client_id`（30 秒内同一动作重发只记一次）。
+   - **工程化**：新增 `/version`（免口令，返回 `version`/`built`/`cf-ray`）与 `POST /run-cron`（老板手动跑一遍固定支出/摊销/预提/折旧 + 自检）；`smoke.mjs` 加 6 条**形状断言**（不再只看状态码）；新增 `scripts/test-safety.mjs`（39 项，专测「接口 200 但账错了」这一类的守卫）；CI 加 `npm audit` 与 `dependabot`；`DEPLOYMENT.md` 补 `wrangler rollback`、`wrangler d1 time-travel restore`（30 天时间点恢复）和部署后打 `/version` 验证的步骤。
+   - **验证**：`check.mjs` 全绿（**407** 条 `app.*` 路由 + 1 条走中间件的 `/version` / 56 表 / **625** SQL / 255 调用 / **753** 绑定）；新库按 CI 顺序全跑：`smoke` 227 GET 无 5xx → `test-modules` 19 项 → `smoke-write` 45 步 + **92** 写路由 + `/run-cron` + 自检 10 类全 0 → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` **39**，再加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
+   - ⚠️ 动了前端（收钱按钮、交付确认、删除确认、`client_id`）→ **小程序要重新上传发布**。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 406 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 407 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1681,7 +1698,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（210）
+**其它（单个接口）**（211）
 
 - `GET /`
 - `GET /access-guide`
@@ -1847,6 +1864,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 - `GET /risk-list`
 - `POST /run-accrual`
 - `POST /run-amort`
+- `POST /run-cron`
 - `POST /run-fixed`
 - `GET /schema-check`
 - `GET /search`

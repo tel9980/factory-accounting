@@ -55,7 +55,7 @@
   <block wx:if="{{tab=='home'}}">
     <view class="qgrid">
       <view class="qbtn blue" bindtap="quickGo" data-t="ar"><view class="qb-t">＋ 记一笔应收</view><view class="qb-d">客户又给活了</view></view>
-      <view class="qbtn green" bindtap="quickGo" data-t="ar"><view class="qb-t">💰 收钱</view><view class="qb-d">在应收那行点收款</view></view>
+      <view class="qbtn green" bindtap="goCollect"><view class="qb-t">💰 收钱</view><view class="qb-d">看谁还欠，点一下收清</view></view>
       <view class="qbtn orange" bindtap="quickGo" data-t="expense"><view class="qb-t">－ 记一笔支出</view><view class="qb-d">当场花的钱</view></view>
     </view>
     <view class="form">
@@ -668,7 +668,7 @@
           <button size="mini" bindtap="openReceipt" data-id="{{item.id}}" data-type="ar">收据</button>
           <button size="mini" bindtap="editDue" data-id="{{item.id}}" data-type="ar" data-due="{{item.due_short}}">改期</button>
           <button size="mini" bindtap="payOrder" data-id="{{item.id}}">收款</button>
-          <button size="mini" bindtap="finishOrder" data-id="{{item.id}}">交付</button>
+          <button size="mini" bindtap="finishOrder" data-id="{{item.id}}" data-who="{{item.customer}}">交付</button>
           <button size="mini" bindtap="editProgress" data-id="{{item.id}}">进度</button>
           <button size="mini" bindtap="applyAdvanceOrder" data-id="{{item.id}}">预收抵</button>
           <button size="mini" bindtap="writeoffOrder" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}">核销</button>
@@ -895,7 +895,6 @@
         <text class="chip" bindtap="presetWage">发工资（按实发数）</text>
       </view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{e_amount}}" bindinput="onEAmount"/>
-<view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
 <view class="amts"><view class="amt" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="e_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{e_remark}}" bindinput="onERemark"/>
       <input class="inp" placeholder="经手人(可选)" value="{{e_operator}}" bindinput="onEOperator"/>
@@ -3346,11 +3345,11 @@
       <view class="tip">支出 / 收入分类（可自己加，报表和预算按分类统计）</view>
       <view class="chips">
         <text class="chip-label">支出类：</text>
-        <text class="chip" wx:for="{{cats_out}}" wx:key="id" bindtap="delCategory" data-id="{{item.id}}">{{item.name}} ✕</text>
+        <text class="chip" wx:for="{{cats_out}}" wx:key="id" bindtap="delCategory" data-id="{{item.id}}" data-n="{{item.name}}">{{item.name}} ✕</text>
       </view>
       <view class="chips">
         <text class="chip-label">收入类：</text>
-        <text class="chip" wx:for="{{cats_in}}" wx:key="id" bindtap="delCategory" data-id="{{item.id}}">{{item.name}} ✕</text>
+        <text class="chip" wx:for="{{cats_in}}" wx:key="id" bindtap="delCategory" data-id="{{item.id}}" data-n="{{item.name}}">{{item.name}} ✕</text>
       </view>
       <picker range="{{['支出类', '收入类']}}" bindchange="onNewCatType"><view class="picker">加到：{{new_cat_type ? '收入类' : '支出类'}} ▾</view></picker>
       <input class="inp" placeholder="新分类名，如 包装 / 快递" value="{{new_cat_name}}" bindinput="onNewCatName"/>

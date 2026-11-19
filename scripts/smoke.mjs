@@ -71,6 +71,30 @@ const worker = async () => {
 }
 await Promise.all(Array.from({ length: Math.max(1, CONCURRENCY) }, worker))
 
+// 只看状态码不够：字段改名、返回空数组，CI 照样绿（历史上有过「界面空白但 CI 全绿」）。
+// 这里对几个最关键的接口做「形状」断言。
+const contractFails = []
+const shape = async (path, fn) => {
+  const r = await hit(path, { headers: { 'x-access-key': KEY } })
+  let d = null
+  try { d = JSON.parse(r.text) } catch (e) { d = null }
+  if (r.status !== 200 || d === null) return contractFails.push(`${path} → ${r.status}`)
+  const why = fn(d)
+  if (why) contractFails.push(`${path} → ${why}`)
+}
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
+await shape('/version', (d) => (d.ok === true ? '' : 'ok 不是 true'))
+await shape('/dashboard', (d) => (isNum(d.ar_total) && isNum(d.ap_total) && isNum(d.month_income) ? '' : 'ar_total/ap_total/month_income 不是数字'))
+await shape('/ar', (d) => (Array.isArray(d) ? '' : '返回的不是数组'))
+await shape('/ap', (d) => (Array.isArray(d) ? '' : '返回的不是数组'))
+await shape('/selfcheck', (d) => (d && typeof d.bad === 'number' ? '' : '没有 bad 计数'))
+await shape('/accounts', (d) => (Array.isArray(d) || (d && Array.isArray(d.accounts)) ? '' : '返回的不是数组'))
+if (contractFails.length) {
+  console.log(`❌ 接口形状变了 ${contractFails.length} 处：`)
+  for (const f of contractFails) console.log(`   · ${f}`)
+  bad.push([200, 'contract', contractFails.join('；')])
+}
+
 if (!bad.length) {
   console.log(`✅ 冒烟通过：${paths.length} 个 GET 接口没有一个 5xx`)
   process.exit(0)

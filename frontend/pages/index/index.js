@@ -292,6 +292,15 @@ Page({
     // 兜底补域名：以前有 6 处写成 url: '/xxx'（少了 API_BASE +），wx.request 直接报「url 不合法」，
     // 对应功能（账户对账、使用向导、客户卡片、月对账单、对账单据、今天收工）在真机上一次都没成功过。
     if (opts && opts.url && !/^https?:\/\//.test(opts.url)) opts.url = API_BASE + opts.url
+    // 写接口统一带一个 client_id：后端按它去重，网络超时重试也不会记两笔。
+    // 同一个动作（once 名字相同）共用一个 id，所以「点两下」和「超时重发」都只算一次。
+    if (opts.once && (opts.method || 'GET').toUpperCase() !== 'GET') {
+      this._cid = this._cid || {}
+      if (!this._cid[opts.once]) this._cid[opts.once] = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+      opts.data = Object.assign({ client_id: this._cid[opts.once] }, opts.data || {})
+      const done0 = () => { if (this._cid) delete this._cid[opts.once] }
+      setTimeout(done0, 30000)
+    }
     // 连点保护：同一个动作（once 名字相同）没回来之前，重复点击直接忽略
     if (opts.once) {
       this._once = this._once || {}
@@ -1598,7 +1607,13 @@ Page({
   },
   delCategory(e) {
     const id = e.currentTarget.dataset.id
-    this.req({ url: API_BASE + '/categories/' + id, method: 'DELETE', success: () => this.loadCategories() })
+    const nm = (e.currentTarget.dataset.n || '').trim()
+    // 分类是一排 chip，手指一碰就删，以前没有任何确认
+    wx.showModal({
+      title: '删除分类',
+      content: (nm ? '「' + nm + '」' : '这个分类') + '删掉后，已经用它记过的账不受影响，但以后不能再选。确定删吗？',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/categories/' + id, method: 'DELETE', success: () => this.loadCategories() }) }
+    })
   },
   loadDashboard() {
     this.req({
@@ -2215,6 +2230,21 @@ Page({
     const t = e.currentTarget.dataset.t
     if (t) this.setTab({ currentTarget: { dataset: { t } } })
   },
+  // 「💰 收钱」以前和「＋ 记一笔应收」是同一个动作，点下去直接落到「记应收」表单，
+  // 最坏会把已经收到的钱记成一张新欠条。现在它只负责跳到「未结清」列表并提示怎么收。
+  goCollect() {
+    const all = this._arAll || []
+    const open = all.filter((x) => !x.settled)
+    this.setData({ tab: 'ar', group: 'bill', ar_filter: 'open' })
+    wx.pageScrollTo({ scrollTop: 0, duration: 0 })
+    this.enterTab('ar')
+    const sum = open.reduce((a, x) => a + (Number(x.unpaid) || 0), 0)
+    wx.showToast({
+      title: open.length ? `共 ${open.length} 张没结清，合计 ¥${Math.round(sum * 100) / 100}；点「整户收款」一次收清` : '现在没有未结清的单',
+      icon: 'none',
+      duration: 2600
+    })
+  },
   onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
   blurOCustomer() {
@@ -2353,7 +2383,8 @@ Page({
       queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }),
       data: { customer: o_customer, item_name: o_item, price: Number(o_price), cost: Number(o_cost || 0), due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid() },
       success: (res) => {
-        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_date: '', last_tip: '' })
+        // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
+        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' })
         this.refresh(); this.loadSuggest()
         this.showChecks(res)
         const w = res.data && res.data.warn
@@ -2808,10 +2839,27 @@ Page({
   },
   finishOrder(e) {
     const id = e.currentTarget.dataset.id
-    this.req({
-      url: API_BASE + '/orders/' + id + '/status', method: 'POST',
-      data: { status: 2 },
-      success: () => this.refresh()
+    const ds = e.currentTarget.dataset || {}
+    const who = ds.who || ''
+    // 以前点一下就改状态、没有任何反馈：一行挤了十几个小按钮，点偏了也不知道点上没有
+    wx.showModal({
+      title: '标记为已交付',
+      content: (who ? who + ' 这单' : '这单') + '的货已经交给客户了？标记后会计入「已交付」，不影响收款。',
+      confirmText: '已交付',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/orders/' + id + '/status', method: 'POST', once: 'finish-' + id,
+          data: { status: 2 },
+          success: (res) => {
+            const d = (res && res.data) || {}
+            if (d && d.ok === false) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
+            wx.showToast({ title: '已标记交付', icon: 'success' })
+            this.refresh()
+          },
+          fail: () => wx.showToast({ title: '网络不好，没提交成功', icon: 'none' })
+        })
+      }
     })
   },
   delOrder(e) {
@@ -3653,7 +3701,11 @@ Page({
   delImportLog(e) {
     const r = ((this.data.import_log || {}).rows || [])[e.currentTarget.dataset.i]
     if (!r) return
-    this.req({ url: API_BASE + '/import-log/' + r.id, method: 'DELETE', success: () => this.loadImportLog() })
+    wx.showModal({
+      title: '删除这条导入记录',
+      content: '只删「导入批次」这条记录，已经导进去的账不动。想撤账请用「撤销这次导入」。确定删吗？',
+      success: (x) => { if (x.confirm) this.req({ url: API_BASE + '/import-log/' + r.id, method: 'DELETE', success: () => this.loadImportLog() }) }
+    })
   },
   // 把「还没处理的差异」复制成一段话，直接发微信给对方
   copyDiffText() {
@@ -5728,7 +5780,8 @@ Page({
   addPrepaid() {
     const d = this.data
     if (!(Number(d.pp_total) > 0)) return wx.showToast({ title: '总金额要大于 0', icon: 'none' })
-    if (!(Number(d.pp_months) >= 1)) return wx.showToast({ title: '摊几个月要填', icon: 'none' })
+    // 月数 0 = 押金这类不摊的（钱付了但不算成本，退租时收回），所以只拦负数
+    if (!(Number(d.pp_months) >= 0) || d.pp_months === '') return wx.showToast({ title: '摊几个月要填（押金填 0）', icon: 'none' })
     this.req({
       url: API_BASE + '/prepaids', method: 'POST',
       data: { name: d.pp_name || d.pp_cat, total: Number(d.pp_total), months: Number(d.pp_months), category: d.pp_cat || '厂房租金', start_date: d.pp_start || '' },
@@ -6500,7 +6553,10 @@ Page({
   },
   delPhrase(e) {
     const id = e.currentTarget.dataset.id
-    this.req({ url: API_BASE + '/phrases/' + id, method: 'DELETE', success: () => this.loadPhrases() })
+    wx.showModal({
+      title: '删除常用短语', content: '删掉这条常用短语？',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/phrases/' + id, method: 'DELETE', success: () => this.loadPhrases() }) }
+    })
   },
   // ── 支出预算 ──
   loadBudgets() {
@@ -6520,7 +6576,10 @@ Page({
   },
   delBudget(e) {
     const id = e.currentTarget.dataset.id
-    this.req({ url: API_BASE + '/budgets/' + id, method: 'DELETE', success: () => { this.loadBudgets(); this.loadDashboard() } })
+    wx.showModal({
+      title: '删除预算', content: '删掉这个分类的月度预算额度？',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/budgets/' + id, method: 'DELETE', success: () => { this.loadBudgets(); this.loadDashboard() } }) }
+    })
   },
   loadMonthLocks() {
     this.req({ url: API_BASE + '/month-locks', success: (res) => this.setData({ month_locks: res.data || [] }) })
@@ -7549,7 +7608,11 @@ Page({
     } })
   },
   delWageRate(e) {
-    this.req({ url: API_BASE + '/wage-rates/' + e.currentTarget.dataset.id, method: 'DELETE', success: () => this.loadWageRates() })
+    const id = e.currentTarget.dataset.id
+    wx.showModal({
+      title: '删除计件单价', content: '删掉这条单价？已经记过的工不受影响。',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/wage-rates/' + id, method: 'DELETE', success: () => this.loadWageRates() }) }
+    })
   },
   copySupplyBook() {
     const d = this.data.spb
@@ -7791,7 +7854,10 @@ Page({
   },
   delBankFlow(e) {
     const id = e.currentTarget.dataset.id
-    this.req({ url: API_BASE + '/bank-flows/' + id, method: 'DELETE', success: () => this.loadBankFlows() })
+    wx.showModal({
+      title: '删除这条银行流水', content: '只是从「待匹配」里去掉，不会动已经记好的账。确定删吗？',
+      success: (r) => { if (r.confirm) this.req({ url: API_BASE + '/bank-flows/' + id, method: 'DELETE', success: () => this.loadBankFlows() }) }
+    })
   },
   matchBankOrder(e) {
     const id = e.currentTarget.dataset.id

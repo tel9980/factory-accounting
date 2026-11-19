@@ -711,8 +711,8 @@ CREATE INDEX IF NOT EXISTS idx_ledger_year ON ledger(substr(created_at,1,4));
 CREATE INDEX IF NOT EXISTS idx_payables_day ON payables(substr(created_at,1,10));
 CREATE INDEX IF NOT EXISTS idx_payables_due_day ON payables(substr(due_date,1,10));
 
--- 发工资幂等：同一个人同一个月只能发一次（/payroll/pay 运行时也建，新装库这里直接带）。
-CREATE UNIQUE INDEX IF NOT EXISTS idx_wage_pay_once ON wage_pays(month, worker);
+-- 发工资：一个人一个月可以分多次发（先发一部分、月底补），所以这里故意不加唯一索引。
+-- 防重复靠 client_id 去重 + 写前按已发金额做条件插入（见 /payroll/pay）。
 
 -- 口令试错计数（按 IP）：15 分钟内错 10 次锁 15 分钟，防止 4 位口令被爆破
 CREATE TABLE IF NOT EXISTS auth_fails (

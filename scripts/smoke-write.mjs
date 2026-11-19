@@ -356,6 +356,18 @@ async function consistency() {
   }
 }
 
+// ── 定时任务：把「每天 0 点那条 cron」手动跑一遍 ──
+// 以前 scheduled() 在 CI 里一次都没跑过（备份没生成、摊销没入账都只能等真出事才发现）。
+async function runCron() {
+  console.log('\n[定时任务：自动记账 + 自检]')
+  const res = await call('POST', '/run-cron', {})
+  if (res.status !== 200 || !res.data) return no('手动跑定时任务', `→ ${res.status} ${brief(res.data)}`)
+  const d = res.data
+  const errs = Object.keys(d).filter((k) => k.endsWith('_err'))
+  if (errs.length) return no('手动跑定时任务', errs.map((k) => `${k}: ${d[k]}`).join('；'))
+  ok(`自动记账（固定支出/摊销/预提/折旧）跑通，自检 ${d.selfcheck ? d.selfcheck.bad : 0} 处问题`)
+}
+
 // ── 跑 ───────────────────────────────────────────────────────
 if (!(await waitReady())) {
   console.log(`❌ 服务器没起来：${BASE}`)
@@ -368,6 +380,7 @@ await step('打开全部模块（冒烟要跑全部接口）', 'POST', '/modules
 try {
   await mainFlow()
   await sweep()
+  await runCron()
   await consistency()
 } catch (e) {
   no('脚本自身', String((e && e.stack) || e))

@@ -12,7 +12,7 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 609 条 SQL 在新库上跑不跑得通、
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 625 条 SQL 在新库上跑不跑得通、
 前端 251 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
@@ -44,7 +44,7 @@ npx wrangler d1 execute factory-db2 --remote --file=schema.sql   # 建了 DB2 �
 npx wrangler d1 execute factory-db3 --remote --file=schema.sql   # 建了 DB3 才要
 ```
 
-**一个 `schema.sql` 就够**：它会建出全部 55 张表、索引和 `month` 列的触发器，
+**一个 `schema.sql` 就够**：它会建出全部 56 张表、索引和 `month` 列的触发器，
 不用再手工 ALTER、也不用单独跑别的脚本。重复执行是安全的（都是 `IF NOT EXISTS`）。
 
 > 历史坑：2026-11 之前 `schema.sql` 是「线上库更新、文件没跟上」的状态，
@@ -67,7 +67,20 @@ crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1", "0 2 1 * *"]
 
 ```bash
 cd backend
-npx wrangler deploy
+# 带上版本号，部署完 /version 就能看到线上到底跑的是哪一版
+npx wrangler deploy --var APP_VERSION:"$(date +%Y%m%d-%H%M)" --var APP_BUILT:"$(date -u +%FT%TZ)"
+curl -s https://jz.qy663.de5.net/version   # {"ok":true,"version":"20261119-0812",...}
+```
+
+部署完**一定要打一下 `/version`**：以前只能靠猜线上更新没有（CI 绿勾不等于线上更新，
+见下面 1.4 末尾的说明）。
+
+**回滚**（改坏了、要退回上一版）：
+
+```bash
+cd backend
+npx wrangler deployments list          # 看最近几次部署
+npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 ```
 
 推 `main` 分支也会自动部署（GitHub Actions），但**只有自检 + 全接口冒烟都通过才会部署**。
@@ -85,7 +98,7 @@ npx wrangler deploy
 `wrangler deploy` 上去的，不是 CI 推的——看到绿勾不等于线上更新了，去看 warning。
 
 > 早期文档写的是「把 index.js 粘进 Cloudflare 编辑器」，那是 2025 年的做法，
-> 现在只有一个 1.5 万行的单文件，别再粘贴了——用 `wrangler deploy`。
+> 现在只有一个 1.6 万行的单文件，别再粘贴了——用 `wrangler deploy`。
 
 ### 1.5 设口令（第一次进去要设）
 
@@ -151,12 +164,32 @@ npx wrangler deploy
 ## 3. 备份与恢复（别等出事才看）
 
 - **备份在哪**：`backups` 表，每天 cron 自动存一份，保留最近 30 份；`GET /backup` 可当场导出一份 JSON。
-- **备份了什么**：45 张表（账目、客户、材料、工钱、外协、返工、待摊、银行流水…），标 `version: 3`。
+- **备份了什么**：46 张表（账目、客户、材料、工钱、外协、返工、待摊、银行流水…），标 `version: 3`。
 - **什么不进备份、为什么**：图片（`attachments`）、月报 xlsx（`month_report`）、员工 PIN（`staff_users`）、
   审计流水（`audit_log`）、报错与慢接口日志、备份自己（`backups`）、去重标记（`op_dedupe`）、
   小程序试用额度（`wx_users`）。`GET /backup-verify` 会把这张清单**原样列给用户看**。
 - **恢复**：`POST /backup-restore` + `{id}`，会先要一次 `confirm:1` 确认，恢复前自动再存一份快照。
 - **D1 单行上限 2MB**：备份超过 1.5MB 时 `/backup-verify` 会提醒，建议按月导出留档。
+- **备份读不出来就报失败**：某张表读失败时 `/backup` 会直接返回 500 并说清是哪几张表，
+  **不会再生成一份「少了半本账却说成功」的文件**；带 `failed` 标记的旧备份也会被拒绝恢复
+  （否则恢复会先 `DELETE` 再插 0 行，把那张表清空）。
+- **恢复的最后一招：D1 时间点恢复（Time Travel，保留 30 天）**。库被误清空、误覆盖、
+  或者备份本身就有问题的时候用这个，它不依赖我们自己的备份文件：
+
+  ```bash
+  cd backend
+  # 1) 看这个时间点之前库里有多少数据（先确认再恢复，别一把梭）
+  npx wrangler d1 time-travel info factory-db --timestamp "2026-11-18T00:00:00Z"
+  # 2) 记下现在的 bookmark，万一恢复错了还能退回来
+  npx wrangler d1 time-travel info factory-db
+  # 3) 恢复到某个时间点
+  npx wrangler d1 time-travel restore factory-db --timestamp "2026-11-18T00:00:00Z"
+  # 4) 恢复错了？用上一步记下的 bookmark 退回来
+  npx wrangler d1 time-travel restore factory-db --bookmark "<上一步的 bookmark>"
+  ```
+
+  三个账套要分别对 `factory-db` / `factory-db2` / `factory-db3` 各做一次。
+  时间点用 UTC（北京时间减 8 小时）。
 
 ---
 

@@ -60,6 +60,9 @@ jobs:
       - name: 安装依赖
         run: npm ci
         working-directory: backend
+      - name: 依赖体检（有已知漏洞只提示，不拦部署）
+        run: npm audit --audit-level=high || true
+        working-directory: backend
       - name: 用 schema.sql 灌一个本地库（顺便验证新装能用）
         run: npx wrangler d1 execute factory-db --local --file=schema.sql
         working-directory: backend
@@ -105,6 +108,11 @@ jobs:
       # 最容易坏的就是「一次提交」本身：漏写一块、重复点翻倍、余额被累加而不是设成实际数。
       - name: 开账向导回归（四块一次填完 / 重复点不翻倍）
         run: node scripts/test-onboarding.mjs --base http://127.0.0.1:8791 --key 8888
+      # 这些 bug 的共同点是「接口 200、账却错了」：员工口令能清库、整户收款多出来的钱丢了、
+      # 发工资补发被挡、已结账月份还补摊销、回收站恢复丢核销金额、收据期末欠不减核销、
+      # 首页逾期笔数被 LIMIT 截断、撤销核销绕过月结锁。只能真打接口才看得见。
+      - name: 钱不能算错回归（守卫 / 预收 / 补发工资 / 月结锁 / 回收站 / 收据）
+        run: node scripts/test-safety.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log
