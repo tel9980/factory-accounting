@@ -82,6 +82,7 @@ server/             本机版入口（免安装 exe / Docker 镜像用）
   main.mjs          HTTP 服务 + 落地页（把 Worker 那份 index.js 原样挂上去）
   d1.mjs            D1 兼容层（把 Cloudflare 的 D1 换成本机 SQLite）
 Dockerfile          本机版镜像
+docker-compose.yml  自托管一键部署（docker compose up -d）
 docs/               文档
   新手教程.md        给小白看的日常使用手册（打印/贴墙都行）
 ```
