@@ -34,7 +34,9 @@ const SCHEMA = path.join(ROOT, 'backend/schema.sql')
 const FUSE = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2'
 const plat = process.platform
 const arch = process.arch
-const exeName = `factory-accounting-${plat}-${arch}` + (plat === 'win32' ? '.exe' : '')
+// 文件名用大家看得懂的名字（process.platform 是 win32/darwin，别直接往文件名上贴）
+const platName = plat === 'win32' ? 'windows' : plat === 'darwin' ? 'macos' : plat
+const exeName = `factory-accounting-${platName}-${arch}` + (plat === 'win32' ? '.exe' : '')
 const target = path.join(OUT, exeName)
 // 直接跑 postject 的 js 入口，而不是 .bin 里的包装脚本 —— Windows 上 .cmd 必须走 shell，
 // 一走 shell 路径里有空格就会被拆开。用 node 跑 cli.js 三个平台都一样。
