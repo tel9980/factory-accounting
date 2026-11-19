@@ -592,6 +592,16 @@ Page({
     // 大字号模式：老板年纪大看着费劲时用（设置里开关，存本机）
     const bigOn = wx.getStorageSync('big_font') === '1'
     if (bigOn !== !!this.data.big) this.setData({ big: bigOn })
+    // 第一次进来沿用上次选的含税口径（报价忽含忽不含，记住上次的少点一下；随时能点别的）
+    if (!this._taxInit) {
+      this._taxInit = true
+      const ka = wx.getStorageSync('tax_kind_ar')
+      const kp = wx.getStorageSync('tax_kind_ap')
+      const d = {}
+      if (ka === '含税' || ka === '不含税') d.o_tax_kind = ka
+      if (kp === '含税' || kp === '不含税') d.p_tax_kind = kp
+      if (Object.keys(d).length) this.setData(d)
+    }
     // 第一次进来沿用上次记支出用的分类，少点一次
     if (!this._catInit) {
       this._catInit = true
@@ -2531,6 +2541,7 @@ Page({
     if (!d.o_tax_kind) d.o_tax_rate = ''
     const c = this._taxCalc(d.o_tax_kind, d.o_tax_kind ? this.data.o_tax_rate : '', this.data.o_price)
     d.o_tax_hint = c ? ('税额 ¥' + c.tax + '，不含税 ¥' + c.net) : ''
+    try { wx.setStorageSync('tax_kind_ar', d.o_tax_kind || '') } catch (e2) {}
     this.setData(d)
   },
   onOTaxRate(e) {
@@ -2544,6 +2555,7 @@ Page({
     if (!d.p_tax_kind) d.p_tax_rate = ''
     const c = this._taxCalc(d.p_tax_kind, d.p_tax_kind ? this.data.p_tax_rate : '', this.data.p_amount)
     d.p_tax_hint = c ? ('税额 ¥' + c.tax + '，不含税 ¥' + c.net) : ''
+    try { wx.setStorageSync('tax_kind_ap', d.p_tax_kind || '') } catch (e2) {}
     this.setData(d)
   },
   onPTaxRate(e) {

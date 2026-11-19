@@ -104,6 +104,25 @@ await new Promise((r) => setTimeout(r, 250))
 const afterLite = paths.slice(beforeLite + liteWave.length)
 ok(afterLite.length === 0, `lite 刷新之后还偷偷发了 ${afterLite.length} 个请求：${afterLite.map((p) => p.split('?')[0]).join('、')}`)
 
+// 7) 报价忽含忽不含：记住上次选的含税口径（存本机，下次开单直接带出来）
+//    用户原话「不一定」——所以不做固定默认，只沿用上次那个
+// 这一组要看 data，把 setData 换成真的（前面几组只数请求，用空实现就够）
+ctx.data = Object.assign({}, page.data || {})
+ctx.setData = function (d) { Object.assign(this.data, d) }
+storage.tax_kind_ar = '不含税'
+storage.tax_kind_ap = '含税'
+ctx._taxInit = false
+ctx.setData({ o_tax_kind: '', p_tax_kind: '' })
+ctx.onShow()
+ok(ctx.data.o_tax_kind === '不含税', `上次选的应收口径没带出来：${ctx.data.o_tax_kind}`)
+ok(ctx.data.p_tax_kind === '含税', `上次选的应付口径没带出来：${ctx.data.p_tax_kind}`)
+ctx.pickOTax({ currentTarget: { dataset: { k: '含税' } } })
+ok(storage.tax_kind_ar === '含税', `点了「含税」没记住：${storage.tax_kind_ar}`)
+ctx.pickOTax({ currentTarget: { dataset: { k: '含税' } } })
+ok(storage.tax_kind_ar === '', '再点一下取消，应该记住「不标」而不是还留着含税')
+ctx.pickPTax({ currentTarget: { dataset: { k: '不含税' } } })
+ok(storage.tax_kind_ap === '不含税', `应付那边没记住：${storage.tax_kind_ap}`)
+
 const total = wave1.length + wave2.length
 console.log(`第一波 ${wave1.length} 次调用（去重 ${uniq1.length} 条）/ 第二波 ${wave2.length} 条（合计 ${total}）`)
 console.log(`  第一波：${wave1.map((p) => p.split('?')[0]).join(' ')}`)

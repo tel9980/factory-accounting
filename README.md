@@ -1495,7 +1495,8 @@ node scripts/build-exe.mjs --out dist
    - **员工看不到这些数**：`STAFF_MONEY_KEYS` 补了 `tax / tax_amt / tax_net / tax_rate`，员工口令下这几个字段一律 `null`。
    - **新增 `scripts/test-tax.mjs`（52 项断言，已挂进 CI，排在 `test-pack` 之后）**：不含税 1000×13% → 税额 130、不含税 1000 → 含税 1130 → 税额 130、不含税 1000 → 手填 87.5 优先 → 改税率 6% 重算 56.6 → 账户标有票/没票能带出 → 收款标「没票」+ 税额 46 落到流水 → 单独收税金 130 不动 `paid`（还是 400）→ 应付含税 9% 1090 → 税额 90 → 单独付税金不动 `paid` → `/tax-summary` 销项 ≥176、进项 ≥131、净额 = 差、没票支出统计到 → 删单后这张单的流水（含税金）归零。
    - **验证**：`check.mjs` 全绿（**412** 路由 / 56 表 / **627** SQL / **258** 调用 / **772** 绑定）；干净库按 CI 顺序全跑：`smoke` **230** GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 写路由 + `/run-cron` + 自检 10 类全 0）→ `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` 48 → `test-pack` 51 → **`test-tax` 52**，加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
-   - ⚠️ 动了前端（收付款面板、开单的含税/不含税、账户「平时有无票」、报表「本月税金」）→ **小程序要重新上传发布**。
+   - **记住上次选的含税口径**：用户说报价「不一定的」，所以不做固定默认，只在第一次进页面时沿用上次点的那一个（`tax_kind_ar` / `tax_kind_ap` 存本机，点「不标」也算一次选择）。忽含忽不含的报价少点一下，点错了随时改，不影响任何已记的账。`scripts/test-firstscreen.mjs` 加了 5 项断言钉住它（包括「再点一下取消要记住空」）。
+   - ⚠️ 动了前端（收付款面板、开单的含税/不含税、账户「平时有无票」、报表「本月税金」、记住上次口径）→ **小程序要重新上传发布**。
 
 <!-- API-LIST:BEGIN -->
 
