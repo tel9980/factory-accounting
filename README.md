@@ -1441,11 +1441,22 @@ node scripts/build-exe.mjs --out dist
    - **验证**：`check.mjs` 全绿（407 路由 / 56 表 / 623 SQL / 255 调用 / 754 绑定 + 新的第 [2.6] 项）；新库按 CI 顺序全跑：`smoke` **227** GET 无 5xx → `test-modules` 19 → `smoke-write` 45 步 + **92** 写路由 + `/run-cron` + 自检 **10 类全 0** → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` **39**，再加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
    - ⚠️ 动了前端（改单弹框、收款金额解析、收钱按钮、搜索、核销确认、按钮换行、首页报错行、相册授权、密码框、家底说明）→ **小程序要重新上传发布**。
 
+297. ✅ **把上一轮列「还挂着的」五项做掉：备份不再天天存、记完账少发 10 个请求、静默失败看得见、承诺只算这一家、线上表结构也在 CI 里体检**：用户说「继续，由你过实施未完成的」，我按自己列的清单挑能落地的五项实施（第 11 项「大列表分页」复查后确认后端早就分页、前端 `PAGE` 也在，无需再动）。
+   - **定时备份「账没变化就跳过」**：新增 `backupSig(db)`，把 46 张备份表的行数和 `MAX(rowid)` 拼起来做指纹（任何一张表读不出来就返回空、不跳过——读不出来的时候不敢说「没变化」）。`saveBackup(db, { skipIfSame: true })` 在 7 天内且指纹相同就跳过，返回 `skipped: true` 并带上一份的 id/时间/大小；`scheduled` 走这套，**手动「云端备份」按钮永远真存**（用户点一下就是想要一份新的）。新增 `POST /run-backup`（老板专用）方便手动跑一次「按跳过规则备份」，`?debug=1` 会回指纹、上次指纹、上次时间。
+     - **踩到两个坑**：①指纹不能在写 `backup_at` 之前存——`backup_at`/`backup_sig` 是 `settings` 里的**新键**，第一次写进去会让 `settings` 的 `MAX(rowid)` 变，拿写之前的指纹去比，第二次永远对不上、天天都存；②`getSetting` 读出来是**字符串**、`backupSig` 返回**数字**，`prev === sig` 严格比较永远 false（这就是它一开始连存 8 份、怎么都不跳过的原因），改成 `String(prev) === String(sig)`。
+   - **记完一笔账只刷新用得上的部分**：`refresh({ lite: true })` 只跑第一波（首页数字、提醒、我的今天、下一步、应收应付汇总、当前这一屏），不排第二波那 10 个（体检分数、目标、在制、预收预付、资金预测、现金流、账本、分类、账期、我的活、本月提示）。18 处写操作成功回调改成 lite，`onShow`/下拉刷新/导入仍然是整轮。实测整轮 22 条、lite 12 条——**每记一笔账少发 10 个请求**。
+   - **静默失败看得见**：`loadSeal` / `loadAttach` / `loadAdvances` 这些 `fail: () => {}` 以前就是「空着」，弱网下分不清「真没有提醒/照片/预收」和「没拉到」。新增 `_noteFail()`：失败累计，**连续两次**才在顶部亮一行「⚠️ 有些数据没拉出来（网不太好）· 点这里重试」（单次抖动不打扰），任何一次成功就自动收掉，点一下走 `retryAll()` 整轮重拉。
+   - **付款承诺按客户下推**：`promiseBook(db, days, type, only)` 支持传客户名单（≤90 家时把 `party IN (…)` 下推到 SQL）；`/collect-list` 只查前 20 家的承诺、催款清单最多 90 家，新增 `/promise-book?party=某客户` 只算这一家。跨客户视图（`/credit-book`、全量 `/promise-book`）保持整表算。验证方式：全量与按家查同一家客户的对象 `JSON.stringify` **逐字节一致**。
+   - **线上表结构也在 CI 里体检**：部署 job 多一步「线上表结构与接口体检」，用 `secrets.PROD_KEY`（线上口令）跑一遍 `smoke.mjs --base https://jz.qy663.de5.net`（227 个 GET）+ 问一次 `/schema-check`，线上真缺列就红并打印缺哪张表哪个字段。没配这个 secret 就挂一条 warning 跳过，跟 `CF_API_TOKEN` 同一套「没配不红」策略——理由本机自检只能证明「`schema.sql` 在空库上建得出来」，证明不了「线上那个库缺不缺列」。
+   - **顺手修的**：`/run-backup` 加进老板专属（员工打 403 `owner_only`）；`scripts/test-firstscreen.mjs` 加第 6 组断言（lite 刷新不许含慢路径、必须含首页数字、250ms 后不许补发）；`scripts/test-safety.mjs` 加第 11 组（9 项：备份跳过的三种情况、手动备份照存、承诺按家查与全量一致），从 39 项涨到 **48 项**。
+   - **验证**：`check.mjs` 全绿（**408** 路由 / 56 表 / 623 SQL / 255 调用 / **755** 绑定）；干净库按 CI 顺序全跑：`smoke` 227 GET 无 5xx → `test-modules` 19 → `smoke-write` 45 步 + **93** 写路由 + 自检 10 类全 0 → `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` **48**，加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。本机版（`node server/main.mjs`）也复测了备份跳过与 `/promise-book?party=`（同一份适配层）。
+   - ⚠️ 动了前端（lite 刷新、失败提示条）→ **小程序要重新上传发布**。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 407 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 408 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1829,7 +1840,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（211）
+**其它（单个接口）**（212）
 
 - `GET /`
 - `GET /access-guide`
@@ -1995,6 +2006,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /risk-list`
 - `POST /run-accrual`
 - `POST /run-amort`
+- `POST /run-backup`
 - `POST /run-cron`
 - `POST /run-fixed`
 - `GET /schema-check`

@@ -96,7 +96,7 @@ Page({
     mg_open: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
     tab: 'home', group: 'home',
     ar_total: 0, ap_total: 0,
-    month_income: 0, month_outcome: 0, month_profit: 0, dash_err: '',
+    month_income: 0, month_outcome: 0, month_profit: 0, dash_err: '', net_bad: false,
     month_order_add: 0, month_payable_add: 0, profit_biz: 0,
     overdue_count: 0, overdue: [],
     due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
@@ -363,6 +363,18 @@ Page({
     return Math.round(h / 24) + ' 天前'
   },
   // 真正发请求（含 401 索赔口令、断网入队等处理）
+  // 静默失败的兜底：以前 loadSeal / loadAttach / loadAdvances 这些失败就是「空着」，
+  // 弱网下看到的是「没有提醒 / 没有照片 / 没有预收」，分不清是真没有还是没拉到。
+  // 这里只统计「连续挂了两次」才亮一行，单次抖动不打扰。
+  _noteFail() {
+    this._failStreak = (this._failStreak || 0) + 1
+    if (this._failStreak >= 2 && !this.data.net_bad) this.setData({ net_bad: true })
+  },
+  retryAll() {
+    this._failStreak = 0
+    this.setData({ net_bad: false })
+    this.refresh()
+  },
   _send(opts, key) {
     this.__doReq(opts, key)
   },
@@ -391,6 +403,7 @@ Page({
             }
           }
           if (!opts.silent) wx.showToast({ title: '网络不好，稍后再试', icon: 'none' })
+          this._noteFail()
           opts.fail && opts.fail(err)
         },
         header: Object.assign({ 'X-Access-Key': key, 'X-Book': bk }, (function () {
@@ -487,6 +500,8 @@ Page({
           }
           if (useCache) this._cachePut(rel, res.data)
           if (this._offShown) { this._offShown = false; this.setData({ offline_at: '' }) }
+          this._failStreak = 0
+          if (this.data.net_bad) this.setData({ net_bad: false })
           opts.success && opts.success(res)
         }
       }))
@@ -577,7 +592,11 @@ Page({
     if (!this._modsLoaded) { this._modsLoaded = true; this.loadModules() }
     this.refresh(); this.loadCloudBackupLazy()
   },
-  refresh() {
+  // opts.lite === true：记完一笔账之后用。写完只需要把「数字 + 当前这一屏」刷新回来，
+  // 体检分数、目标、在制、资金预测、账本、分类这些跟这笔账无关，晚一点或下次进来再拉。
+  // 一次记账原来要连带 21 个请求，lite 之后是 11 个。
+  refresh(opts) {
+    const lite = !!(opts && opts.lite)
     // 第一波：首屏第一眼要看的（首页那几个数字、提醒、我的今天、下一步、应收应付汇总）
     this.loadDashboard()
     this.loadReminders()
@@ -591,6 +610,7 @@ Page({
     //   体检分数、目标、在制、预收预付、资金预测、现金流、账本、分类、账期、我的活、本月提示
     //   原来这 11 个跟第一波一起发，首屏要等 20 多个请求全回来才算完（真机 onShow 900 多毫秒）；
     //   拆成两波之后第一波只有十来个，首屏先出来，剩下的自己补上。
+    if (lite) return
     clearTimeout(this._slowT)
     this._slowT = setTimeout(() => {
       this.loadHealth()
@@ -1763,7 +1783,7 @@ Page({
             const d = res.data || {}
             if (d.ok) {
               wx.showModal({ title: '付款成功', content: '共冲 ¥' + d.total + '，' + (d.used || []).length + ' 笔' + (d.rest > 0 ? '\n还剩 ¥' + d.rest + ' 没抵完' : ''), showCancel: false })
-              this.refresh()
+              this.refresh({ lite: true })
             } else wx.showToast({ title: d.error || '失败', icon: 'none' })
           }
         })
@@ -2412,7 +2432,7 @@ Page({
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' })
-        this.refresh(); this.loadSuggest()
+        this.refresh({ lite: true }); this.loadSuggest()
         this.showChecks(res)
         const w = res.data && res.data.warn
         if (w) {
@@ -2431,7 +2451,7 @@ Page({
       url: API_BASE + '/payables', method: 'POST', once: 'add-payable', queue: '记应付',
       queued: () => this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }),
       data: { supplier: p_supplier, amount: Number(p_amount), category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid() }, dupRetry: true,
-      success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh(); this.loadSuggest(); this.showChecks(res) }
+      success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh({ lite: true }); this.loadSuggest(); this.showChecks(res) }
     })
   },
   // 「按实发数入账」：不开计件工资时，工资就是「这个月实际发出去多少钱」，
@@ -2451,7 +2471,7 @@ Page({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true, once: 'add-expense', queue: '记支出',
       queued: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_date: '' }) },
       data: { amount: Number(e_amount), category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date, client_id: this.newCid() },
-      success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh(); this.loadSuggest() }
+      success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh({ lite: true }); this.loadSuggest() }
     })
   },
   // 记完自查：后端挑出的「可能记错」的地方，一条条摆出来（不影响已记上的账）
@@ -2500,7 +2520,7 @@ Page({
           data: { amount: amt, date: pt.date, account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
             const d = res.data || {}
-            this.refresh()
+            this.refresh({ lite: true })
             this.showChecks(res)
             if (d.over) wx.showToast({ title: '多出的 ' + d.over + ' 元记成预收了', icon: 'none' })
             const noLeft = remain > 0 && Math.round((remain - amt) * 100) / 100 <= 0.005
@@ -2525,7 +2545,7 @@ Page({
           data: { amount: 0, settle: true, account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
             const d = res.data || {}
-            this.refresh()
+            this.refresh({ lite: true })
             wx.showToast({ title: d.settled ? '差额 ' + d.settled + ' 记了核销' : '已结清', icon: 'none' })
             this._offerReceipt(id, kind)
           }
@@ -2551,7 +2571,7 @@ Page({
           url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'), once: 'pay-' + id,
           method: 'POST',
           data: { amount: left, account_id: this.data.acc_id },
-          success: () => { this.refresh(); wx.showToast({ title: kind === 'ar' ? '已收清' : '已付清', icon: 'success' }); this._offerReceipt(id, kind) }
+          success: () => { this.refresh({ lite: true }); wx.showToast({ title: kind === 'ar' ? '已收清' : '已付清', icon: 'success' }); this._offerReceipt(id, kind) }
         })
       }
     })
@@ -2583,7 +2603,7 @@ Page({
                 showCancel: false
               })
               this.setData({ rb_amount: '', rb_date: '' })
-              this.refresh()
+              this.refresh({ lite: true })
             } else {
               wx.showToast({ title: d.error || '核销失败', icon: 'none' })
             }
@@ -2636,7 +2656,7 @@ Page({
           data: { amount: amt, date: pt.date, account_id: this.data.acc_id, client_id: this.newCid() },
           success: (res) => {
             const d = res.data || {}
-            this.refresh()
+            this.refresh({ lite: true })
             if (d.over) wx.showToast({ title: '多出的 ' + d.over + ' 元记成预付了', icon: 'none' })
             this._afterPay(id, amt, remain, 'ap', !!d.over)
           }
@@ -2744,7 +2764,7 @@ Page({
             const d = res.data || {}
             if (!d.ok) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
             wx.showToast({ title: '改好了', icon: 'success' })
-            this.loadEditReqs(); this.refresh()
+            this.loadEditReqs(); this.refresh({ lite: true })
           }
         })
       }
@@ -2806,7 +2826,7 @@ Page({
                 const d = res.data || {}
                 if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
                 wx.showToast({ title: d.changed ? '改好了：' + d.changed : '没变动', icon: 'none' })
-                this.refresh()
+                this.refresh({ lite: true })
               }
             })
           }
@@ -2837,7 +2857,7 @@ Page({
             data: { progress: (r.content || '').trim(), operator: this.data.o_operator || '' },
             success: (res) => {
               if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
-              else { wx.showToast({ title: '已更新', icon: 'success' }); this.refresh() }
+              else { wx.showToast({ title: '已更新', icon: 'success' }); this.refresh({ lite: true }) }
             }
           })
         }
@@ -2870,7 +2890,7 @@ Page({
             data: { supplier: p[0], amount: Number(p[1]), remark: p[2] || '', rev: it.rev },
             success: (res) => {
               if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
-              else this.refresh()
+              else this.refresh({ lite: true })
             }
           })
         }
@@ -2892,7 +2912,7 @@ Page({
             data: { amount: Number(p[0]), category: p[1] || '', remark: p[2] || '' },
             success: (res) => {
               if (res.data && res.data.error) wx.showToast({ title: res.data.error, icon: 'none' })
-              else this.refresh()
+              else this.refresh({ lite: true })
             }
           })
         }
@@ -2917,7 +2937,7 @@ Page({
             const d = (res && res.data) || {}
             if (d && d.ok === false) return wx.showToast({ title: d.error || '没改成', icon: 'none' })
             wx.showToast({ title: '已标记交付', icon: 'success' })
-            this.refresh()
+            this.refresh({ lite: true })
           },
           fail: () => wx.showToast({ title: '网络不好，没提交成功', icon: 'none' })
         })
@@ -2930,7 +2950,7 @@ Page({
       title: '删除应收单', content: '会连同它的收款记录一起删除。删掉后 30 天内在「设置 → 回收站」还能找回。',
       success: (r) => {
         if (r.confirm) {
-          this.req({ url: API_BASE + '/orders/' + id, method: 'DELETE', success: () => this.refresh() })
+          this.req({ url: API_BASE + '/orders/' + id, method: 'DELETE', success: () => this.refresh({ lite: true }) })
         }
       }
     })
@@ -2941,7 +2961,7 @@ Page({
       title: '删除应付单', content: '会连同它的付款记录一起删除。删掉后 30 天内在「设置 → 回收站」还能找回。',
       success: (r) => {
         if (r.confirm) {
-          this.req({ url: API_BASE + '/payables/' + id, method: 'DELETE', success: () => this.refresh() })
+          this.req({ url: API_BASE + '/payables/' + id, method: 'DELETE', success: () => this.refresh({ lite: true }) })
         }
       }
     })
@@ -2952,7 +2972,7 @@ Page({
       title: '删除支出', content: '删掉后 30 天内在「设置 → 回收站」还能找回。确定删除这条支出？',
       success: (r) => {
         if (r.confirm) {
-          this.req({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => this.refresh() })
+          this.req({ url: API_BASE + '/ledger/' + id, method: 'DELETE', success: () => this.refresh({ lite: true }) })
         }
       }
     })

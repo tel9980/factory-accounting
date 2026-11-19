@@ -23,6 +23,8 @@ const BASE = arg('base', 'http://127.0.0.1:8791').replace(/\/$/, '')
 const KEY = arg('key', '8888')
 const H = { 'X-Access-Key': KEY, 'Content-Type': 'application/json' }
 const TAG = '守卫' + Date.now().toString(36).replace(/[0-9]/g, (d) => 'abcdefghij'[Number(d)]).slice(-4)
+// 北京时间的今天（服务端 created_at 都是北京时间当 UTC 存的）
+const TODAY = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
 
 let pass = 0
 const bad = []
@@ -243,6 +245,38 @@ console.log('\n[10] 转账去重、定时任务可手跑、版本号公开')
   const v = await call('GET', '/version', undefined, null)
   eq('/version 不带口令也能看', v.status, 200)
   eq('/version 有 ok', !!(v.d && v.d.ok), true)
+}
+
+// ── 11. 定时备份「账没变化就不重复存」+ 付款承诺按客户下推 ──
+console.log('\n[11] 备份没变化就跳过、付款承诺只算这一家')
+{
+  const b1 = await call('POST', '/run-backup', {})
+  eq('第一次跑备份状态码', b1.status, 200)
+  const b2 = await call('POST', '/run-backup', {})
+  eq('账没变化时第二次跳过', !!(b2.d && b2.d.skipped), true)
+  // 改一笔（新建一张单）之后必须真的再存一份，不能一直跳
+  const cid = 'bkc' + TAG
+  await call('POST', '/orders', { customer: TAG + '备份客户', item_name: '加工', price: 66, date: TODAY, client_id: cid })
+  const b3 = await call('POST', '/run-backup', {})
+  eq('账变了之后真的再存一份', !!(b3.d && b3.d.skipped === false), true)
+  // 手动云端备份永远照存（用户点一下就该真存）
+  const c1 = await call('POST', '/cloud-backup', {})
+  eq('手动云端备份状态码', c1.status, 200)
+  eq('手动云端备份真的存了', !!(c1.d && c1.d.id), true)
+
+  // 付款承诺：给两家各记一次承诺，按家查只回这一家
+  const a = TAG + '承诺甲'
+  const b = TAG + '承诺乙'
+  for (const nm of [a, b]) {
+    await call('POST', '/dunning-log', { party: nm, type: 'ar', note: '答应月底付', promise_date: TODAY })
+  }
+  const all = await call('GET', '/promise-book?days=3650')
+  const one = await call('GET', '/promise-book?days=3650&party=' + encodeURIComponent(a))
+  eq('全量承诺里有这两家', !!(all.d && all.d.count >= 2), true)
+  eq('按家查只回这一家', !!(one.d && one.d.count === 1), true)
+  eq('按家查回来的就是这家', !!((one.d.parties || [])[0] && (one.d.parties || [])[0].party === a), true)
+  const inAll = ((all.d.parties || []).filter((x) => x.party === a)[0]) || null
+  eq('同一家两侧的统计一致', !!inAll && JSON.stringify(inAll) === JSON.stringify((one.d.parties || [])[0]), true)
 }
 
 console.log('')

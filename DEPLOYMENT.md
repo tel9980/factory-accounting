@@ -97,6 +97,18 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 **2026-11 查过，这个仓库当时一个 secret 都没有**，所以线上的 Worker 一直是手工
 `wrangler deploy` 上去的，不是 CI 推的——看到绿勾不等于线上更新了，去看 warning。
 
+还有一个可选的 `PROD_KEY`（值就是线上老板口令），配上之后部署完会多跑一步「线上体检」：
+
+```
+名字：PROD_KEY
+值：  线上那本账的老板口令
+```
+
+这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/smoke.mjs`（227 个 GET，
+只读不写）；②问一次 `/schema-check`，线上真缺列就直接红，并打印缺哪张表哪个字段。
+为什么不配也能跑：`check.mjs` 只能证明「`schema.sql` 在空库上建得出来」，证明不了
+「线上那个库缺不缺列」——这两个 secret 都不配时，CI 只能保证「代码能跑」，保证不了「线上是对的」。
+
 > 早期文档写的是「把 index.js 粘进 Cloudflare 编辑器」，那是 2025 年的做法，
 > 现在只有一个 1.6 万行的单文件，别再粘贴了——用 `wrangler deploy`。
 

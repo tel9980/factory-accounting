@@ -90,6 +90,20 @@ ctx.loadCloudBackupLazy()
 const cb = paths.slice(before).filter((p) => p.split('?')[0] === '/backup-list')
 ok(cb.length === 1, `备份时间问了 ${cb.length} 次（5 分钟内应该只问 1 次）`)
 
+// 6) 记完一笔账用的 refresh({lite:true})：只刷新第一波，不再连带那 10 个慢的
+//    以前记一笔应收要连带 21 个请求；lite 之后是 11 个左右。
+const beforeLite = paths.length
+ctx.refresh({ lite: true })
+const liteWave = paths.slice(beforeLite)
+const liteSlow = liteWave.filter((p) => SLOW.some((s) => p.split('?')[0] === s))
+ok(liteSlow.length === 0, `lite 刷新不该拉这些：${liteSlow.join('、')}`)
+ok(liteWave.some((p) => p.split('?')[0] === '/dashboard'), 'lite 刷新把首页数字也省掉了（记完账数字要立刻更新）')
+const missFast = FAST.filter((p) => !liteWave.some((x) => x.split('?')[0] === p))
+ok(missFast.length === 0, `lite 刷新缺了：${missFast.join('、')}`)
+await new Promise((r) => setTimeout(r, 250))
+const afterLite = paths.slice(beforeLite + liteWave.length)
+ok(afterLite.length === 0, `lite 刷新之后还偷偷发了 ${afterLite.length} 个请求：${afterLite.map((p) => p.split('?')[0]).join('、')}`)
+
 const total = wave1.length + wave2.length
 console.log(`第一波 ${wave1.length} 次调用（去重 ${uniq1.length} 条）/ 第二波 ${wave2.length} 条（合计 ${total}）`)
 console.log(`  第一波：${wave1.map((p) => p.split('?')[0]).join(' ')}`)
@@ -100,4 +114,5 @@ if (bad.length) {
   bad.forEach((m) => console.error('  · ' + m))
   process.exit(1)
 }
-console.log('\n✅ 首屏分波正常：第一波去重 ' + uniq1.length + ' 条先出来，第二波 ' + wave2.length + ' 条 150ms 后补上')
+console.log(`lite 刷新（记完一笔账）：${liteWave.length} 条，比整轮少 ${total - liteWave.length} 条`)
+console.log('\n✅ 首屏分波正常：第一波去重 ' + uniq1.length + ' 条先出来，第二波 ' + wave2.length + ' 条 150ms 后补上，lite 刷新 ' + liteWave.length + ' 条')

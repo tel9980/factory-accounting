@@ -10108,18 +10108,25 @@ app.post('/party-terms/apply', async (c) => {
 
 // 催款清单：按「欠得久 × 欠得多」排，话术现成
 // ── 付款承诺：答应哪天付、到底付没付（失约记账）──
-async function promiseBook(db, days, type) {
+// parties 传了（且不超过 90 家）就只算这几家：客户卡片、催款清单这类页面只关心一屏里的客户，
+// 以前为了这 20 家把整本流水的 JOIN 全读进来，客户一多就线性放大。
+async function promiseBook(db, days, type, only) {
   const since = dayAgo(days)
-  const prows = (await db.prepare("SELECT id, party, type, note, promise_date, created_at FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,10)>=? ORDER BY id DESC LIMIT 500").bind(since).all().catch(() => ({ results: [] }))).results || []
+  const pn = Array.isArray(only) ? only.map((x) => String(x || '').trim()).filter(Boolean) : []
+  const narrow = pn.length > 0 && pn.length <= 90
+  const mark = narrow ? ` AND ${pn.map(() => '?').join(',')}` : ''
+  const bd = (st) => (narrow ? st.bind(...pn) : st)
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  const prows = (await bd(db.prepare("SELECT id, party, type, note, promise_date, created_at FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,10)>=?" + (narrow ? ` AND party IN (${pn.map(() => '?').join(',')})` : '') + " ORDER BY id DESC LIMIT 500")).bind(...(narrow ? [since, ...pn] : [since])).all().catch(() => ({ results: [] }))).results || []
   const flows = type === 'ap'
-    ? (await db.prepare("SELECT p.supplier AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN payables p ON l.ref_type='payable' AND l.ref_id=p.id WHERE l.direction='out'").all().catch(() => ({ results: [] }))).results || []
-    : (await db.prepare("SELECT o.customer AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN orders o ON l.ref_type='order' AND l.ref_id=o.id WHERE l.direction='in'").all().catch(() => ({ results: [] }))).results || []
+    ? (await bd(db.prepare("SELECT p.supplier AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN payables p ON l.ref_type='payable' AND l.ref_id=p.id WHERE l.direction='out'" + (narrow ? ` AND p.supplier IN (${pn.map(() => '?').join(',')})` : ''))).all().catch(() => ({ results: [] }))).results || []
+    : (await bd(db.prepare("SELECT o.customer AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN orders o ON l.ref_type='order' AND l.ref_id=o.id WHERE l.direction='in'" + (narrow ? ` AND o.customer IN (${pn.map(() => '?').join(',')})` : ''))).all().catch(() => ({ results: [] }))).results || []
   const unpaid = {}
   try {
     const q = type === 'ap'
-      ? 'SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0 GROUP BY supplier'
-      : 'SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0 GROUP BY customer'
-    for (const r of (await db.prepare(q).all()).results || []) unpaid[norm(r.party)] = round2(num(unpaid[norm(r.party)]) + num(r.t))
+      ? `SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0${narrow ? ` AND supplier IN (${pn.map(() => '?').join(',')})` : ''} GROUP BY supplier`
+      : `SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0${narrow ? ` AND customer IN (${pn.map(() => '?').join(',')})` : ''} GROUP BY customer`
+    for (const r of (await bd(db.prepare(q)).all()).results || []) unpaid[norm(r.party)] = round2(num(unpaid[norm(r.party)]) + num(r.t))
   } catch (e) {}
   const today = todayIso()
   const fmap = {}
@@ -10179,7 +10186,8 @@ app.get('/promise-book', async (c) => {
   const db = c.env.DB
   const days = Math.min(1095, Math.max(30, Math.round(Number(c.req.query('days')) || 365)))
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
-  return c.json(await promiseBook(db, days, type))
+  const party = String(c.req.query('party') || '').trim()
+  return c.json(await promiseBook(db, days, type, party ? [party] : null))
 })
 
 app.get('/collect-list', async (c) => {
@@ -10243,7 +10251,8 @@ app.get('/collect-list', async (c) => {
     for (const a of arows) { const k = norm(a.party); if (!amap[k]) amap[k] = a }
   } catch (e) {}
   // 付款承诺：答应过哪天付、有没有失约（话术里点一句，比空催管用）
-  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
+  // 只算这一屏要展示的 20 家，别把整本流水读进来
+  const pb = await promiseBook(db, 365, type, list.slice(0, 20).map((x) => x.party)).catch(() => ({ parties: [] }))
   const pbmap = {}
   for (const p of (pb.parties || [])) pbmap[norm(p.party)] = p
   const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, (() => {
@@ -10430,7 +10439,8 @@ app.get('/collect-plan', async (c) => {
   const cb = await creditBook(db, type).catch(() => ({ rows: [] }))
   const gmap = {}
   for (const r of (cb.rows || [])) gmap[norm(r.party)] = r
-  const pb = await promiseBook(db, 365, type).catch(() => ({ parties: [] }))
+  // 只算这一屏涉及的客户（base 已是按未收排序的列表）
+  const pb = await promiseBook(db, 365, type, base.map((x) => x.party).slice(0, 90)).catch(() => ({ parties: [] }))
   const pmap = {}
   for (const p of (pb.parties || [])) pmap[norm(p.party)] = p
   const GW = { A: 0.9, B: 1, C: 1.15, D: 1.3, N: 1 }
@@ -14400,7 +14410,7 @@ const BACKUP_SKIP = [
 // 备份里的 month 列：orders/payables/ledger 有触发器自动补，别的表要恢复完手动补一遍，否则按月报表会缺这几块
 const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archive', 'recon_log', 'dunning_log', 'net_snapshots', 'recon_confirm', 'wage_records', 'wage_pays', 'wage_deduct', 'reworks', 'bank_flows']
 // 口令这类东西不进备份文件，免得备份发出去把口令也带出去
-const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sign_secret', 'sealed', 'sealed_at', 'sealed_note']
+const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sign_secret', 'sealed', 'sealed_at', 'sealed_note', 'backup_sig', 'backup_at']
 async function buildBackup(db) {
   const out = { exported_at: now(), version: 3 }
   // 读不出来的表要留痕：以前 catch 里只写空数组，于是「备份成功」但少了一整块数据，
@@ -14514,18 +14524,72 @@ app.get('/backup', async (c) => {
 })
 
 // 云端备份：写一份快照进 backups 表，保留最近 30 份
-async function saveBackup(db) {
+// 备份指纹：只数「每张表多少行、最大 rowid」，不读内容。
+// 46 次 COUNT(*)/MAX(rowid) 是索引级操作，比把整库拼成 9MB JSON 再写进 D1 便宜两个数量级。
+async function backupSig(db) {
+  const parts = []
+  for (const t of BACKUP_TABLES) {
+    try {
+      const r = await db.prepare(`SELECT COUNT(*) AS c, COALESCE(MAX(rowid),0) AS m FROM ${t}`).first()
+      parts.push(`${t}:${num(r && r.c)}:${num(r && r.m)}`)
+    } catch (e) {
+      return '' // 有表读不出来就别跳过，老老实实备份（失败会由 buildBackup 抛错）
+    }
+  }
+  return fnv1a(parts.join('|'))
+}
+
+async function saveBackup(db, opts) {
+  const o = opts || {}
+  const sig = (o.skipIfSame || o.withSig) ? await backupSig(db) : ''
+  if (o.skipIfSame) {
+    // 内容和上次一样、且最近 7 天内已经存过一份 → 今天不重复占体积。
+    // 超过 7 天强制存一份，免得「一直没变化」变成「一直没有新备份」。
+    const prev = await getSetting(db, 'backup_sig')
+    const at = await getSetting(db, 'backup_at')
+    const fresh = at ? daysSince(at.slice(0, 10)) < 7 : false
+    // settings 里取出来是字符串、backupSig 返回的是数字，必须都转成字符串再比（严格 === 比不过）
+    if (sig && prev && String(prev) === String(sig) && fresh) {
+      const latest = await db.prepare('SELECT id, created_at, length(content) AS size FROM backups ORDER BY id DESC LIMIT 1').first()
+      return Object.assign({ skipped: true, reason: '账没变化，今天不重复备份' }, latest || {})
+    }
+  }
   const content = await buildBackup(db)
   await db.prepare('INSERT INTO backups (content, created_at) VALUES (?,?)').bind(content, now()).run()
   await db.prepare('DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 30)').run()
+  if (sig) {
+    // 指纹要在「这次写完」之后再算一遍存起来：第一次写 backup_at 这个 settings 行会让
+    // MAX(rowid) 变（新键是新增一行），拿写之前的指纹去比，第二次永远对不上、天天都会存。
+    await putSetting(db, 'backup_at', now())
+    await putSetting(db, 'backup_sig', await backupSig(db))
+  }
   const latest = await db.prepare('SELECT id, created_at, length(content) AS size FROM backups ORDER BY id DESC LIMIT 1').first()
   return latest
 }
 
+// 手动触发一次「定时备份」（会按「账没变化就跳过」判断），方便验证和应急补备份
+app.post('/run-backup', async (c) => {
+  if (c.get('role') !== 'owner') return c.json({ error: '只有老板能操作', code: 'owner_only' }, 403)
+  const db = c.env.DB
+  try {
+    const r = await saveBackup(db, { skipIfSame: true })
+    const out = { ok: true, skipped: !!r.skipped, reason: r.reason || '', id: r.id, saved_at: r.created_at, size: r.size }
+    if (c.req.query('debug')) {
+      out.sig = await backupSig(db)
+      out.prev = await getSetting(db, 'backup_sig')
+      out.at = await getSetting(db, 'backup_at')
+    }
+    return c.json(out)
+  } catch (e) {
+    noteFail(e, '手动备份')
+    return c.json({ error: String((e && e.message) || e), code: 'backup_failed' }, 500)
+  }
+})
+
 app.post('/cloud-backup', async (c) => {
   let latest
   try {
-    latest = await saveBackup(c.env.DB)
+    latest = await saveBackup(c.env.DB, { withSig: true })
   } catch (e) {
     noteFail(e, '云端备份')
     return c.json({ error: String((e && e.message) || e), code: 'backup_failed' }, 500)
@@ -16442,7 +16506,9 @@ export default {
         noteFailDb(db, e, '定时自检·' + bid, bid)
       }
       try {
-        await saveBackup(db)
+        // 每天都会跑，但账没变化就不重复存（省 D1 用量）；超过 7 天仍会强制存一份
+        const b = await saveBackup(db, { skipIfSame: true })
+        if (b && b.skipped) console.log('scheduled backup skipped book' + bid + '（账没变化）')
       } catch (e) {
         console.error('scheduled backup failed book' + bid, e)
         noteFailDb(db, e, '定时备份·' + bid, bid)

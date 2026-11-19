@@ -183,3 +183,29 @@ jobs:
             echo "::error title=版本号没带上去::线上 /version 还是 dev，说明 --var 没生效"
             exit 1
           fi
+
+      # 线上表结构对比：本机自检只能证明「schema.sql 在空库上建得出来」，
+      # 证明不了「线上那个库到底缺不缺列」。这里用一把只读口令把线上所有 GET 接口打一遍，
+      # 再问一次 /schema-check —— 线上真缺列时会明确列出哪张表缺哪个字段。
+      # 口令要单独配一个 GitHub secret（PROD_KEY = 线上老板口令）；没配就跳过并挂 warning，
+      # 不会因为没配就红一片。
+      - name: 线上表结构与接口体检
+        if: steps.token.outputs.can == 'true'
+        env:
+          PROD_KEY: ${{ secrets.PROD_KEY }}
+        run: |
+          if [ -z "$PROD_KEY" ]; then
+            echo "::warning title=线上体检跳过了::仓库没配 PROD_KEY（线上老板口令），跳过了部署后的线上体检。配法：Settings → Secrets → New repository secret，名字 PROD_KEY。"
+            exit 0
+          fi
+          node scripts/smoke.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"
+          node -e '
+            const k = process.env.PROD_KEY;
+            fetch("https://jz.qy663.de5.net/schema-check", { headers: { "x-access-key": k } })
+              .then((r) => r.json())
+              .then((d) => {
+                if (d && d.ok === false) { console.error("线上表结构有问题：" + JSON.stringify(d.note || d)); process.exit(1) }
+                console.log("线上表结构对得上：" + JSON.stringify(d.books || d.note || "ok"));
+              })
+              .catch((e) => { console.error("问不到 /schema-check：" + e.message); process.exit(1) });
+          '
