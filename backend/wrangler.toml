@@ -12,7 +12,7 @@ database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
 #   2) 要安全用必须配 Sessions API（env.DB.withSession('first-primary') 把写后读钉回主库），
 #      399 个接口逐个改，改动面比收益大得多。
 #   3) 现在库里 594KB、每天读 3.3 万行，读复制省的那点延迟根本看不见。
-# 真要开（wrangler 4 才支持这个配置键；现在用的是 3.114）：
+# 真要开（read_replication 这个配置键要 wrangler 4；2026-11-19 已升到 4.165）：
 #   npx wrangler d1 info factory-db        # 先看 read_replication.mode
 #   在 Cloudflare 控制台 D1 → 选库 → Settings 里打开，或 PATCH /accounts/<id>/d1/database/<db> {"read_replication":{"mode":"auto"}}
 #   然后把下面这行取消注释（本地 dev 也用得上）：
@@ -22,7 +22,7 @@ database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
 crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1", "0 2 1 * *"]
 
 # Workers Logs：把 console.log/error 留在 Cloudflare 里可以翻（默认不保留，出事只能靠 error_log 表）。
-# 这块在 wrangler 3.114 上是支持的；如果哪天部署报「unexpected field」，删掉这一段不影响别的。
+# observability 在 wrangler 3/4 都支持；如果哪天部署报「unexpected field」，删掉这一段不影响别的。
 [observability]
 enabled = true
 head_sampling_rate = 0.1   # 采样 10%，免费额度按事件计费，全采太贵

@@ -533,7 +533,7 @@ node scripts/build-exe.mjs --out dist
 - **✅ 没有 `ETag`/`304`**：全库 0 处 `ETag`。现在中间件给 GET 的 JSON/HTML 响应打 `W/"长度-哈希"`（FNV-1a，不算安全用途），**客户端带了 `if-none-match` 且对得上就回 304**；>256KB 的响应（`/backup` 那种 9MB）直接跳过不打。小程序 `wx.request` 从来不发这个头，所以对现有前端只是多一个响应头、不改任何行为。
   - **线上实测踩到一个坑**：Cloudflare 一旦压缩响应就会把这个头**摘掉**——同一条 `/statement-ack`，本地有 `ETag`、线上没有（内容字节完全一致，1621 字节）。所以 17 个打印页（对账单/工资单/报价/订单/年结那些）额外加了 `Cache-Control: no-cache, no-transform`：这些页面就几 KB，客户会反复点同一条链接，304 比压缩更省。加完线上复测：`ETag` 保住了，带 `if-none-match` 第二次请求返回 **304**。
   - 代价说清楚：JSON 接口仍走压缩（手机端省流量更重要），所以那部分的 `ETag` 在线上会被摘掉，等于只在本地开发时可见。
-- **⏸ D1 读复制：查过、能开，故意没开**。`wrangler d1 info factory-db` 现在是 `read_replication.mode = disabled`。不开的理由是这套系统到处是「刚记完一笔就刷新看」：开了 auto 模式，读会就近走副本，副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，**账就重了**。要安全用必须配 Sessions API（`env.DB.withSession('first-primary')` 把写后读钉回主库），399 个接口逐个改，改动面远大于收益；何况现在库才 594KB、每天读 3.3 万行，省下的延迟根本看不见。开启方法和注意事项写在 `backend/wrangler.toml` 的注释里（wrangler 3.114 还不支持 `read_replication` 配置键，得用 4.x）。
+- **⏸ D1 读复制：查过、能开，故意没开**。`wrangler d1 info factory-db` 现在是 `read_replication.mode = disabled`。不开的理由是这套系统到处是「刚记完一笔就刷新看」：开了 auto 模式，读会就近走副本，副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，**账就重了**。要安全用必须配 Sessions API（`env.DB.withSession('first-primary')` 把写后读钉回主库），399 个接口逐个改，改动面远大于收益；何况现在库才 594KB、每天读 3.3 万行，省下的延迟根本看不见。开启方法和注意事项写在 `backend/wrangler.toml` 的注释里（`read_replication` 配置键要 wrangler 4 才有；2026-11-19 已经把 wrangler 从 3.114 升到 4.165，真要用时直接在 `backend/wrangler.toml` 里加那两行就行）。
 
 > 审计方法：只读源码 + `node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN` 验证索引是否命中；行号对应 2026-11-18 的 `backend/index.js`（15164 行）版本。
 
@@ -1525,6 +1525,10 @@ node scripts/build-exe.mjs --out dist
    - **新增 `docker-compose.yml`**：镜像 `ghcr.io/tel9980/factory-accounting:v1.2.0`，`./data:/data` 挂账本，`restart: unless-stopped`，healthcheck 用镜像自带的 node 探 `/version`（容器里没有 curl），日志 `max-size 10m × 3` 防小主机写满盘。注释里写了换版本 / 看日志 / 备份 / 恢复 / 别再套反代的提醒。容器自带四条 cron，不需要额外 crontab。
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
+
+305. ✅ **wrangler 从 3.114 升到 4.165（顺手消化 dependabot 的大版本 PR）**：`backend/package.json` 的 devDependency 改 `"wrangler": "^4.165.0"`，`package-lock.json` 跟着重新解析（+931/−908 行，主要是 workerd / miniflare 那几棵树）。升之前先把 `package.json`、`package-lock.json` 各留一份在 `/tmp` 里当退路。
+   - **升完逐项实测**（大版本不敢只看版本号）：`wrangler --version` → 4.165.0；`d1 execute --local --persist-to` 灌 `schema.sql` 成功；`wrangler dev --local` 起来后 `/version` 200、`scripts/smoke.mjs` 230 GET 无 5xx、`test-tax` 52 项、`test-safety` 48 项、`test-modules` / `test-crossmonth` / `test-apcat` / `test-import-xlsx` / `test-onboarding` / `test-pack` 全部 0 失败；`wrangler deploy --dry-run` 的绑定清单跟以前一致（DB/DB2/DB3 + NOTES_* + APP_VERSION/APP_BUILT/APP_COMMIT）；**真部署也跑了一次**（Version `e886bcb6-5b34-44cd-a568-93f51fcc0ec6`，线上 `/version` 带 commit 正常回）；`d1 execute --remote` 也能查；`scripts/build-exe.mjs` 打出来的单文件照样跑通（`/version` 200、建出 3 个库 1657KB）。
+   - 顺手把 `backend/wrangler.toml` 与 README 里「wrangler 3.114 不支持 `read_replication`」的注记改成「已升到 4.165，真要开直接在 toml 里加那两行」。
 
 304. ✅ **发 v1.2.0：exe / 镜像 / compose 跟上当前代码**：v1.1.0 之后又进了税与票（含税/不含税、G行有票 N行没票、税金单独收付、开票另收税点）、两个多页签模板包（开账全套 / 日常台账）、第六轮审计（钱和账同一次落库、备份分片、现金桥口径、cron 心跳）。v1.1.0 的 exe 与镜像里这些都还没有，而仓库里 `docker-compose.yml` 还钉着 v1.1.0 —— 谁照文档拉起容器，拿到的是旧代码。
    - **做了什么**：`git tag -a v1.2.0` 推上去 → `release.yml` 出三平台单文件 + `linux/amd64 + linux/arm64` 多架构镜像（Release 发布 2026-11-19T09:08:43Z：`factory-accounting-windows-x64.exe` 91.0MB、`factory-accounting-linux-x64` 122.4MB、`factory-accounting-macos-arm64` 117.3MB、`SHA256SUMS.txt`）；`docker-compose.yml` 与 `DEPLOYMENT.md` 的镜像标签改 `v1.2.0`，README 的 digest 改成 `sha256:b6fcef9f246e95b9d75ecb5103bba6f67581c5ceb2607f23396eaaf61c42d756`（manifest 里 `linux/amd64` + `linux/arm64`，另两个 `unknown/unknown` 是 buildx 的 attestation，正常）。
