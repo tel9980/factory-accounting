@@ -12,7 +12,7 @@
 
 services:
   factory-accounting:
-    image: ghcr.io/tel9980/factory-accounting:v1.1.0
+    image: ghcr.io/tel9980/factory-accounting:v1.2.0
     container_name: factory-accounting
     restart: unless-stopped
     ports:
@@ -25,7 +25,7 @@ services:
       # 时间口径统一按北京时间（月结、账龄、对账单都按这个算）
       TZ: Asia/Shanghai
       # 想给线上这台起个版本号，部署后 /version 能看到
-      FACTORY_VERSION: compose-${FACTORY_VERSION:-v1.1.0}
+      FACTORY_VERSION: compose-${FACTORY_VERSION:-v1.2.0}
     volumes:
       # 账本本体。左边是你机器上的目录，绝对路径最省心（相对路径会落在 compose 项目目录里）
       - ./data:/data

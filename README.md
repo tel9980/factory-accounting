@@ -122,7 +122,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 在 GitHub 的 **Releases** 页下载对应系统的文件（<https://github.com/tel9980/factory-accounting/releases>）。
 推一个 `v*` tag 时由 `.github/workflows/release.yml` 自动构建（Node SEA：node 运行时和整份后端打成一个文件，约 90–122 MB）。
 
-当前 v1.1.0 的四个文件：
+当前 v1.2.0 的四个文件：
 
 | 文件 | 系统 | 大小 |
 |---|---|---|
@@ -160,7 +160,7 @@ docker compose up -d
 
 ```bash
 docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
-  --restart unless-stopped ghcr.io/tel9980/factory-accounting:v1.1.0
+  --restart unless-stopped ghcr.io/tel9980/factory-accounting:v1.2.0
 ```
 
 > 用 `./data` 挂载而不是命名卷，图的是「备份 = 拷目录」：`tar czf backup.tgz data/` 就是一份完整备份，
@@ -170,7 +170,7 @@ docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
 
 镜像 `linux/amd64` + `linux/arm64` 都推了（群晖 ARM 也能跑），数据在容器里的 `/data`。
 `docker logs factory` 能看到启动信息；健康检查打的是 `/version`。
-v1.1.0 的镜像 digest 是 `sha256:548da807e66be5cc92b8c0d9f357842ba6bbd16bfab4d7ae8ce918f214244ee9`
+v1.2.0 的镜像 digest 是 `sha256:b6fcef9f246e95b9d75ecb5103bba6f67581c5ceb2607f23396eaaf61c42d756`
 （多架构索引，`docker pull` 时按机器自动挑 amd64 / arm64）。这个包是**公开**的，直接 pull 就行、不用登录；
 万一哪天改成私有，再 `echo <PAT> | docker login ghcr.io -u tel9980 --password-stdin`（PAT 勾 `read:packages`）。
 
@@ -1522,9 +1522,13 @@ node scripts/build-exe.mjs --out dist
 
 301. ✅ **收尾：审计清单结账 + 一句 `docker compose up -d` 就能部署 + v1.1.0 的 exe 与镜像**：用户问「还有未完成的吗，完成后在 GitHub 上生成免安装 exe 和镜像，给出部署 compose」。
    - **审计清单结账**：上一轮「还有哪些优化空间」里还标着 ⏳ 的 #5（定时备份没变化跳过）、#9（promiseBook 按客户下推）、#14（静默失败提示）、#16（CI 线上结构体检）在 297 就做完了，只是文档没跟上，这轮把状态改成 ✅ 并写清怎么做的。真正剩下的只有三件「要别人点头才能做」的：微信登录（要小程序主体资质与 scope）、前端 7800 行拆 component（没有 UI 自动化测试网，回归风险大于收益）、README 编年史瘦身（它是唯一记「为什么这么改」的地方）。另外两件是环境限制：R2 桶（账号未开通）、D1 读复制（会读到滞后副本，这套系统到处「刚记完就刷新看」，开了容易显示「没记上」→ 重复记账，暂时不开）。
-   - **新增 `docker-compose.yml`**：镜像 `ghcr.io/tel9980/factory-accounting:v1.1.0`，`./data:/data` 挂账本，`restart: unless-stopped`，healthcheck 用镜像自带的 node 探 `/version`（容器里没有 curl），日志 `max-size 10m × 3` 防小主机写满盘。注释里写了换版本 / 看日志 / 备份 / 恢复 / 别再套反代的提醒。容器自带四条 cron，不需要额外 crontab。
+   - **新增 `docker-compose.yml`**：镜像 `ghcr.io/tel9980/factory-accounting:v1.2.0`，`./data:/data` 挂账本，`restart: unless-stopped`，healthcheck 用镜像自带的 node 探 `/version`（容器里没有 curl），日志 `max-size 10m × 3` 防小主机写满盘。注释里写了换版本 / 看日志 / 备份 / 恢复 / 别再套反代的提醒。容器自带四条 cron，不需要额外 crontab。
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
+
+304. ✅ **发 v1.2.0：exe / 镜像 / compose 跟上当前代码**：v1.1.0 之后又进了税与票（含税/不含税、G行有票 N行没票、税金单独收付、开票另收税点）、两个多页签模板包（开账全套 / 日常台账）、第六轮审计（钱和账同一次落库、备份分片、现金桥口径、cron 心跳）。v1.1.0 的 exe 与镜像里这些都还没有，而仓库里 `docker-compose.yml` 还钉着 v1.1.0 —— 谁照文档拉起容器，拿到的是旧代码。
+   - **做了什么**：`git tag -a v1.2.0` 推上去 → `release.yml` 出三平台单文件 + `linux/amd64 + linux/arm64` 多架构镜像（Release 发布 2026-11-19T09:08:43Z：`factory-accounting-windows-x64.exe` 91.0MB、`factory-accounting-linux-x64` 122.4MB、`factory-accounting-macos-arm64` 117.3MB、`SHA256SUMS.txt`）；`docker-compose.yml` 与 `DEPLOYMENT.md` 的镜像标签改 `v1.2.0`，README 的 digest 改成 `sha256:b6fcef9f246e95b9d75ecb5103bba6f67581c5ceb2607f23396eaaf61c42d756`（manifest 里 `linux/amd64` + `linux/arm64`，另两个 `unknown/unknown` 是 buildx 的 attestation，正常）。
+   - 顺手把 CI 的 `actions/checkout` 与 `actions/setup-node` 从 v4 升到 v7（两个 dependabot PR 想做的事，自己升更省事），升完这一轮 CI 全绿。
 
 303. ✅ **别让同一份数据问两遍：切回来不整轮重拉、同一屏只要一次、模块开关能恢复出厂**：用户问「还有你可以决定而未完成的吗」，把上一轮剩下那些「我自己就能定」的收掉。
    - **切走再切回来不整轮重拉**：`onShow()` 以前每次都跑一整轮 `refresh()`（第一波 11 条 + 150ms 后第二波 10 条）。现在记住上次刷新时间，**20 秒内回来只刷第一屏**（首页数字、提醒、当前这一屏），第二波那 10 个（体检分数、目标、在制、资金预测、账本、分类、账期…）等下次真进页面再说；隔久了（比如半小时后从别的应用切回来）照旧整轮。理由：用户原话是「切出去看一眼消息再回来，屏幕还转半天」。
