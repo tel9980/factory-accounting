@@ -231,11 +231,35 @@ macOS / Linux 一样，先 `chmod +x`；macOS 若提示「无法验证开发者�
 正式发布的小程序要在微信后台把该域名加进 request 合法域名——局域网 IP 过不了审核，
 所以**本机版适合自己/车间内部用**，对外发布还是走 Cloudflare 那套。
 
-### 4.2 Docker 镜像（服务器 / 群晖 / NAS）
+### 4.2 Docker 镜像（服务器 / 群晖 / NAS）—— 推荐用仓库里的 compose
+
+仓库根目录有 `docker-compose.yml`，已经写好端口、数据挂载、健康检查、日志轮转和版本号，
+不需要改就能起：
 
 ```bash
-docker run -d --name factory -p 8787:8787 -v factory-data:/data \
-  ghcr.io/tel9980/factory-accounting:latest
+mkdir -p ./data
+docker compose up -d
+docker compose logs -f        # 看启动日志，Ctrl-C 退出
+```
+
+打开 `http://<这台机器IP>:8787` → 设老板口令 → 抄下恢复码。数据在 `./data`（`book1.db`/`book2.db`/`book3.db`）。
+
+日常运维：
+
+```bash
+docker compose pull && docker compose up -d     # 升级到新版本
+tar czf backup-$(date +%F).tgz data/            # 备份（更稳的做法：先 docker compose stop）
+docker compose down                             # 停
+```
+
+容器**自带四条定时任务**（每天备份/体检/记账兜底、每周一汇总、每月 1 号报表包），
+不用你在宿主机上再配 crontab；时间按 `TZ=Asia/Shanghai` 算。
+
+不想用 compose 的话，一行 `docker run` 等价写法：
+
+```bash
+docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
+  --restart unless-stopped ghcr.io/tel9980/factory-accounting:latest
 ```
 
 - 数据在卷 `factory-data` 里（容器内 `/data`）。

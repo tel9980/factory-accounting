@@ -116,7 +116,7 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 在 GitHub 的 **Releases** 页下载对应系统的文件（<https://github.com/tel9980/factory-accounting/releases>）。
 推一个 `v*` tag 时由 `.github/workflows/release.yml` 自动构建（Node SEA：node 运行时和整份后端打成一个文件，约 90–122 MB）。
 
-当前 v1.0.0 的四个文件：
+当前 v1.1.0 的四个文件：
 
 | 文件 | 系统 | 大小 |
 |---|---|---|
@@ -141,10 +141,26 @@ Intel 芯片的 Mac 没有现成包（GitHub 的 macOS 机器都是 arm64，交�
 
 ### 2. Docker 镜像（服务器 / 群晖 / NAS）
 
+仓库根目录带了一个 `docker-compose.yml`，改都不用改，两条命令：
+
 ```bash
-docker run -d --name factory -p 8787:8787 -v factory-data:/data \
-  ghcr.io/tel9980/factory-accounting:latest
+mkdir -p ./data
+docker compose up -d
 ```
+
+打开 `http://<这台机器IP>:8787` 设老板口令（恢复码抄下来），小程序里的服务器地址改成同一个地址就完事。
+
+不用 compose 也可以一行 `docker run`：
+
+```bash
+docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
+  --restart unless-stopped ghcr.io/tel9980/factory-accounting:v1.1.0
+```
+
+> 用 `./data` 挂载而不是命名卷，图的是「备份 = 拷目录」：`tar czf backup.tgz data/` 就是一份完整备份，
+> 恢复直接解包覆盖。镜像支持 amd64 与 arm64（群晖、树莓派、N100 小主机都能跑）。
+> 镜像里没有 TLS，要放公网请套 cloudflared 或 tailscale，别自己在前面糊一层 nginx + 证书。
+> 四条定时任务（每天备份/体检/记账兜底、每周一汇总、每月 1 号报表包）容器自带，不需要额外 crontab。
 
 镜像 `linux/amd64` + `linux/arm64` 都推了（群晖 ARM 也能跑），数据在容器里的 `/data`。
 `docker logs factory` 能看到启动信息；健康检查打的是 `/version`。
@@ -438,7 +454,7 @@ node scripts/build-exe.mjs --out dist
 
 ## 还有哪些优化空间（2026-11-18 审计；实施状态见每条 ✅ / ⏳）
 
-> ✅ = 本次 280 已实施；⏳ = 审计到但本次未动（大改造，理由见迭代 280 与交付说明）。
+> ✅ = 已实施（多数在 280，剩下几项在 297）；⏳ = 审计到但没动（会说明为什么）。
 
 前面「优化路线图」1–278 项都已落地；下面这批是**接下来还能做的**，按「不做会出事 → 做了省钱 → 做了好用」排序。
 每条都标了源码位置（`backend/index.js` 简写为 `index.js`，`frontend/pages/index/index.js` 简写为 `ui.js`）和一句话修法，方便以后按图施工。
@@ -457,7 +473,7 @@ node scripts/build-exe.mjs --out dist
 
 ### P1 · D1 用量与性能（省读省写，间接省钱）
 
-5. **⏳ 定时任务每天 ×3 账套把全库读两遍**：`index.js:14892,14899` 的 `selfCheck`（`11875-11935`）用两条 `SELECT * FROM orders/payables` 读全部行进内存，只为数出两个 mismatch 数字（结果只写 `selfcheck_count/at`，明细根本没人看）；紧接着 `saveBackup`（`13085-13089`）又把 44 张表全量拼成 JSON 写库，没有「没变化就跳过」的开关。两个日常 cron（`0 16 * * *`、`0 1 * * *`）都走这里 → 3 账套 × 2 次/天 × 约 8000 行读取，外加约 56MB/天的全库 JSON 写入（按线上 9.4MB/份估算）。
+5. **✅ 定时任务每天 ×3 账套把全库读两遍**（297 已改：备份前先算一张「账本指纹」`backupSig`，账没变化直接跳过；`selfCheck` 的两条 `SELECT *` 缩到 4 列）：`index.js:14892,14899` 的 `selfCheck`（`11875-11935`）用两条 `SELECT * FROM orders/payables` 读全部行进内存，只为数出两个 mismatch 数字（结果只写 `selfcheck_count/at`，明细根本没人看）；紧接着 `saveBackup`（`13085-13089`）又把 44 张表全量拼成 JSON 写库，没有「没变化就跳过」的开关。两个日常 cron（`0 16 * * *`、`0 1 * * *`）都走这里 → 3 账套 × 2 次/天 × 约 8000 行读取，外加约 56MB/天的全库 JSON 写入（按线上 9.4MB/份估算）。
    → 修法：自检改成一条 `COUNT(*) WHERE paid != (...)` 的 SQL；备份加「当日无变化就跳过」的哨兵。
 6. **✅ 年报表三处漏网的 `LIKE` 让年份索引白建**：`index.js:11703,8554,8567,8582,8598` 用 `created_at LIKE '2025-%'`，EXPLAIN 实测是 `SCAN ledger`；改成项目里已经普遍采用的 `substr(created_at,1,4)=?` 就会变 `SEARCH ... USING INDEX idx_ledger_year`，本地 15001 行库从读 15001 行降到约 1250 行/月。
    → 修法：把这 5 处统一替换为 `substr(created_at,1,4)=?` 并绑定年份。
@@ -465,7 +481,7 @@ node scripts/build-exe.mjs --out dist
    → 修法：加 `(paid<price)` 表达索引与 `statement_log(party, substr(created_at,1,7))` 复合索引；三条按客户汇总合成一条 `GROUP BY`。
 8. **✅ 批量导入按行串行 SQL**：`index.js:8687-8804` 的 `importRows` 每行 3–6 条串行 `await`（锁月、查重、账期、INSERT、默认账户…），500 行 Excel = 2000–3000 条 SQL；查重 SQL 只用到 `idx_orders_customer` 的首列，同客户历史越多越慢。`/import-xlsx` 的银行流水分支（`index.js:5728,5773-5777`）更直接，一行一条 `INSERT`，没有 `db.batch`。
    → 修法：查重走 `(customer, 日期, price)` 联合索引；插入攒成每 100–200 条一批的 `db.batch`（项目里的 `/receive-batch` 已有现成写法）。
-9. **⏳ `/customer-card` 等只看一家，却把全库流水读进来**：`promiseBook`（`index.js:8941-9007`）的两条 JOIN `ledger` 和未付汇总都没有按 `party` 过滤，调用方 `/customer-card`(8297)、`/collect-list`(9035)、`/promise-book`(9012) 等至少 6 处都中招。本地 6003 单时还不慢，量上去线性放大。
+9. **✅ `/customer-card` 等只看一家，却把全库流水读进来**（297 已改：`promiseBook(db, days, type, only)` 支持按 party 下推，调用方传当前这一页的客户名）：`promiseBook`（`index.js:8941-9007`）的两条 JOIN `ledger` 和未付汇总都没有按 `party` 过滤，调用方 `/customer-card`(8297)、`/collect-list`(9035)、`/promise-book`(9012) 等至少 6 处都中招。本地 6003 单时还不慢，量上去线性放大。
    → 修法：给 `promiseBook` 加可选 `party` 参数下推到 WHERE，或用已有 dunning 结果的 party 集合做 `IN (?)` 限定。
 10. **✅ 健康分每次首屏都全表 GROUP BY**：`healthScan`（`index.js:11938-12042`）的重复单检测按 `customer+price+日` 对全表 6003 单分组，三条 `DISTINCT ... LIMIT 300` 也扫全表；结果只用在首页那条分数条和每天一条历史，却每次 `refresh()`（前端 `ui.js:526`）都重算。
     → 修法：按天缓存到 `settings`，首屏直接读；重复检测限定近 N 天。
@@ -478,14 +494,14 @@ node scripts/build-exe.mjs --out dist
     → 修法：写后按变更域只刷相关 loader；`onShow` 加时间间隔门控 + 同一 GET 的 in-flight 去重。
 13. **✅ GET 缓存无 TTL，失败回放旧数据**：`ui.js:298-315,333-350,440,479-495` 里 `_cacheGet` 完全不校验时间戳；所有 GET 默认缓存；网络失败时把旧快照伪装成 `statusCode:200` 返回；`/batch` 成功路径对每个结果无条件缓存，**不检查 `opts.cache===false`**，缓存了带 `error` 的响应下次会被当数据渲染。
     → 修法：缓存加 TTL/版本、只白名单静态数据；写操作相关的 GET 显式 `cache:false`；缓存前校验 `ok/statusCode`。
-14. **⏳ 关键失败被静默吞掉**：`ui.js:353,406-437,1612-1624,2519-2528,6099-6106` 里 `loadPartyItems/loadEditReqs/loadSeal/loadAttach` 失败只留空；`loadAccounts/loadCategories/loadAdvances` 甚至显式 `fail:()=>{}`。弱网时客户分组展开为空、审批提醒显示 0、账本封存失败却显示「未封存」、单据照片为空——用户完全不知道出错了。
+14. **✅ 关键失败被静默吞掉**（297 已改：前端 `_noteFail` 连续两次失败就在顶部挂一条「有些数据没拉出来 · 点这里重试」，不再假装是空的）：`ui.js:353,406-437,1612-1624,2519-2528,6099-6106` 里 `loadPartyItems/loadEditReqs/loadSeal/loadAttach` 失败只留空；`loadAccounts/loadCategories/loadAdvances` 甚至显式 `fail:()=>{}`。弱网时客户分组展开为空、审批提醒显示 0、账本封存失败却显示「未封存」、单据照片为空——用户完全不知道出错了。
     → 修法：用户主动触发的加载失败给行内「加载失败/重试」；封存/审批等状态失败保留上次已知值并显示「状态未知」。
 15. **✅ 单据明细白传一份没人用的大字符串**：`ui.js:7738-7765` 把同一批内容既拼成 `detail_rows` 又拼成 `detail_text` 一起 `setData`，而 WXML（`index.wxml:3358-3359`）只渲染 `detail_rows`；`grep` 未发现 `detail_text` 的使用。
     → 修法：把这行 `setData` 里的 `detail_text` 去掉。
 
 ### P2 · 基建与可观测性
 
-16. **🔶 CI 不查线上表结构**（`concurrency` 已加，剩下两项要额外凭证）：`.github/workflows/deploy.yml` 现在有 `concurrency` 组（连续 push 不会互相顶掉）；仍然只在本地用 schema.sql 建一遍新库，部署前没有对 DB/DB2/DB3 做只读 `--remote` 结构对比（线上老库缺列不会被发现），部署后也没有 `/health-check` 冒烟。
+16. **✅ CI 不查线上表结构**（`concurrency` 已加；297 又补了部署后「线上表结构与接口体检」——配了 `PROD_KEY` 就真打线上，没配只 warning 不红）：`.github/workflows/deploy.yml` 现在有 `concurrency` 组（连续 push 不会互相顶掉）；仍然只在本地用 schema.sql 建一遍新库，部署前没有对 DB/DB2/DB3 做只读 `--remote` 结构对比（线上老库缺列不会被发现），部署后也没有 `/health-check` 冒烟。
     → 剩下两项的修法：部署前加只读远程结构检查（要往 CI 传一个只能读的 D1 token）；部署后打一次 `/health-check`，失败通知到现有告警渠道。
 17. **✅ 静默失败不进错误日志**：`index.js:39-56,78-85,14825-14831` 里 `noteFail` 只在 500 时落 `error_log`；`scheduled()` 的自愈失败被 `catch(e){}` 完全吞掉，只 `console.error`；账套 2/3 的定时备份/自愈失败时 `/error-log` 里查不到，用户只看到数字为 0 或「没备份」。
     → 修法：把 `noteFail` 和 scheduled 的 catch 统一写 `error_log`（带 book/cron 标签），恢复失败同时记审计/通知。
@@ -1242,7 +1258,7 @@ node scripts/build-exe.mjs --out dist
    - **P0 资金安全**：①`restoreCore` 失败不再留半份账——恢复前快照 + 任一批失败自动重放快照回滚（`/restore` 和 `/backup-restore` 两个入口都接了）；②预收预付抵扣改条件扣减（`used + ? <= amount`、`paid + 核销 + ? <= 总额`），并发/重复请求不会双花，扣不动返回 409「单据金额已变化」；③发工资建 `UNIQUE(month, worker)` 索引 + `INSERT OR IGNORE`，月结先查 `isMonthLocked` 直接返回 `already_closed`；④材料领用改成单条 `INSERT...SELECT WHERE 库存>=领用量`，并发领料不会超卖；⑤`num()` 加 `1e12` 上限拦脏数（注意：时间戳必须用 `Number()` 不能过 `num()`，健康缓存已按此修正）；⑥报价编号先 `UPDATE...RETURNING` 拿号再一次带 id/no 插入，不再有半截报价。
    - **P1 D1 用量**：①7 处 `created_at LIKE` 全清（`/statement-month` 走 `month=?`，`/report`/`/report-data` 走 `substr(created_at,1,4)=?` + `idx_ledger_year`，`/report` 51→27ms）；②selfCheck 两条 `SELECT *` 缩到 4 列；③`/reminders` 两条 `NOT EXISTS` 改 `LEFT JOIN (DISTINCT party)`，改前改后响应逐字节一致；④`importRows` 预载月份锁/账户/账期，500 行 ~2500 SQL→~500；⑤`/import-xlsx` bank 分支 100 条一批 `db.batch`；⑥`/health-check` 5 分钟缓存（首屏复用，`fresh=1` 强制真算），新 `settings.health_cache`；⑦scheduled 的 12 处 `catch(e){}` 全改成 `noteFailDb()`，账套 2/3 的失败进各自 `error_log`（刚修完一处 book 号传错的 bug，DB2/DB3 分支现在传对了 db 和 book）。
    - **P2 前端/基建**：删 `detail_text`；`_cachePut` 拒绝缓存报错响应、`_cacheGet` 加 7 天 TTL、`/batch` 尊重 `cache:false`；CI 加 `concurrency` 防版本回退；`schema.sql` 补发工资唯一索引。
-   - **⏳ 本次未做（清单里标 ⏳ 的 6 项）**：#5 定时备份「没变化跳过」（要碰 45 表快照关键路径，单独论证）；#9 promiseBook 按 party 下推（6 处调用含跨客户视图，贸然过滤会漏数据）；#11 大列表分页渲染 + #12 写后局部刷新（前端 7.8k 行单文件，缺 UI 自动化测试，回归风险大）；#14 静默失败提示（要逐处改 WXML 加「加载失败/重试」）；#16 CI 线上结构对比 + 部署后冒烟（要往 CI 里传 D1 只读 token，本次只先加了 concurrency）。
+   - **⏳ 本次未做（清单里标 ⏳ 的 6 项；297 已经把 #5 #9 #12 #14 #16 补完，只剩结构性那几项）**：#5 定时备份「没变化跳过」（要碰 45 表快照关键路径，单独论证）；#9 promiseBook 按 party 下推（6 处调用含跨客户视图，贸然过滤会漏数据）；#11 大列表分页渲染 + #12 写后局部刷新（前端 7.8k 行单文件，缺 UI 自动化测试，回归风险大）；#14 静默失败提示（要逐处改 WXML 加「加载失败/重试」）；#16 CI 线上结构对比 + 部署后冒烟（要往 CI 里传 D1 只读 token，本次只先加了 concurrency）。
    - **自查到的 2 个 bug**：①`num()` 上限误伤毫秒时间戳 → 健康缓存用 `Number(h.at)`；②一次全局替换把 `accountId()` 改成自己递归自己 → 修回 `defaultAccountId(db)`。都在提交前 caught。
    - **验证**：`node scripts/check.mjs` 全绿（399 路由/54 表/604 SQL/251 调用/733 绑定）、`node scripts/test-batch.mjs` 新老后端各 4 项全绿、`node scripts/smoke.mjs` 224 个 GET 无 5xx；改前改后数据逐字节对比：reminders、report、report-data、statement-month、recon-conclusion、margin-by 全一致。
 
@@ -1497,6 +1513,12 @@ node scripts/build-exe.mjs --out dist
    - **验证**：`check.mjs` 全绿（**412** 路由 / 56 表 / **627** SQL / **258** 调用 / **772** 绑定）；干净库按 CI 顺序全跑：`smoke` **230** GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 写路由 + `/run-cron` + 自检 10 类全 0）→ `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` 19 → `test-safety` 48 → `test-pack` 51 → **`test-tax` 52**，加 `test-batch` / `test-key-queue` / `test-firstscreen`，全绿。
    - **记住上次选的含税口径**：用户说报价「不一定的」，所以不做固定默认，只在第一次进页面时沿用上次点的那一个（`tax_kind_ar` / `tax_kind_ap` 存本机，点「不标」也算一次选择）。忽含忽不含的报价少点一下，点错了随时改，不影响任何已记的账。`scripts/test-firstscreen.mjs` 加了 5 项断言钉住它（包括「再点一下取消要记住空」）。
    - ⚠️ 动了前端（收付款面板、开单的含税/不含税、账户「平时有无票」、报表「本月税金」、记住上次口径）→ **小程序要重新上传发布**。
+
+301. ✅ **收尾：审计清单结账 + 一句 `docker compose up -d` 就能部署 + v1.1.0 的 exe 与镜像**：用户问「还有未完成的吗，完成后在 GitHub 上生成免安装 exe 和镜像，给出部署 compose」。
+   - **审计清单结账**：上一轮「还有哪些优化空间」里还标着 ⏳ 的 #5（定时备份没变化跳过）、#9（promiseBook 按客户下推）、#14（静默失败提示）、#16（CI 线上结构体检）在 297 就做完了，只是文档没跟上，这轮把状态改成 ✅ 并写清怎么做的。真正剩下的只有三件「要别人点头才能做」的：微信登录（要小程序主体资质与 scope）、前端 7800 行拆 component（没有 UI 自动化测试网，回归风险大于收益）、README 编年史瘦身（它是唯一记「为什么这么改」的地方）。另外两件是环境限制：R2 桶（账号未开通）、D1 读复制（会读到滞后副本，这套系统到处「刚记完就刷新看」，开了容易显示「没记上」→ 重复记账，暂时不开）。
+   - **新增 `docker-compose.yml`**：镜像 `ghcr.io/tel9980/factory-accounting:v1.1.0`，`./data:/data` 挂账本，`restart: unless-stopped`，healthcheck 用镜像自带的 node 探 `/version`（容器里没有 curl），日志 `max-size 10m × 3` 防小主机写满盘。注释里写了换版本 / 看日志 / 备份 / 恢复 / 别再套反代的提醒。容器自带四条 cron，不需要额外 crontab。
+   - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
+   - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
 <!-- API-LIST:BEGIN -->
 
