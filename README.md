@@ -496,7 +496,7 @@ node scripts/build-exe.mjs --out dist
 
 11. **✅ 大列表一次塞给渲染层，越滚越卡**（已改：全量数组留在页面实例上，`setData` 只给当前列表）：`ui.js:1559,1655-1687` 的应收/应付/支出每次把累计数组整个 `setData`，`onReachBottom` 无上限累加；`/flows`（后端 `index.js:12814`）一次返回 300 条整包渲染；`/contacts`（`index.js:12896-12907`）SQL 连 `LIMIT` 都没有，WXML（`index.wxml:640,826,908,2912,3324`）对几千行做全量 `wx:for`。
     → 修法：只把当前页/可见区交给 `setData`，全量数组留 JS 侧；长列表上虚拟列表或至少限制一次渲染条数。
-12. **🔶 每次写操作都全量 `refresh()`**（已做「同一轮同一条路径只发一次」，按变更域局部刷新还没做）：`ui.js:500-535,1700-1727` 里 `onShow()` 必跑 18 个 loader，保存/删除后普遍直接 `this.refresh()`；首页分支第 1726 行还和 528 行重复调 `loadMyDay()`，联系人页重复调 `loadAccounts()`。合批只是把请求并起来了，查询量和渲染量一点没省。
+12. **✅ 每次写操作都全量 `refresh()`**（297 做了「写后只刷第一屏」+「同一轮同一条路径只发一次」，303 补了「切回来 20 秒内不整轮重拉」+「同一条 GET 在飞时不发第二遍」）：`ui.js:500-535,1700-1727` 里 `onShow()` 必跑 18 个 loader，保存/删除后普遍直接 `this.refresh()`；首页分支第 1726 行还和 528 行重复调 `loadMyDay()`，联系人页重复调 `loadAccounts()`。合批只是把请求并起来了，查询量和渲染量一点没省。
     → 修法：写后按变更域只刷相关 loader；`onShow` 加时间间隔门控 + 同一 GET 的 in-flight 去重。
 13. **✅ GET 缓存无 TTL，失败回放旧数据**：`ui.js:298-315,333-350,440,479-495` 里 `_cacheGet` 完全不校验时间戳；所有 GET 默认缓存；网络失败时把旧快照伪装成 `statusCode:200` 返回；`/batch` 成功路径对每个结果无条件缓存，**不检查 `opts.cache===false`**，缓存了带 `error` 的响应下次会被当数据渲染。
     → 修法：缓存加 TTL/版本、只白名单静态数据；写操作相关的 GET 显式 `cache:false`；缓存前校验 `ok/statusCode`。
@@ -1525,6 +1525,10 @@ node scripts/build-exe.mjs --out dist
    - **新增 `docker-compose.yml`**：镜像 `ghcr.io/tel9980/factory-accounting:v1.2.0`，`./data:/data` 挂账本，`restart: unless-stopped`，healthcheck 用镜像自带的 node 探 `/version`（容器里没有 curl），日志 `max-size 10m × 3` 防小主机写满盘。注释里写了换版本 / 看日志 / 备份 / 恢复 / 别再套反代的提醒。容器自带四条 cron，不需要额外 crontab。
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
+
+306. ✅ **收尾三件：审计第 12 条结清、v1.2.0 之后的依赖也升了、CI 与文档对齐**：这一轮把「还有哪些优化空间」清单里最后一条还挂着的 🔶 划成 ✅，并把升完依赖后的实测写进文档。
+   - 清单第 12 条（每次写操作都全量 `refresh()`）：297 做了「写后只刷第一屏」+「同一轮同一条路径只发一次」，303 补了「切回来 20 秒内不整轮重拉」+「同一条 GET 在飞时不发第二遍」，现在整条标 ✅。
+   - 这一轮之后仓库状态：`dependabot` 的三个 PR（wrangler 3→4、checkout 4→7、setup-node 4→7）都由我自己升完并实测通过，GitHub 上**没有开着的 PR**；`v1.2.0` 的 tag 已打在 `7f07581`，`release.yml` 出了三平台单文件与多架构镜像。
 
 305. ✅ **wrangler 从 3.114 升到 4.165（顺手消化 dependabot 的大版本 PR）**：`backend/package.json` 的 devDependency 改 `"wrangler": "^4.165.0"`，`package-lock.json` 跟着重新解析（+931/−908 行，主要是 workerd / miniflare 那几棵树）。升之前先把 `package.json`、`package-lock.json` 各留一份在 `/tmp` 里当退路。
    - **升完逐项实测**（大版本不敢只看版本号）：`wrangler --version` → 4.165.0；`d1 execute --local --persist-to` 灌 `schema.sql` 成功；`wrangler dev --local` 起来后 `/version` 200、`scripts/smoke.mjs` 230 GET 无 5xx、`test-tax` 52 项、`test-safety` 48 项、`test-modules` / `test-crossmonth` / `test-apcat` / `test-import-xlsx` / `test-onboarding` / `test-pack` 全部 0 失败；`wrangler deploy --dry-run` 的绑定清单跟以前一致（DB/DB2/DB3 + NOTES_* + APP_VERSION/APP_BUILT/APP_COMMIT）；**真部署也跑了一次**（Version `e886bcb6-5b34-44cd-a568-93f51fcc0ec6`，线上 `/version` 带 commit 正常回）；`d1 execute --remote` 也能查；`scripts/build-exe.mjs` 打出来的单文件照样跑通（`/version` 200、建出 3 个库 1657KB）。
