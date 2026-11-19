@@ -105,8 +105,19 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 
 ### 1. 免安装单文件程序（Windows / Linux / macOS）
 
-在 GitHub 的 **Releases** 页下载对应系统的文件。推一个 `v*` tag 时由
-`.github/workflows/release.yml` 自动构建（Node SEA：node 运行时和整份后端打成一个文件，约 120 MB）。
+在 GitHub 的 **Releases** 页下载对应系统的文件（<https://github.com/tel9980/factory-accounting/releases>）。
+推一个 `v*` tag 时由 `.github/workflows/release.yml` 自动构建（Node SEA：node 运行时和整份后端打成一个文件，约 90–122 MB）。
+
+当前 v1.0.0 的四个文件：
+
+| 文件 | 系统 | 大小 |
+|---|---|---|
+| `factory-accounting-windows-x64.exe` | Windows 10/11 x64 | 90.9 MB |
+| `factory-accounting-linux-x64` | Linux x64（glibc） | 122.3 MB |
+| `factory-accounting-macos-arm64` | macOS Apple 芯片（M 系列） | 117.2 MB |
+| `SHA256SUMS.txt` | 三个文件的校验和 | — |
+
+Intel 芯片的 Mac 没有现成包（GitHub 的 macOS 机器都是 arm64，交叉打不出来），可以在自己机器上按下面「自己打一个」跑一遍。
 
 - **Windows**：双击 `factory-accounting-windows-x64.exe`。浏览器会自己打开 `http://127.0.0.1:8787`，
   先设一个口令（就是小程序里要输的那个），下面会给出恢复码，抄下来。
@@ -129,6 +140,9 @@ docker run -d --name factory -p 8787:8787 -v factory-data:/data \
 
 镜像 `linux/amd64` + `linux/arm64` 都推了（群晖 ARM 也能跑），数据在容器里的 `/data`。
 `docker logs factory` 能看到启动信息；健康检查打的是 `/version`。
+v1.0.0 的镜像 digest 是 `sha256:644744fdafb766cdf51a32a7d4f628382ab6293ca9566727e3b91cee88ad42ac`
+（多架构索引，`docker pull` 时按机器自动挑）。要是 `docker pull` 报无权限，
+先 `echo <PAT> | docker login ghcr.io -u tel9980 --password-stdin`（PAT 勾 `read:packages`）。
 
 ### 自己打一个（本地验证用）
 

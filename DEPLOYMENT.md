@@ -200,7 +200,7 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 
 ### 4.1 免安装 exe（Windows 最省事）
 
-1. 打开仓库的 **Releases** 页，下载 `factory-accounting-windows-x64.exe`（约 120 MB）。
+1. 打开仓库的 **Releases** 页，下载 `factory-accounting-windows-x64.exe`（90.9 MB；Linux 是 `factory-accounting-linux-x64` 122.3 MB，macOS 是 `factory-accounting-macos-arm64` 117.2 MB，只出 Apple 芯片）。
 2. 双击。浏览器会自己打开 `http://127.0.0.1:8787`。
 3. 页面上设一个口令（小程序里要输的那个），**把显示的恢复码抄下来**。
 4. 数据在 exe 旁边的 `data/book1.db`。拷走 `data/` 就是备份，换电脑拷回来接着用。
@@ -227,7 +227,8 @@ docker run -d --name factory -p 8787:8787 -v factory-data:/data \
 ```
 
 - 数据在卷 `factory-data` 里（容器内 `/data`）。
-- 支持 `linux/amd64` 和 `linux/arm64`（群晖 ARM 机型也行）。
+- 支持 `linux/amd64` 和 `linux/arm64`（群晖 ARM 机型也行）；v1.0.0 多架构 digest `sha256:644744fdafb766cdf51a32a7d4f628382ab6293ca9566727e3b91cee88ad42ac`。
+- `docker pull` 若报无权限：`echo <PAT> | docker login ghcr.io -u tel9980 --password-stdin`（PAT 勾 `read:packages`）。
 - 想接笔记站同步：`-e NOTES_BASE=https://... -e NOTES_SLUG=... -e NOTES_PASS=...`。
 - 升级：`docker pull` 新镜像后删掉旧容器重建（卷不删，数据不动）。启动时会自动补新表、新列。
 - 看日志：`docker logs factory`；健康状态：`docker inspect --format '{{.State.Health.Status}}' factory`。
