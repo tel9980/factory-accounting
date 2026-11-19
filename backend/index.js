@@ -6444,7 +6444,9 @@ app.post('/import-pack', async (c) => {
     ok: true, dry, sheets: out, total_imported: totalImported, total_amount: totalAmount,
     text: dry
       ? '看一遍对不对，没问题点「确认导入」：' + lines.join('；')
-      : `导完了，一共 ${totalImported} 行、合计 ¥${totalAmount}。` + (lines.length ? '（' + lines.join('；') + '）' : '')
+      : (totalImported
+        ? `导完了，一共 ${totalImported} 行、合计 ¥${totalAmount}。` + (lines.length ? '（' + lines.join('；') + '）' : '')
+        : '这本表一页都没填数据，什么都没导进去。填好再传一次。')
   })
 })
 
