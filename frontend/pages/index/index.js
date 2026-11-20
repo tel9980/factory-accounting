@@ -5986,8 +5986,11 @@ Page({
   closeKey() {
     const c = this._keyCtx
     this._keyCtx = null
+    // 点了「先不看」：排队的请求既不放行也不留着 —— 否则下次进来会突然冒出别人的数据
+    this._keyQueue = []
+    this._askingKey = false
     if (c) c.done()
-    this.setData({ key_open: false })
+    this.setData({ key_open: false, key_input: '', key_err: '' })
   },
   // 输口令进（或者第一次用：设口令）
   submitKey() {

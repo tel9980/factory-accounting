@@ -45,6 +45,10 @@ const run = async ({ boot, cancel }) => {
         authOk = true
         return setTimeout(() => o.success && o.success({ statusCode: 200, data: { ok: true } }), 0)
       }
+      // 演示口令：后端认，直接放行（前端「先看看演示」走的就是这条路）
+      if (String(storage.ak) === 'demo-look') {
+        return setTimeout(() => o.success && o.success({ statusCode: 200, data: { ok: true, path: url, role: 'demo' } }), 0)
+      }
       if (!authOk) {
         return setTimeout(() => o.success && o.success({ statusCode: 401, data: { ok: false, code: 'no_key' } }), 0)
       }
@@ -57,7 +61,7 @@ const run = async ({ boot, cancel }) => {
 
   const ctx = Object.assign(Object.create(page), {
     data: {},
-    setData() {},
+    setData(d) { Object.assign(this.data, d) },
     _cachePut() {},
     _cacheGet() { return null },
     _agoText() { return '' },
@@ -68,7 +72,7 @@ const run = async ({ boot, cancel }) => {
     ctx._send({ url: 'https://x' + p, method: 'GET', __rel: p, success: () => delivered.push(p) })
   }
   await new Promise((ok) => setTimeout(ok, 120))
-  return { modals, delivered, hits, queued: (ctx._keyQueue || []).length }
+  return { modals, delivered, hits, ctx, storage, queued: (ctx._keyQueue || []).length }
 }
 
 let bad = 0
@@ -81,21 +85,42 @@ const boot = ['/dashboard', '/reminders', '/me', '/accounts', '/categories', '/o
 console.log('18 个请求同时 401（换手机 / 清了缓存）：')
 {
   const r = await run({ boot })
+  ok(r.delivered.length === 0, `401 的时候先别假装成功（实际送出了 ${r.delivered.length} 份）`)
+  ok(r.ctx.data.key_open === true, '弹出的是页面自己的登录卡片（key_open）')
+  ok(r.ctx.data.key_mode === 'set', '新账本第一次用 → 卡片切到「设个口令」')
+  ok(r.modals.filter((t) => t === '首次使用').length === 0, '不再弹系统那种只有一个输入框的窗')
+  // 用户输口令 → 18 个请求原样重放
+  r.ctx.data.key_input = '1234'
+  r.ctx.submitKey()
+  await new Promise((ok2) => setTimeout(ok2, 120))
+  ok(r.ctx.data.key_open === false, '交出队列后卡片关掉')
   ok(r.delivered.length === boot.length, `18 份数据都拿到了（实际 ${r.delivered.length}/18）`)
   ok(new Set(r.delivered).size === boot.length, '没有重复回调（每份数据只送一次）')
-  ok(r.modals.filter((t) => t === '首次使用').length === 1, `口令只问一次（实际弹了 ${r.modals.filter((t) => t === '首次使用').length} 次）`)
-  ok(r.queued === 0, '队列清空了')
+  ok((r.ctx._keyQueue || []).length === 0, '队列清空了')
   const setup = r.hits.filter((u) => u.endsWith('/auth/setup')).length
   ok(setup === 1, `只调了一次 /auth/setup（实际 ${setup}）`)
 }
 
-console.log('用户点取消（不输口令）：')
+console.log('小白/审核员不输口令，直接点「先看看演示」：')
 {
-  const r = await run({ boot, cancel: true })
-  ok(r.delivered.length === 0, '取消时不该假装成功')
-  ok(r.queued === 0, '队列已清空，不会在别的时机偷偷重放')
-  ok(r.hits.filter((u) => u.endsWith('/auth/setup')).length === 0, '取消时没有去设口令')
+  const r = await run({ boot })
+  r.ctx.enterDemoLook()
+  await new Promise((ok2) => setTimeout(ok2, 120))
+  ok(r.delivered.length === boot.length, `点了演示也能把一屏数据拉全（实际 ${r.delivered.length}/18）`)
+  ok(r.storage.ak === 'demo-look', '本机记的是演示口令（下次进来还是演示）')
+  ok(r.hits.filter((u) => u.endsWith('/auth/setup')).length === 0, '走演示不该去设口令')
+  ok(r.ctx.data.demo === true, '页面知道自己现在是演示模式（顶部会有横幅）')
+}
+
+console.log('用户点「先不看」：')
+{
+  const r = await run({ boot })
+  r.ctx.closeKey()
+  await new Promise((ok2) => setTimeout(ok2, 60))
+  ok(r.delivered.length === 0, '不输口令时不该假装成功')
+  ok((r.ctx._keyQueue || []).length === 0, '队列已清空，不会在别的时机偷偷重放')
+  ok(r.hits.filter((u) => u.endsWith('/auth/setup')).length === 0, '没有去设口令')
 }
 
 if (bad) { console.log(`\n❌ ${bad} 项不符合预期`); process.exit(1) }
-console.log('\n✅ 口令排队回归测试通过：401 的请求会排队，拿到口令后原样重放')
+console.log('\n✅ 口令排队回归测试通过：401 的请求会排队，输口令或点演示后原样重放')
