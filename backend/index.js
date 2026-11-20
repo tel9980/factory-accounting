@@ -627,6 +627,10 @@ const DEMO_KEY = 'demo-look'
 // 为什么要内置：微信审核 3.3「登录受限」——审核员拿不到口令进不去就驳回。
 // 光给一个只读口令还得老板自己去设、再去提审页面填，小白根本走不完这几步。
 async function seedDemoBook(db) {
+  // 第 3 本账如果没灌过表结构（新部署只灌了主账套），这里会一路 no such table: accounts，
+  // 让人以为程序坏了。先探一下，没有就给中间件一个能翻译成人话的信号。
+  const hasOrders = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='orders'").first().catch(() => null)
+  if (!hasOrders) { const err = new Error('demo_no_schema'); err.code = 'demo_no_schema'; throw err }
   const flag = await db.prepare("SELECT value FROM settings WHERE key='demo_seeded'").first().catch(() => null)
   if (flag && String(flag.value) === '1') return false
   const cnt = await db.prepare('SELECT COUNT(*) AS c FROM orders').first().catch(() => null)
@@ -1161,7 +1165,14 @@ app.use('*', async (c, next) => {
     if (denyDemo) return c.json({ code: 'demo_readonly', error: '演示模式不能导出、不能备份、不能改设置（这些是真账本才有的动作）' }, 403)
     if (given === DEMO_KEY) {
       // 内置演示：进的是第 3 本账（示例数据），随便记都不碰真账 —— 审核员要能试才叫「完整体验」
-      try { await seedDemoBook(c.env.DB) } catch (e) { noteFail(e, '演示账套示例数据') }
+      try {
+        await seedDemoBook(c.env.DB)
+      } catch (e) {
+        if (e && e.code === 'demo_no_schema') {
+          return c.json({ code: 'demo_not_ready', error: '演示账套还没准备好：先给第 3 个库灌一次表结构（看 DEPLOYMENT.md 5.0），灌完点一下就能进' }, 503)
+        }
+        noteFail(e, '演示账套示例数据')
+      }
     } else if (dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') {
       // 老板自己设的那个演示口令：原账本只读，一个字段都别改
       return c.json({ code: 'demo_readonly', error: '演示口令只能看，不能改账、不能导出（要记账请换成自己的口令）' }, 403)

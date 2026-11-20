@@ -66,8 +66,13 @@ jobs:
       - name: 依赖体检（有已知漏洞只提示，不拦部署）
         run: npm audit --audit-level=high || true
         working-directory: backend
-      - name: 用 schema.sql 灌一个本地库（顺便验证新装能用）
-        run: npx wrangler d1 execute factory-db --local --file=schema.sql
+      - name: 用 schema.sql 灌本地库（顺便验证新装能用）
+        # 三本账都灌：内置演示入口进的是第 3 本账，只灌主账套的话演示账套是空库，
+        # /ar 会 500 no such table: accounts —— 部署到线上时同理，DEPLOYMENT 5.0 写了。
+        run: |
+          npx wrangler d1 execute factory-db --local --file=schema.sql
+          npx wrangler d1 execute factory-db2 --local --file=schema.sql
+          npx wrangler d1 execute factory-db3 --local --file=schema.sql
         working-directory: backend
         env:
           CI: '1'
