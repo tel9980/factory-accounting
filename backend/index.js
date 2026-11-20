@@ -619,6 +619,97 @@ async function demoKeyOn(db) {
   return !!(r && String(r.value).trim())
 }
 
+// 内置演示口令：不用老板设、不用记，前端登录页有「先看看演示」的按钮直接用它。
+// 它只进第 3 本账（演示账套，全是示例数据），碰不到真账本。
+const DEMO_KEY = 'demo-look'
+
+// 演示账套的示例数据（只在第 3 本账里，且只种一次）。
+// 为什么要内置：微信审核 3.3「登录受限」——审核员拿不到口令进不去就驳回。
+// 光给一个只读口令还得老板自己去设、再去提审页面填，小白根本走不完这几步。
+async function seedDemoBook(db) {
+  const flag = await db.prepare("SELECT value FROM settings WHERE key='demo_seeded'").first().catch(() => null)
+  if (flag && String(flag.value) === '1') return false
+  const cnt = await db.prepare('SELECT COUNT(*) AS c FROM orders').first().catch(() => null)
+  if (num(cnt && cnt.c) > 0) return false
+  await ensureBaseTables(db).catch(() => {})
+  await ensureExtraCols(db).catch(() => {})
+  await ensureAccounts(db).catch(() => {})
+  await ensureCats(db).catch(() => {})
+  const today = todayIso()
+  const m0 = today.slice(0, 7)
+  const m1 = monthAdd(today, -1).slice(0, 7)
+  const day = (m, d) => `${m}-${String(d).padStart(2, '0')}T02:00:00.000Z`
+  const acc = async (name) => {
+    const r = await db.prepare('SELECT id FROM accounts WHERE name=?').bind(name).first().catch(() => null)
+    return num(r && r.id)
+  }
+  const cash = await acc('现金')
+  const bank = await acc('银行卡')
+  // 先把两个账户的期初填上，看起来像真在用的账本
+  await db.batch([
+    db.prepare('UPDATE accounts SET opening=? WHERE id=?').bind(5000, cash),
+    db.prepare('UPDATE accounts SET opening=? WHERE id=?').bind(50000, bank),
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('book_name', ?)").bind('演示账套（示例数据）')
+  ]).catch(() => {})
+
+  const orders = [
+    ['演示·张老板', '铝合金支架', 12000, 6000, m1, 6, bank],
+    ['演示·李老板', '冲压件', 8000, 8000, m1, 12, bank],
+    ['演示·王老板', '折弯件', 5600, 0, m1, 20, bank],
+    ['演示·张老板', '第二批支架', 15000, 5000, m0, 3, cash],
+    ['演示·李老板', '电池托盘', 3200, 0, m0, 8, bank],
+    ['演示·王老板', '样品费', 1800, 1800, m0, 10, cash]
+  ]
+  const pays = [
+    ['演示·硫酸厂', '硫酸', 3000, 3000, m1, 5, bank],
+    ['演示·染料行', '染料', 5200, 2000, m1, 15, bank],
+    ['演示·外协厂', '外发加工费', 8000, 0, m0, 5, bank],
+    ['演示·电厂', '电费', 2400, 2400, m0, 12, bank]
+  ]
+  const st = []
+  for (const [cus, item, price, paid, m, d, aid] of orders) {
+    st.push(db.prepare(`INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, operator, progress, created_at, month)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).bind(cus, item, price, paid >= price ? 1 : 0, paid, 0, day(m, d).slice(0, 10), '演示', '', day(m, d), m))
+  }
+  for (const [sup, cat, amt, paid, m, d] of pays) {
+    st.push(db.prepare(`INSERT INTO payables (supplier, amount, paid, category, remark, operator, due_date, created_at, month)
+      VALUES (?,?,?,?,?,?,?,?,?)`).bind(sup, amt, paid, cat, '', '演示', day(m, d).slice(0, 10), day(m, d), m))
+  }
+  await db.batch(st).catch(() => {})
+
+  // 收款/付款流水要跟单据上的 paid 对上，不然账本自检会报「单据已收 vs 流水合计」不一致
+  const st2 = []
+  const oRows = await db.prepare("SELECT id, customer, paid, created_at, month FROM orders WHERE customer LIKE '演示·%'").all().catch(() => ({ results: [] }))
+  for (const o of (oRows.results || [])) {
+    const p = num(o.paid)
+    if (p > 0) {
+      st2.push(db.prepare(`INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, created_at, month, account_id, cash)
+        VALUES ('in','order',?,?,?,?,?,?,?,?,1)`).bind(num(o.id), p, '加工费', `收 ${o.customer} 货款`, '演示', o.created_at, o.month, bank))
+    }
+  }
+  const pRows = await db.prepare("SELECT id, supplier, paid, created_at, month FROM payables WHERE supplier LIKE '演示·%'").all().catch(() => ({ results: [] }))
+  for (const p of (pRows.results || [])) {
+    const q = num(p.paid)
+    if (q > 0) {
+      st2.push(db.prepare(`INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, created_at, month, account_id, cash)
+        VALUES ('out','payable',?,?,?,?,?,?,?,?,1)`).bind(num(p.id), q, '采购', `付 ${p.supplier} 货款`, '演示', p.created_at, p.month, bank))
+    }
+  }
+  // 日常支出：工资、房租、水电、辅料
+  for (const [amt, cat, m, d] of [[18000, '工资', m1, 28], [6000, '房租', m1, 1], [1200, '水电', m0, 5], [800, '辅料', m0, 7]]) {
+    st2.push(db.prepare(`INSERT INTO ledger (direction, ref_type, amount, category, remark, operator, created_at, month, account_id, cash)
+      VALUES ('out','expense',?,?,?,?,?,?,?,1)`).bind(amt, cat, `${cat}（示例）`, '演示', day(m, d), m, m === m1 && d === 28 ? bank : cash))
+  }
+  // 材料台账：进料两笔，库存是正的
+  st2.push(db.prepare("INSERT INTO materials (name, unit, min_qty, note, active, created_at) VALUES ('硫酸','吨',1,'演示数据',1,?)").bind(day(m1, 3)))
+  st2.push(db.prepare("INSERT INTO materials (name, unit, min_qty, note, active, created_at) VALUES ('染料','公斤',5,'演示数据',1,?)").bind(day(m1, 3)))
+  st2.push(db.prepare("INSERT INTO material_moves (material, kind, date, month, qty, price, amount, party, order_id, note, by, created_at) VALUES ('硫酸','in',?,?,10,300,3000,'演示·硫酸厂',0,'进料','演示',?)").bind(day(m1, 3).slice(0, 10), m1, day(m1, 3)))
+  st2.push(db.prepare("INSERT INTO material_moves (material, kind, date, month, qty, price, amount, party, order_id, note, by, created_at) VALUES ('染料','in',?,?,20,260,5200,'演示·染料行',0,'进料','演示',?)").bind(day(m1, 4).slice(0, 10), m1, day(m1, 4)))
+  await db.batch(st2).catch(() => {})
+  await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('demo_seeded','1')").run().catch(() => {})
+  return true
+}
+
 // 试错太多时统一的 429 文案（口令、员工 PIN、恢复码共用一套）
 const tooMany = (sec) => ({ error: `试错太多次了，${Math.max(1, Math.ceil(sec / 60))} 分钟后再试（急着进去可以用「恢复码」重设口令，那条路不受这个限制）`, code: 'too_many', retry_after: sec })
 
@@ -836,6 +927,18 @@ app.post('/auth/demo-state', async (c) => {
   return c.json({ ok: true, enabled: await demoKeyOn(mainDb) })
 })
 
+// 内置演示入口开着没有（老板可关。关掉之后前端那个「先看看演示」直接消失）
+app.post('/auth/demo-builtin', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板能改' }, 403)
+  const off = b.off === true
+  if (off) await mainDb.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('demo_builtin_off','1')").run()
+  else await mainDb.prepare("DELETE FROM settings WHERE key='demo_builtin_off'").run()
+  await logAudit(mainDb, off ? '关掉内置演示入口' : '打开内置演示入口', '演示模式', '微信审核 / 试用用', '', '老板')
+  return c.json({ ok: true, builtin: !off })
+})
+
 // 按账户对账：今天/这个月，钱到底进了哪个口袋，有没有对不上
 app.get('/account-recon', async (c) => {
   const db = c.env.DB
@@ -1010,6 +1113,11 @@ app.use('*', async (c, next) => {
   let role = ''
   let staffMods = null
   if (given && (await verifyKey(mainDb, given))) role = 'owner'
+  else if (given === DEMO_KEY) {
+    // 内置演示：默认开着（不然审核员进不来），老板可以在设置里关掉
+    const offR = await mainDb.prepare("SELECT value FROM settings WHERE key='demo_builtin_off'").first().catch(() => null)
+    if (!(offR && String(offR.value) === '1')) role = 'demo'
+  }
   else if (given && (await verifySetting(mainDb, 'demo_key', given))) role = 'demo'
   else if (given) {
     // 一人一个口令：认到人就按这个人的名字和权限走
@@ -1044,9 +1152,20 @@ app.use('*', async (c, next) => {
   // 只读而不是「进另一个假账本」：这样老板自己也能拿它当「只看不改」的临时口令。
   if (role === 'demo') {
     const dm = c.req.method
-    const denyDemo = (dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') ||
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import|db-clean|staff-users|staff-perms|schema-check|party-merge|seal|unseal|auth\/)/.test(path)
-    if (denyDemo) return c.json({ code: 'demo_readonly', error: '演示口令只能看，不能改账、不能导出（要记账请换成自己的口令）' }, 403)
+    // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
+    const denyDemo = dm !== 'OPTIONS' && (
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name)/.test(path) ||
+      // 模块清单可以看（前端要据此藏入口），但改不了
+      (/^\/modules$/.test(path) && dm !== 'GET')
+    )
+    if (denyDemo) return c.json({ code: 'demo_readonly', error: '演示模式不能导出、不能备份、不能改设置（这些是真账本才有的动作）' }, 403)
+    if (given === DEMO_KEY) {
+      // 内置演示：进的是第 3 本账（示例数据），随便记都不碰真账 —— 审核员要能试才叫「完整体验」
+      try { await seedDemoBook(c.env.DB) } catch (e) { noteFail(e, '演示账套示例数据') }
+    } else if (dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') {
+      // 老板自己设的那个演示口令：原账本只读，一个字段都别改
+      return c.json({ code: 'demo_readonly', error: '演示口令只能看，不能改账、不能导出（要记账请换成自己的口令）' }, 403)
+    }
   }
   // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
   if (role === 'staff') {
@@ -5099,7 +5218,10 @@ app.get('/me', async (c) => {
   }
   // demo_enabled 只给老板看（前端据此决定要不要显示「设演示口令」按钮），不回明文
   const demoEnabled = role === 'owner' ? await demoKeyOn(mainDb) : false
-  return c.json({ role, book: String(c.env.BOOK || '1'), staff_name: myName, staff_enabled: !!staff, demo_enabled: demoEnabled, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '', staff_modules: mods, staff_mod_labels: STAFF_MOD_LABEL })
+  const builtinOff = role === 'owner'
+    ? !!(await mainDb.prepare("SELECT value FROM settings WHERE key='demo_builtin_off'").first().catch(() => null) || { value: '' }).value === '1'
+    : false
+  return c.json({ role, book: String(c.env.BOOK || '1'), staff_name: myName, staff_enabled: !!staff, demo_enabled: demoEnabled, demo_builtin: role === 'owner' ? !builtinOff : false, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '', staff_modules: mods, staff_mod_labels: STAFF_MOD_LABEL })
 })
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
 const addDaysIso = (iso, n) => {
@@ -17201,6 +17323,8 @@ export default {
         if (qb === 2 || qb === 3) book = qb
       }
     } catch (e) { book = 1 }
+    // 内置演示：只看第 3 本账（示例数据），碰不到真账本。放在选库之前，所以连 X-Book 都盖掉。
+    try { if (String(req.headers.get('x-access-key') || '').trim() === DEMO_KEY) book = 3 } catch (e) { /* 头解析失败就按原样 */ }
     const db = book === 3 ? env.DB3 : book === 2 ? env.DB2 : env.DB
     // 老账本上缺的 7 张基础表在这里兜一次底（_memoDdl 记忆，一个 isolate 只跑一次，之后 0 开销）
     try { await ensureBaseTables(db) } catch (e) { noteFail(e, '建表兜底') }

@@ -4,6 +4,9 @@
 // 就没法「完整体验功能」。给一个只读的演示口令能解决，但只读必须真的是只读：
 // 能看、不能改、不能导出，更不能拿它去改口令或者看备份。
 //
+// 另外还有「内置演示口令」（demo-look）：不用老板设、登录页点一下就进，进的是第 3 本账的
+// 示例数据，可以随便记（不碰真账），但导出/备份/改设置照样不给。
+//
 // 用法：node scripts/test-demo.mjs --base http://127.0.0.1:8791 --key 8888
 import process from 'node:process'
 
@@ -119,6 +122,46 @@ async function main() {
   eq('演示口令至少 4 位', short.s, 400)
   const notBoss = await call('POST', '/auth/demo', { key: 'whatever', password: DEMO })
   eq('非老板口令设不了演示口令', notBoss.s, 403)
+
+  // 9) 内置演示口令（不用老板设）：进第 3 本账的示例数据，能看能试，危险动作不给
+  const BUILTIN = 'demo-look'
+  const bMe = await call('GET', '/me', undefined, BUILTIN)
+  eq('内置演示能直接进（不用设口令）', bMe.s, 200)
+  eq('…身份是 demo', bMe.d && bMe.d.role, 'demo')
+  eq('…进的是第 3 本账', String(bMe.d && bMe.d.book), '3')
+  const bAr = await call('GET', '/ar', undefined, BUILTIN)
+  eq('…能看演示账套的应收', bAr.s, 200)
+  const bList = Array.isArray(bAr.d) ? bAr.d : (bAr.d && bAr.d.list) || []
+  const hasDemo = bList.some((x) => String(x.customer || '').startsWith('演示·'))
+  if (hasDemo) ok(`…演示账套里有示例单（${bList.length} 张）`)
+  else no('演示账套没有种子数据（示例单应为「演示·」开头）', bList.length)
+  const bDash = await call('GET', '/dashboard', undefined, BUILTIN)
+  eq('…能看演示账套首页', bDash.s, 200)
+  // 审核员要能真点一下「记一笔」，所以演示账套允许写（写进第 3 本账，不碰真账）
+  const TAG = '演示·审核试记' + Date.now().toString(36).replace(/[0-9]/g, (d) => 'abcdefghij'[Number(d)]).slice(-4)
+  const bW = await call('POST', '/orders', { customer: TAG, price: 100, item_name: '试试' }, BUILTIN)
+  if (bW.s >= 400) no('演示账套应该允许试记一笔（不然审核员还是「体验受限」）', bW.d); else ok('…演示账套里可以试记一笔（沙箱）')
+  // 但导出/备份/改设置不给
+  for (const p of ['/backup', '/export-all', '/staff-users', '/schema-check']) {
+    const r = await call('GET', p, undefined, BUILTIN)
+    eq('内置演示不能看 ' + p, r.s, 403)
+  }
+  const bMod = await call('POST', '/modules', { off: [] }, BUILTIN)
+  eq('内置演示不能改模块开关', bMod.s, 403)
+  // 真账本不能被碰：主账套里不该出现「演示·审核试记」
+  const mainAr = await call('GET', '/ar', undefined, KEY)
+  const mainList = Array.isArray(mainAr.d) ? mainAr.d : (mainAr.d && mainAr.d.list) || []
+  if (mainList.some((x) => String(x.customer || '') === TAG)) no('演示账套里记的单跑进真账本了', 1)
+  else ok('…真账本没被演示数据污染')
+  // 老板可以关掉内置演示入口
+  const offB = await call('POST', '/auth/demo-builtin', { key: KEY, off: true })
+  eq('老板关掉内置演示入口', offB.d && offB.d.builtin, false)
+  const afterOff = await call('GET', '/ar', undefined, BUILTIN)
+  eq('关掉后内置演示进不来', afterOff.s, 401)
+  const onB = await call('POST', '/auth/demo-builtin', { key: KEY, off: false })
+  eq('再打开', onB.d && onB.d.builtin, true)
+  const afterOn = await call('GET', '/ar', undefined, BUILTIN)
+  eq('打开后又可以进', afterOn.s, 200)
 
   console.log(bad ? `\n❌ 演示口令：${bad} 项没过` : '\n✅ 演示口令：全部通过（只读真的只读，老板照常）')
   process.exit(bad ? 1 : 0)

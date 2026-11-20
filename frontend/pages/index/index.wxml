@@ -1,10 +1,23 @@
 <view class="page {{big?'big':''}}">
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
-  <view class="offbar demo" wx:if="{{demo}}" bindtap="exitDemo">👀 演示模式（只能看，不能改账）· 点这里换成我自己的口令</view>
+  <view class="offbar demo" wx:if="{{demo}}" bindtap="exitDemo">👀 演示账套（示例数据，随便点都动不到你的账）· 点这里换成我自己的口令</view>
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
   <view class="offbar" wx:if="{{net_bad}}" bindtap="retryAll">⚠️ 有些数据没拉出来（网不太好）· 点这里重试</view>
   <view class="sealbar" wx:if="{{sealed}}" bindtap="goSeal">🔒 这本账已封存（只读），{{sealed_at}}起 · 点这里去解封</view>
+  <view class="mask" wx:if="{{key_open}}" catchtap="closeKey">
+    <view class="keycard" catchtap="noop">
+      <view class="keytt">{{key_mode=='set'?'第一次用，设个口令':'输入访问口令'}}</view>
+      <view class="tip" wx:if="{{key_mode=='set'}}">这是你自己定的记账口令（至少 4 位），不是微信密码。设好记牢，忘了可以用恢复码重设。</view>
+      <view class="tip" wx:else>老板给你的那个口令。忘了就点下面的「用恢复码」。</view>
+      <input class="inp" password placeholder="{{key_mode=='set'?'设置口令（至少 4 位）':'输入口令'}}" value="{{key_input}}" bindinput="onKeyInput"/>
+      <view class="keyerr" wx:if="{{key_err}}">{{key_err}}</view>
+      <button class="btn" bindtap="submitKey">{{key_mode=='set'?'设好，开始记账':'进入'}}</button>
+      <view class="keydemo" wx:if="{{key_mode!='set' && demo_builtin!==false}}" bindtap="enterDemoLook">👀 先看看演示（不用口令，示例数据）</view>
+      <view class="keyrecover" wx:if="{{key_mode!='set'}}" bindtap="keyRecover">忘了口令？用恢复码重设</view>
+      <view class="keyclose" bindtap="closeKey">先不看</view>
+    </view>
+  </view>
 
   <view class="card" wx:if="{{er_open}}">
         <view class="ct">📝 申请改一下这张单</view>
@@ -1737,6 +1750,7 @@
       <button class="btn warn" size="mini" wx:if="{{role!='staff' && staff_enabled}}" bindtap="staffOff">🚫 一键停用员工口令</button>
       <view class="tip" wx:if="{{role=='owner'}}">微信审核 / 想先看看的人用的口令（只能看，不能改账、不能导出；审核驳回常因为「登录受限」，填它就能过）：{{demo_enabled?'已开着，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role=='owner'}}" bindtap="setDemoKey">{{demo_enabled?'🎬 改演示口令（审核 / 试用）':'🎬 设演示口令（审核 / 试用）'}}</button>
+      <button class="btn ghost" size="mini" wx:if="{{role=='owner'}}" bindtap="toggleDemoBuiltin">{{demo_builtin!==false?'👀 内置演示入口：开着（点这里关掉）':'👀 内置演示入口：关着（点这里打开）'}}</button>
       <view class="hobtns" wx:if="{{role!='staff'}}">
         <button class="btn gray" size="mini" bindtap="loadAccessGuide">🔄 换手机 / 停用员工向导</button>
       </view>

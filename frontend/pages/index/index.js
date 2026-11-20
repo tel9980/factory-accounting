@@ -1,4 +1,6 @@
 const API_BASE = 'https://jz.qy663.de5.net'
+// 内置演示口令（和后端 DEMO_KEY 一致）：登录页「先看看演示」用，进的是演示账套（示例数据）
+const DEMO_KEY = 'demo-look'
 
 // 手机本地日期串（YYYY-MM-DD）。不能用 toISOString()——那是 UTC，北京时间 0~8 点会差一天
 const pad2 = (n) => String(n).padStart(2, '0')
@@ -130,7 +132,8 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日'],
-    role: 'owner', staff_enabled: false, demo: false, demo_enabled: false, cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
+    role: 'owner', staff_enabled: false, demo: false, demo_enabled: false, demo_builtin: true,
+    key_open: false, key_input: '', key_mode: 'enter', key_err: '', cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
@@ -502,42 +505,11 @@ Page({
               this._keyQueue = []
               q.forEach((o) => { try { this._send(o, k) } catch (e) { /* 单个失败不影响别的 */ } })
             }
-            if (code === 'no_key') {
-              wx.showModal({
-                title: '首次使用',
-                content: '先设置一个访问口令（至少 4 位，记牢）',
-                editable: true, placeholderText: '设置口令',
-                success: (r) => {
-                  if (r.confirm && r.content) {
-                    const k = r.content.trim()
-                    wx.request({
-                      url: API_BASE + '/auth/setup', method: 'POST',
-                      data: { key: k },
-                      success: (s) => {
-                        done()
-                        if (s.data && s.data.ok) {
-                          wx.setStorageSync('ak', k); doReq(k); replayKey(k)
-                          if (s.data.recover_code) this.showRecoverCode(s.data.recover_code)
-                        } else wx.showToast({ title: (s.data && s.data.error) || '设置失败', icon: 'none' })
-                      },
-                      fail: () => { done(); this._keyQueue = []; wx.showToast({ title: '网络失败', icon: 'none' }) }
-                    })
-                  } else { done(); this._keyQueue = [] }
-                }
-              })
-            } else {
-              wx.showModal({
-                title: '访问口令', editable: true, placeholderText: '请输入访问口令（审核 / 试用可问老板要演示口令）',
-                cancelText: '忘了口令', confirmText: '确定',
-                success: (r) => {
-                  if (r.confirm && r.content) {
-                    const k = r.content.trim()
-                    wx.setStorageSync('ak', k)
-                    done(); doReq(k); replayKey(k)
-                  } else { done(); this._keyQueue = []; this.openRecover() }
-                }
-              })
-            }
+            // 以前这里弹 wx.showModal，只有一个输入框——小白不知道「口令」是什么，
+            // 微信审核员也不知道，3.3「登录受限」就是这么被驳回的。现在改成站内一张卡片：
+            // 输口令 / 先看看演示（内置示例账套，不用口令、不碰真账）/ 忘了口令用恢复码。
+            this._keyCtx = { done, replayKey, doReq }
+            this.setData({ key_open: true, key_input: '', key_err: '', key_mode: code === 'no_key' ? 'set' : 'enter' })
             return
           }
           if (res.statusCode >= 400) {
@@ -6010,6 +5982,80 @@ Page({
       }
     })
   },
+  onKeyInput(e) { this.setData({ key_input: e.detail.value }) },
+  closeKey() {
+    const c = this._keyCtx
+    this._keyCtx = null
+    if (c) c.done()
+    this.setData({ key_open: false })
+  },
+  // 输口令进（或者第一次用：设口令）
+  submitKey() {
+    const k = String(this.data.key_input || '').trim()
+    if (k.length < 4) return wx.showToast({ title: '口令至少 4 位', icon: 'none' })
+    const c = this._keyCtx
+    if (this.data.key_mode === 'set') {
+      wx.showLoading({ title: '设置中' })
+      wx.request({
+        url: API_BASE + '/auth/setup', method: 'POST', data: { key: k },
+        success: (s) => {
+          wx.hideLoading()
+          const d = s.data || {}
+          if (d.ok) {
+            wx.setStorageSync('ak', k)
+            this._keyCtx = null
+            this.setData({ key_open: false })
+            if (c) { c.done(); c.doReq(k); c.replayKey(k) }
+            this.loadMe()
+            if (d.recover_code) this.showRecoverCode(d.recover_code)
+          } else this.setData({ key_err: d.error || '设置失败' })
+        },
+        fail: () => { wx.hideLoading(); this.setData({ key_err: '网络失败，再试一次' }) }
+      })
+      return
+    }
+    wx.setStorageSync('ak', k)
+    this._keyCtx = null
+    this.setData({ key_open: false, key_err: '' })
+    if (c) { c.done(); c.doReq(k); c.replayKey(k) }
+    this.loadMe()
+  },
+  // 先看看演示：内置口令直接进演示账套（示例数据），不用问任何人要口令
+  enterDemoLook() {
+    const c = this._keyCtx
+    wx.setStorageSync('ak', DEMO_KEY)
+    this._keyCtx = null
+    this.setData({ key_open: false, demo: true, role: 'demo' })
+    if (c) { c.done(); c.doReq(DEMO_KEY); c.replayKey(DEMO_KEY) }
+    this.loadMe()
+  },
+  keyRecover() {
+    this.closeKey()
+    this.openRecover()
+  },
+  // 老板关/开「内置演示入口」（审核过了可以关掉，免得谁都能进来看示例账本）
+  toggleDemoBuiltin() {
+    const on = !!this.data.demo_builtin
+    wx.showModal({
+      title: on ? '关掉内置演示入口？' : '打开内置演示入口？',
+      content: on
+        ? '关掉后登录页不再显示「先看看演示」，微信审核员就进不来了。审核过了再关比较稳。'
+        : '打开后任何拿到小程序的人都能点「先看看演示」看示例账套（碰不到你的真账本）。',
+      confirmText: on ? '关掉' : '打开',
+      success: (r) => {
+        if (!r.confirm) return
+        this.req({
+          url: API_BASE + '/auth/demo-builtin', method: 'POST',
+          data: { key: wx.getStorageSync('ak'), off: on },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) { this.setData({ demo_builtin: !!d.builtin }); wx.showToast({ title: d.builtin ? '演示入口已打开' : '演示入口已关掉', icon: 'none' }) }
+            else wx.showToast({ title: d.error || '改不了', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
   // 演示模式里点横幅：清掉手上的演示口令，回到「输入我的口令」
   exitDemo() {
     wx.removeStorageSync('ak')
@@ -6293,7 +6339,7 @@ Page({
         const d = res.data || {}
         // 三种身份：老板 / 员工 / 演示（只读，给微信审核和试用的人看）
         const r = d.role === 'staff' ? 'staff' : d.role === 'demo' ? 'demo' : 'owner'
-        this.setData({ role: r, demo: r === 'demo', staff_enabled: !!d.staff_enabled, demo_enabled: !!d.demo_enabled })
+        this.setData({ role: r, demo: r === 'demo', staff_enabled: !!d.staff_enabled, demo_enabled: !!d.demo_enabled, demo_builtin: d.demo_builtin !== false })
       }
     })
   },
