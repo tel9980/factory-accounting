@@ -612,6 +612,13 @@ async function verifySetting(db, key, given) {
   return false
 }
 
+// 演示口令开着没有（给微信审核 / 试用的人看的只读口令）。
+// 存在 settings.demo_key，和员工口令一样是哈希；没有这一行就等于没开。
+async function demoKeyOn(db) {
+  const r = await db.prepare("SELECT value FROM settings WHERE key='demo_key'").first().catch(() => null)
+  return !!(r && String(r.value).trim())
+}
+
 // 试错太多时统一的 429 文案（口令、员工 PIN、恢复码共用一套）
 const tooMany = (sec) => ({ error: `试错太多次了，${Math.max(1, Math.ceil(sec / 60))} 分钟后再试（急着进去可以用「恢复码」重设口令，那条路不受这个限制）`, code: 'too_many', retry_after: sec })
 
@@ -796,6 +803,39 @@ app.post('/auth/staff-off', async (c) => {
   return c.json({ ok: true, enabled: false, note: '已停用：他手机上那个口令现在进不去了' })
 })
 
+// 演示口令：给微信审核、给想先看看的人。只读（GET），改不了账、导不走数据。
+// 微信审核 3.3「登录受限」就是因为审核员拿不到口令进不去，有了这个就能自己进去看。
+app.post('/auth/demo', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '尚未设置老板口令' }, 400)
+  if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板口令能设演示口令' }, 403)
+  const pw = String(b.password || '').trim()
+  if (pw && pw.length < 4) return c.json({ error: '演示口令至少 4 位' }, 400)
+  if (pw && (await verifyKey(mainDb, pw))) return c.json({ error: '演示口令不能和老板口令一样' }, 400)
+  if (pw && (await verifySetting(mainDb, 'staff_key', pw))) return c.json({ error: '演示口令不能和员工口令一样' }, 400)
+  if (!pw) {
+    await mainDb.prepare("DELETE FROM settings WHERE key='demo_key'").run()
+    await logAudit(mainDb, '关掉演示口令', '演示口令', '审核/试用入口已关闭', '', '老板')
+    return c.json({ ok: true, enabled: false })
+  }
+  const rec = await makeKeyRecord(pw)
+  const old = await mainDb.prepare("SELECT value FROM settings WHERE key='demo_key'").first()
+  if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='demo_key'").bind(rec).run()
+  else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('demo_key', ?)").bind(rec).run()
+  await logAudit(mainDb, '设演示口令', '演示口令', '只读，给审核/试用用', '', '老板')
+  return c.json({ ok: true, enabled: true })
+})
+
+// 演示口令开着没有（老板才看得到；不回明文，明文只在设置时显示一次）
+app.post('/auth/demo-state', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板能看' }, 403)
+  return c.json({ ok: true, enabled: await demoKeyOn(mainDb) })
+})
+
 // 按账户对账：今天/这个月，钱到底进了哪个口袋，有没有对不上
 app.get('/account-recon', async (c) => {
   const db = c.env.DB
@@ -970,6 +1010,7 @@ app.use('*', async (c, next) => {
   let role = ''
   let staffMods = null
   if (given && (await verifyKey(mainDb, given))) role = 'owner'
+  else if (given && (await verifySetting(mainDb, 'demo_key', given))) role = 'demo'
   else if (given) {
     // 一人一个口令：认到人就按这个人的名字和权限走
     let su = null
@@ -999,6 +1040,14 @@ app.use('*', async (c, next) => {
     return c.json({ error: '访问口令错误', code: 'bad_key', left: f.left }, 401)
   }
   await authOk(mainDb, ip)
+  // 演示口令：只读。给微信审核和试用的人看界面用，改不了账，也导不走数据。
+  // 只读而不是「进另一个假账本」：这样老板自己也能拿它当「只看不改」的临时口令。
+  if (role === 'demo') {
+    const dm = c.req.method
+    const denyDemo = (dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import|db-clean|staff-users|staff-perms|schema-check|party-merge|seal|unseal|auth\/)/.test(path)
+    if (denyDemo) return c.json({ code: 'demo_readonly', error: '演示口令只能看，不能改账、不能导出（要记账请换成自己的口令）' }, 403)
+  }
   // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
   if (role === 'staff') {
     const m = c.req.method
@@ -5048,7 +5097,9 @@ app.get('/me', async (c) => {
     const su = await mainDb.prepare('SELECT modules FROM staff_users WHERE name=? AND active=1 ORDER BY id DESC').bind(myName).first().catch(() => null)
     if (su && String(su.modules || '').trim()) mods = String(su.modules).split(',').map((x) => x.trim()).filter(Boolean)
   }
-  return c.json({ role, book: String(c.env.BOOK || '1'), staff_name: myName, staff_enabled: !!staff, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '', staff_modules: mods, staff_mod_labels: STAFF_MOD_LABEL })
+  // demo_enabled 只给老板看（前端据此决定要不要显示「设演示口令」按钮），不回明文
+  const demoEnabled = role === 'owner' ? await demoKeyOn(mainDb) : false
+  return c.json({ role, book: String(c.env.BOOK || '1'), staff_name: myName, staff_enabled: !!staff, demo_enabled: demoEnabled, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '', staff_modules: mods, staff_mod_labels: STAFF_MOD_LABEL })
 })
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
 const addDaysIso = (iso, n) => {

@@ -130,7 +130,7 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日'],
-    role: 'owner', staff_enabled: false, cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
+    role: 'owner', staff_enabled: false, demo: false, demo_enabled: false, cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
@@ -527,7 +527,7 @@ Page({
               })
             } else {
               wx.showModal({
-                title: '访问口令', editable: true, placeholderText: '请输入访问口令',
+                title: '访问口令', editable: true, placeholderText: '请输入访问口令（审核 / 试用可问老板要演示口令）',
                 cancelText: '忘了口令', confirmText: '确定',
                 success: (r) => {
                   if (r.confirm && r.content) {
@@ -5982,6 +5982,41 @@ Page({
     })
   },
   // 员工口令：设一个给员工，权限受限
+  // 演示口令：只读（能看不能改），给微信审核和「想先看看」的人用。
+  // 为什么要它：微信审核 3.3「登录受限」——审核员拿不到口令进不去，就判定「体验受限」驳回。
+  setDemoKey() {
+    const on = !!this.data.demo_enabled
+    wx.showModal({
+      title: on ? '改演示口令' : '设演示口令',
+      content: on
+        ? '输入新的演示口令（至少 4 位）；输空并确定=关闭演示模式'
+        : '给微信审核 / 试用的人用的口令（至少 4 位）。拿到它只能看，不能改账、不能导出。输空并确定=关闭',
+      editable: true, placeholderText: '演示口令', confirmText: '保存',
+      success: (r) => {
+        if (!r.confirm) return
+        const pw = String(r.content || '').trim()
+        this.req({
+          url: API_BASE + '/auth/demo', method: 'POST',
+          data: { key: wx.getStorageSync('ak'), password: pw },
+          success: (res) => {
+            const d = res.data || {}
+            if (d.ok) {
+              this.setData({ demo_enabled: !!d.enabled })
+              wx.showToast({ title: d.enabled ? ('演示口令已保存：' + pw + '（只读）') : '演示模式已关闭', icon: 'none' })
+              this.loadMe()
+            } else wx.showToast({ title: d.error || '设置失败', icon: 'none' })
+          }
+        })
+      }
+    })
+  },
+  // 演示模式里点横幅：清掉手上的演示口令，回到「输入我的口令」
+  exitDemo() {
+    wx.removeStorageSync('ak')
+    this.setData({ demo: false, role: 'owner' })
+    this.loadMe()
+    this.refresh({ fresh: true })
+  },
   setStaffKey() {
     const tip = this.data.staff_enabled ? '输入新的员工口令（至少 4 位）；输空并确定=关闭员工登录' : '给员工用的口令（至少 4 位，别和你的口令一样）；输空并确定=关闭'
     wx.showModal({
@@ -6256,7 +6291,9 @@ Page({
       url: API_BASE + '/me',
       success: (res) => {
         const d = res.data || {}
-        this.setData({ role: d.role === 'staff' ? 'staff' : 'owner', staff_enabled: !!d.staff_enabled })
+        // 三种身份：老板 / 员工 / 演示（只读，给微信审核和试用的人看）
+        const r = d.role === 'staff' ? 'staff' : d.role === 'demo' ? 'demo' : 'owner'
+        this.setData({ role: r, demo: r === 'demo', staff_enabled: !!d.staff_enabled, demo_enabled: !!d.demo_enabled })
       }
     })
   },

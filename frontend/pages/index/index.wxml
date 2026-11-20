@@ -1,5 +1,6 @@
 <view class="page {{big?'big':''}}">
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
+  <view class="offbar demo" wx:if="{{demo}}" bindtap="exitDemo">👀 演示模式（只能看，不能改账）· 点这里换成我自己的口令</view>
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
   <view class="offbar" wx:if="{{net_bad}}" bindtap="retryAll">⚠️ 有些数据没拉出来（网不太好）· 点这里重试</view>
@@ -1734,6 +1735,8 @@
       <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
       <button class="btn warn" size="mini" wx:if="{{role!='staff' && staff_enabled}}" bindtap="staffOff">🚫 一键停用员工口令</button>
+      <view class="tip" wx:if="{{role=='owner'}}">微信审核 / 想先看看的人用的口令（只能看，不能改账、不能导出；审核驳回常因为「登录受限」，填它就能过）：{{demo_enabled?'已开着，可修改或清空关闭':'未设置'}}</view>
+      <button class="btn" size="mini" wx:if="{{role=='owner'}}" bindtap="setDemoKey">{{demo_enabled?'🎬 改演示口令（审核 / 试用）':'🎬 设演示口令（审核 / 试用）'}}</button>
       <view class="hobtns" wx:if="{{role!='staff'}}">
         <button class="btn gray" size="mini" bindtap="loadAccessGuide">🔄 换手机 / 停用员工向导</button>
       </view>

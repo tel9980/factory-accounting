@@ -1526,6 +1526,14 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+307. ✅ **过微信审核：加「演示口令（只读）」**：小程序第一次提审被驳回——「存在登录受限问题，违反《微信小程序平台运营规范常见拒绝情形 3.3》」，详情是「【口令】无法完整体验功能，请在提审页面填写有效账号及密码或上传小程序完整功能截图、录屏运行协助完成」。说白了：审核员打开小程序就撞上一个「请输入访问口令」，他没有口令，进不去，也没法判断这小程序能不能用。
+   - **两条路一起走**。第一条是微信自己给的路（不用改代码，但只能老板自己做）：提交审核时在「测试账号 / 测试密码」里填上，**账号随便写（比如「老板」），密码填你的访问口令**；备注里加一句「打开后弹口令框，输入上面密码即可」。不想把真口令交出去，就填下面这个演示口令。
+   - **第二条是代码里加一个只读的「演示口令」**：设置 → 单位·账户·设置 里有「🎬 设演示口令（审核 / 试用）」，设一个至少 4 位的口令（不能和老板口令、员工口令相同）。拿到这个口令的人**能看所有页面和数字，但一个字都改不了**：非 GET 一律 403 `code:'demo_readonly'`（文案「演示口令只能看，不能改账、不能导出」），`/backup*`、`/export-all`、`/import-all`、`/staff-users`、`/schema-check`、`/party-merge`、`/seal`、`/auth/*` 这些能导走数据或改结构的 GET 也一并拦掉；`/batch` 放行（前端首屏合批是 POST，里面全是 GET）。演示身份进来时顶部有一条蓝色横幅「👀 演示模式（只能看，不能改账）· 点这里换成我自己的口令」，点一下清掉本机口令、回到输入框。
+   - **为什么不做成「假数据演示账套」**：账套三现在是真的空的，塞假数据进去会污染（用户真拿它记第二本账时全是演示单）；而且老板自己也能拿这个口令当「只看不改」的临时口令给会计或客户看。所以演示模式 = 真账本 ⊕ 只读。
+   - **实现**：`settings.demo_key` 存哈希（和员工口令同一套 `makeKeyRecord` / `verifySetting`，永不明文落库）；中间件在老板口令之后、员工 PIN 之前认它，命中 `role='demo'`；`/me` 对老板多回一个 `demo_enabled`（只回布尔值，不回明文），对演示身份回 `false`（不泄露），前端据此切三态 `owner / staff / demo`；新端点 `POST /auth/demo`（老板口令才能设/清，空字符串=关闭）、`POST /auth/demo-state`（老板查开没开）。
+   - **验证**：新增 `scripts/test-demo.mjs`（**34 项**，已挂 CI：设 → 能看 → 写 403 → 备份/导出 403 → 改口令 403 → 老板照常 → 关掉后立刻失效 → 不能和老板/员工口令撞、至少 4 位、非老板设不了）。干净库实测：`GET /me` 回 `role:'demo'`、`GET /ar|/dashboard|/modules` 200，`POST /orders`、`POST /expenses`、`PATCH /orders/1`、`DELETE /orders/1`、`GET /backup`、`GET /export-all`、`GET /staff-users`、`GET /schema-check`、`POST /auth/change` 全部 403，老板口令下一切 200。全量回归：`check.mjs` 全绿、`smoke` 230 GET 无 5xx、`test-modules`、`smoke-write`（主流程 + 写路由 + 备份闭环）、`test-safety` 48、`test-demo` 34、离线 `test-batch` / `test-key-queue` / `test-firstscreen` 全过。
+   - ⚠️ 动了前端（演示横幅、设置页按钮、口令弹窗提示）→ **小程序要重新上传发布，再重新提交审核**；提审页面记得填「测试账号/密码」（填演示口令最稳）。
+
 306. ✅ **收尾三件：审计第 12 条结清、v1.2.0 之后的依赖也升了、CI 与文档对齐**：这一轮把「还有哪些优化空间」清单里最后一条还挂着的 🔶 划成 ✅，并把升完依赖后的实测写进文档。
    - 清单第 12 条（每次写操作都全量 `refresh()`）：297 做了「写后只刷第一屏」+「同一轮同一条路径只发一次」，303 补了「切回来 20 秒内不整轮重拉」+「同一条 GET 在飞时不发第二遍」，现在整条标 ✅。
    - 这一轮之后仓库状态：`dependabot` 的三个 PR（wrangler 3→4、checkout 4→7、setup-node 4→7）都由我自己升完并实测通过，GitHub 上**没有开着的 PR**；`v1.2.0` 的 tag 已打在 `7f07581`，`release.yml` 出了三平台单文件与多架构镜像。
@@ -1561,7 +1569,7 @@ node scripts/build-exe.mjs --out dist
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 413 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 415 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1843,10 +1851,12 @@ node scripts/build-exe.mjs --out dist
 - `GET /attachments`
 - `POST /attachments`
 
-**auth**（7）
+**auth**（9）
 
 - `GET /auth/recover-info`
 - `POST /auth/change`
+- `POST /auth/demo`
+- `POST /auth/demo-state`
 - `POST /auth/recover`
 - `POST /auth/recover-code`
 - `POST /auth/setup`
