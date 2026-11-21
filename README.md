@@ -1728,6 +1728,14 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+334. ✅ **部署这件事每次都要现找 token、现拼命令，还把版本号漏掉过**：`npx wrangler deploy` 那行长命令里，`--var APP_VERSION/APP_BUILT/APP_COMMIT` 少一个，线上 `/version` 就永远显示 `dev`，出了事分不清线上跑的是哪一次代码；而 token 又散在两三个地方（环境变量、仓库 `.env.local`、`~/.dsh/cf-token`），还经常是「拿的是另一个 Cloudflare 账号的 token」，一路报到 `D1 binding 'DB2' references database … which was not found`（code 10181）——看着像代码问题，其实是账号不对。这一轮把部署收成一条命令：
+   - **新增 `scripts/deploy.sh`**：一条命令做完四件事——①按「环境变量 → 仓库根 `.env.local` → `~/.dsh/cf-token`」找 token，都没有就打印三种给法并退出（不再靠猜）；②`unset http_proxy/https_proxy/…`（wrangler 连 Cloudflare 走本机代理会直接 TLS 失败，跟 git push 是同一个坑）；③跑 `scripts/check.mjs`，绿了才发（`--no-check` 跳过）；④带上三个 `--var` 部署，**发完自己打 `/version` 核对**：还是 `dev`、或 `commit` 跟本地 HEAD 对不上，直接报错退出（退出码非 0，能挂进别的脚本）。另有 `--dry-run` 只看不发。
+   - **账号 id 固化**：`CLOUDFLARE_ACCOUNT_ID` 不再要求每次手打，脚本里默认 `fb907fe08010a1b319f68be568331ce5`（本项目生产账号），环境变量可以覆盖。踩过的坑写进注释了：另一个账号的 token 能通过认证、`wrangler whoami` 也不报错，要到 `deploy` 才炸在「找不到 DB2」上。
+   - **GitHub 仓库配上 `CF_API_TOKEN`**：以前这个仓库一个 secret 都没有，所以 CI 只跑自检 + 冒烟，「部署」那步一直被 `if` 跳过（工作流里会打 warning 说明），线上全靠手工发——**看到绿勾不等于线上更新了**。现在配上了（`gh secret set`），推 `main` 就是「自检绿 → 自动部署 → 部署后验版本」。
+   - **`.env.local` 本机留一份变量**（`CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`），`.gitignore` 里的 `.env.*` 早就挡住了，`git check-ignore` 验过进不了仓库。
+   - **验证**：`bash -n` 语法通过；新 token 实测 `wrangler whoami` 认到生产账号、`d1 list` 能看到三本账（`factory-db` / `factory-db2` / `factory-db3`）；用脚本真发了一次，线上 `/version` 的 `commit` 与本地 HEAD 一致。
+   - 文档：`DEPLOYMENT.md` 1.4 改成「一条命令 + token 三处来源 + 账号不对会报什么错 + 手工兜底命令」。
+
 333. ✅ **「一人财务 + 模板」这条路，卡在三个地方**：现在这套的日常用法就是「下载模板 → 填 → 传」。可这条链路上有三处一直在悄悄费人的时间：模板里不刷卡，70 多个客户名天天手打、打错一个字这一笔就对不上那个客户；预览只告诉你前 3 行错在哪，剩下的自己猜（改到第 4 行又错，再猜再错）；导错了想整批撤回，报销和付房东根本不支持，只能一条条手删——而报销手删时没人记得把借支的「已用」退回去。这一轮把这三处补齐：
    - **模板预填扩到员工名**（`GET /import-template-pack`）：以前 `fill=1` 只把客户名 / 供应商名填进「应收对账 / 应付对账 / 期初应收 / 期初应付」四页。现在**借支页的「员工」列、报销页的「员工」列、支出页的「经手人」列都成了下拉**，候选值来自三处合并去重：借支记录里的员工、员工账号表里在职的人、计件工资里出现过的工人。名字打错一个字，这笔就对不上人——员工的借支余额、「只看自己录的单」全靠这个字串对，所以这里必须能选不能打。
    - **下拉整串有 255 字符上限**：新增 `fitDvList(list, max = 250)`，超了按累计长度截断（不是按条数）。不截的话 Excel 打开会直接报「文件已损坏」，用户完全猜不到是名字太多。实测 63 个名字时最长一串 250 字符，能正常打开。

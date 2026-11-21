@@ -65,11 +65,48 @@ crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1", "0 2 1 * *"]
 
 ### 1.4 部署后端
 
+日常部署就一条命令（在仓库根目录）：
+
+```bash
+bash scripts/deploy.sh
+```
+
+它会依次做四件事，少一步就出过事，所以都收进去了：
+
+1. **找 token**：环境变量 `CLOUDFLARE_API_TOKEN` → 仓库根 `.env.local` → `~/.dsh/cf-token`，三个有一个就行
+2. **清代理**：`http_proxy/https_proxy` 会让 wrangler 连 Cloudflare 直接 TLS 失败（跟 git push 是同一个坑）
+3. **跑自检** `scripts/check.mjs`，绿了才发（赶时间可以 `--no-check`）
+4. **带上版本号部署**（`APP_VERSION` / `APP_BUILT` / `APP_COMMIT` 三个 `--var`），发完**自己打一次 `/version` 核对**，`version` 还是 `dev` 或者 `commit` 对不上就报错退出
+
+想先看看会发什么：`bash scripts/deploy.sh --dry-run`。
+
+token 放哪儿（三选一，别写进仓库）：
+
+```bash
+# 本机：仓库根建 .env.local（.gitignore 的 .env.* 已经挡住了，进不了仓库）
+CLOUDFLARE_API_TOKEN=xxxx
+CLOUDFLARE_ACCOUNT_ID=fb907fe08010a1b319f68be568331ce5
+
+# 或者全机共用一份
+echo 'xxxx' > ~/.dsh/cf-token && chmod 600 ~/.dsh/cf-token
+```
+
+token 需要 `Workers Scripts:Edit` + `D1:Edit`（模板 "Edit Cloudflare Workers" 就够）。
+注意**账号要对**：拿别的账号的 token 部署会报
+`D1 binding 'DB2' references database 'ace7317a-…' which was not found`（code 10181）——
+那说明 token 属于另一个 Cloudflare 账号，不是这个项目的。
+
+手工部署（脚本不好使时兜底）：
+
 ```bash
 cd backend
-# 带上版本号，部署完 /version 就能看到线上到底跑的是哪一版
-npx wrangler deploy --var APP_VERSION:"$(date +%Y%m%d-%H%M)" --var APP_BUILT:"$(date -u +%FT%TZ)"
-curl -s https://jz.qy663.de5.net/version   # {"ok":true,"version":"20261119-0812",...}
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NODE_USE_ENV_PROXY
+CLOUDFLARE_ACCOUNT_ID=fb907fe08010a1b319f68be568331ce5 \
+  npx wrangler deploy \
+  --var APP_VERSION:"$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)" \
+  --var APP_BUILT:"$(date -u +%FT%TZ)" \
+  --var APP_COMMIT:"$(git rev-parse --short HEAD)"
+curl -s https://jz.qy663.de5.net/version   # {"ok":true,"version":"20261121-1944",...}
 ```
 
 部署完**一定要打一下 `/version`**：以前只能靠猜线上更新没有（CI 绿勾不等于线上更新，
@@ -94,8 +131,9 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 ```
 
 没配会怎样：自检和冒烟照跑，「部署」那步会跳过，并在运行摘要上挂一条 warning。
-**2026-11 查过，这个仓库当时一个 secret 都没有**，所以线上的 Worker 一直是手工
-`wrangler deploy` 上去的，不是 CI 推的——看到绿勾不等于线上更新了，去看 warning。
+**2026-11-21 已配上 `CF_API_TOKEN`**（用 `gh secret set CF_API_TOKEN` 设的），
+所以从那以后推 `main` 就是「自检绿 → 自动部署 → 部署后验版本」，不用再手工发。
+上线后还是建议打一下 `/version` 确认 commit 对得上。
 
 还有一个可选的 `PROD_KEY`（值就是线上老板口令），配上之后部署完会多跑一步「线上体检」：
 

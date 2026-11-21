@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# 一条命令部署到线上：bash scripts/deploy.sh
+#
+# 为什么要有这个脚本：以前每次部署都要手打一长串
+#   npx wrangler deploy --var APP_VERSION:"$(date …)" --var APP_BUILT:… --var APP_COMMIT:…
+# 还得先找 token、先关代理 —— 少一样就报「not authenticated」或者线上 /version 变成 dev，
+# 之后分不清线上跑的是哪一次代码。现在这些都收进来了，部署就一条命令。
+#
+# token 从哪来（按顺序找，找到就用）：
+#   1) 环境变量 CLOUDFLARE_API_TOKEN（CI / 临时用）
+#   2) 仓库根的 .env.local（本机，已被 .gitignore 挡住，绝不进仓库）
+#   3) ~/.dsh/cf-token（本机全局，多个项目共用一份）
+# token 需要的权限：Workers Scripts:Edit + D1:Edit（模板名 "Edit Cloudflare Workers"）。
+#
+# 用法：
+#   bash scripts/deploy.sh              # 自检 → 部署 → 验线上版本
+#   bash scripts/deploy.sh --no-check   # 跳过自检（赶时间时用，自己确保测过）
+#   bash scripts/deploy.sh --dry-run    # 只看会部署什么，不真发
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+
+NO_CHECK=0
+DRY=0
+for a in "$@"; do
+  case "$a" in
+    --no-check) NO_CHECK=1 ;;
+    --dry-run) DRY=1 ;;
+    *) echo "不认识的参数：$a"; exit 2 ;;
+  esac
+done
+
+# ---- token ----
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "$ROOT/.env.local" ]; then
+  set -a; . "$ROOT/.env.local"; set +a
+fi
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "$HOME/.dsh/cf-token" ]; then
+  CLOUDFLARE_API_TOKEN="$(cat "$HOME/.dsh/cf-token")"
+fi
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+  cat <<'EOF' >&2
+❌ 找不到 Cloudflare token。三种给法（选一个）：
+   1) 仓库根建 .env.local，写上：
+        CLOUDFLARE_API_TOKEN=xxxx
+        CLOUDFLARE_ACCOUNT_ID=fb907fe08010a1b319f68be568331ce5
+   2) 写到 ~/.dsh/cf-token（多个项目共用）
+   3) 直接 export CLOUDFLARE_API_TOKEN=xxxx
+EOF
+  exit 1
+fi
+export CLOUDFLARE_API_TOKEN
+export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-fb907fe08010a1b319f68be568331ce5}"
+
+# wrangler 连 Cloudflare 走本机代理经常 TLS 报错（跟 git push 是同一个坑），这里统一清掉。
+# 注意：这只影响本进程，不动你 shell 里的设置。
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NODE_USE_ENV_PROXY
+
+# ---- 自检 ----
+if [ "$NO_CHECK" = "0" ]; then
+  echo "→ 自检（scripts/check.mjs）"
+  node scripts/check.mjs > /tmp/deploy-check.log 2>&1 || { echo "❌ 自检没过，先看下面："; tail -30 /tmp/deploy-check.log; exit 1; }
+  grep -E "路由|SQL|绑定" /tmp/deploy-check.log | tail -3 || true
+fi
+
+# ---- 版本号：这三个变量必须带上去，否则线上 /version 显示 dev，出了事查不清是哪次 ----
+V="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+B="$(date -u +%FT%TZ)"
+C="$(git rev-parse --short HEAD)"
+DIRTY=""
+if [ -n "$(git status --porcelain)" ]; then DIRTY="（工作区有未提交改动）"; fi
+echo "→ 部署 $V  commit $C$DIRTY"
+
+EXTRA=""
+[ "$DRY" = "1" ] && EXTRA="--dry-run"
+cd backend
+npx wrangler deploy $EXTRA --var APP_VERSION:"$V" --var APP_BUILT:"$B" --var APP_COMMIT:"$C"
+[ "$DRY" = "1" ] && { echo "（--dry-run：没有真发）"; exit 0; }
+
+# ---- 验线上：不能光看 wrangler 说 Deployed ----
+echo "→ 验线上版本"
+sleep 5
+node -e '
+const want = process.argv[1], wantV = process.argv[2]
+fetch("https://jz.qy663.de5.net/version").then((r) => r.json()).then((d) => {
+  console.log("   线上：" + JSON.stringify(d))
+  if (String(d.version) === "dev") { console.error("❌ 线上还是 dev，--var 没生效"); process.exit(1) }
+  if (d.commit && String(d.commit).indexOf(want) !== 0) { console.error("❌ 线上 commit 是 " + d.commit + "，不是 " + want); process.exit(1) }
+  if (wantV && String(d.version) !== wantV) console.log("   （注意：版本串是 " + d.version + "，本地算的是 " + wantV + "，跨分钟属正常）")
+  console.log("✅ 线上已经是这次提交")
+}).catch((e) => { console.error("❌ 拿不到 /version：" + e.message); process.exit(1) })
+' "$C" "$V"
