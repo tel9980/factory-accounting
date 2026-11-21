@@ -521,6 +521,26 @@ Page({
     } catch (e) {}
     return null
   },
+  // 缓存回收：断网看账会在手机里留 c_<账套>_<路径> 的缓存，只增不减会慢慢吃满存储。
+  // 每次进来清一次 14 天前的、以及坏掉的条目（一个 session 只跑一次）。
+  _cacheSweep() {
+    if (this._cacheSwept) return
+    this._cacheSwept = true
+    try {
+      const info = wx.getStorageInfoSync()
+      const keys = (info && info.keys) || []
+      const nowMs = Date.now()
+      const stale = 14 * 86400000
+      let dropped = 0
+      for (const k of keys) {
+        if (String(k).indexOf('c_') !== 0) continue
+        const v = wx.getStorageSync(k)
+        const t = Number((v && v.t) || 0)
+        if (!t || nowMs - t > stale) { try { wx.removeStorageSync(k); dropped++ } catch (e) {} }
+      }
+      if (dropped) console.log('缓存回收清掉 ' + dropped + ' 条')
+    } catch (e) {}
+  },
   _agoText(ts) {
     const m = Math.max(0, Math.round((Date.now() - Number(ts || 0)) / 60000))
     if (m < 1) return '刚刚'
@@ -741,6 +761,7 @@ Page({
     }
     this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).length })
     this.flushPending(true)
+    this._cacheSweep()
     if (!this._modsLoaded) { this._modsLoaded = true; this.loadModules() }
     // 刚离开又马上回来（切到微信看消息、点开又退回）不必整轮重拉：
     // 20 秒内回来只刷第一屏，省掉第二波那 11 个跟这笔账无关的请求。
@@ -2209,8 +2230,10 @@ Page({
   loadExpenses(more) {
     if (more && this._pagBusy && this._pagBusy.ex) return
     const off = more ? this.data.ex_off : 0
+    // 搜索词下推后端：以前只在前端筛「已经加载的那 60 条」，支出一多旧记录搜不到还提示没有。
+    const kwq = this.data.ex_kw ? '&kw=' + encodeURIComponent(this.data.ex_kw) : ''
     if (more) this._loading('ex', true)
-    this.req({ url: API_BASE + '/expenses?offset=' + off + '&limit=' + this.PAGE, success: (res) => {
+    this.req({ url: API_BASE + '/expenses?offset=' + off + '&limit=' + this.PAGE + kwq, success: (res) => {
       const page = res.data || []
       const all = this._appendPage(this._expAll, page, more)
       this._expAll = all
@@ -2245,11 +2268,18 @@ Page({
     clearTimeout(this._apT)
     this._apT = setTimeout(() => this.loadAp(), 300)
   },
-  onExKw(e) { this.setData({ ex_kw: e.detail.value, expense_list: this.filterEx(this._expAll, e.detail.value) }) },
+  onExKw(e) {
+    const kw = e.detail.value
+    this.setData({ ex_kw: kw, expense_list: this.filterEx(this._expAll, kw) })
+    clearTimeout(this._exT)
+    this._exT = setTimeout(() => this.loadExpenses(), 300)
+  },
   // 切到某个页时才加载那一页要用的数据（一次 30 个请求太多，手机上慢）
   enterTab(t) {
     if (t === 'ar' || t === 'ap') {
-      this.loadAr(); this.loadAp(); this.loadArSummary(); this.loadGroups(t || 'ar')
+      // 只看当前这一页：以前应收/应付两个子页各自都把对方那 60 条也拉一遍，白费一次请求。
+      if (t === 'ar') this.loadAr(); else this.loadAp()
+      this.loadArSummary(); this.loadGroups(t || 'ar')
       this.loadLimits(); this.loadAdvances()
     } else if (t === 'expense') {
       this.loadExpenses(); this.loadLoans(); this.loadSuggest(); this.loadMaterials()
@@ -2681,7 +2711,9 @@ Page({
   // 「💰 收钱」：先切到应收未结清，再报「一共几张、多少钱」。
   // 以前是拿列表里已经加载的前 60 条现算，客户一多就少报（金额和笔数都不对）。
   goCollect() {
-    this.setData({ tab: 'ar', group: 'bill', ar_filter: 'open' })
+    // 切到「按客户」分组视图：toast 里说的「整户收款」按钮只在按客户视图里有，
+    // 以前默认停在「按单据」，toast 让人去点一个根本不显示的按钮。
+    this.setData({ tab: 'ar', group: 'bill', ar_filter: 'open', ar_view: 'party' })
     wx.pageScrollTo({ scrollTop: 0, duration: 0 })
     this.enterTab('ar')
     const say = (d) => {
@@ -8384,12 +8416,13 @@ Page({
   // ===== 计件工资：记工 → 工资表 → 发工资 → 工资单 =====
   loadPayroll() {
     const mm = String(this.data.pw_month || '').trim() || dayOf().slice(0, 7)
+    // 工资表和记工明细没有先后关系，一起发（以前工资表回来才去拉明细，串行多等一轮）。
     this.req({ url: API_BASE + '/payroll?month=' + mm, success: (r) => {
       const d = r.data || {}
       if (!d.ok) return wx.showToast({ title: d.error || '没取到工资表', icon: 'none' })
       this.setData({ pw: d, pw_month: d.month })
-      this.loadWageRecs(d.month)
     } })
+    this.loadWageRecs(mm)
   },
   closePayroll() { this.setData({ pw: null, pw_recs: [] }) },
   onPwMonth(e) { this.setData({ pw_month: e.detail.value }) },

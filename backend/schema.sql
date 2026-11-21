@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_month ON ledger(month);
+CREATE INDEX IF NOT EXISTS idx_ledger_cash_dir ON ledger(cash, direction, ref_type);
 CREATE TRIGGER IF NOT EXISTS trg_ledger_month AFTER INSERT ON ledger WHEN NEW.month IS NULL
 BEGIN UPDATE ledger SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
@@ -679,6 +680,7 @@ CREATE TABLE IF NOT EXISTS writeoffs (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_writeoffs_ref ON writeoffs(ref_type, ref_id);
+CREATE INDEX IF NOT EXISTS idx_writeoffs_month ON writeoffs(substr(created_at,1,7));
 CREATE TABLE IF NOT EXISTS targets (
   month TEXT PRIMARY KEY,
   receive REAL DEFAULT 0,

@@ -1189,3 +1189,34 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
   `POST /backup-to-notes {all:true}` 手动全推；`GET /export-all?all=1` 一次导出所有账本
   （`kind:'factory-accounting-multi'`，`books:[{book_id, book, pkg}]`）。
 
+### 4.32 性能 / 高效 / 便捷一轮的硬规矩（改后端并发和前端交互前先看这段）
+
+- **别把「快慢接口」混着串行发**：这一轮把 `/collect-list`（删了废弃的 `pbP`）、`/customer-card`
+  （`promiseBook` 必须传 `[party]`，别再为一家客户读全库三年）、`/tax-pack`（借款还欠改成
+  一次 `GROUP BY debt_id`）、`/month-brief`（趋势 6 个月别再串行 5 次 `monthPL`）、
+  `payrollOf` / `promiseBook` / `/month-report`（14 条）/ `/merge-summary`（每本账 5 条）/
+  `healthScan` 尾部，全部改成 `Promise.all` 并发。以后再写「循环里发查询」先问一句：
+  这几条有依赖吗？没有就并起来，D1 是「读多少行计费」，串行 = 多等一次往返还多读一遍。
+- **两个索引不能删**：`idx_ledger_cash_dir ON ledger(cash, direction, ref_type)` 与
+  `idx_writeoffs_month ON writeoffs(substr(created_at,1,7))` 已经写进 `schema.sql`（新装自带）+
+  `ensureBaseTables`（老库部署后第一次请求自动补）。`accountBalances`（首页现金卡/月报/手机报表/
+  本月一页纸都在复用）和 `monthPL`（利润口径）全靠它们，删了立刻回到全表扫。
+- **`guide.js` 是懒加载，别改回顶层 import**：那 50KB 静态 HTML 原来 `import { GUIDE_HTML } from './guide.js'`
+  写在第 2 行，每次冷启动 eager parse。现在是 `/guide` 处理器里 `await import('./guide.js')`。
+  GUIDE_HTML 只有 `/guide` 一处用，别再挪到顶层。
+- **DDL 记忆化只注册一次**：`ensureStaffTable` 等建表函数统一在文件底部 `_memoDdl(fn, tag)` 注册，
+  不要在顶部再内联包一层（之前 `tag` 写错成 'stafftable' 和 'staff' 两个，包两层纯冗余）。
+- **前端交互几个「别退回」**：①`goCollect` 必须 `setData({ar_view:'party'})`——「整户收款」按钮只在
+  `ar_view=='party'` 渲染，不切过去 toast 会指向一个不存在的按钮；②支出搜索走 `loadExpenses` 的 `kw`
+  下推后端（`/expenses` 支持 `kw`），别退回只在前端 filter；③`enterTab` 只拉当前 tab（loadAr 或 loadAp），
+  别再两个都发；④工资加载 `/payroll` 与工资记录并行，别再等 payroll 回来才发第二条；⑤缓存要回收——
+  `_cacheSweep` 在 onShow 里跑，`c_` 前缀缓存超 14 天自动删，别把 storage 越撑越大。
+- **有意的两个暂缓（不是没做，是算过账）**：①`failBucket` 并发串台——Workers 没有 AsyncLocalStorage、
+  `noteFail` 50+ 处内联没有 `c` 可传，逐处穿桶是大 diff，且只影响「降级日志归属」不碰账和钱，低严重度；
+  ②SQL 口径抽常量（`ref_type NOT IN (...)` 57 处、`COALESCE(written_off,0)` 227 处）——片段已完全一致，
+  抽 `${OP_REF}` 要逐处把双引号串转反引号，mass replace 一处漏转就语法错或 SQL 静默变，收益只是
+  「将来改排除项少改几处」，暂缓。**这两条如果要动，先评估 diff 和回归成本，别顺手改。**
+- **`scripts/run-all.mjs` 是全套回归的入口**：`node scripts/run-all.mjs --base <url> --key <口令>`，
+  顺序跟 `.github/workflows/deploy.yml` 一致（离线五件套 + smoke + 29 个 test 脚本），失败不中断、
+  最后列清单 exit 1。CI 里加新 test 脚本时，别忘在这里的 ONLINE 数组里也加一行，否则本地一把跑不全。
+

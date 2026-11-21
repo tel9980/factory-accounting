@@ -746,6 +746,11 @@
 
   <block wx:if="{{tab=='ap'}}">
     <view class="form">
+      <view class="chips" wx:if="{{contacts_ap.length}}">
+        <text class="chip-label">常用供应商：</text>
+        <text class="chip" wx:for="{{contacts_ap}}" wx:key="name" wx:if="{{contacts_more || index < 8}}" bindtap="pickSupplier" data-n="{{item.name}}">{{item.name}}</text>
+        <text class="chip" wx:if="{{contacts_ap.length > 8 && !contacts_more}}" bindtap="toggleMoreCust">还有 {{contacts_ap.length - 8}} 个…</text>
+      </view>
       <input class="inp" placeholder="供应商/收款人" value="{{p_supplier}}" bindinput="onPSupplier" bindblur="blurPSupplier"/>
       <view class="chips" wx:if="{{sug_ap.length}}">
         <text class="chip-label">常记：</text>
@@ -785,10 +790,6 @@
         <text class="chip" data-f="p_date" data-n="3" bindtap="quickDate">3 天前</text>
       </view>
       <button class="btn btn-main" bindtap="addPayable">记一笔应付</button>
-      <view class="chips" wx:if="{{contacts_ap.length}}">
-        <text class="chip-label">常用供应商：</text>
-        <text class="chip" wx:for="{{contacts_ap}}" wx:key="name" wx:if="{{index < 8}}" bindtap="pickSupplier" data-n="{{item.name}}">{{item.name}}</text>
-      </view>
     </view>
     <view class="form">
       <view class="tip">先付了定金、货还没到 → 记预付款，到货后可一键抵扣</view>

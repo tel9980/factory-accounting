@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
-import { GUIDE_HTML } from './guide.js'
+// GUIDE_HTML 不再顶层静态 import：guide.js 是 50KB 的纯静态 HTML 字符串，静态 import 会让每次冷启动
+// 都 eager parse 这 50KB。改成 /guide 命中时才动态 import（懒加载），首屏路由不背这个包。
 
 const app = new Hono()
 
@@ -229,7 +230,7 @@ async function ensureStaffTable(db) {
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_pin ON staff_users(pin)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_hash ON staff_users(pin_hash)').run().catch(() => {})
 }
-ensureStaffTable = _memoDdl(ensureStaffTable, 'stafftable')
+// ensureStaffTable 的记忆化在文件底部统一注册（见 _memoDdl 区），这里不重复包。
 // ensureMonthCols 现在每个请求都会走一次兜底，必须记忆化，不然每条请求都要跑 3 次 PRAGMA + 一次回填 UPDATE
 async function ensureMonthCols(db) {
   for (const t of ['orders', 'ledger', 'payables']) {
@@ -267,6 +268,7 @@ async function ensureBaseTables(db) {
     'CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)',
     'CREATE INDEX IF NOT EXISTS idx_invoices_order ON invoices(order_id)',
     'CREATE INDEX IF NOT EXISTS idx_writeoffs_ref ON writeoffs(ref_type, ref_id)',
+    'CREATE INDEX IF NOT EXISTS idx_writeoffs_month ON writeoffs(substr(created_at,1,7))',
     `CREATE TABLE IF NOT EXISTS prepaids (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT DEFAULT '', total REAL NOT NULL DEFAULT 0, months INTEGER DEFAULT 0, start_date TEXT, category TEXT DEFAULT '', account_id INTEGER DEFAULT 0, remark TEXT DEFAULT '', active INTEGER DEFAULT 1, created_at TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS wx_users (id INTEGER PRIMARY KEY AUTOINCREMENT, openid TEXT UNIQUE, nickname TEXT DEFAULT '', quota INTEGER DEFAULT 0, created_at TEXT, last_at TEXT)`,
     `CREATE TABLE IF NOT EXISTS bank_flows (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, direction TEXT, amount REAL NOT NULL DEFAULT 0, memo TEXT DEFAULT '', matched_type TEXT, matched_id INTEGER DEFAULT 0, created_at TEXT)`,
@@ -281,6 +283,7 @@ async function ensureBaseTables(db) {
     'CREATE INDEX IF NOT EXISTS idx_orders_due_day ON orders(substr(due_date,1,10))',
     'CREATE INDEX IF NOT EXISTS idx_ledger_day ON ledger(substr(created_at,1,10))',
     'CREATE INDEX IF NOT EXISTS idx_ledger_year ON ledger(substr(created_at,1,4))',
+    'CREATE INDEX IF NOT EXISTS idx_ledger_cash_dir ON ledger(cash, direction, ref_type)',
     'CREATE INDEX IF NOT EXISTS idx_payables_day ON payables(substr(created_at,1,10))',
     'CREATE INDEX IF NOT EXISTS idx_payables_due_day ON payables(substr(due_date,1,10))',
     // 备份分片：D1 单行上限 2MB，整库备份到一定规模就超了（本地 6000 单时 9MB+）。
@@ -2606,18 +2609,22 @@ app.delete('/wage-records/:id', async (c) => {
 
 // 月底工资表：每人应发多少、已发多少、还差多少
 async function payrollOf(db, mm) {
-  const { results: recs } = await db.prepare('SELECT worker, SUM(qty) q, SUM(amount) a, COUNT(*) n FROM wage_records WHERE month=? GROUP BY worker ORDER BY a DESC').bind(mm).all()
-  const { results: pays } = await db.prepare('SELECT worker, SUM(amount) a FROM wage_pays WHERE month=? GROUP BY worker').bind(mm).all()
+  // 四条互不依赖，一起发（串行在 D1 上每条多等 80–120ms）
+  const [recs, pays, loans, dds] = await Promise.all([
+    db.prepare('SELECT worker, SUM(qty) q, SUM(amount) a, COUNT(*) n FROM wage_records WHERE month=? GROUP BY worker ORDER BY a DESC').bind(mm).all(),
+    db.prepare('SELECT worker, SUM(amount) a FROM wage_pays WHERE month=? GROUP BY worker').bind(mm).all(),
+    db.prepare('SELECT staff, SUM(amount-COALESCE(used,0)-COALESCE(returned,0)) a FROM loans GROUP BY staff').all(),
+    db.prepare('SELECT worker, SUM(amount) a FROM wage_deduct WHERE month=? GROUP BY worker').bind(mm).all().catch(() => ({ results: [] }))
+  ])
+  const recRows = recs.results || []
   const payMap = {}
-  for (const p of pays || []) payMap[p.worker] = num(p.a)
-  const { results: loans } = await db.prepare('SELECT staff, SUM(amount-COALESCE(used,0)-COALESCE(returned,0)) a FROM loans GROUP BY staff').all()
+  for (const p of (pays.results || [])) payMap[p.worker] = num(p.a)
   const loanMap = {}
-  for (const l of loans || []) if (num(l.a) > 0.005) loanMap[l.staff] = num(l.a)
+  for (const l of (loans.results || [])) if (num(l.a) > 0.005) loanMap[l.staff] = num(l.a)
   // 宿舍水电、宿舍租金这类「厂里先付给房东、再从工资里扣回来」的钱
-  const { results: dds } = await db.prepare('SELECT worker, SUM(amount) a FROM wage_deduct WHERE month=? GROUP BY worker').bind(mm).all().catch(() => ({ results: [] }))
   const ddMap = {}
-  for (const d of dds || []) ddMap[d.worker] = num(d.a)
-  const rows = (recs || []).map((r) => {
+  for (const d of (dds.results || [])) ddMap[d.worker] = num(d.a)
+  const rows = recRows.map((r) => {
     const due = Math.round(num(r.a) * 100) / 100
     const paid = Math.round((payMap[r.worker] || 0) * 100) / 100
     const deduct = Math.round((ddMap[r.worker] || 0) * 100) / 100
@@ -7260,7 +7267,10 @@ app.get('/import-template-pack', async (c) => {
 
 // 使用教程（网页版）：内容来自 docs/新手教程.md，由 scripts/gen-guide.mjs 编译成 backend/guide.js。
 // 免口令就能看 —— 教程里没有账目数据，用不着口令；/pc 页面和它互相有链接。
-app.get('/guide', (c) => c.html(GUIDE_HTML))
+app.get('/guide', async (c) => {
+  const { GUIDE_HTML } = await import('./guide.js')
+  return c.html(GUIDE_HTML)
+})
 
 // 电脑上填表 / 上传：手机上一个个敲 70 多个客户不现实，这个页面就干两件事 ——
 // 下载带客户名的模板、把填好的 Excel 传回来（同一个口令，不经过小程序）
@@ -8877,17 +8887,19 @@ app.get('/merge-summary', async (c) => {
   const qm = String(c.req.query('month') || '')
   const mm = /^\d{4}-\d{2}$/.test(qm) ? qm : now().slice(0, 7)
   const defs = [['1', all.DB, '主账本'], ['2', all.DB2, '第二本'], ['3', all.DB3, '第三本']]
-  const books = []
-  for (const [id, db, def] of defs) {
-    if (!db) continue
-    const g = (sql, ...b) => db.prepare(sql).bind(...b).first().catch(() => null)
-    const nm = await g("SELECT value FROM settings WHERE key='book_name'")
+  const g = (db, sql, ...b) => db.prepare(sql).bind(...b).first().catch(() => null)
+  // 每本账 5 条互不依赖、账与账之间也互不依赖，全部一起发（原来 3×5 串行）。
+  const books = (await Promise.all(defs.map(async ([id, db, def]) => {
+    if (!db) return null
+    const [nm, pl, nw, cnt, last] = await Promise.all([
+      g(db, "SELECT value FROM settings WHERE key='book_name'"),
+      monthPL(db, mm).catch(() => null),
+      netNow(db).catch(() => null),
+      g(db, 'SELECT COUNT(*) n FROM orders WHERE month=?', mm),
+      g(db, 'SELECT MAX(created_at) t FROM ledger')
+    ])
     const name = (nm && nm.value) || def
-    const pl = await monthPL(db, mm).catch(() => null)
-    const nw = await netNow(db).catch(() => null)
-    const cnt = await g('SELECT COUNT(*) n FROM orders WHERE month=?', mm)
-    const last = await g('SELECT MAX(created_at) t FROM ledger')
-    books.push({
+    return {
       id, name,
       orders: num(cnt && cnt.n),
       income: round2(num(pl && pl.income)), mat: round2(num(pl && pl.mat)), exp: round2(num(pl && pl.cash_exp)),
@@ -8896,8 +8908,8 @@ app.get('/merge-summary', async (c) => {
       debt: round2(num(nw && nw.debt)), net: round2(num(nw && nw.net)),
       last: last && last.t ? String(last.t).slice(0, 10) : '',
       empty: !num(cnt && cnt.n) && !num(pl && pl.income) && !num(pl && pl.cash_exp) && !num(nw && nw.cash) && !num(nw && nw.ar)
-    })
-  }
+    }
+  }))).filter(Boolean)
   const used = books.filter((b) => !b.empty)
   const T = (k) => round2(books.reduce((a, b) => a + num(b[k]), 0))
   const totals = { orders: books.reduce((a, b) => a + num(b.orders), 0), income: T('income'), mat: T('mat'), exp: T('exp'), adj: T('adj'),
@@ -11578,11 +11590,26 @@ app.get('/month-brief', async (c) => {
   if (topIn) events.push({ k: 'in', text: `最大一笔进账 ¥${num(topIn.amount)}（${String(topIn.remark || '收款').slice(0, 20)}）`, date: String(topIn.created_at).slice(5, 10) })
   if (topOut) events.push({ k: 'out', text: `最大一笔花销 ¥${num(topOut.amount)}（${topOut.category || topOut.remark || '支出'}）`, date: String(topOut.created_at).slice(5, 10) })
   if (topOrder) events.push({ k: 'order', text: `最大一张单：${topOrder.customer} ${topOrder.item_name || ''} ¥${num(topOrder.price)}`, date: String(topOrder.created_at).slice(5, 10) })
+  // 性能：原来是 6 个月 × 完整 monthPL（每次 10 个子查询）串行只为 profit 一个数，
+  // 改成 3 条按月分组的聚合（orders + ledger + writeoffs）一次拿全过去 5 个月的净利；
+  // 当月直接复用上面已算好的 cur，保证柱状图与文案数字严格一致。
+  const m0 = monthAdd(m + '-01', -5).slice(0, 7)
+  const [tOrd, tLed, tWo] = await Promise.all([
+    db.prepare('SELECT month mk, COALESCE(SUM(price),0) income, COALESCE(SUM(COALESCE(cost,0)),0) mat FROM orders WHERE month BETWEEN ? AND ? GROUP BY month').bind(m0, m).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT month mk, COALESCE(SUM(CASE WHEN ${COST_EXP_WHERE} THEN amount ELSE 0 END),0) cash_exp, COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) amort, COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) dep, COALESCE(SUM(CASE WHEN ref_type='debt_int' THEN amount ELSE 0 END),0) accrue FROM ledger WHERE month BETWEEN ? AND ? GROUP BY month`).bind(m0, m).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT substr(created_at,1,7) mk, COALESCE(SUM(amount),0) wo FROM writeoffs WHERE substr(created_at,1,7) BETWEEN ? AND ? GROUP BY substr(created_at,1,7)').bind(m0, m).all().catch(() => ({ results: [] }))
+  ])
+  const tMap = {}
+  for (const r of (tOrd.results || [])) tMap[r.mk] = { income: num(r.income), mat: num(r.mat) }
+  for (const r of (tLed.results || [])) { const e = tMap[r.mk] || (tMap[r.mk] = {}); e.cash_exp = num(r.cash_exp); e.adj = num(r.amort) + num(r.dep) + num(r.accrue) }
+  for (const r of (tWo.results || [])) { const e = tMap[r.mk] || (tMap[r.mk] = {}); e.wo = num(r.wo) }
   const trend = []
   for (let i = 5; i >= 0; i--) {
     const mm = monthAdd(m + '-01', -i).slice(0, 7)
-    const p0 = i === 0 ? cur : await monthPL(db, mm)
-    trend.push({ m: mm, profit: p0.profit, cash: 0 })
+    if (i === 0) { trend.push({ m: mm, profit: cur.profit, cash: 0 }); continue }
+    const e = tMap[mm] || {}
+    const profit = round2(num(e.income) - num(e.mat) - num(e.cash_exp) - num(e.adj) - num(e.wo))
+    trend.push({ m: mm, profit, cash: 0 })
   }
   const mx = Math.max(1, ...trend.map((x) => Math.abs(x.profit)))
   trend.forEach((x) => { x.bar = Math.round(Math.abs(x.profit) / mx * 100); x.neg = x.profit < 0 })
@@ -11910,9 +11937,12 @@ app.get('/customer-card', async (c) => {
     db.prepare("SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN ack='doubt' AND resolved_at IS NULL THEN 1 ELSE 0 END),0) doubt FROM statement_log WHERE party=? AND type=?").bind(party, type).first().catch(() => null)
   ])
   // 回款速度：只在「已经结清」的单上看（从开单到他付清花了几天）
-  const hp = await db.prepare(`SELECT o.created_at c_at, MAX(l.created_at) last_pay FROM orders o
+  const [hp, last] = await Promise.all([
+    db.prepare(`SELECT o.created_at c_at, MAX(l.created_at) last_pay FROM orders o
       JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in'
-      WHERE o.customer=? AND o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id`).bind(party).all().catch(() => ({ results: [] }))
+      WHERE o.customer=? AND o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id`).bind(party).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT item_name, price, cost, created_at FROM orders WHERE customer=? ORDER BY price DESC LIMIT 1').bind(party).first().catch(() => null)
+  ])
   const ds = []
   for (const h of (hp.results || [])) {
     const a = Date.parse(h.c_at || ''), b = Date.parse(h.last_pay || '')
@@ -11921,7 +11951,6 @@ app.get('/customer-card', async (c) => {
   }
   ds.sort((x, y) => x - y)
   const avgDays = ds.length ? Math.round(ds.reduce((x, y) => x + y, 0) / ds.length) : null
-  const last = await db.prepare('SELECT item_name, price, cost, created_at FROM orders WHERE customer=? ORDER BY price DESC LIMIT 1').bind(party).first().catch(() => null)
 
   const cnt = num(orR && orR.cnt), income = round2(num(orR && orR.income)), cost = round2(num(orR && orR.cost))
   const noCost = num(orR && orR.no_cost_cnt)
@@ -11971,7 +12000,7 @@ app.get('/customer-card', async (c) => {
   L.push(avgDays === null ? '付款速度：还没有结清的单' : `付款速度：平均 ${avgDays} 天付清（最快 ${ds[0]} 天，最慢 ${ds[ds.length - 1]} 天，共 ${ds.length} 单）`)
   L.push(`现在欠 ¥${unpaid}${oldest ? `，最老一笔 ${oldest} 天` : ''}${overdueCnt ? `，${overdueCnt} 笔已过期` : ''}`)
   if (dunTimes || stN) L.push(`催过 ${dunTimes} 次，发过 ${stN} 份对账单${disputes ? `，${disputes} 份有争议` : ''}`)
-  const pbAll = await promiseBook(db, 1095, type).catch(() => null)
+  const pbAll = await promiseBook(db, 1095, type, [party]).catch(() => null)
   const pbk = pbAll ? (pbAll.parties || []).find((x) => norm(x.party) === norm(party)) : null
   if (pbk && pbk.promises) L.push(`答应付款 ${pbk.promises} 次：兑现 ${pbk.kept} 次、失约 ${pbk.broken} 次${pbk.rate !== null ? `（兑现率 ${pbk.rate}%）` : ''}`)
   advice.forEach((x) => L.push('· ' + x))
@@ -12982,17 +13011,22 @@ async function promiseBook(db, days, type, only) {
   const mark = narrow ? ` AND ${pn.map(() => '?').join(',')}` : ''
   const bd = (st) => (narrow ? st.bind(...pn) : st)
   const col = type === 'ap' ? 'supplier' : 'customer'
-  const prows = (await bd(db.prepare("SELECT id, party, type, note, promise_date, created_at FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,10)>=?" + (narrow ? ` AND party IN (${pn.map(() => '?').join(',')})` : '') + " ORDER BY id DESC LIMIT 500")).bind(...(narrow ? [since, ...pn] : [since])).all().catch(() => ({ results: [] }))).results || []
-  const flows = type === 'ap'
-    ? (await bd(db.prepare("SELECT p.supplier AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN payables p ON l.ref_type='payable' AND l.ref_id=p.id WHERE l.direction='out'" + (narrow ? ` AND p.supplier IN (${pn.map(() => '?').join(',')})` : ''))).all().catch(() => ({ results: [] }))).results || []
-    : (await bd(db.prepare("SELECT o.customer AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN orders o ON l.ref_type='order' AND l.ref_id=o.id WHERE l.direction='in'" + (narrow ? ` AND o.customer IN (${pn.map(() => '?').join(',')})` : ''))).all().catch(() => ({ results: [] }))).results || []
+  const flowQ = type === 'ap'
+    ? "SELECT p.supplier AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN payables p ON l.ref_type='payable' AND l.ref_id=p.id WHERE l.direction='out'" + (narrow ? ` AND p.supplier IN (${pn.map(() => '?').join(',')})` : '')
+    : "SELECT o.customer AS party, l.created_at AS d, l.amount AS a FROM ledger l JOIN orders o ON l.ref_type='order' AND l.ref_id=o.id WHERE l.direction='in'" + (narrow ? ` AND o.customer IN (${pn.map(() => '?').join(',')})` : '')
+  const unpaidQ = type === 'ap'
+    ? `SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0${narrow ? ` AND supplier IN (${pn.map(() => '?').join(',')})` : ''} GROUP BY supplier`
+    : `SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0${narrow ? ` AND customer IN (${pn.map(() => '?').join(',')})` : ''} GROUP BY customer`
+  // 三条彼此独立，一起发（promiseBook 被催款清单/客户画像/付款承诺三处复用，优化一次翻三倍）
+  const [prowsR, flowsR, unpaidR] = await Promise.all([
+    bd(db.prepare("SELECT id, party, type, note, promise_date, created_at FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,10)>=?" + (narrow ? ` AND party IN (${pn.map(() => '?').join(',')})` : '') + " ORDER BY id DESC LIMIT 500")).bind(...(narrow ? [since, ...pn] : [since])).all().catch(() => ({ results: [] })),
+    bd(db.prepare(flowQ)).all().catch(() => ({ results: [] })),
+    bd(db.prepare(unpaidQ)).all().catch(() => ({ results: [] }))
+  ])
+  const prows = prowsR.results || []
+  const flows = flowsR.results || []
   const unpaid = {}
-  try {
-    const q = type === 'ap'
-      ? `SELECT supplier AS party, COALESCE(SUM(amount-paid-COALESCE(written_off,0)),0) t FROM payables WHERE amount-paid-COALESCE(written_off,0) > 0${narrow ? ` AND supplier IN (${pn.map(() => '?').join(',')})` : ''} GROUP BY supplier`
-      : `SELECT customer AS party, COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) t FROM orders WHERE price-paid-COALESCE(written_off,0) > 0${narrow ? ` AND customer IN (${pn.map(() => '?').join(',')})` : ''} GROUP BY customer`
-    for (const r of (await bd(db.prepare(q)).all()).results || []) unpaid[norm(r.party)] = round2(num(unpaid[norm(r.party)]) + num(r.t))
-  } catch (e) {}
+  for (const r of (unpaidR.results || [])) unpaid[norm(r.party)] = round2(num(unpaid[norm(r.party)]) + num(r.t))
   const today = todayIso()
   const fmap = {}
   for (const f of flows) {
@@ -13075,7 +13109,6 @@ app.get('/collect-list', async (c) => {
   const histSql = type === 'ap'
     ? "SELECT o.supplier AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM payables o JOIN ledger l ON l.ref_type='payable' AND l.ref_id=o.id AND l.direction='out' WHERE o.paid + COALESCE(o.written_off,0) >= o.amount GROUP BY o.id"
     : "SELECT o.customer AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id"
-  const pbP = promiseBook(db, 365, type).catch(() => ({ parties: [] }))
   const histRows = (await db.prepare(histSql).all()).results || []
   const hstat = {}
   for (const h of histRows) {
@@ -13103,21 +13136,17 @@ app.get('/collect-list', async (c) => {
     }
   }).filter((x) => x.left > 0.005 && x.oldest_days >= minDays)
   list.sort((a, b) => b.score - a.score)
-  // 催款记录：这一家催过几次、上次哪天、几天前
+  // 催款记录 / 对账回执 / 付款承诺：三条彼此独立，一起发（串行发在 D1 上每条多等 80–120ms）
+  // 付款承诺只算这一屏要展示的 20 家，别把整本流水读进来
+  const [drows, arows, pb] = await Promise.all([
+    db.prepare("SELECT party, COUNT(*) n, MAX(created_at) last FROM dunning_log GROUP BY party").all().catch(() => ({ results: [] })),
+    db.prepare("SELECT party, ack, ack_at, note, month, resolved_at, created_at FROM statement_log WHERE type=? AND ack IN ('ok','doubt') ORDER BY id DESC LIMIT 400").bind(type).all().catch(() => ({ results: [] })),
+    promiseBook(db, 365, type, list.slice(0, 20).map((x) => x.party)).catch(() => ({ parties: [] }))
+  ])
   const dmap = {}
-  try {
-    const drows = (await db.prepare("SELECT party, COUNT(*) n, MAX(created_at) last FROM dunning_log GROUP BY party").all()).results || []
-    drows.forEach((r) => { dmap[norm(r.party)] = { n: num(r.n), last: String(r.last || '') } })
-  } catch (e) {}
-  // 对方对账回执：说「对得上」催款更硬气；说「对不上」先核数别催钱
+  for (const r of (drows.results || [])) dmap[norm(r.party)] = { n: num(r.n), last: String(r.last || '') }
   const amap = {}
-  try {
-    const arows = (await db.prepare("SELECT party, ack, ack_at, note, month, resolved_at, created_at FROM statement_log WHERE type=? AND ack IN ('ok','doubt') ORDER BY id DESC LIMIT 400").bind(type).all()).results || []
-    for (const a of arows) { const k = norm(a.party); if (!amap[k]) amap[k] = a }
-  } catch (e) {}
-  // 付款承诺：答应过哪天付、有没有失约（话术里点一句，比空催管用）
-  // 只算这一屏要展示的 20 家，别把整本流水读进来
-  const pb = await promiseBook(db, 365, type, list.slice(0, 20).map((x) => x.party)).catch(() => ({ parties: [] }))
+  for (const a of (arows.results || [])) { const k = norm(a.party); if (!amap[k]) amap[k] = a }
   const pbmap = {}
   for (const p of (pb.parties || [])) pbmap[norm(p.party)] = p
   const out = list.slice(0, 20).map((x, i) => Object.assign({}, x, (() => {
@@ -15871,11 +15900,14 @@ app.get('/tax-pack', async (c) => {
   const debts = (debtR && debtR.results) || []
   const reps = (repR && repR.results) || []
   const dRows = [['借款人', '类型', '本金', '年利率%', '起借日', '期限(月)', '还款方式', '本年还息', '本年还本', '截至年底还欠']]
+  // 「截至年底还欠」要的是全历史还本（reps 只含本年的），逐笔查会 N 次往返；一条 GROUP BY 拿全再查 Map
+  const priAllMap = {}
+  for (const r of ((await db.prepare("SELECT debt_id, COALESCE(SUM(amount),0) t FROM debt_repays WHERE kind='principal' GROUP BY debt_id").all().catch(() => ({ results: [] }))).results || [])) priAllMap[num(r.debt_id)] = num(r.t)
   for (const d of debts) {
     const mine = reps.filter((r) => num(r.debt_id) === num(d.id))
     const intY = round2(mine.filter((r) => r.kind !== 'principal').reduce((a2, r) => a2 + num(r.amount), 0))
     const priY = round2(mine.filter((r) => r.kind === 'principal').reduce((a2, r) => a2 + num(r.amount), 0))
-    const priAll = round2(((await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM debt_repays WHERE debt_id=? AND kind='principal'").bind(d.id).first()) || {}).a)
+    const priAll = round2(priAllMap[num(d.id)] || 0)
     dRows.push([d.lender, d.kind || '', num(d.principal), num(d.rate), d.start_date || '', num(d.term_months), d.pay_kind || '', intY, priY, round2(num(d.principal) - priAll)])
   }
   sheets.push({ name: '借款利息', rows: dRows })
@@ -16730,7 +16762,7 @@ async function healthScan(db) {
   const add = (k, label, count, tip, go, list) => { items.push({ k, label, count: num(count), tip, go: go || '', list: list || [] }) }
   const since7 = new Date(Date.now() + TZ_MS - 7 * 86400000).toISOString()
 
-  const [costMiss, payNoDue, arNoTerm, apNoTerm, noPhone, ledgerNoAcc, dupCnt, lastLock, errCnt, bkLast, wxCnt, cronRow] = await Promise.all([
+  const [costMiss, payNoDue, arNoTerm, apNoTerm, noPhone, ledgerNoAcc, dupCnt, lastLock, errCnt, bkLast, wxCnt, cronRow, termRows, phoneRows, totRow] = await Promise.all([
     qAll("SELECT id, customer, item_name, price FROM orders WHERE COALESCE(cost,0)=0 AND price>0 ORDER BY id DESC LIMIT 5"),
     q1("SELECT COUNT(*) AS c FROM payables WHERE paid<amount AND (due_date IS NULL OR due_date='')"),
     qAll("SELECT DISTINCT customer AS party FROM orders WHERE paid<price AND COALESCE(written_off,0)<price-paid LIMIT 300"),
@@ -16743,9 +16775,12 @@ async function healthScan(db) {
     qAll("SELECT created_at FROM backups ORDER BY id DESC LIMIT 1"),
     q1("SELECT COUNT(*) AS c FROM wx_users"),
     q1("SELECT value AS v FROM settings WHERE key='cron_at'"),
+    qAll('SELECT party FROM party_terms'),
+    qAll('SELECT party, phone FROM party_profiles'),
+    db.prepare('SELECT (SELECT COUNT(*) FROM orders)+(SELECT COUNT(*) FROM payables)+(SELECT COUNT(*) FROM ledger) AS tot').first().catch(() => ({ tot: 0 }))
   ])
-  const terms = new Set((await qAll('SELECT party FROM party_terms')).map((x) => x.party))
-  const phones = new Map((await qAll('SELECT party, phone FROM party_profiles')).map((x) => [x.party, x.phone || '']))
+  const terms = new Set((termRows || []).map((x) => x.party))
+  const phones = new Map((phoneRows || []).map((x) => [x.party, x.phone || '']))
   const arParties = (arNoTerm || []).map((x) => x.party)
   const apParties = (apNoTerm || []).map((x) => x.party)
   const allParties = Array.from(new Set([...arParties, ...apParties, ...(noPhone || []).map((x) => x.party)]))
@@ -16776,7 +16811,6 @@ async function healthScan(db) {
 
   // 空账本：还没记过任何单子和流水时，「没备份」「上月没结账」「微信没开」都不算问题，
   // 否则新用户一进来就看到 77 分和一堆要处理的事，反而不想看。
-  const totRow = await db.prepare('SELECT (SELECT COUNT(*) FROM orders)+(SELECT COUNT(*) FROM payables)+(SELECT COUNT(*) FROM ledger) AS tot').first().catch(() => ({ tot: 0 }))
   const emptyBook = num(totRow && totRow.tot) === 0
   let items2 = items
   if (emptyBook) items2 = items.filter((x) => !['lock', 'backup', 'wx', 'err', 'cron'].includes(x.k))
@@ -18840,27 +18874,34 @@ app.get('/month-report', async (c) => {
   const db = c.env.DB
   let m = String(c.req.query('month') || '').slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(m)) m = now().slice(0, 7)
-  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND direction='in' AND month=?").bind(m).first()
-  const out = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND direction='out' AND month=?").bind(m).first()
-  const oAdd = await db.prepare("SELECT COALESCE(SUM(price),0) t FROM orders WHERE month=?").bind(m).first()
-  const pAdd = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE month=?").bind(m).first()
-  const cats = (await db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') c, SUM(amount) t FROM ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND direction='out' AND month=? GROUP BY c ORDER BY t DESC").bind(m).all()).results
-  const cash = await cashAtEnd(db, m)
-  const ar = await arAtEnd(db, m)
-  const ap = await apAtEnd(db, m)
-  // 月底还欠多少借款。以前这份「月度归档」只减应收应付，没减借款，
-  // 于是同一个月底，归档说家底 8 万、年报和「科目余额表」说 3 万。
-  const debt = await debtLeftAt(db, monthEndOf(m) || (m + '-28'))
-  // 预收（客户先打来的钱，我们还欠他货）要减；预付（先付给供应商的钱）要加。
-  // 以前这里只有现金+应收−应付−借款，客户打来 2 万定金，家底一分没涨。
+  // 一条 SQL / 一个汇总函数都不互相依赖，全部一起发。
+  // 以前 14 条串行，月度归档在 2000 单量级要 800ms+，这里省掉大头。
   const advEnd = monthEndOf(m) || (m + '-28')
-  const advQ = await advLeftAt(db, advEnd).catch((e) => { noteFail(e, '月度归档·预收预付'); return { in: 0, out: 0 } })
+  const [inc, out, oAdd, pAdd, catsR, head, _hn, cash, ar, ap, debt, advQ, pl, rr] = await Promise.all([
+    db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND direction='in' AND month=?").bind(m).first(),
+    db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND direction='out' AND month=?").bind(m).first(),
+    db.prepare("SELECT COALESCE(SUM(price),0) t FROM orders WHERE month=?").bind(m).first(),
+    db.prepare("SELECT COALESCE(SUM(amount),0) t FROM payables WHERE month=?").bind(m).first(),
+    db.prepare("SELECT COALESCE(NULLIF(category,''),'其他') c, SUM(amount) t FROM ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND direction='out' AND month=? GROUP BY c ORDER BY t DESC").bind(m).all(),
+    db.prepare("SELECT key, value FROM settings WHERE key='report_title'").first(),
+    db.prepare("SELECT value FROM settings WHERE key='report_note'").first(),
+    cashAtEnd(db, m),
+    arAtEnd(db, m),
+    apAtEnd(db, m),
+    // 月底还欠多少借款。以前这份「月度归档」只减应收应付，没减借款，
+    // 于是同一个月底，归档说家底 8 万、年报和「科目余额表」说 3 万。
+    debtLeftAt(db, monthEndOf(m) || (m + '-28')),
+    // 预收（客户先打来的钱，我们还欠他货）要减；预付（先付给供应商的钱）要加。
+    // 以前这里只有现金+应收−应付−借款，客户打来 2 万定金，家底一分没涨。
+    advLeftAt(db, advEnd).catch((e) => { noteFail(e, '月度归档·预收预付'); return { in: 0, out: 0 } }),
+    monthPL(db, m),
+    reconRate(db, m)
+  ])
+  const cats = (catsR.results || [])
   const advIn = round2(num(advQ.in))
   const advOut = round2(num(advQ.out))
-  const head = await db.prepare("SELECT key, value FROM settings WHERE key='report_title'").first()
   const lines = []
   lines.push(`【${(head && head.value) || '加工费记账'}】${m} 月度归档`)
-  const _hn = await db.prepare("SELECT value FROM settings WHERE key='report_note'").first()
   if (_hn && _hn.value) lines.push(`（${_hn.value}）`)
   lines.push(`—— 收支 ——`)
   lines.push(`本月收款：¥${round2(num(inc.t))}`)
@@ -18869,10 +18910,8 @@ app.get('/month-report', async (c) => {
   lines.push(`—— 业务 ——`)
   lines.push(`新接单：¥${round2(num(oAdd.t))}`)
   lines.push(`新赊购：¥${round2(num(pAdd.t))}`)
-  const pl = await monthPL(db, m)
   lines.push(`材料·外协成本：¥${pl.mat}`)
   lines.push(`净利（权责）：¥${pl.profit}`)
-  const rr = await reconRate(db, m)
   lines.push(`—— 对账 ——`)
   lines.push(rr.total ? `应核对 ${rr.total} 家，核对清楚 ${rr.done} 家（${rr.rate}%）` : '本月没有需要对账的单位')
   if (rr.disputed) lines.push(`对方说对不上：${rr.disputed} 家`)
