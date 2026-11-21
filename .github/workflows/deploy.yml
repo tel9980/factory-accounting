@@ -128,6 +128,8 @@ jobs:
       # 等于把整个账本放开给任何拿到这个口令的人。
       - name: 演示口令回归（审核用只读，改不了账也导不走）
         run: node scripts/test-demo.mjs --base http://127.0.0.1:8791 --key 8888
+      - name: 报表存档回归（日报 / 月报 / 年报 / 应收 / 应付 / 明细账 / 科目余额表都要能出 Excel）
+        run: node scripts/test-archive.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 整账套回归（导出 / 导入 / 一键初始化；会清空再导回，放最后跑）
         run: node scripts/test-book.mjs --base http://127.0.0.1:8791 --key 8888
       # 一个人管账的现实是「几个模板来回填」：开账一次、之后每天只维护日常那本。

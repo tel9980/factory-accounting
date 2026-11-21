@@ -1159,7 +1159,7 @@ app.use('*', async (c, next) => {
     const dm = c.req.method
     // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
     const denyDemo = dm !== 'OPTIONS' && (
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset)/.test(path) ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset)/.test(path) ||
       // 模块清单可以看（前端要据此藏入口），但改不了
       (/^\/modules$/.test(path) && dm !== 'GET')
     )
@@ -6793,6 +6793,30 @@ app.get('/pc', async (c) => {
   <div class="tip">换公司、或者试用完想从头来时用。清空的是<b>上面选中的这本账</b>：单据、流水、客户、材料、工资、备份、照片全清，账户和分类回到默认；<b>口令和账本名留着</b>；清空前会自动备份一份，点错了还能退回去。</div>
 </div>
 
+<div class="card">
+  <h2>5. 报表存档（存成 Excel，随时能翻）</h2>
+  <div class="row">
+    <select id="ak" onchange="kindChg()" style="padding:9px 12px;border:1px solid #d8dbe0;border-radius:8px;font-size:15px">
+      <option value="daily">日报（某一天）</option>
+      <option value="monthly" selected>月报（某个月，全套 8 张表）</option>
+      <option value="yearly">年报（某一年）</option>
+      <option value="ar">应收台账</option>
+      <option value="ap">应付台账</option>
+      <option value="ledger">明细账（按科目）</option>
+      <option value="trial">科目余额表</option>
+    </select>
+    <input type="date" id="a_d" class="hide" style="max-width:180px"/>
+    <input type="month" id="a_m" style="max-width:180px"/>
+    <input type="text" id="a_y" class="hide" placeholder="2026" style="max-width:110px"/>
+    <input type="date" id="a_f" class="hide" style="max-width:170px"/>
+    <span id="a_sep" class="hide">~</span>
+    <input type="date" id="a_t" class="hide" style="max-width:170px"/>
+    <button class="p" onclick="arcDown()">下载 Excel</button>
+  </div>
+  <div class="tip" id="a_tip">月报：总览 / 利润表 / 资产负债表 / 应收明细 / 应付明细 / 收付流水 / 账龄 / 应收到期表。</div>
+  <div class="tip">存档建议：每个月结完账下一份月报，年底下一份年报，跟整账套 JSON 一起放文件夹；这些表是给人看和打印的，恢复数据还是用上面的整账套。</div>
+</div>
+
 <script>
 var K = localStorage.getItem('fa_key') || ''
 document.getElementById('key').value = K
@@ -6817,6 +6841,51 @@ function dl(tpl){
       saveBlob(new Blob([u], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name || (tpl + '.xlsx'))
       msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill ? '（已把客户/供应商名字填好）' : ''), true)
     }).catch(function(e){ msg('下载失败：' + e, false) })
+}
+var ARC_TIP = {
+  daily: '日报：当天收付合计、当天每笔明细、按科目小计、按账户小计。',
+  monthly: '月报：总览 / 利润表 / 资产负债表 / 应收明细 / 应付明细 / 收付流水 / 账龄 / 应收到期表。',
+  yearly: '年报：12 个月汇总、年末余额、年末应收（按客户）、年末应付（按供应商）、客户与供应商年度榜。',
+  ar: '应收台账：每张未结清的单 + 逾期天数和账龄档 + 按客户汇总，可以直接发客户对账。',
+  ap: '应付台账：每张未付清的单 + 欠了多久 + 按供应商汇总。',
+  ledger: '明细账：按科目（工资、房租、货款、税金…）分页签，每页有期初、逐笔、结余、小计。',
+  trial: '科目余额表：每个科目的期初 / 本期收（借）/ 本期付（贷）/ 期末，另附余额类科目（应收、应付、各账户现金、借款、净资产）和本年逐月。'
+}
+function pad2(n){ return n < 10 ? '0' + n : '' + n }
+function todayStr(){ var d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) }
+function kindChg(){
+  var k = document.getElementById('ak').value
+  document.getElementById('a_tip').textContent = ARC_TIP[k] || ''
+  var show = function (id, on) { document.getElementById(id).classList[on ? 'remove' : 'add']('hide') }
+  show('a_d', k === 'daily')
+  show('a_m', k === 'monthly')
+  show('a_y', k === 'yearly')
+  show('a_f', k === 'ledger' || k === 'trial')
+  show('a_t', k === 'ledger' || k === 'trial')
+  show('a_sep', k === 'ledger' || k === 'trial')
+  if (!document.getElementById('a_d').value) document.getElementById('a_d').value = todayStr()
+  if (!document.getElementById('a_m').value) document.getElementById('a_m').value = todayStr().slice(0, 7)
+  if (!document.getElementById('a_y').value) document.getElementById('a_y').value = todayStr().slice(0, 4)
+  if (!document.getElementById('a_t').value) document.getElementById('a_t').value = todayStr()
+  if (!document.getElementById('a_f').value) document.getElementById('a_f').value = todayStr().slice(0, 7) + '-01'
+}
+function arcDown(){
+  if (needKey()) return
+  var k = document.getElementById('ak').value
+  var q = 'kind=' + k
+  if (k === 'daily') q += '&date=' + encodeURIComponent(document.getElementById('a_d').value || todayStr())
+  if (k === 'monthly') q += '&month=' + encodeURIComponent(document.getElementById('a_m').value || todayStr().slice(0, 7))
+  if (k === 'yearly') q += '&year=' + encodeURIComponent((document.getElementById('a_y').value || todayStr().slice(0, 4)).replace(/[^0-9]/g, ''))
+  if (k === 'ledger' || k === 'trial') q += '&from=' + encodeURIComponent(document.getElementById('a_f').value || '') + '&to=' + encodeURIComponent(document.getElementById('a_t').value || '')
+  msg('正在生成 Excel…')
+  fetch('/archive-pack?' + q + '&book=' + bk(), { headers: { 'x-access-key': K, 'X-Book': bk() } })
+    .then(function(r){ return r.json() }).then(function(d){
+      if (!d.ok) { msg(d.error || '出表失败', false); return }
+      var bin = atob(d.b64), arr = new Uint8Array(bin.length), i
+      for (i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+      saveBlob(new Blob([arr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name)
+      msg('下好了：' + d.name + '（' + (d.sheets || []).length + ' 张表：' + (d.sheets || []).join(' / ') + '）', true)
+    }).catch(function(e){ msg('出表失败：' + e, false) })
 }
 function bk(){ return document.getElementById('bk').value }
 function bookOut(){
@@ -6922,6 +6991,7 @@ function doImport(){
     }).catch(function(e){ b.disabled = false; msg(String(e), false) })
 }
 function reset(){ window._b64 = null; document.getElementById('res').innerHTML = ''; document.getElementById('btn2').classList.add('hide'); document.getElementById('btn0').classList.add('hide'); msg('') }
+kindChg()
 </script></div></body></html>`
   return c.html(html)
 })
@@ -12755,6 +12825,287 @@ app.get('/month-pack', async (c) => {
   const sheets = await packSheets(c.env.DB, m)
   const b64 = toB64(await makeXlsxSheets(sheets))
   return c.json({ ok: true, month: m, name: '全套报表_' + m + '.xlsx', b64, sheets: sheets.map((x) => x.name), size: b64.length })
+})
+
+// ===== 报表存档：日报 / 月报 / 年报 / 应收 / 应付 / 明细账 / 科目余额表，一键出 Excel =====
+// 老板的用法：月底（或年底）点几下把这些表存成 xlsx，放文件夹里，谁要看就发谁；也可以直接打印。
+const ARCHIVE_KINDS = [
+  ['daily', '日报（某一天）'],
+  ['monthly', '月报（某个月）'],
+  ['yearly', '年报（某一年）'],
+  ['ar', '应收台账'],
+  ['ap', '应付台账'],
+  ['ledger', '明细账（按科目，区间）'],
+  ['trial', '科目余额表（月 / 年）'],
+]
+// 科目名：流水上有分类就用分类，没有就按业务类型给一个中文名（老板看不懂 ref_type）
+const SUBJ_TEXT = {
+  order: '货款', payable: '采购', expense: '支出', fixed: '固定支出', loan: '借支', loan_return: '借支退回',
+  advance: '预收预付', tax_ar: '税金', tax_ap: '税金', transfer: '内部转账', amort: '摊销', dep: '折旧',
+  accrual: '预提', debt_int: '利息', prepaid: '预付待摊'
+}
+const subjName = (k) => SUBJ_TEXT[String(k || '')] || String(k || '其他')
+const SUBJ_OF_ROW = (r) => {
+  const c = String(r.category || '').trim()
+  if (c) return c
+  return subjName(r.ref_type)
+}
+const ymd = (v) => String(v || '').slice(0, 10)
+
+async function ledgerRows(db, from, to) {
+  const rs = await db.prepare(
+    `SELECT l.*, COALESCE(o.customer, p.supplier, ad.party) AS party_name, COALESCE(acc.name, '') AS acc_name
+       FROM ledger l
+       LEFT JOIN orders o ON l.ref_type = 'order' AND o.id = l.ref_id
+       LEFT JOIN payables p ON l.ref_type = 'payable' AND p.id = l.ref_id
+       LEFT JOIN advances ad ON l.ref_type = 'advance' AND ad.id = l.ref_id
+       LEFT JOIN accounts acc ON acc.id = l.account_id
+      WHERE substr(l.created_at,1,10) >= ? AND substr(l.created_at,1,10) <= ?
+      ORDER BY l.id`).bind(from, to).all().catch((e) => { noteFail(e, '明细账'); return { results: [] } })
+  return rs.results || []
+}
+
+// 科目余额表：期初 = 区间之前的收 − 付；本期借/贷 = 区间内的收/付
+async function trialBalance(db, from, to) {
+  const before = await db.prepare(
+    `SELECT COALESCE(NULLIF(TRIM(category),''), ref_type) AS k, direction AS d, COALESCE(SUM(amount),0) AS s
+       FROM ledger WHERE substr(created_at,1,10) < ? GROUP BY k, d`).bind(from).all().catch(() => ({ results: [] }))
+  const inRange = await db.prepare(
+    `SELECT COALESCE(NULLIF(TRIM(category),''), ref_type) AS k, direction AS d, COALESCE(SUM(amount),0) AS s, COUNT(*) AS n
+       FROM ledger WHERE substr(created_at,1,10) >= ? AND substr(created_at,1,10) <= ? GROUP BY k, d`).bind(from, to).all().catch(() => ({ results: [] }))
+  const map = new Map()
+  const get = (k) => {
+    // 分类为空的行在 SQL 里拿到的是 ref_type（order / tax_ap …），这里翻成老板看得懂的中文；
+    // 两个原始键翻成同一个名字（比如 tax_ar 和 tax_ap 都是「税金」）就并成一行
+    const key = subjName(k)
+    if (!map.has(key)) map.set(key, { k: key, open: 0, dr: 0, cr: 0, n: 0 })
+    return map.get(key)
+  }
+  for (const r of before.results || []) {
+    const x = get(r.k)
+    x.open = round2(x.open + (r.d === 'in' ? num(r.s) : -num(r.s)))
+  }
+  for (const r of inRange.results || []) {
+    const x = get(r.k)
+    if (r.d === 'in') x.dr = round2(x.dr + num(r.s)); else x.cr = round2(x.cr + num(r.s))
+    x.n += num(r.n)
+  }
+  const rows = Array.from(map.values()).map((x) => Object.assign(x, { end: round2(x.open + x.dr - x.cr) }))
+    .filter((x) => x.open || x.dr || x.cr)
+    .sort((a, b) => Math.abs(b.end) - Math.abs(a.end) || (a.k < b.k ? -1 : 1))
+  return rows
+}
+
+async function archiveSheets(db, kind, q) {
+  const sheets = []
+  if (kind === 'daily') {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(q.date || '') ? q.date : now().slice(0, 10)
+    const led = (await ledgerRows(db, d, d)).filter((l) => num(l.cash))
+    let inc = 0
+    let out = 0
+    for (const l of led) { if (l.direction === 'in') inc = round2(inc + num(l.amount)); else out = round2(out + num(l.amount)) }
+    sheets.push({ name: '日报摘要', rows: [
+      ['日期', d], ['收款合计', inc], ['付款/支出合计', out], ['当天结余', round2(inc - out)], ['笔数', led.length], [],
+      ['说明', '这是当天的现金收付；应收应付的增减看「月报 → 应收明细/应付明细」']
+    ] })
+    sheets.push({ name: '当天明细', rows: [['时间', '收/付', '金额', '科目', '对方', '摘要', '账户', '票据']].concat(
+      led.map((l) => [String(l.created_at || '').slice(11, 16), l.direction === 'in' ? '收' : '付', num(l.amount), SUBJ_OF_ROW(l), l.party_name || '', l.remark || '', l.acc_name || '', INV_STATES[l.inv_state] || ''])
+    ).concat([[], ['合计（收）', '', inc], ['合计（付）', '', out]]) })
+    const byCat = new Map()
+    for (const l of led) {
+      const k = (l.direction === 'in' ? '收·' : '付·') + SUBJ_OF_ROW(l)
+      byCat.set(k, round2((byCat.get(k) || 0) + num(l.amount)))
+    }
+    sheets.push({ name: '按科目小计', rows: [['科目', '金额']].concat(Array.from(byCat.entries()).sort((a, b) => b[1] - a[1])) })
+    const byAcc = new Map()
+    for (const l of led) {
+      const k = l.acc_name || '（没写账户）'
+      const cur = byAcc.get(k) || { i: 0, o: 0 }
+      if (l.direction === 'in') cur.i = round2(cur.i + num(l.amount)); else cur.o = round2(cur.o + num(l.amount))
+      byAcc.set(k, cur)
+    }
+    sheets.push({ name: '按账户小计', rows: [['账户', '收', '付', '净']].concat(Array.from(byAcc.entries()).map(([k, v]) => [k, v.i, v.o, round2(v.i - v.o)])) })
+    return { sheets, title: '日报_' + d }
+  }
+
+  if (kind === 'monthly') {
+    const m = /^\d{4}-\d{2}$/.test(q.month || '') ? q.month : now().slice(0, 7)
+    const sh = await packSheets(db, m)
+    return { sheets: sh, title: '月报_' + m }
+  }
+
+  if (kind === 'yearly') {
+    const y = /^\d{4}$/.test(q.year || '') ? q.year : now().slice(0, 4)
+    const mons = []
+    for (let i = 1; i <= 12; i++) mons.push(y + '-' + String(i).padStart(2, '0'))
+    const ord = await db.prepare("SELECT month mk, COALESCE(SUM(price),0) p, COALESCE(SUM(COALESCE(cost,0)),0) c, COUNT(*) n FROM orders WHERE month>=? AND month<=? GROUP BY mk").bind(mons[0], y + '-12').all().catch(() => ({ results: [] }))
+    const led = await db.prepare(
+      `SELECT month mk,
+              COALESCE(SUM(CASE WHEN ${COST_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
+              COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) inc,
+              COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') THEN amount ELSE 0 END),0) out
+         FROM ledger WHERE month>=? AND month<=? GROUP BY mk`).bind(mons[0], y + '-12').all().catch(() => ({ results: [] }))
+    const om = new Map((ord.results || []).map((r) => [r.mk, r]))
+    const lm = new Map((led.results || []).map((r) => [r.mk, r]))
+    const rows = [['月份', '接单额', '单数', '材料外协成本', '毛利', '收款', '付款/支出', '现金结余', '费用（含非现金）']]
+    let T = { p: 0, c: 0, n: 0, inc: 0, out: 0, exp: 0 }
+    for (const m of mons) {
+      const o = om.get(m) || {}
+      const l = lm.get(m) || {}
+      const p = round2(num(o.p))
+      const c = round2(num(o.c))
+      rows.push([m, p, num(o.n), c, round2(p - c), round2(num(l.inc)), round2(num(l.out)), round2(num(l.inc) - num(l.out)), round2(num(l.exp))])
+      T.p = round2(T.p + p); T.c = round2(T.c + c); T.n += num(o.n); T.inc = round2(T.inc + num(l.inc)); T.out = round2(T.out + num(l.out)); T.exp = round2(T.exp + num(l.exp))
+    }
+    rows.push([], ['全年合计', T.p, T.n, T.c, round2(T.p - T.c), T.inc, T.out, round2(T.inc - T.out), T.exp])
+    sheets.push({ name: y + ' 年 12 个月', rows })
+    const ye = y + '-12-31'
+    const [arRows, apRows, cust, sup, cashRow, debtRow] = await Promise.all([
+      db.prepare(`SELECT customer party, COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) left_amt
+                    FROM orders WHERE substr(created_at,1,10) <= ? AND price - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005
+                   GROUP BY customer ORDER BY left_amt DESC`).bind(ye).all().catch(() => ({ results: [] })),
+      db.prepare(`SELECT supplier party, COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) left_amt
+                    FROM payables WHERE substr(created_at,1,10) <= ? AND amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005
+                   GROUP BY supplier ORDER BY left_amt DESC`).bind(ye).all().catch(() => ({ results: [] })),
+      db.prepare("SELECT customer party, COUNT(*) n, COALESCE(SUM(price),0) amt, COALESCE(SUM(price - COALESCE(cost,0)),0) gp FROM orders WHERE month>=? AND month<=? GROUP BY customer ORDER BY amt DESC LIMIT 30").bind(mons[0], y + '-12').all().catch(() => ({ results: [] })),
+      db.prepare("SELECT supplier party, COUNT(*) n, COALESCE(SUM(amount),0) amt FROM payables WHERE month>=? AND month<=? GROUP BY supplier ORDER BY amt DESC LIMIT 30").bind(mons[0], y + '-12').all().catch(() => ({ results: [] })),
+      db.prepare("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10) <= ?").bind(ye).first().catch(() => ({ t: 0 })),
+      db.prepare("SELECT COALESCE(SUM(amount - COALESCE(repayed,0)),0) t FROM debts WHERE status='open'").first().catch(() => ({ t: 0 }))
+    ])
+    const arTot = round2((arRows.results || []).reduce((a, r) => a + num(r.left_amt), 0))
+    const apTot = round2((apRows.results || []).reduce((a, r) => a + num(r.left_amt), 0))
+    sheets.push({ name: '年末余额', rows: [
+      [y + '-12-31 那天的余额', ''], ['应收未收合计', arTot], ['涉及客户数', (arRows.results || []).length],
+      ['应付未付合计', apTot], ['涉及供应商数', (apRows.results || []).length],
+      ['累计现金结余', round2(num(cashRow && cashRow.t))], ['借款余额', round2(num(debtRow && debtRow.t))],
+      ['净资产（现金+应收−应付−借款）', round2(num(cashRow && cashRow.t) + arTot - apTot - num(debtRow && debtRow.t))]
+    ] })
+    sheets.push({ name: '年末应收（按客户）', rows: [['客户', '笔数', '未收金额']].concat((arRows.results || []).map((r) => [r.party, num(r.n), round2(num(r.left_amt))])).concat([[], ['合计', '', arTot]]) })
+    sheets.push({ name: '年末应付（按供应商）', rows: [['供应商', '笔数', '未付金额']].concat((apRows.results || []).map((r) => [r.party, num(r.n), round2(num(r.left_amt))])).concat([[], ['合计', '', apTot]]) })
+    sheets.push({ name: '客户年度榜', rows: [['客户', '单数', '接单额', '毛利']].concat((cust.results || []).map((r) => [r.party, num(r.n), round2(num(r.amt)), round2(num(r.gp))])) })
+    sheets.push({ name: '供应商年度榜', rows: [['供应商', '笔数', '采购额']].concat((sup.results || []).map((r) => [r.party, num(r.n), round2(num(r.amt))])) })
+    return { sheets, title: '年报_' + y }
+  }
+
+  if (kind === 'ar' || kind === 'ap') {
+    const isAr = kind === 'ar'
+    const tb = isAr ? 'orders' : 'payables'
+    const partyCol = isAr ? 'customer' : 'supplier'
+    const amtCol = isAr ? 'price' : 'amount'
+    const rows = await db.prepare(
+      `SELECT id, ${partyCol} party, ${isAr ? 'item_name' : 'COALESCE(remark, category, \'\')'} item, ${amtCol} amt,
+              COALESCE(paid,0) paid, COALESCE(written_off,0) wo, ${amtCol} - COALESCE(paid,0) - COALESCE(written_off,0) leftover,
+              substr(created_at,1,10) d, COALESCE(due_date,'') due
+         FROM ${tb} WHERE ${amtCol} - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005 ORDER BY ${partyCol}, id`).all().catch(() => ({ results: [] }))
+    const list = rows.results || []
+    const det = [['单号', isAr ? '客户' : '供应商', isAr ? '产品' : '说明', '金额', '已收付', '已核销', '未结', '开单日', '到期日', '逾期天数', '账龄档']]
+    let tot = 0
+    for (const r of list) {
+      const left = round2(num(r.leftover))
+      tot = round2(tot + left)
+      const days = daysSince(r.due ? ymd(r.due) : ymd(r.d))
+      const age = days <= 30 ? '未超 30 天' : days <= 60 ? '31-60 天' : days <= 90 ? '61-90 天' : days <= 180 ? '91-180 天' : '超 180 天'
+      det.push([r.id, r.party, r.item || '', round2(num(r.amt)), round2(num(r.paid)), round2(num(r.wo)), left, ymd(r.d), ymd(r.due), days, age])
+    }
+    det.push([], ['合计', '', '', '', '', '', tot])
+    const by = new Map()
+    for (const r of list) {
+      const cur = by.get(r.party) || { n: 0, amt: 0, left: 0, oldest: 0 }
+      cur.n += 1; cur.amt = round2(cur.amt + num(r.amt)); cur.left = round2(cur.left + num(r.leftover))
+      cur.oldest = Math.max(cur.oldest, daysSince(r.due ? ymd(r.due) : ymd(r.d)))
+      by.set(r.party, cur)
+    }
+    const sumRows = [[isAr ? '客户' : '供应商', '笔数', '开单额', '未结金额', '最久逾期天数']]
+      .concat(Array.from(by.entries()).sort((a, b) => b[1].left - a[1].left).map(([k, v]) => [k, v.n, v.amt, v.left, v.oldest]))
+      .concat([[], ['合计', '', '', tot]])
+    sheets.push({ name: isAr ? '应收台账' : '应付台账', rows: det })
+    sheets.push({ name: '按单位汇总', rows: sumRows })
+    return { sheets, title: (isAr ? '应收台账_' : '应付台账_') + todayIso() }
+  }
+
+  if (kind === 'ledger') {
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to || '') ? q.to : now().slice(0, 10)
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from || '') ? q.from : to.slice(0, 7) + '-01'
+    const all = await ledgerRows(db, '1900-01-01', to)
+    const inRange = all.filter((l) => ymd(l.created_at) >= from)
+    const groups = new Map()
+    for (const l of all) {
+      const k = SUBJ_OF_ROW(l)
+      if (!groups.has(k)) groups.set(k, { open: 0, rows: [] })
+      const g = groups.get(k)
+      if (ymd(l.created_at) < from) g.open = round2(g.open + (l.direction === 'in' ? num(l.amount) : -num(l.amount)))
+    }
+    for (const l of inRange) groups.get(SUBJ_OF_ROW(l)).rows.push(l)
+    const used = Array.from(groups.entries()).filter(([, g]) => g.rows.length || g.open)
+      .sort((a, b) => b[1].rows.length - a[1].rows.length)
+    for (const [k, g] of used.slice(0, 30)) {
+      const rows = [['日期', '摘要', '对方', '收（借）', '付（贷）', '结余', '账户', '是否动现金']]
+      let bal = g.open
+      rows.push([from + ' 之前结转', '期初余额', '', '', '', g.open, '', ''])
+      for (const l of g.rows) {
+        const amt = num(l.amount)
+        bal = round2(bal + (l.direction === 'in' ? amt : -amt))
+        rows.push([ymd(l.created_at), l.remark || '', l.party_name || '', l.direction === 'in' ? amt : '', l.direction === 'out' ? amt : '', bal, l.acc_name || '', num(l.cash) ? '是' : '否'])
+      }
+      rows.push([], ['小计', g.rows.length + ' 笔', '', '', '', bal])
+      const nm = k.replace(/[\\/?*\[\]:]/g, '').slice(0, 26) || '其他'
+      if (!sheets.some((x) => x.name === nm)) sheets.push({ name: nm, rows })
+    }
+    if (!sheets.length) sheets.push({ name: '明细账', rows: [['区间', from + ' ~ ' + to], ['这期间没有流水']] })
+    return { sheets, title: '明细账_' + from + '_' + to }
+  }
+
+  // trial：科目余额表
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(q.to || '') ? q.to : now().slice(0, 10)
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(q.from || '') ? q.from : to.slice(0, 7) + '-01'
+  const tb = await trialBalance(db, from, to)
+  let T = { open: 0, dr: 0, cr: 0, end: 0 }
+  const rows = [['科目', '期初余额', '本期收（借）', '本期付（贷）', '期末余额', '笔数']]
+  for (const r of tb) {
+    rows.push([r.k, r.open, r.dr, r.cr, r.end, r.n])
+    T.open = round2(T.open + r.open); T.dr = round2(T.dr + r.dr); T.cr = round2(T.cr + r.cr); T.end = round2(T.end + r.end)
+  }
+  rows.push([], ['合计', T.open, T.dr, T.cr, T.end, ''])
+  sheets.push({ name: '科目余额表', rows })
+  // 余额类科目（不在流水里滚的）：应收未收 / 应付未付 / 各账户余额 / 借款
+  const [arS, apS, accs, dbt] = await Promise.all([
+    db.prepare(`SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) t, COUNT(*) n FROM orders WHERE substr(created_at,1,10) <= ? AND price - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005`).bind(to).first().catch(() => ({ t: 0, n: 0 })),
+    db.prepare(`SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) t, COUNT(*) n FROM payables WHERE substr(created_at,1,10) <= ? AND amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005`).bind(to).first().catch(() => ({ t: 0, n: 0 })),
+    accountBalances(db).catch(() => []),
+    db.prepare("SELECT COALESCE(SUM(amount - COALESCE(repayed,0)),0) t FROM debts WHERE status='open'").first().catch(() => ({ t: 0 }))
+  ])
+  sheets.push({ name: '余额类科目', rows: [
+    ['科目', '余额', '笔数', '说明'],
+    ['应收未收', round2(num(arS && arS.t)), num(arS && arS.n), '截至 ' + to + ' 还没收回来的'],
+    ['应付未付', round2(num(apS && apS.t)), num(apS && apS.n), '截至 ' + to + ' 还没付出去的'],
+    ...((accs || []).map((a) => ['账户·' + a.name, round2(num(a.balance)), '', '这个账户现在有多少钱（期初 + 收 − 付）'])),
+    ['借款余额', round2(num(dbt && dbt.t)), '', '还欠银行/私人的'],
+    ['净资产', round2((accs || []).reduce((x, a) => x + num(a.balance), 0) + num(arS && arS.t) - num(apS && apS.t) - num(dbt && dbt.t)), '', '现金 + 应收 − 应付 − 借款（不含押金、借支）']
+  ] })
+  sheets.push({ name: '本年逐月', rows: [['月份', '收款', '付款/支出', '结余']].concat(
+    (await db.prepare(`SELECT month mk, COALESCE(SUM(CASE WHEN direction='in' AND cash=1 THEN amount ELSE 0 END),0) i, COALESCE(SUM(CASE WHEN direction='out' AND cash=1 THEN amount ELSE 0 END),0) o FROM ledger WHERE month>=? AND month<=? GROUP BY mk`).bind(from.slice(0, 7), to.slice(0, 7)).all().catch(() => ({ results: [] }))).results.map((r) => [r.mk, round2(num(r.i)), round2(num(r.o)), round2(num(r.i) - num(r.o))])
+  ) })
+  return { sheets, title: '科目余额表_' + from + '_' + to }
+}
+
+app.get('/archive-kinds', (c) => c.json({ ok: true, kinds: ARCHIVE_KINDS.map(([k, n]) => ({ k, n })) }))
+
+// 出 Excel。参数按 kind 取：daily→date；monthly→month；yearly→year；ledger/trial→from,to；ar/ap 不用参数
+app.get('/archive-pack', async (c) => {
+  const db = c.env.DB
+  const kind = String(c.req.query('kind') || 'monthly')
+  if (!ARCHIVE_KINDS.some(([k]) => k === kind)) return c.json({ error: '不认识的报表类型', kinds: ARCHIVE_KINDS }, 400)
+  const q = { date: String(c.req.query('date') || ''), month: String(c.req.query('month') || ''), year: String(c.req.query('year') || ''), from: String(c.req.query('from') || ''), to: String(c.req.query('to') || '') }
+  const t0 = Date.now()
+  let out
+  try {
+    out = await archiveSheets(db, kind, q)
+  } catch (e) {
+    noteFail(e, '报表存档 ' + kind)
+    return c.json({ error: '出表失败：' + String((e && e.message) || e).slice(0, 120), code: 'pack_failed' }, 500)
+  }
+  const b64 = toB64(await makeXlsxSheets(out.sheets))
+  return c.json({ ok: true, kind, title: out.title, name: out.title + '.xlsx', b64, sheets: out.sheets.map((x) => x.name), size: b64.length, ms: Date.now() - t0 })
 })
 
 // ===== 手机端报表：手机上直接看，不用开 Excel =====
