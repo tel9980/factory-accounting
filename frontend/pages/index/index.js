@@ -268,59 +268,109 @@ Page({
     const q = wx.getStorageSync('pending_ops') || []
     op.data = op.data || {}
     if (!op.data.client_id) op.data.client_id = this.newCid()
+    // uid 用来在补发时区分「这批里的」和「补发途中用户新记的」
+    if (!op.uid) op.uid = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
     op.ts = Date.now()
     q.push(op)
     wx.setStorageSync('pending_ops', q)
     this.setData({ pending_count: q.length })
   },
   // 联网后把存着的单子补发上去。
-  // 判成功的标准是 2xx。4xx（口令失效 401、已结账锁定 403、被规则驳回 400）说明服务端明确拒绝了，
-  // 这条**留在队列里**并把原因告诉用户——以前一律算「补上了」然后清空队列，那几笔就永远消失了，
-  // 界面还轻飘飘一句「补上了 2 笔」，她以为全补上了。
+  // 判成功的标准是 2xx（且 body 不是 ok:false）。4xx（口令失效 401、已结账锁定 403、被规则驳回 400）
+  // 说明服务端明确拒绝了：这条**留在队列里**并把原因告诉用户——以前一律算「补上了」然后清空队列，
+  // 那几笔就永远消失了，界面还轻飘飘一句「补上了 2 笔」，她以为全补上了。
+  //
+  // 另外三个坑（都是这一轮补的）：
+  //   1. 补发途中用户又记了一笔（网刚回来最容易发生），finish() 以前拿旧快照覆盖存储，新那笔被静默抹掉。
+  //      现在按「快照长度之后新追加的」合并回去。
+  //   2. 中途 401（口令过期 / 换了账套）：以前逐条试，每条都被标上「口令错误」。现在立刻停，
+  //      当前这条及后面的原样留着（不标错），弹出登录卡，输完口令自动接着补。
+  //   3. 200 但 body 里 ok:false（少数接口的失败形状）：以前算成功 → 这条就没了。现在按失败处理。
   flushPending(silent) {
     if (this._flushing) return
-    const q = wx.getStorageSync('pending_ops') || []
-    if (!q.length) { if (this.data.pending_count) this.setData({ pending_count: 0 }); return }
+    const snap = wx.getStorageSync('pending_ops') || []
+    if (!snap.length) { if (this.data.pending_count) this.setData({ pending_count: 0 }); return }
     this._flushing = true
     const ak = wx.getStorageSync('ak') || ''
     const bk = String(wx.getStorageSync('book') || 1)
-    const keep = []
+    // slot 按原下标放「还没补上的」，这样失败的不会跑到队头、顺序不乱
+    const slot = new Array(snap.length).fill(null)
     let done = 0
+    let needKey = false
     const finish = () => {
       this._flushing = false
+      const left = slot.filter(Boolean)
+      // 补发期间新记的账（enqueueOp 追加在快照后面）不能丢
+      const nowQ = wx.getStorageSync('pending_ops') || []
+      const added = nowQ.length > snap.length ? nowQ.slice(snap.length) : []
+      const keep = left.concat(added)
       wx.setStorageSync('pending_ops', keep)
       this.setData({ pending_count: keep.length })
       const bad = keep.filter((x) => x && x._err)
       if (done && !silent) wx.showToast({ title: '补上了 ' + done + ' 笔' + (bad.length ? '，' + bad.length + ' 笔没补上' : ''), icon: 'none' })
+      if (needKey) {
+        // 口令过期：直接弹登录卡，输完自动接着补（submitKey 里会再调一次 flushPending）
+        this._askingKey = false
+        this._keyQueue = []
+        this._keyCtx = { done: () => { this._askingKey = false }, replayKey: () => {}, doReq: () => {} }
+        this.setData({
+          key_open: true, key_input: '', key_mode: 'enter',
+          key_err: '口令过期了，重新输一下；剩下的 ' + keep.length + ' 笔会自动补发'
+        })
+        return
+      }
       if (bad.length && !silent) {
         wx.showModal({
           title: '有 ' + bad.length + ' 笔没补上',
           content: bad.slice(0, 5).map((x) => '· ' + (x.label || '记账') + '：' + x._err).join('\n') +
-            (bad.length > 5 ? '\n…共 ' + bad.length + ' 笔' : '') + '\n\n这些还留在「待补」里，改好再发一次。',
+            (bad.length > 5 ? '\n…共 ' + bad.length + ' 笔' : '') + '\n\n这些还留在「待补」里，改好再发一次。点顶上的「待补 N 笔」能看、能丢掉。',
           showCancel: false, confirmText: '知道了'
         })
       }
       if (done) this.refresh()
     }
     const step = (i) => {
-      if (i >= q.length) return finish()
-      const it = q[i]
+      if (i >= snap.length) return finish()
+      const it = snap[i]
+      const body = it.data || {}
       wx.request({
-        url: it.url, method: it.method || 'POST', data: it.data,
+        url: it.url, method: it.method || 'POST', data: body,
         header: { 'X-Access-Key': ak, 'X-Book': bk },
         success: (res) => {
-          if (res.statusCode >= 200 && res.statusCode < 300) { done++; step(i + 1); return }
-          if (res.statusCode >= 400 && res.statusCode < 500) {
-            const msg = (res.data && (res.data.error || res.data.msg)) || ('被拒绝（' + res.statusCode + '）')
-            keep.push(Object.assign({}, it, { _err: String(msg).slice(0, 90) }))
+          const code = res.statusCode
+          if (code >= 200 && code < 300) {
+            const d = res.data || {}
+            if (d && d.ok === false) {
+              // 200 但明确说没成（日期不对、参数不合规这类）
+              slot[i] = Object.assign({}, it, { _err: String(d.error || '服务端说没记上').slice(0, 90) })
+              step(i + 1)
+              return
+            }
+            done++
             step(i + 1)
             return
           }
-          // 5xx：服务器那边的事，剩下的原样留着等下次；不能当成功
-          keep.push.apply(keep, q.slice(i))
+          if (code === 401) {
+            // 口令过期 / 换手机 / 切了账套：别再一条条试（会把每条都标成「口令错误」）
+            for (let k = i; k < snap.length; k++) slot[k] = snap[k]
+            needKey = true
+            return finish()
+          }
+          if (code >= 400 && code < 500) {
+            const d = res.data || {}
+            const msg = d.error || d.msg || ('被拒绝（' + code + '）')
+            slot[i] = Object.assign({}, it, { _err: String(msg).slice(0, 90) })
+            step(i + 1)
+            return
+          }
+          // 5xx：服务器那边的事，当前及剩下的原样留着等下次；不能当成功
+          for (let k = i; k < snap.length; k++) slot[k] = snap[k]
           finish()
         },
-        fail: () => { keep.push.apply(keep, q.slice(i)); finish() }
+        fail: () => {
+          for (let k = i; k < snap.length; k++) slot[k] = snap[k]
+          finish()
+        }
       })
     }
     step(0)
@@ -331,8 +381,26 @@ Page({
     wx.showModal({
       title: '还有 ' + q.length + ' 笔没发出去',
       content: q.slice(0, 8).map((x) => '· ' + (x.label || '记账') + ' ' + ((x.data && (x.data.customer || x.data.supplier || x.data.remark || x.data.amount)) || '') + (x._err ? '（上次没补上：' + x._err + '）' : '')).join('\n') + '\n\n现在重发吗？',
-      confirmText: '重发', cancelText: '等一下',
-      success: (r) => { if (r.confirm) this.flushPending(false) }
+      confirmText: '重发', cancelText: '先不发',
+      success: (r) => {
+        if (r.confirm) { this.flushPending(false); return }
+        // 有些条永远补不上（参数错了、单子已经删了），得给个「丢掉」的口子，
+        // 否则「待补」会一直挂着，用户每次点都看到同一句错。
+        const one = q[0] || {}
+        const what = one.label || '记账'
+        wx.showModal({
+          title: '最早那笔要不要丢掉？',
+          content: '· ' + what + '\n\n丢掉就是彻底不要这笔了（不会记进账）。确定不该记的时候才丢。',
+          confirmText: '丢掉这笔', cancelText: '留着',
+          success: (r2) => {
+            if (!r2.confirm) return
+            const rest = (wx.getStorageSync('pending_ops') || []).slice(1)
+            wx.setStorageSync('pending_ops', rest)
+            this.setData({ pending_count: rest.length })
+            wx.showToast({ title: '丢掉了，还剩 ' + rest.length + ' 笔', icon: 'none' })
+          }
+        })
+      }
     })
   },
   req(opts) {
@@ -6080,6 +6148,8 @@ Page({
             this.setData({ key_open: false })
             if (c) { c.done(); c.doReq(k); c.replayKey(k) }
             this.loadMe()
+            // 口令是补发时过期的话，输完接着把「待补」补完
+            setTimeout(() => this.flushPending(true), 400)
             if (d.recover_code) this.showRecoverCode(d.recover_code)
           } else this.setData({ key_err: d.error || '设置失败' })
         },
@@ -6106,6 +6176,7 @@ Page({
         if (c) { c.done(); c.doReq(k); c.replayKey(k) }
         this.loadMe()
         this.refresh({ lite: true })
+        setTimeout(() => this.flushPending(true), 400)
       },
       // 这个接口挂了不该拦住登录：照原来的路走，进不去再提示
       fail: () => {

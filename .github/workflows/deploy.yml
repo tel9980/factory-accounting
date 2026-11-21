@@ -70,6 +70,10 @@ jobs:
         run: node scripts/test-firstscreen.mjs
       - name: 列表分页回归（重新拉第一页不许在旧列表后面追加）
         run: node scripts/test-list.mjs
+      # 弱网攒了十几笔、网回来后按顺序补发：中间一笔被拒不能连累后面的，
+      # 补发途中又记的一笔不能丢，口令过期要停下来等登录而不是把每条都标成「口令错误」。
+      - name: 离线补发回归（没补上的留在「待补」里，补上的不许重复、补发途中新记的不许丢）
+        run: node scripts/test-offline.mjs
 
   smoke:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍

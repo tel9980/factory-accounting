@@ -42,6 +42,7 @@ jobs:
       - run: node scripts/test-key-queue.mjs
       - run: node scripts/test-firstscreen.mjs
       - run: node scripts/test-list.mjs
+      - run: node scripts/test-offline.mjs
       # 文档和代码对不上就别发版：接口清单、网页版教程都是从源文件生成的产物，
       # 忘了重新生成的话，发出去的 exe 里带的是旧教程。
       - run: node scripts/gen-api-list.mjs --check
