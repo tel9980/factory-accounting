@@ -1003,6 +1003,56 @@ node scripts/test-preview.mjs    # 28 项，含「没写日期要说清」
 node scripts/test-fixes2.mjs     # 28 项，已挂 deploy.yml（紧跟切片上传之后）
 ```
 
+### 4.28 加列、修写接口、备份说明这三件事的硬规矩
+
+**一、给 `backend/schema.sql` 里已有的表加列，必须同时进 `EXTRA_COLS`。**
+线上 D1 全是老库：`CREATE TABLE IF NOT EXISTS` 遇到已存在的表整句跳过，「后来加的列」永远补不上，
+代码一查就是 `no such column` → 整个接口 500。补列只靠 `backend/index.js` 里那张 `EXTRA_COLS`
+（本机版另有一套：`server/d1.mjs` 的 `completeColumns()` 直接解析 `schema.sql`，所以本机不会漏）。
+
+漏了会怎样（真实历史）：
+
+| 漏的列 | 现象 |
+| --- | --- |
+| `orders.deliver_date` / `orders.created_by` | 老库上「预计交付日」「员工只看自己录的单」一查就 500 |
+| `error_log.ray` | 出 500 时定位不到是哪一次请求 |
+
+所以 `node scripts/check.mjs` 现在会查两件事（见 `[4.7]`）：
+
+1. `EXTRA_COLS` 点名的表和列，`schema.sql` 里必须真的有（防手滑写错名）；
+2. 拿 `scripts/schema-baseline.json`（**发布过的列快照**）对比，这次新加的列如果不在 `EXTRA_COLS` 里 → **直接红**。
+
+改完加列的步骤：
+
+```bash
+# 1) 改 backend/schema.sql（新列写进建表语句）
+# 2) 把同一列加进 backend/index.js 的 EXTRA_COLS（老库靠它补）
+# 3) 跑自检（会红，提示你哪张表的新列没登记）
+node scripts/check.mjs
+# 4) 全绿之后刷新基线（此后这一列才算「已发布」）
+node scripts/check.mjs --update-baseline
+```
+
+**二、新写接口要有人真跑过，否则「CI 全绿」是错觉。**
+`check.mjs` 的 `[5.6]` 会把 195 个写接口和 `scripts/*.mjs` 全文比对，列出「从没被任何脚本调用过」的名字
+（warn 不拦——有些确实只能人工验）。当前覆盖 **180/195**。加写接口时顺手在某个测试里打一次，
+尤其是**动钱**的：设备处置（`/assets/:id/dispose` 会写 `ref_type='dispose'` 的现金流水）、
+设备折旧（`/assets/run-depreciation`）、计件扣款（`/wage-deducts`）。
+
+**三、备份要说清「哪些东西不在里面」。**
+`BACKUP_SKIP` 里每一项都有理由，其中两项容易被误解：
+
+- `attachments`：单据照片是图片本体，一张几百 KB；
+- `month_report`：月度报表存档是 xlsx 本体（base64）。
+
+它们**不在备份里**，恢复不回来。所以 `/backup`、`/backup-verify` 都带 `notice`
+（`BACKUP_NOTICE`），`/book-reset`（一键初始化）的返回文案里也明说「照片和月报存档恢复不回来」。
+加新的 skip 项时，把原因写进 `BACKUP_SKIP` 的第二列——`/backup-verify` 会把原因原样显示给用户。
+
+```bash
+node scripts/test-fixes3.mjs     # 29 项：设备买→折旧→维修→处置、计件扣款、对账保存/差异、交接备注、备份 notice
+```
+
 ### 5.0 最省事：什么都不用配（内置演示入口）
 
 登录页有一行 **「👀 先看看演示（不用口令，示例数据）」**——审核员点它就直接进演示账套

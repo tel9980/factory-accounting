@@ -19,7 +19,8 @@ const opt = (n, d) => {
 }
 const BASE = opt('base', 'http://127.0.0.1:8791').replace(/\/+$/, '')
 const KEY = opt('key', '8888')
-const TAG = '并发' + Math.random().toString(36).slice(2, 6)
+// 只用字母：一句话记账会把句子里的数字当金额剥掉，客户名里带数字会被拆坏（第 8 组就靠这个名字查单）。
+const TAG = '并发' + Array.from({ length: 4 }, () => String.fromCharCode(97 + Math.floor(Math.random() * 26))).join('')
 const TODAY = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
 const MON = TODAY.slice(0, 7)
 

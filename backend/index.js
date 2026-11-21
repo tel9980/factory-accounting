@@ -16008,7 +16008,11 @@ app.post('/book-reset', async (c) => {
   try { await logAudit(db, '一键初始化', String(c.env.BOOK || '1'), `清空 ${cleared.length} 张表${snapId ? `，清空前备份 #${snapId}` : ''}`) } catch (e) {}
   return c.json({
     ok: true, cleared: cleared.length, tables: cleared, snapshot: snapId,
-    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}），以前的备份也都还在——想反悔可以在「报表 → 备份列表」里恢复。` : '清空前那次自动备份没成功（看错误日志），以前的备份都还在。')
+    // 清空会把单据照片（attachments）和月度报表存档（month_report）一起删掉，而这两样**不在备份里**
+    // （图片和 xlsx 本体一张就几百 KB，塞进每日快照会把备份撑爆）。所以「想反悔能恢复」只对账目成立，
+    // 照片和存档恢复不回来 —— 这事必须在这里说清，不能等用户点完恢复才发现照片没了。
+    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}），以前的备份也都还在——账目想反悔能在「报表 → 备份列表」里恢复。` : '清空前那次自动备份没成功（看错误日志），以前的备份都还在。') + '注意：单据照片和月度报表存档本来就不在备份里（怕把快照撑爆），清空后恢复不回来。',
+    not_in_backup: ['attachments', 'month_report', 'staff_users', 'audit_log', 'error_log', 'slow_log'],
   })
 })
 
@@ -17768,7 +17772,7 @@ async function pushToNotes(db, env, book) {
 // 数据备份：全量导出 JSON（复制用）
 app.get('/backup', async (c) => {
   try {
-    return c.json({ text: await buildBackup(c.env.DB) })
+    return c.json({ text: await buildBackup(c.env.DB), notice: BACKUP_NOTICE })
   } catch (e) {
     noteFail(e, '导出备份')
     return c.json({ error: String((e && e.message) || e), code: 'backup_failed' }, 500)
@@ -17842,6 +17846,10 @@ async function backupSig(db) {
     return '' // 有表读不出来就别跳过，老老实实备份（失败会由 buildBackup 抛错）
   }
 }
+
+// 备份**不含**的东西（照片、月报存档是本体太大；员工 PIN、日志不该出本机）。
+// 每次备份的返回里都带上这句话，别让人以为「备份过了就什么都丢不了」。
+const BACKUP_NOTICE = '照片（单据拍照）、月度报表存档、员工口令、审计/报错日志不在备份里'
 
 async function saveBackup(db, opts) {
   const o = opts || {}
@@ -18256,7 +18264,7 @@ app.get('/backup-verify', async (c) => {
       (drift ? ' 和现在比有 ' + drift + ' 类数量不一样（备份之后又记了新东西，正常）。' : ' 和现在完全一致。') +
       ' 另有 ' + skipped.length + ' 张表按设计不进备份（下面写了原因）。'
   return c.json({ ok: true, has: true, usable, id: row.id, at: row.created_at, days_ago: days, size, version: (d && d.version) || 1,
-    tables, missing, skipped, uncovered, covered, drift_count: drift, warns, text })
+    tables, missing, skipped, uncovered, covered, drift_count: drift, warns, notice: BACKUP_NOTICE, text })
 })
 
 app.post('/backup-restore', async (c) => {

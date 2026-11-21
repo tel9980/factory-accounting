@@ -242,6 +242,54 @@ if (db) for (const [t, cols] of need) {
 }
 say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列都在`, `表结构有 ${schemaBad} 处问题（见上面逐条）`)
 
+// ── 4.7 老库补列清单（EXTRA_COLS）必须有、且不许 drift ──
+// 线上 D1 是老库：schema.sql 里全是 CREATE TABLE IF NOT EXISTS，表已经在了就整句跳过，
+// 于是「后来加的列」永远补不上，代码一查就 no such column → 整个接口 500。
+// 补列靠 backend/index.js 里的 EXTRA_COLS（本机版还有 server/d1.mjs 按 schema 自动补）。
+// 所以：schema.sql 里**新增**的列必须同时进 EXTRA_COLS，否则老库永远醒不过来。
+// 基线文件 scripts/schema-baseline.json 记着「发布过的列」，新列不在基线里就会被查出来。
+{
+  const blk = beSrc.match(/const EXTRA_COLS = \{([\s\S]*?)\n\}/)
+  const extras = new Map() // 表 -> Set(列)
+  if (blk) {
+    for (const m of blk[1].matchAll(/^\s{2}(\w+):\s*\[([\s\S]*?)\]\s*[,}]?\s*$/gm)) {
+      const cols = new Set([...m[2].matchAll(/'([a-z_][a-z0-9_]*)'\s*,/gi)].map((x) => x[1]))
+      extras.set(m[1], cols)
+    }
+  }
+  let bad47 = 0
+  if (!blk) { fail('找不到 EXTRA_COLS（老库补列清单），老库升级会缺列'); bad47++ }
+  for (const [t, cols] of extras) {
+    if (!declared.has(t)) { fail(`EXTRA_COLS 里的表 ${t} 在 schema.sql 里不存在`); bad47++; continue }
+    const ghost = [...cols].filter((c) => !declared.get(t).has(c))
+    if (ghost.length) { fail(`EXTRA_COLS 给 ${t} 补的列 schema.sql 里没有：${ghost.join(', ')}（新库也会缺，一查就 500）`); bad47++ }
+  }
+  // 基线对比：现在的列 - 基线里的列 = 这次新加的，必须已经在 EXTRA_COLS 里
+  const baselineFile = path.join(ROOT, 'scripts/schema-baseline.json')
+  const snapshot = {}
+  for (const [t, cols] of declared) if (cols.size) snapshot[t] = [...cols].sort()
+  const wantWrite = process.argv.includes('--update-baseline')
+  if (wantWrite) {
+    fs.writeFileSync(baselineFile, JSON.stringify(snapshot, null, 2) + '\n')
+    console.log('  📝 已把当前列结构写进 scripts/schema-baseline.json（下次发布后的新列才算「新增」）')
+  } else if (!fs.existsSync(baselineFile)) {
+    warn.push('没有 scripts/schema-baseline.json，老库补列 drift 查不了（跑 node scripts/check.mjs --update-baseline 生成）')
+  } else {
+    const base = JSON.parse(fs.readFileSync(baselineFile, 'utf8'))
+    for (const [t, cols] of Object.entries(snapshot)) {
+      const old = new Set(base[t] || [])
+      if (!old.size) continue // 新表：整张表都不在老库，不需要逐列补
+      const fresh = cols.filter((c) => !old.has(c))
+      const miss = fresh.filter((c) => !(extras.get(t) && extras.get(t).has(c)))
+      if (miss.length) {
+        fail(`表 ${t} 新加的列没进 EXTRA_COLS：${miss.join(', ')}（老库升级后一查就 500；补进 EXTRA_COLS 再跑 --update-baseline）`)
+        bad47++
+      }
+    }
+  }
+  say(bad47 === 0, `老库补列清单对得上（${extras.size} 张表有补列规则）`, `老库补列有 ${bad47} 处问题（见上）`)
+}
+
 // ── 4.5 代码里写死的 SQL，拿来真跑一遍（prepare 就会报 no such column / no such table）──
 console.log('\n[4.5] SQL 语句')
 if (db) {
@@ -298,6 +346,23 @@ const really = dead.filter((p) => !familyOk(p))
 for (const p of really) fail(`前端调了 ${p}，后台没有这个路由（真机上点一下就是 404 / url 不合法）`)
 if (dead.length && !really.length) warn.push(`这 ${dead.length} 个前端路径没直接命中路由、但前缀族对得上（动态拼的）：${dead.join('、')}`)
 say(true, `${calls.size} 个前端调用，${dead.length} 个没直接命中（${really.length} 个需要人工看）`)
+
+// ── 5.6 写接口有没有人真跑过（没人跑 = 出了事也没人知道）──
+// 240 多个写接口里，只要脚本从没打过它，就等于「上线了但从没执行过一次」。
+// 这里不拦（有些确实只能人工验），但必须把名单摆出来，别让「全绿」变成错觉。
+{
+  const scriptsDir = path.join(ROOT, 'scripts')
+  const allScripts = fs.readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs')).map((f) => fs.readFileSync(path.join(scriptsDir, f), 'utf8')).join('\n')
+  const writes = routes.filter((r) => r.m !== 'GET')
+  const never = writes.filter((r) => {
+    const parts = r.p.split('/').filter(Boolean).filter((x) => !x.startsWith(':'))
+    if (!parts.length) return false
+    const pat = parts.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('(?:[\\s\\S]{0,120}?)')
+    return !new RegExp(pat).test(allScripts)
+  })
+  say(true, `${writes.length} 个写接口里 ${writes.length - never.length} 个脚本跑过、${never.length} 个没有`, '')
+  if (never.length) warn.push('这 ' + never.length + ' 个写接口从没被任何脚本调用过（真实执行路径没人验）：' + never.slice(0, 12).map((r) => r.m + ' ' + r.p).join('、') + (never.length > 12 ? ' …' : ''))
+}
 
 // ── 6. 页面绑定和方法重名（README 227/229 两个 bug 都出在这）──
 console.log('\n[6] 页面绑定')

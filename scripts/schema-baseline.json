@@ -1,0 +1,605 @@
+{
+  "orders": [
+    "ar_cat",
+    "cost",
+    "created_at",
+    "created_by",
+    "customer",
+    "deliver_date",
+    "delivered_at",
+    "due_date",
+    "id",
+    "import_batch",
+    "item_name",
+    "month",
+    "no_invoice",
+    "operator",
+    "paid",
+    "price",
+    "progress",
+    "rev",
+    "status",
+    "tax_amt",
+    "tax_kind",
+    "tax_rate",
+    "written_off"
+  ],
+  "process_log": [
+    "created_at",
+    "id",
+    "operator",
+    "order_id",
+    "progress"
+  ],
+  "payables": [
+    "amount",
+    "category",
+    "created_at",
+    "created_by",
+    "due_date",
+    "id",
+    "import_batch",
+    "month",
+    "operator",
+    "paid",
+    "remark",
+    "rev",
+    "supplier",
+    "tax_amt",
+    "tax_kind",
+    "tax_rate",
+    "written_off"
+  ],
+  "ledger": [
+    "account_id",
+    "amount",
+    "cash",
+    "category",
+    "created_at",
+    "direction",
+    "id",
+    "import_batch",
+    "inv_no",
+    "inv_state",
+    "month",
+    "operator",
+    "ref_id",
+    "ref_type",
+    "remark",
+    "tax"
+  ],
+  "settings": [
+    "key",
+    "value"
+  ],
+  "backups": [
+    "content",
+    "created_at",
+    "id",
+    "size",
+    "stat"
+  ],
+  "backup_parts": [
+    "bid",
+    "data",
+    "seq"
+  ],
+  "fixed_expenses": [
+    "amount",
+    "category",
+    "created_at",
+    "day",
+    "id",
+    "remark"
+  ],
+  "month_lock": [
+    "locked_at",
+    "month"
+  ],
+  "audit_log": [
+    "action",
+    "by",
+    "created_at",
+    "detail",
+    "id",
+    "ref_id",
+    "ref_type",
+    "target"
+  ],
+  "trash": [
+    "batch",
+    "data",
+    "deleted_at",
+    "id",
+    "ref_id",
+    "type"
+  ],
+  "budgets": [
+    "amount",
+    "category",
+    "created_at",
+    "id"
+  ],
+  "phrases": [
+    "created_at",
+    "id",
+    "kind",
+    "text"
+  ],
+  "accounts": [
+    "created_at",
+    "id",
+    "inv_default",
+    "kind",
+    "name",
+    "opening"
+  ],
+  "categories": [
+    "created_at",
+    "id",
+    "name",
+    "sort",
+    "type"
+  ],
+  "advances": [
+    "account_id",
+    "amount",
+    "created_at",
+    "id",
+    "party",
+    "remark",
+    "type",
+    "used"
+  ],
+  "loans": [
+    "account_id",
+    "amount",
+    "created_at",
+    "id",
+    "import_batch",
+    "remark",
+    "returned",
+    "staff",
+    "used"
+  ],
+  "month_archive": [
+    "created_at",
+    "data",
+    "id",
+    "month"
+  ],
+  "recon_log": [
+    "created_at",
+    "diff",
+    "done",
+    "id",
+    "imported",
+    "month",
+    "note",
+    "party",
+    "state",
+    "system",
+    "type"
+  ],
+  "import_log": [
+    "batch",
+    "cnt",
+    "created_at",
+    "dup_count",
+    "id",
+    "ids",
+    "skipped_locked",
+    "src",
+    "total",
+    "type",
+    "undone"
+  ],
+  "party_terms": [
+    "created_at",
+    "id",
+    "kind",
+    "note",
+    "party",
+    "recon_cycle",
+    "recon_day",
+    "term_days"
+  ],
+  "party_profiles": [
+    "addr",
+    "contact",
+    "created_at",
+    "id",
+    "kind",
+    "note",
+    "party",
+    "phone"
+  ],
+  "dunning_log": [
+    "channel",
+    "created_at",
+    "id",
+    "note",
+    "party",
+    "promise_date",
+    "type"
+  ],
+  "statement_log": [
+    "ack",
+    "ack_at",
+    "channel",
+    "created_at",
+    "id",
+    "month",
+    "note",
+    "party",
+    "resolved_at",
+    "type"
+  ],
+  "error_log": [
+    "book",
+    "created_at",
+    "id",
+    "method",
+    "ms",
+    "msg",
+    "params",
+    "path",
+    "ray",
+    "ref",
+    "status"
+  ],
+  "slow_log": [
+    "book",
+    "created_at",
+    "dur",
+    "id",
+    "method",
+    "path"
+  ],
+  "track_log": [
+    "created_at",
+    "id",
+    "party",
+    "ua"
+  ],
+  "op_dedupe": [
+    "client_id",
+    "created_at",
+    "id",
+    "kind",
+    "ref_id"
+  ],
+  "uploads": [
+    "created_at",
+    "done",
+    "id",
+    "name",
+    "parts",
+    "size"
+  ],
+  "upload_parts": [
+    "data",
+    "id",
+    "seq"
+  ],
+  "net_snapshots": [
+    "ap",
+    "ar",
+    "cash",
+    "created_at",
+    "debt",
+    "month",
+    "net",
+    "note"
+  ],
+  "assets": [
+    "buy_date",
+    "cost",
+    "created_at",
+    "dispose_amount",
+    "disposed_at",
+    "id",
+    "life_years",
+    "maint_last",
+    "maint_months",
+    "name",
+    "residual_rate"
+  ],
+  "attachments": [
+    "b64",
+    "created_at",
+    "id",
+    "mime",
+    "name",
+    "r2_key",
+    "ref_id",
+    "ref_type",
+    "size"
+  ],
+  "staff_users": [
+    "active",
+    "ap",
+    "asset'",
+    "contact",
+    "created_at",
+    "exp",
+    "id",
+    "import",
+    "modules",
+    "name",
+    "pin",
+    "pin_hash"
+  ],
+  "edit_requests": [
+    "by",
+    "changes",
+    "created_at",
+    "done_at",
+    "done_by",
+    "id",
+    "kind",
+    "note",
+    "reason",
+    "ref_id",
+    "status"
+  ],
+  "recon_confirm": [
+    "amount",
+    "by",
+    "created_at",
+    "diff",
+    "id",
+    "imported",
+    "month",
+    "note",
+    "party",
+    "system",
+    "type"
+  ],
+  "quotes": [
+    "cost",
+    "created_at",
+    "decided_at",
+    "id",
+    "item",
+    "margin",
+    "no",
+    "note",
+    "order_id",
+    "party",
+    "price",
+    "qty",
+    "sent_at",
+    "status",
+    "token",
+    "valid_days"
+  ],
+  "wage_rates": [
+    "active",
+    "created_at",
+    "id",
+    "item",
+    "process",
+    "rate",
+    "unit",
+    "worker"
+  ],
+  "wage_records": [
+    "amount",
+    "by",
+    "created_at",
+    "date",
+    "id",
+    "item",
+    "month",
+    "note",
+    "order_id",
+    "process",
+    "qty",
+    "rate",
+    "worker"
+  ],
+  "wage_pays": [
+    "account_id",
+    "amount",
+    "by",
+    "created_at",
+    "id",
+    "month",
+    "note",
+    "worker"
+  ],
+  "wage_deduct": [
+    "amount",
+    "by",
+    "created_at",
+    "id",
+    "kind",
+    "month",
+    "remark",
+    "worker"
+  ],
+  "materials": [
+    "active",
+    "created_at",
+    "id",
+    "min_qty",
+    "name",
+    "note",
+    "unit"
+  ],
+  "material_moves": [
+    "amount",
+    "by",
+    "created_at",
+    "date",
+    "id",
+    "kind",
+    "material",
+    "month",
+    "note",
+    "order_id",
+    "party",
+    "price",
+    "qty"
+  ],
+  "party_staff": [
+    "party",
+    "staff",
+    "updated_at"
+  ],
+  "frame_prices": [
+    "active",
+    "created_at",
+    "end_date",
+    "id",
+    "item",
+    "note",
+    "party",
+    "price",
+    "start_date",
+    "unit"
+  ],
+  "outsourcing": [
+    "back_date",
+    "by",
+    "created_at",
+    "due_date",
+    "id",
+    "item",
+    "note",
+    "order_id",
+    "party",
+    "price",
+    "qty",
+    "sent_date",
+    "status"
+  ],
+  "reworks": [
+    "by",
+    "cost",
+    "created_at",
+    "date",
+    "fault",
+    "fix",
+    "id",
+    "item",
+    "kind",
+    "month",
+    "note",
+    "order_id",
+    "party",
+    "qty",
+    "reason"
+  ],
+  "debts": [
+    "account_id",
+    "created_at",
+    "id",
+    "kind",
+    "lender",
+    "pay_kind",
+    "principal",
+    "rate",
+    "remark",
+    "start_date",
+    "status",
+    "term_months"
+  ],
+  "debt_repays": [
+    "account_id",
+    "amount",
+    "created_at",
+    "debt_id",
+    "id",
+    "kind",
+    "rdate",
+    "remark"
+  ],
+  "invoices": [
+    "amount",
+    "created_at",
+    "date",
+    "id",
+    "no",
+    "order_id",
+    "party",
+    "remark",
+    "tax",
+    "type"
+  ],
+  "transfers": [
+    "amount",
+    "created_at",
+    "from_id",
+    "id",
+    "remark",
+    "to_id"
+  ],
+  "writeoffs": [
+    "amount",
+    "created_at",
+    "id",
+    "party",
+    "reason",
+    "ref_id",
+    "ref_type"
+  ],
+  "targets": [
+    "created_at",
+    "month",
+    "order_add",
+    "receive"
+  ],
+  "credit_limits": [
+    "created_at",
+    "id",
+    "limit_amount",
+    "note",
+    "party"
+  ],
+  "prepaids": [
+    "account_id",
+    "active",
+    "category",
+    "created_at",
+    "id",
+    "months",
+    "name",
+    "remark",
+    "start_date",
+    "total"
+  ],
+  "wx_users": [
+    "created_at",
+    "id",
+    "last_at",
+    "nickname",
+    "openid",
+    "quota"
+  ],
+  "bank_flows": [
+    "amount",
+    "created_at",
+    "date",
+    "direction",
+    "id",
+    "matched_id",
+    "matched_type",
+    "memo"
+  ],
+  "month_report": [
+    "b64",
+    "created_at",
+    "id",
+    "month",
+    "name",
+    "size"
+  ],
+  "auth_fails": [
+    "first_at",
+    "ip",
+    "locked_until",
+    "n"
+  ]
+}
