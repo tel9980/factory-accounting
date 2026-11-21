@@ -129,6 +129,16 @@ const run = async () => {
   yes('首页有 /guide 链接', /href="\/guide"/.test(html))
   yes('首页不再写着「请不要在浏览器里打开」', !/请不要在浏览器里打开/.test(html))
 
+  // 页面脚本必须能解析：这里写坏一个换行，整页按钮全都不响应，而且看起来只是「点了没反应」
+  const pc = await (await fetch(BASE + '/pc')).text()
+  const sm = pc.match(/<script>([\s\S]*?)<\/script>/)
+  let parseErr = ''
+  try {
+    if (!sm) throw new Error('没有 <script>')
+    new Function(sm[1])
+  } catch (e) { parseErr = String((e && e.message) || e) }
+  yes('/pc 的脚本能解析（解析不了整页按钮都点不动）', !parseErr, parseErr)
+
   console.log('')
   if (bad.length) {
     console.log('❌ 整账套回归 ' + bad.length + ' 项失败：')

@@ -6935,7 +6935,7 @@ function setSuper(off){
     .catch(function () { smsg('网断了，稍后再试', false) })
 }
 function resBookKey(id){
-  var pw = window.prompt('给第 ' + id + ' 本账设一个管理员口令（至少 4 位）。\n设好之后，那本账可以只让它的管理员进，不用把主口令给出去。')
+  var pw = window.prompt('给第 ' + id + ' 本账设一个管理员口令（至少 4 位）。设好之后，那本账可以只让它的管理员进，不用把主口令给出去。')
   if (!pw) return
   smsg('正在设……')
   fetch('/book-admin-key', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ book: id, password: pw }) })
@@ -7059,7 +7059,7 @@ function bookReset(){
   if (needKey()) return
   if (document.getElementById('rs').value.trim() !== '清空') { msg('要清空请先在框里输入「清空」两个字', false); return }
   var sel = document.getElementById('bk')
-  if (!confirm('清空「' + sel.options[sel.selectedIndex].text + '」的全部账目？\n口令和账本名会留着，清空前会自动备份一份。')) return
+  if (!confirm('清空「' + sel.options[sel.selectedIndex].text + '」的全部账目？口令和账本名会留着，清空前会自动备份一份。')) return
   msg('正在清空…')
   fetch('/book-reset', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bk(), 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: '清空' }) })
     .then(function(r){ return r.json() }).then(function(d){ msg(d.ok ? d.text : (d.error || '清空失败'), !!d.ok) })
