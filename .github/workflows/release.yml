@@ -29,18 +29,26 @@ jobs:
   check:
     name: 自检
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
       # 光跑静态自检不够：以前 release 只验「代码能解析」，打包出来的东西能不能跑完全没验。
-      # 这三个是纯离线的（不需要起服务、不连库），出错说明前端首屏/401 重放/分批这些真坏了。
+      # 这几个是纯离线的（不需要起服务、不连库），出错说明前端首屏/401 重放/分批这些真坏了。
       - run: node scripts/check.mjs
       - run: node scripts/test-batch.mjs
       - run: node scripts/test-key-queue.mjs
       - run: node scripts/test-firstscreen.mjs
       - run: node scripts/test-list.mjs
+      # 文档和代码对不上就别发版：接口清单、网页版教程都是从源文件生成的产物，
+      # 忘了重新生成的话，发出去的 exe 里带的是旧教程。
+      - run: node scripts/gen-api-list.mjs --check
+      - run: node scripts/gen-guide.mjs --check
+      # 镜像标签钉在 compose / README / DEPLOYMENT 三处，发版时必须与这个 tag 一致，
+      # 否则「照文档 docker compose up」拉到的还是上一版（v1.1.0 就发生过）。
+      - run: node scripts/check-version.mjs "${{ github.ref_name }}"
 
   exe:
     name: 打包 ${{ matrix.name }}
@@ -72,14 +80,19 @@ jobs:
         run: node scripts/build-exe.mjs --out dist
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
+      # 校验和按平台分开命名：三个平台原来都写 SHA256SUMS.txt，最后 upload-artifact
+      # 用 merge-multiple 合并时互相覆盖，发出去的 SHA256SUMS.txt 只剩一个平台一行。
       - name: 算校验和
         shell: bash
         run: |
           cd dist
+          OUT="SHA256SUMS-${{ matrix.name }}.txt"
+          : > "$OUT"
           for f in *; do
-            node -e "const c=require('node:crypto'),fs=require('fs');const h=c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex');console.log(h+'  '+process.argv[1])" "$f" >> SHA256SUMS.txt
+            case "$f" in SHA256SUMS*) continue;; esac
+            node -e "const c=require('node:crypto'),fs=require('fs');const h=c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex');console.log(h+'  '+process.argv[1])" "$f" >> "$OUT"
           done
-          cat SHA256SUMS.txt
+          cat "$OUT"
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.name }}
@@ -91,43 +104,81 @@ jobs:
     needs: exe
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      # fetch-depth: 0 才有完整 tag 历史，下面要算「上一个 tag 到今天改了哪些东西」
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: bin-*
           merge-multiple: true
           path: bins
-      - name: 合并校验和
-        run: cat bins/SHA256SUMS.txt > SHA256SUMS.txt && rm bins/SHA256SUMS.txt
+      # 各平台各交了一份 SHA256SUMS-<平台>.txt，这里合并成一份给用户下载，
+      # 并且自己重算一遍再断言「三个文件都在」—— 以前 merge 时互相覆盖，
+      # 发出去的校验和只有一行（README 却写着三个），用户拿去对不上。
+      - name: 合并校验和（并断言三个平台都在）
+        shell: bash
+        run: |
+          cd bins
+          rm -f SHA256SUMS.txt
+          for f in *; do
+            case "$f" in SHA256SUMS*) continue;; esac
+            node -e "const c=require('node:crypto'),fs=require('fs');const h=c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex');console.log(h+'  '+process.argv[1])" "$f" >> SHA256SUMS.txt
+          done
+          N=$(wc -l < SHA256SUMS.txt)
+          echo "校验和 $N 行："; cat SHA256SUMS.txt
+          if [ "$N" -ne 3 ]; then echo "::error::应该有 3 个可执行文件，实际 $N 个"; exit 1; fi
+      # Release 说明 = 用法（固定）+ 这次改了什么（git log 自动拼）。
+      # 以前既写自定义 body 又开 generate_release_notes，结果 GitHub 只留了 compare 链接，
+      # 每次发版用户都不知道改了什么。
+      - name: 写 Release 说明
+        shell: bash
+        run: |
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo '')
+          {
+            echo '## 怎么用'
+            echo ''
+            echo '**Windows**：下载 `factory-accounting-windows-x64.exe`，双击。浏览器会自己打开'
+            echo '`http://127.0.0.1:8787`，先设一个口令，然后就能记账了。数据在 exe 旁边的'
+            echo '`data/` 目录里，把这个目录拷走就是备份。'
+            echo ''
+            echo '**Linux / macOS**：下载对应文件，`chmod +x` 后直接跑。macOS 第一次打开如果提示'
+            echo '「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。'
+            echo ''
+            echo '**手机小程序**：手机和电脑连同一个 Wi-Fi，把小程序的 `API_BASE` 改成'
+            echo '`http://<电脑IP>:8787` 即可（电脑 IP 在程序启动的窗口里和落地页上都写着）。'
+            echo ''
+            echo '**Docker**（推荐服务器/群晖）：'
+            echo '```'
+            echo 'docker run -d --name factory -p 8787:8787 -v factory-data:/data \'
+            echo '  ghcr.io/tel9980/factory-accounting:'"${GITHUB_REF_NAME}"''
+            echo '```'
+            echo ''
+            echo '免安装版跑的是和线上同一份后端，只是数据库换成本机 SQLite；账目、备份、导出、'
+            echo '打印页全都在。第一次启动会自动建好 57 张表，不用手工初始化。'
+            echo ''
+            echo '## 这次改了什么'
+            echo ''
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty='- %s' "$PREV"..HEAD | head -60
+            else
+              git log --no-merges --pretty='- %s' -30 HEAD
+            fi
+            echo ''
+            echo '## 校验和'
+            echo ''
+            echo '见 `SHA256SUMS.txt`（三个文件都在里面）。'
+          } > RELEASE_BODY.md
+          head -20 RELEASE_BODY.md
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             bins/*
-            SHA256SUMS.txt
-          generate_release_notes: true
-          body: |
-            ## 怎么用
-
-            **Windows**：下载 `factory-accounting-windows-x64.exe`，双击。浏览器会自己打开
-            `http://127.0.0.1:8787`，先设一个口令，然后就能记账了。数据在 exe 旁边的
-            `data/` 目录里，把这个目录拷走就是备份。
-
-            **Linux / macOS**：下载对应文件，`chmod +x` 后直接跑。macOS 第一次打开如果提示
-            「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。
-
-            **手机小程序**：手机和电脑连同一个 Wi-Fi，把小程序的 `API_BASE` 改成
-            `http://<电脑IP>:8787` 即可（电脑 IP 在程序启动的窗口里和落地页上都写着）。
-
-            **Docker**（推荐服务器/群晖）：
-            ```
-            docker run -d --name factory -p 8787:8787 -v factory-data:/data \
-              ghcr.io/tel9980/factory-accounting:latest
-            ```
-
-            免安装版跑的是和线上同一份后端，只是数据库换成本机 SQLite；账目、备份、
-            导出、打印页全都在。第一次启动会自动建好 57 张表，不用手工初始化。
+          body_path: RELEASE_BODY.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

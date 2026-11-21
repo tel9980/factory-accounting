@@ -20,12 +20,20 @@
 .tip { width: 100%; font-size: 24rpx; color: #777; }
 .list .item { background: #fff; border-radius: 12rpx; padding: 16rpx; margin-bottom: 12rpx; }
 .row1 { display: flex; justify-content: space-between; align-items: center; }
-.nm { font-size: 28rpx; font-weight: 600; color: #1a1a1a; }
+.nm {
+  font-size: 28rpx; font-weight: 600; color: #1a1a1a;
+  /* 客户名特别长（「XX市XX区XX五金制品有限公司」）时不要挤掉金额 */
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .amt { font-size: 30rpx; font-weight: 700; color: #e0711e; }
 .amt.out { color: #3d7bf5; }
 .row2 { font-size: 24rpx; color: #888; margin: 8rpx 0; }
 .btns { display: flex; gap: 12rpx; flex-wrap: wrap; }
 .btns button { font-size: 24rpx; }
+/* 单据行上的按钮：只有三个，点击区要够大（原来 15 个 mini 按钮，每个约 28px 高，
+   比手指窄，「删」还紧挨「月结」，误触就删单）。 */
+.btns2 { gap: 16rpx; margin-top: 12rpx; }
+.btns2 button { min-height: 64rpx; line-height: 64rpx; padding: 0 26rpx; font-size: 26rpx; }
 .empty { text-align: center; color: #aaa; font-size: 26rpx; padding: 40rpx 0; }
 .pre { white-space: pre-wrap; font-family: monospace; font-size: 22rpx; line-height: 1.6; color: #333; }
 .seg { background: #f5f6f8; border-radius: 8rpx; padding: 12rpx 20rpx; font-size: 26rpx; color: #666; }

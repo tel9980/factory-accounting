@@ -4,7 +4,7 @@
 #   docker run -d --name factory -p 8787:8787 -v factory-data:/data factory-accounting
 #
 # 打开 http://<那台机器的IP>:8787 设个口令，然后把小程序的 API_BASE 指到这个地址。
-# 数据全在 /data 里（book1.db / book2.db / book3.db），把 /data 备份走就等于备份了整本账。
+# 数据全在 /data 里（book1.db … book9.db，一本账一个文件），把 /data 备份走就等于备份了整本账。
 #
 # 注意：这里不需要构建 exe，直接 node 跑 server/main.mjs —— 和 exe 里跑的是同一份代码，
 # 只差 exe 用 Node SEA 把 node 运行时一起塞进了一个文件里。

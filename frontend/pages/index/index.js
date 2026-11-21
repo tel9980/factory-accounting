@@ -346,25 +346,31 @@ Page({
       const done0 = () => { if (this._cid) delete this._cid[opts.once] }
       setTimeout(done0, 30000)
     }
-    // 连点保护：同一个动作（once 名字相同）没回来之前，重复点击直接忽略
-    if (opts.once) {
-      this._once = this._once || {}
-      if (this._once[opts.once]) return
-      this._once[opts.once] = true
-      const tag = opts.once
-      const rel = () => { if (this._once) delete this._once[tag] }
-      setTimeout(rel, 8000)
-      const s0 = opts.success, f0 = opts.fail
-      opts = Object.assign({}, opts, {
-        success: (res) => { rel(); s0 && s0(res) },
-        fail: (res) => { rel(); f0 && f0(res) }
-      })
-    }
     const ak = wx.getStorageSync('ak') || ''
     // 一屏里的 GET 攒到一起发（弱网下 10 次往返 → 1 次），失败自动退回逐个发
     const method = (opts.method || 'GET').toUpperCase()
     const rel = opts.url && opts.url.indexOf(API_BASE) === 0 ? opts.url.slice(API_BASE.length) : ''
     opts.__rel = rel
+    // 防连点：所有写操作都加一道。以前只有显式写了 once 的接口才有，于是「加员工 / 记支出 /
+    // 加借款 / 存目标」这十几个保存按钮连点两下就记两笔、余额翻倍。
+    // 键 = 方法 + 路径 + 主键/金额；改单和删单各算各的，不会互相挡。
+    const guard = opts.once || (method !== 'GET'
+      ? method + '|' + rel + '|' + String((opts.data && (opts.data.id || opts.data.amount || opts.data.price || '')) || '')
+      : '')
+    if (guard) {
+      this._once = this._once || {}
+      if (this._once[guard]) return
+      this._once[guard] = true
+      const tag = guard
+      const relF = () => { if (this._once) delete this._once[tag] }
+      setTimeout(relF, 8000)
+      const s0 = opts.success, f0 = opts.fail, c0 = opts.complete
+      opts = Object.assign({}, opts, {
+        success: (res) => { relF(); s0 && s0(res) },
+        fail: (res) => { relF(); f0 && f0(res) },
+        complete: (res) => { relF(); c0 && c0(res) }
+      })
+    }
     // 同一个 GET 还在路上时，不再发第二遍：切页签回来、enterTab 和 refresh 撞在一起时，
     // 同一条路径经常被要两次（回来的数据一模一样）。后到的挂到前一个上，数据回来一起回调。
     // opts.fresh === true 表示「我就要一次新的」（比如用户点了刷新），那种照发。
@@ -955,7 +961,7 @@ Page({
         const d = res.data || {}
         if (!d.ok) return wx.showToast({ title: d.error || '算不出来', icon: 'none' })
         this.setData({ qh: d })
-        if (!Number(this.data.qt_price)) {
+        if (!this.toAmount(this.data.qt_price)) {
           const t = (d.tiers || []).filter((x) => x.k === 'target')[0]
           if (t) this.setData({ qt_price: String(t.price) })
         }
@@ -972,7 +978,7 @@ Page({
     if (!party) return wx.showToast({ title: '先填报给谁', icon: 'none' })
     const body = {
       party: party, item: this.data.qt_item || '', qty: Number(this.data.qt_qty) || 1,
-      cost: Number(this.data.qt_cost) || 0, price: Number(this.data.qt_price) || 0,
+      cost: this.toAmount(this.data.qt_cost) || 0, price: this.toAmount(this.data.qt_price) || 0,
       margin: Number(this.data.qt_margin) || 15, valid_days: Number(this.data.qt_days) || 15
     }
     if (!body.price && !body.cost) return wx.showToast({ title: '单价和成本至少填一个', icon: 'none' })
@@ -1389,7 +1395,7 @@ Page({
   onLRemark(e) { this.setData({ l_remark: e.detail.value }) },
   addLoan() {
     const staff = (this.data.l_staff || '').trim()
-    const amount = Number(this.data.l_amount) || 0
+    const amount = this.toAmount(this.data.l_amount) || 0
     if (!staff) return wx.showToast({ title: '填员工姓名', icon: 'none' })
     if (amount <= 0) return wx.showToast({ title: '填借出金额', icon: 'none' })
     this.req({
@@ -1419,7 +1425,7 @@ Page({
   doReimburse() {
     const id = this.data.cur_loan
     if (!id) return
-    const amount = Number(this.data.rl_amount) || 0
+    const amount = this.toAmount(this.data.rl_amount) || 0
     const category = (this.data.categories || [])[this.data.rl_category] || '其他'
     this.req({
       url: API_BASE + '/loans/' + id + '/reimburse', method: 'POST',
@@ -1979,7 +1985,14 @@ Page({
     for (const row of rows) if (!seen.has(String(row.id))) { seen.add(String(row.id)); add.push(row) }
     return base.concat(add)
   },
-  _loading(key, on) { this._pagBusy = this._pagBusy || {}; this._pagBusy[key] = !!on },
+  // 分页加载中状态：除了内部防重发（_pagBusy），还要让界面看得见 ——
+  // 以前点「加载更早的」按钮文字一点变化都没有，弱网下像没反应，于是又点一次。
+  _loading(key, on) {
+    this._pagBusy = this._pagBusy || {}
+    this._pagBusy[key] = !!on
+    const k = key === 'ex' ? 'ex_busy' : key + '_busy'
+    this.setData({ [k]: !!on })
+  },
   loadAr(more) {
     if (more && this._pagBusy && this._pagBusy.ar) return
     const off = more ? this.data.ar_off : 0
@@ -2890,10 +2903,13 @@ Page({
     if (left <= 0.005) return this._offerReceipt(id, kind)
     wx.showModal({
       title: '还差 ' + left + ' 元',
-      content: (kind === 'ar' ? '这张单还没收完' : '这笔还没付完') + '，剩下的一次结清吗？剩下的不要了就点「差额抹零」。',
-      confirmText: '一次结清', cancelText: '差额抹零',
+      // 「取消」原来等于「差额抹零」= 直接写一笔核销把这张单结掉。
+      // 按返回键、点错了、只想先收这一笔，都会静默把差的钱抹掉 —— 单子显示已收清，账上却没这笔钱。
+      // 现在取消就是什么都不做；真要抹零走行上单独的「抹零」按钮（会再确认一次）。
+      content: (kind === 'ar' ? '这张单还没收完' : '这笔还没付完') + '。现在把剩下的 ' + left + ' 元也记成收/付吗？',
+      confirmText: '剩下的也记上', cancelText: '先这样',
       success: (rr) => {
-        if (!rr.confirm) return this._settleByDiff(id, kind)
+        if (!rr.confirm) return
         this.req({
           url: API_BASE + (kind === 'ar' ? '/orders/' : '/payables/') + id + (kind === 'ar' ? '/receive' : '/pay'), once: 'pay-' + id,
           method: 'POST',
@@ -2909,7 +2925,7 @@ Page({
   pickRbCustomer(e) { this.setData({ rb_customer: e.currentTarget.dataset.n }) },
   receiveBatch() {
     const customer = (this.data.rb_customer || '').trim()
-    const amount = Number(this.data.rb_amount)
+    const amount = this.toAmount(this.data.rb_amount) || 0
     if (!customer) return wx.showToast({ title: '填客户名称', icon: 'none' })
     if (!(amount > 0)) return wx.showToast({ title: '填收款金额', icon: 'none' })
     wx.showModal({
@@ -6864,7 +6880,7 @@ Page({
   onFDay(e) { this.setData({ f_day: e.detail.value }) },
   onFRemark(e) { this.setData({ f_remark: e.detail.value }) },
   addFixed() {
-    const amount = Number(this.data.f_amount)
+    const amount = this.toAmount(this.data.f_amount) || 0
     const day = Number(this.data.f_day)
     if (!(amount > 0)) return wx.showToast({ title: '金额必填', icon: 'none' })
     if (!(day >= 1 && day <= 28)) return wx.showToast({ title: '每月号数填 1–28', icon: 'none' })
@@ -7019,15 +7035,44 @@ Page({
   switchBook(e) {
     const id = Number(e.currentTarget.dataset.id)
     if (id === this.data.book) return
+    const nb = this.data.books.find((b) => b.id === id) || {}
+    // 演示模式后端会强制进第 3 本账，切了也不生效 —— 别假装切成功
+    if (this.data.demo) {
+      return wx.showToast({ title: '演示账套固定是第 3 本，用自己的口令登录才能切', icon: 'none' })
+    }
     wx.showModal({
       title: '切换账套',
-      content: '切换到「' + (this.data.books.find((b) => b.id === id) || {}).name + '」？各账套数据完全分开。',
+      content: '切换到「' + (nb.name || ('第 ' + id + ' 本')) + '」？各账套数据完全分开。',
       success: (r) => {
         if (!r.confirm) return
+        wx.showLoading({ title: '正在切换', mask: true })
+        // 换账套 = 换一整个数据库。以前只改 book 就 refresh，结果：
+        // ①列表里还是上一本的客户（两本的单号都从 1 开始，甚至会把收款记到另一本的同号单上）；
+        // ②在途请求的键里没有账套号，上一本的响应回来把这一本的数据盖掉；
+        // ③翻页 offset 还停在上一次的页码上。
+        this._flight = {}
+        this._bq = []
+        this._arAll = []
+        this._apAll = []
+        this._expAll = []
+        this._pagBusy = {}
+        this.setData({
+          book: id,
+          book_name: nb.name || ('第 ' + id + ' 本'),
+          ar_list: [], ar_off: 0, ar_more: false, ar_kw: '',
+          ap_list: [], ap_off: 0, ap_more: false, ap_kw: '',
+          expense_list: [], ex_off: 0, ex_more: false,
+          ar_sum: null, ap_sum: null, dash_err: ''
+        })
         wx.setStorageSync('book', id)
-        this.setData({ book: id })
+        if (nb.name) wx.setStorageSync('book_name', nb.name)
+        this.loadMe()
         this.refresh()
-        wx.showToast({ title: '已切换', icon: 'success' })
+        // 等第一屏回来再报成功（立刻 toast 会让人以为已经看到了新账套的数据）
+        setTimeout(() => {
+          wx.hideLoading()
+          wx.showToast({ title: '已切到' + (nb.name || ('第 ' + id + ' 本')), icon: 'none' })
+        }, 600)
       }
     })
   },
@@ -7102,7 +7147,7 @@ Page({
   onBCategory(e) { this.setData({ b_category: Number(e.detail.value) }) },
   onBAmount(e) { this.setData({ b_amount: e.detail.value }) },
   saveBudget() {
-    const amount = Number(this.data.b_amount)
+    const amount = this.toAmount(this.data.b_amount) || 0
     if (!(amount > 0)) return wx.showToast({ title: '额度要大于 0', icon: 'none' })
     this.req({ url: API_BASE + '/budgets', method: 'POST',
       data: { category: this.data.categories[this.data.b_category], amount },
@@ -7754,7 +7799,7 @@ Page({
     const kind = this.data.mt_kind === 1 ? 'out' : 'in'
     const qty = Number(this.data.mt_qty) || 0
     if (!(qty > 0)) return wx.showToast({ title: '数量要大于 0', icon: 'none' })
-    const body = { material: name, kind, qty, price: Number(this.data.mt_price) || 0, date: this.data.mt_date || '', note: this.data.mt_note || '' }
+    const body = { material: name, kind, qty, price: this.toAmount(this.data.mt_price) || 0, date: this.data.mt_date || '', note: this.data.mt_note || '' }
     this.req({ url: API_BASE + '/material-moves', method: 'POST', once: 'addMove', queue: true, data: body,
       success: (res) => {
         const d = res.data || {}
@@ -8644,20 +8689,89 @@ Page({
   // 改约定日期（应收/应付通用）
   editDue(e) {
     const { id, type, due } = e.currentTarget.dataset
+    const save = (val) => {
+      const url = API_BASE + (type === 'ar' ? '/orders/' : '/payables/') + id
+      this.req({ url, method: 'PATCH', data: { due_date: val },
+        success: (res) => {
+          if (res.data && res.data.ok) {
+            this.refresh()
+            wx.showToast({ title: val ? '已更新' : '已经清掉了', icon: 'none' })
+          } else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
+        } })
+    }
     wx.showModal({
       title: type === 'ar' ? '约定收款日' : '约定付款日',
       editable: true,
-      placeholderText: '如 11-20 或 2026-11-20，留空=清除',
+      // 有的机型 editable 不回填 content，所以把当前值写进提示里，让人知道现在是什么
+      placeholderText: due ? '现在是 ' + due + '，如 11-20 或 2026-11-20' : '如 11-20 或 2026-11-20',
       content: due || '',
       success: (r) => {
         if (!r.confirm) return
-        const val = (r.content || '').trim()
-        const url = API_BASE + (type === 'ar' ? '/orders/' : '/payables/') + id
-        this.req({ url, method: 'PATCH', data: type === 'ar' ? { due_date: val } : { due_date: val },
-          success: (res) => {
-            if (res.data && res.data.ok) { this.refresh(); wx.showToast({ title: '已更新', icon: 'success' }) }
-            else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
-          } })
+        const raw = (r.content || '').trim()
+        // 留空原来是直接 PATCH 空串 + 提示「已更新」：到期日被悄悄清掉，
+        // 这张单从此不进「快到期/逾期」提醒，也没人知道是自己按了什么。
+        if (!raw) {
+          if (!due) return wx.showToast({ title: '本来就没填日期', icon: 'none' })
+          return wx.showModal({
+            title: '清掉日期？',
+            content: '清掉以后这张单不会再进「快到期」「逾期」提醒，也看不出该哪天收钱。',
+            confirmText: '清掉', cancelText: '算了',
+            success: (r2) => { if (r2.confirm) save('') }
+          })
+        }
+        // 本地先粗校一遍，别把「下周三」这种话发到后端再报错
+        const ok = /^(\d{4}-)?\d{1,2}[-/月]\d{1,2}日?$/.test(raw)
+        if (!ok) return wx.showToast({ title: '日期写成 11-20 或 2026-11-20', icon: 'none' })
+        save(raw)
+      }
+    })
+  },
+  // 一行只留「收款 / 收清 / 更多」，其余动作都在这里选。
+  // 微信的 showActionSheet 最多 6 项，所以按「先常用、再管理」分成两组，选完第一组里没有的再问第二组。
+  moreOrder(e) {
+    const d = e.currentTarget.dataset
+    const type = d.type === 'ap' ? 'ap' : 'ar'
+    const id = d.id
+    const name = d.name || ''
+    const isOwner = this.data.role === 'owner'
+    const base = type === 'ar' ? [
+      { t: '明细（这一单都发生了什么）', fn: 'showDetail' },
+      { t: '收据', fn: 'openReceipt' },
+      { t: '改约定收款日', fn: 'editDue' },
+      { t: '标记已交付', fn: 'finishOrder' },
+      { t: '改工序进度', fn: 'editProgress' },
+      { t: '用预收抵扣', fn: 'applyAdvanceOrder' }
+    ] : [
+      { t: '明细（这一笔都发生了什么）', fn: 'showDetail' },
+      { t: '收据', fn: 'openReceipt' },
+      { t: '改约定付款日', fn: 'editDue' },
+      { t: '用预付抵扣', fn: 'applyAdvancePayable' },
+      { t: '对账单（这一家）', fn: 'statement' },
+      { t: '月度对账单', fn: 'monthStatement' }
+    ]
+    const more = type === 'ar' ? [
+      { t: '对账单（这一家）', fn: 'statement' },
+      { t: '月度对账单', fn: 'monthStatement' },
+      { t: '核销抹账（不动的钱）', fn: 'writeoffOrder' },
+      { t: '再来一单', fn: 'againOrder' },
+      isOwner ? { t: '改金额/客户/产品', fn: 'editOrder' } : { t: '申请修改（老板批）', fn: 'openEditReq' },
+      isOwner ? { t: '删掉这张单', fn: 'delOrder' } : null
+    ] : [
+      { t: '核销抹账（不动的钱）', fn: 'writeoffPayable' },
+      { t: '再来一笔', fn: 'againPayable' },
+      isOwner ? { t: '改金额/供应商/备注', fn: 'editPayable' } : { t: '申请修改（老板批）', fn: 'openEditReq' },
+      isOwner ? { t: '删掉这笔', fn: 'delPayable' } : null
+    ]
+    const run = (fn) => {
+      const payload = { id, type, name, kind: type, who: name, unpaid: d.unpaid, due: d.due, settled: d.settled }
+      if (typeof this[fn] === 'function') this[fn]({ currentTarget: { dataset: payload } })
+    }
+    wx.showActionSheet({
+      itemList: base.map((x) => x.t).concat(['更多（核销 / 再来 / 改 / 删）']),
+      success: (r) => {
+        if (r.tapIndex < base.length) return run(base[r.tapIndex].fn)
+        const l2 = more.filter(Boolean)
+        wx.showActionSheet({ itemList: l2.map((x) => x.t), success: (r2) => { if (l2[r2.tapIndex]) run(l2[r2.tapIndex].fn) } })
       }
     })
   },

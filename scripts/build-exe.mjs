@@ -18,6 +18,7 @@ import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import os from 'node:os'
+import { BOOKS } from '../server/books.mjs'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
 const argv = process.argv.slice(2)
@@ -147,12 +148,14 @@ if (!flag('no-test')) {
     if (!st.dbFile || st.orders !== 0) throw new Error('状态接口不对：' + JSON.stringify(st).slice(0, 120))
     // 建库是启动时做的，这里确认真的建出来了（57 张表）
     const files = fs.readdirSync(dataDir).filter((f) => f.endsWith('.db'))
-    if (files.length !== 3) throw new Error('应该建出 3 个库文件，实际 ' + files.length)
+    // 库文件个数跟 server/books.mjs 的 BOOKS 走。以前这里写死 3，服务改成 9 本以后
+    // 断言没跟，打出来的程序明明是好的，自测却判失败 → 三个平台的 release 全红。
+    if (files.length !== BOOKS) throw new Error(`应该建出 ${BOOKS} 个库文件，实际 ${files.length}（BOOKS 在 server/books.mjs 里改）`)
     // 记数在 WAL 里，主库文件可能还是 4KB，所以把 book1.db* 一起算
     const sz = fs.readdirSync(dataDir).filter((f) => f.startsWith('book1.db'))
       .reduce((n, f) => n + fs.statSync(path.join(dataDir, f)).size, 0)
     if (sz < 100 * 1024) throw new Error('主库文件太小（' + sz + ' 字节），schema.sql 可能没跑起来')
-    console.log(`  ✅ 跑通了：/version=200，落地页正常，建出 3 个库（主库 ${(sz / 1024).toFixed(0)} KB）`)
+    console.log(`  ✅ 跑通了：/version=200，落地页正常，建出 ${BOOKS} 个库（主库 ${(sz / 1024).toFixed(0)} KB）`)
   } catch (e) {
     console.log('  ❌ 自测失败：' + String(e && e.message || e))
     console.log(`  子进程状态：exitCode=${child.exitCode} signalCode=${child.signalCode}`)
@@ -167,4 +170,4 @@ if (!flag('no-test')) {
 
 console.log(`\n✅ 好了：${target}`)
 console.log('   双击或在命令行里跑它，浏览器会自己打开 http://127.0.0.1:8787')
-console.log('   数据默认放在程序旁边的 data/ 目录（book1.db / book2.db / book3.db）')
+console.log(`   数据默认放在程序旁边的 data/ 目录（book1.db … book${BOOKS}.db，一本账一个文件）`)

@@ -109,6 +109,10 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 为什么不配也能跑：`check.mjs` 只能证明「`schema.sql` 在空库上建得出来」，证明不了
 「线上那个库缺不缺列」——这两个 secret 都不配时，CI 只能保证「代码能跑」，保证不了「线上是对的」。
 
+**体检没过会自动回滚**：`deploy.yml` 的部署步现在带 `id: deploy`，紧随其后的「线上体检」
+一旦红，就会自动 `npx wrangler rollback`（退回上一个 Worker 版本）并把过程写进运行摘要。
+以前体检红了只是红，线上照样挂着新版本——用户看到的是「线上怪怪的」，CI 是一片绿。
+
 > 早期文档写的是「把 index.js 粘进 Cloudflare 编辑器」，那是 2025 年的做法，
 > 现在只有一个 1.9 万行的单文件，别再粘贴了——用 `wrangler deploy`。
 
@@ -453,6 +457,18 @@ cd backend && ./node_modules/.bin/wrangler deploy
 
 同一个站点还有一页 **`/guide`**：把 `docs/新手教程.md` 编译成网页（免口令、可打印），`/pc` 页面右上角有链接。
 改完教程记得跑一次 `node scripts/gen-guide.mjs`（CI 会校验 `backend/guide.js` 是否最新）。
+
+### 4.14 报表口径的几条硬规则（改报表前先看这段）
+
+- **「某一天还剩多少」一律走 `arApLeftAt(db, ymd, 'ar'|'ap')` 和 `debtLeftAt(db, ymd)`**
+  （`backend/index.js` 里，报表存档之前）。不能用 `orders.paid / written_off` ——
+  那两列是「今天」的累计值，拿它算去年年底余额，每年重打一次年报数字就变小一次、永远不可复现。
+- **借款余额 = `SUM(debts.principal) − debt_repays(kind='principal')`**。`debts` 表里
+  没有 `amount / repayed` 两列（曾经写错过，报错被 `.catch` 吞掉，表现为「科目余额表的借款余额恒为 0」）。
+- **经营收付不含内部转账与税点**：`ref_type NOT IN ('transfer','tax_ar','tax_ap')`。
+  代收/代付的税点单独一行；账户现金余额（`cash=1`）是含税点和转账的真实现金。
+- **账龄按到期日**（没填到期日才用开单日），五档：30 天内 / 31-60 / 61-90 / 91-180 / 180 以上；
+  坏账准备 = 61-90×10% + 91-180×30% + 180 以上×50%，只在这一个地方算。
 
 ### 5.0 最省事：什么都不用配（内置演示入口）
 

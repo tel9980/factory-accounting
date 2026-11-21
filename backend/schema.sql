@@ -112,6 +112,9 @@ CREATE TABLE IF NOT EXISTS backups (
   -- 真实字符数。内容超过 90 万字符（D1 单行上限 2MB 的一半）就切成多片存 backup_parts，
   -- content 留空、长度记在这里，读的时候按 seq 拼回去（对外还是同一份 JSON）。
   size INTEGER DEFAULT 0,
+  -- 摘要（订单/应付/流水各多少笔、金额合计）。备份列表只要这些数字，
+  -- 以前每次把最近 12 份备份整份读回来再 JSON.parse，几千单的账本一打开就卡。
+  stat TEXT DEFAULT '',
   created_at TEXT NOT NULL
 );
 

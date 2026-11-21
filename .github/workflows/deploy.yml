@@ -16,6 +16,13 @@ on:
       - 'server/**'
       # 改工作流本身也要跑一遍：不然 YAML 写错了没人发现（本次就是靠这条才验证到的）
       - '.github/**'
+      # 容器相关：Dockerfile / compose 改了，镜像行为就变了（数据目录、端口、健康检查）
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'docs/**'
+      - 'README.md'
+      - 'DEPLOYMENT.md'
+      - 'SECURITY.md'
   pull_request:
     paths:
       - 'backend/**'
@@ -30,24 +37,31 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
+# 默认给只读：部署和摘要都不需要写仓库内容，出了事也不会被自动化改坏东西
+permissions:
+  contents: read
+
 jobs:
   check:
     name: 自检（语法 / 路由重名 / schema 建库 / SQL / 前端绑定）
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           # 要 node 24：自检用内置 node:sqlite 在内存里真建一遍库，node 20 没有这个模块
           node-version: 24
-      - name: 使用教程网页是最新的（docs/新手教程.md → backend/guide.js）
-        run: node scripts/gen-guide.mjs --check
       - name: 跑自检
         run: node scripts/check.mjs
       # README 里的接口清单是自动生成的。后端加了/改了接口而忘了重新生成，
       # 文档就跟不上代码（这半年已经发生过两次）。--check 只比对、不改文件。
       - name: README 接口清单是不是最新的
         run: node scripts/gen-api-list.mjs --check
+      - name: 使用教程网页是不是最新的
+        run: node scripts/gen-guide.mjs --check
+      - name: 镜像版本号（compose / README / DEPLOYMENT）一致
+        run: node scripts/check-version.mjs
       - name: 合批回归（首屏 18 个请求不许退回逐个发）
         run: node scripts/test-batch.mjs
       - name: 口令排队回归（401 的请求要排队重放，不许悄悄丢掉）
@@ -61,6 +75,7 @@ jobs:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍
     needs: check
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -84,10 +99,19 @@ jobs:
         working-directory: backend
         env:
           CI: '1'
-      - name: 起本地 server
+      - name: 起本地 server（等到能回话再往下走）
+        # 以前是「nohup 起服务 → 直接打冒烟」，wrangler 冷启动要 3~10 秒，
+        # 偶尔就把「还没起来」当成「接口坏了」，红一次要重跑整个 job。
+        # 现在每 1 秒问一次 /version，最多等 90 秒；等不到就把日志打出来再失败。
         run: |
           nohup npx wrangler dev --local --port 8791 --ip 127.0.0.1 > /tmp/wd.log 2>&1 &
-          echo started
+          for i in $(seq 1 90); do
+            if curl -sf http://127.0.0.1:8791/version > /dev/null 2>&1; then echo "服务起来了（等了 ${i}s）"; exit 0; fi
+            sleep 1
+          done
+          echo "::error title=本地服务没起来::等了 90 秒 /version 还是不通"
+          tail -60 /tmp/wd.log || true
+          exit 1
         working-directory: backend
         env:
           CI: '1'
@@ -162,7 +186,11 @@ jobs:
         run: |
           rm -rf /tmp/fa-ci
           node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron > /tmp/fa-local.log 2>&1 &
-          sleep 3
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8792/version > /dev/null 2>&1; then echo "本机版起来了（等了 ${i}s）"; break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8792/version > /dev/null || { echo "::error::本机版 60 秒没起来"; tail -60 /tmp/fa-local.log; exit 1; }
           node scripts/smoke.mjs --base http://127.0.0.1:8792 --key 8888
           node scripts/smoke-write.mjs --base http://127.0.0.1:8792 --key 8888
       - name: 挂了就打印 server 日志
@@ -174,6 +202,7 @@ jobs:
     needs: [check, smoke]
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -209,6 +238,7 @@ jobs:
             echo "can=true" >> "$GITHUB_OUTPUT"
           fi
       - name: 部署到 Cloudflare
+        id: deploy
         if: steps.token.outputs.can == 'true'
         # 版本号必须带上去：wrangler.toml 里写的是 APP_VERSION="dev"，
         # 以前光跑 `wrangler deploy`，线上 /version 永远是 dev，出了事分不清哪次部署。
@@ -283,3 +313,22 @@ jobs:
               })
               .catch((e) => { console.error("问不到 /schema-check：" + e.message); process.exit(1) });
           '
+
+      # 部署完了但线上体检没过（缺列、接口 500）→ 自动退回上一版，别让坏版本挂着。
+      # 只在这一步「真的部署过」时才回滚，没配 token 的情况下什么都不做。
+      - name: 体检没过就自动回滚
+        if: failure() && steps.deploy.outcome == 'success' && steps.token.outputs.can == 'true'
+        working-directory: backend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+        run: |
+          echo "::error title=部署回滚::部署后体检没过，自动退回上一版"
+          npx wrangler rollback --message "CI 自动回滚：部署后体检没过（${{ github.sha }}）" || {
+            echo "::error::自动回滚也失败了，请手工处理：cd backend && npx wrangler rollback"; exit 1; }
+          {
+            echo "## ⚠️ 已自动回滚"
+            echo ""
+            echo "部署后体检没过，线上已退回上一版。commit：\`${{ github.sha }}\`"
+            echo "先看这次 run 的日志定位，再决定重新部署还是本地手工 deploy。"
+          } >> "$GITHUB_STEP_SUMMARY"

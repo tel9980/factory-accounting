@@ -72,7 +72,20 @@ const todayIso = () => now().slice(0, 10)
 const month = () => now().slice(0, 7)
 // 数字归一：非数字/Infinity/1e309 归 d；超过 1e12 的「天文数字」也当脏数据归 d，
 // 防止批量导入把 1e300 这种数写进金额字段（SQLite REAL 能存，但界面和合计全乱）。
-const num = (v, d = 0) => { const n = Number(v); return Number.isFinite(n) && Math.abs(n) <= 1e12 ? n : d }
+// 金额解析：老板手输的是「1,200」「1 200 元」「￥1200」，以前 Number('1,200') 给的是 NaN → 0，
+// 于是「记一笔 1,200」会变成 0 元。这里先去掉千分位逗号、空格、币种符号和「元」字再转。
+// 只认纯数字（含小数点、负号），别的写法（比如「1.2万」）一律回落默认值，不猜。
+// 数字解析：老板手输的「1,200」「￥1200」「1200 元」都要认（以前 Number('1,200') 是 NaN → 0，钱就记没了）。
+// 注意空值和空串必须回默认值 d：以前写成 Number('') = 0 是「有限数」，
+// 结果 num(undefined, o.price) 拿到 0，改单只填成本会把金额清零。
+const num = (v, d = 0) => {
+  if (v === null || v === undefined) return d
+  if (typeof v === 'number') return Number.isFinite(v) && Math.abs(v) <= 1e12 ? v : d
+  const raw = String(v).replace(/[,，\s]/g, '').replace(/[￥¥元]/g, '')
+  if (!raw) return d
+  const n = Number(raw)
+  return Number.isFinite(n) && Math.abs(n) <= 1e12 ? n : d
+}
 const round2 = (x) => Math.round(x * 100) / 100
 
 // ===== 税（口径在这一个地方定，别处只调用） =====
@@ -245,7 +258,7 @@ async function ensureBaseTables(db) {
 // 一个 isolate 只跑一次（_memoDdl 记忆），代价是几条 PRAGMA。
 const EXTRA_COLS = {
   // 备份体积：内容超过单行上限后会被切成多片存到 backup_parts，content 留空、真实字符数记在 size
-  backups: [['size', 'INTEGER DEFAULT 0']],
+  backups: [['size', 'INTEGER DEFAULT 0'], ['stat', "TEXT DEFAULT ''"]],
   attachments: [['r2_key', 'TEXT']],
   statement_log: [['ack', "TEXT DEFAULT ''"], ['ack_at', 'TEXT'], ['resolved_at', 'TEXT']],
   // 税相关三列：税率不固定（13/9/6/3/1 都见，也有按点数谈的），所以 kind 记「含税/不含税」，
@@ -355,6 +368,19 @@ function staffModOf(path) { for (const [k, re] of STAFF_MOD_RULES) if (re.test(p
 const STAFF_MONEY_DENY = /^\/(margin-by|cost-hint|report-data|report$|cashbook|health-report|invoice-check|cashflow|networth(-snapshots)?$|funding|year-print-link)/
 // ② 员工干活时会打开的台账（领料、外协、返工、在制、框架价、采购比价）→ 照常返回，只把金额抹空，页面照旧能用
 const STAFF_MONEY_SCRUB = /^\/(wip|materials|supply-price|frame-prices|rework-book|outsource-book)/
+// 员工能看「客户欠多少、这次该收多少」，但不能看「这一单赚多少」。
+// 以前 /ar、/ap、/orders/:id/detail 直接把 fmtOrder 的 cost / gross / gross_pct / gross_net 返回，
+// 老板辛苦拦住的 /margin-by 换个入口就绕过去了；这几个键单独剥掉，金额照常给。
+const STAFF_COST_PATHS = /^\/(ar|ap|orders|settled|quick$|collect)/
+const STAFF_COST_KEYS = new Set(['cost', 'gross', 'gross_pct', 'gross_net', 'mat_cost', 'unit_cost', 'profit', 'margin', 'net_profit'])
+function costScrub(v) {
+  if (Array.isArray(v)) { for (const x of v) costScrub(x); return }
+  if (!v || typeof v !== 'object') return
+  for (const k of Object.keys(v)) {
+    if (STAFF_COST_KEYS.has(k)) delete v[k]
+    else costScrub(v[k])
+  }
+}
 // 字段名归一化后比对，total_cost / totalCost / in_amt / monthAmt 都能命中
 const STAFF_MONEY_KEYS = new Set(['price', 'cost', 'totalcost', 'wagetotal', 'wage', 'wageqty', 'amount', 'amt', 'fee', 'loss', 'margin', 'profit', 'left', 'unitprice', 'inamt', 'outamt', 'monthamt', 'unpaid', 'paid', 'tax', 'tax_amt', 'tax_net', 'tax_rate', 'balance', 'matcost', 'revenue', 'total', 'subtotal', 'income', 'outcome', 'cash', 'value', 'avg', 'avgprice', 'lastprice', 'minprice', 'maxprice'])
 // 人话里也带钱（「这张单压了两万三」），一并抹掉
@@ -659,10 +685,13 @@ async function seedDemoBook(db) {
   const cash = await acc('现金')
   const bank = await acc('银行卡')
   // 先把两个账户的期初填上，看起来像真在用的账本
+  // 只在「这个账户还是 0 期初」时才填示例数字：万一有人先在这本账里填过余额，
+  // 不能因为有人点了「先看看演示」就把他的期初改成 5000。
+  // 账套名同样用 INSERT OR IGNORE：老板已经改过名就保留他的。
   await db.batch([
-    db.prepare('UPDATE accounts SET opening=? WHERE id=?').bind(5000, cash),
-    db.prepare('UPDATE accounts SET opening=? WHERE id=?').bind(50000, bank),
-    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('book_name', ?)").bind('演示账套（示例数据）')
+    db.prepare('UPDATE accounts SET opening=? WHERE id=? AND COALESCE(opening,0)=0').bind(5000, cash),
+    db.prepare('UPDATE accounts SET opening=? WHERE id=? AND COALESCE(opening,0)=0').bind(50000, bank),
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('book_name', ?)").bind('演示账套（示例数据）')
   ]).catch(() => {})
 
   const orders = [
@@ -1267,9 +1296,19 @@ app.use('*', async (c, next) => {
         }
         noteFail(e, '演示账套示例数据')
       }
-    } else if (dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') {
+    } else {
       // 老板自己设的那个演示口令：原账本只读，一个字段都别改
-      return c.json({ code: 'demo_readonly', error: '演示口令只能看，不能改账、不能导出（要记账请换成自己的口令）' }, 403)
+      if (dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') {
+        return c.json({ code: 'demo_readonly', error: '演示口令只能看，不能改账、不能导出（要记账请换成自己的口令）' }, 403)
+      }
+    }
+    // 内置演示也要分两种：这个库里要是真有老板自己的单子（有人把第 3 本当二厂/三厂在用），
+    // 那演示就只能看，绝不能让人在「演示」名义下把真账删了。
+    if (given === DEMO_KEY && dm !== 'GET' && dm !== 'OPTIONS' && path !== '/batch') {
+      const seeded = await c.env.DB.prepare("SELECT value FROM settings WHERE key='demo_seeded'").first().catch(() => null)
+      if (!(seeded && String(seeded.value) === '1')) {
+        return c.json({ code: 'demo_readonly', error: '这本账里有真实数据，演示模式只能看不能改（示例账套才会开放试记）' }, 403)
+      }
     }
   }
   // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
@@ -1280,7 +1319,10 @@ app.use('*', async (c, next) => {
       // 这几条以前漏在外面：/import-all 一句 confirm 就能逐表 DELETE 清空整库，/export-all 能把
       // 全量数据（含单据照片）拖走，/backup-restore 能把线上覆盖成任意一份旧备份，
       // /db-clean 会批量删旧数据。员工只有 4 位 PIN，必须一律拦住。
-      (/^\/(import-all|export-all|backup-restore|db-clean|backup-timeline|month-pack-run|month-pack|month-pack-file|month-reports|archive-pack|archive-kinds)$/.test(path) && m !== 'OPTIONS') ||
+      // /export（CSV 全量）与 /export-xlsx 以前漏在外面：员工 4 位 PIN 就能把三年的单子（含成本）拖走。
+      // 演示口令那边早就把 export 写进黑名单了，员工这边反而没有。
+      (/^\/export/.test(path) && m !== 'OPTIONS') ||
+      (/^\/(import-all|backup-restore|db-clean|backup-timeline|month-pack-run|month-pack|month-pack-file|month-reports|archive-pack|archive-kinds)$/.test(path) && m !== 'OPTIONS') ||
       // 系统内部的东西也不给员工看：报错原文、慢接口、账套清单（带别家的应收合计）
       (/^\/(error-log|slow-log|selfcheck|books|books-all|schema-check|books-check)$/.test(path) && m !== 'OPTIONS') ||
       (/^\/auth\/(change|staff)$/.test(path)) ||
@@ -1297,7 +1339,8 @@ app.use('*', async (c, next) => {
       (/^\/(payroll|wage-)/.test(path) && m !== 'OPTIONS') ||
       (/^\/rework-book$/.test(path) && m !== 'OPTIONS') ||
       (/^\/run-(amort|accrual)$/.test(path)) ||
-      (/^\/transfers/.test(path) && m !== 'GET') ||
+      // /transfer（单数）和 /transfers 是两条各自独立的路由，只拦复数等于没拦
+      (/^\/transfers?(\/|$)/.test(path) && m !== 'GET') ||
       (/^\/writeoffs/.test(path) && m !== 'GET') ||
       // 核销抹账、预收预付抵扣、月结锁账：这三件都是「改账本结构」的动作，员工只能记账不能改账
       (/^\/(orders|payables)\/[^/]+\/(writeoff|apply-advance)$/.test(path) && m !== 'OPTIONS') ||
@@ -1351,16 +1394,21 @@ app.use('*', async (c, next) => {
   c.set('role', role)
   await next()
   // 员工看带钱的台账：数字抹掉、页面照常（内容不变形、不弹窗）
-  if (role === 'staff' && STAFF_MONEY_SCRUB.test(path) && c.res && /application\/json/i.test(c.res.headers.get('content-type') || '')) {
-    try {
-      const res = c.res
-      const data = await res.clone().json()
-      if (data && typeof data === 'object') {
-        staffScrub(data, STAFF_MONEY_KEEP[path])
-        data.staff_hidden = STAFF_HIDDEN_NOTE
-        c.res = new Response(JSON.stringify(data), res)
-      }
-    } catch (e) { /* 不是 JSON 就算了，不拦 */ }
+  if (role === 'staff' && c.res && /application\/json/i.test(c.res.headers.get('content-type') || '')) {
+    const moneyPath = STAFF_MONEY_SCRUB.test(path)
+    const costPath = STAFF_COST_PATHS.test(path)
+    if (moneyPath || costPath) {
+      try {
+        const res = c.res
+        const data = await res.clone().json()
+        if (data && typeof data === 'object') {
+          if (moneyPath) { staffScrub(data, STAFF_MONEY_KEEP[path]); data.staff_hidden = STAFF_HIDDEN_NOTE }
+          // 成本和毛利只对「应收/应付/单子详情」这几类剥掉，别把员工该看的金额一起抹了
+          if (costPath) { costScrub(data); data.profit_hidden = '这一单的成本和毛利只有老板能看' }
+          c.res = new Response(JSON.stringify(data), res)
+        }
+      } catch (e) { /* 不是 JSON 就算了，不拦 */ }
+    }
   }
   await applyEtag(c)
 })
@@ -3300,13 +3348,24 @@ app.get('/debts', async (c) => {
 app.post('/debts', async (c) => {
   const b = await c.req.json()
   const db = c.env.DB
+  const principal = num(b.principal)
+  if (!(principal > 0)) return c.json({ error: '借进来多少要大于 0' }, 400)
+  const startD = String(b.start_date || now()).slice(0, 10)
+  if (await isMonthLocked(db, startD.slice(0, 7))) return c.json({ error: `${startD.slice(0, 7)} 已结账锁定，这笔借款记不进去（先解锁）`, code: 'month_locked' }, 403)
   const acc = num(b.account_id) || (await defaultAccountId(db))
-  const r = await db.prepare('INSERT INTO debts (lender, kind, principal, rate, start_date, term_months, pay_kind, account_id, remark, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-    .bind(String(b.lender || ''), String(b.kind || 'bank'), num(b.principal), num(b.rate), String(b.start_date || now()).slice(0, 10), num(b.term_months), String(b.pay_kind || 'interest'), acc, String(b.remark || ''), 'open', now()).run()
-  const id = r.meta && r.meta.last_row_id
-  // 借进来的钱记一笔现金流入（不算经营收入）
-  await db.prepare('INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at, operator) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .bind('in', num(b.principal), '借款', (DEBT_KIND[b.kind] || '借款') + '：' + String(b.lender || ''), 'debt', id, acc, 1, String(b.start_date || now()).slice(0, 10), String(b.operator || '')).run()
+  // 借款本身 + 那笔现金流入必须一起落库：以前先插 debts 再单独插 ledger，
+  // 第二条失败就成了「账上有这笔债、现金没进来」。
+  const st = [
+    db.prepare('INSERT INTO debts (lender, kind, principal, rate, start_date, term_months, pay_kind, account_id, remark, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(String(b.lender || ''), String(b.kind || 'bank'), principal, num(b.rate), startD, num(b.term_months), String(b.pay_kind || 'interest'), acc, String(b.remark || ''), 'open', now()),
+    // 同一个 batch 里上一条刚插进去，这里用 (SELECT MAX(id) FROM debts) 拿到它的 id
+    db.prepare('INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at, operator, month) SELECT ?,?,?,?,?, (SELECT MAX(id) FROM debts), ?,?,?,?,?')
+      .bind('in', principal, '借款', (DEBT_KIND[b.kind] || '借款') + '：' + String(b.lender || ''), 'debt', acc, 1, startD, String(b.operator || ''), startD.slice(0, 7))
+  ]
+  let done
+  try { done = await db.batch(st) } catch (e) { noteFail(e, '建借款'); return c.json({ error: '借款没记上，再点一次', code: 'db' }, 500) }
+  const id = num(done && done[0] && done[0].meta && done[0].meta.last_row_id)
+  await logAudit(db, '建借款', String(b.lender || ''), `本金 ¥${round2(principal)}`, 'debt:' + id, act(c))
   return c.json({ ok: true, id })
 })
 
@@ -3316,18 +3375,61 @@ app.patch('/debts/:id', async (c) => {
   const db = c.env.DB
   const d = await db.prepare('SELECT * FROM debts WHERE id=?').bind(id).first()
   if (!d) return c.json({ error: '没有这笔借款' }, 404)
-  await db.prepare('UPDATE debts SET lender=?, kind=?, principal=?, rate=?, start_date=?, term_months=?, pay_kind=?, remark=?, status=? WHERE id=?')
-    .bind(b.lender !== undefined ? String(b.lender) : d.lender, b.kind || d.kind, b.principal !== undefined ? num(b.principal) : num(d.principal), b.rate !== undefined ? num(b.rate) : num(d.rate), b.start_date || d.start_date, b.term_months !== undefined ? num(b.term_months) : num(d.term_months), b.pay_kind || d.pay_kind, b.remark !== undefined ? String(b.remark) : d.remark, b.status || d.status, id).run()
+  if (await isMonthLocked(db, (d.start_date || d.created_at || '').slice(0, 7))) {
+    return c.json({ error: '这笔借款所在的月份已结账锁定，改不了（先解锁）', code: 'month_locked' }, 403)
+  }
+  const newP = b.principal !== undefined ? num(b.principal) : num(d.principal)
+  const pChanged = round2(newP) !== round2(num(d.principal))
+  if (pChanged) {
+    const rep = await db.prepare('SELECT COUNT(*) AS n FROM debt_repays WHERE debt_id=?').bind(id).first().catch(() => ({ n: 0 }))
+    if (num(rep && rep.n) > 0) {
+      return c.json({ error: '这笔借款已经还过钱了，本金不能改（改本金会让已还的金额对不上）。要改请在备注里写清楚', code: 'has_repay' }, 400)
+    }
+    if (!(newP > 0)) return c.json({ error: '借进来多少要大于 0' }, 400)
+  }
+  // 改本金必须同一条新增里把当初那笔「借进来」的流水一起改，否则账户余额和债务表当场对不上
+  const st = [
+    db.prepare('UPDATE debts SET lender=?, kind=?, principal=?, rate=?, start_date=?, term_months=?, pay_kind=?, remark=?, status=? WHERE id=?')
+      .bind(b.lender !== undefined ? String(b.lender) : d.lender, b.kind || d.kind, newP, b.rate !== undefined ? num(b.rate) : num(d.rate), b.start_date || d.start_date, b.term_months !== undefined ? num(b.term_months) : num(d.term_months), b.pay_kind || d.pay_kind, b.remark !== undefined ? String(b.remark) : d.remark, b.status || d.status, id)
+  ]
+  if (pChanged) {
+    st.push(db.prepare("UPDATE ledger SET amount=? WHERE id=(SELECT MIN(id) FROM ledger WHERE ref_type='debt' AND ref_id=? AND direction='in')").bind(round2(newP), id))
+  }
+  try { await db.batch(st) } catch (e) { noteFail(e, '改借款'); return c.json({ error: '没改成，再试一次', code: 'db' }, 500) }
+  await logAudit(db, '改借款', String(d.lender || ''), pChanged ? `本金 ¥${round2(num(d.principal))} → ¥${round2(newP)}` : '改了资料', 'debt:' + id, act(c))
   return c.json({ ok: true })
 })
 
 app.delete('/debts/:id', async (c) => {
   const id = c.req.param('id')
   const db = c.env.DB
-  await db.prepare('DELETE FROM debts WHERE id=?').bind(id).run()
-  await db.prepare('DELETE FROM debt_repays WHERE debt_id=?').bind(id).run()
-  await db.prepare("DELETE FROM ledger WHERE ref_type='debt' AND ref_id=?").bind(id).run()
-  return c.json({ ok: true })
+  const d = await db.prepare('SELECT * FROM debts WHERE id=?').bind(id).first()
+  if (!d) return c.json({ error: '没有这笔借款' }, 404)
+  const [lgs, reps] = await Promise.all([
+    db.prepare("SELECT * FROM ledger WHERE ref_type='debt' AND ref_id=?").bind(id).all().catch(() => ({ results: [] })),
+    db.prepare('SELECT * FROM debt_repays WHERE debt_id=?').bind(id).all().catch(() => ({ results: [] }))
+  ])
+  // 这笔借款的借入/还款分散在好几个月，只要有一个月结了账就不能删
+  const lockM = await anyMonthLocked(db, [
+    (d.start_date || d.created_at || '').slice(0, 7),
+    ...(lgs.results || []).map((l) => l.month || String(l.created_at || '').slice(0, 7)),
+    ...(reps.results || []).map((r) => String(r.rdate || r.created_at || '').slice(0, 7))
+  ])
+  if (lockM) return c.json({ error: `${lockM} 已经结账锁定，这笔借款在那个月有流水，删了报表就对不上了（先解锁 ${lockM}）`, code: 'month_locked' }, 403)
+  // 以前这里是硬删：债务、还款记录、流水一起没了，选错一次就永远找不回来。
+  // 现在整笔进回收站（回收站留 30 天），恢复时按 type 还原到对应的表。
+  const b = uid()
+  await intoTrash(db, 'debt', d.id, d, b)
+  for (const r of reps.results || []) await intoTrash(db, 'debt_repay', r.id, r, b)
+  for (const l of lgs.results || []) await intoTrash(db, 'ledger', l.id, l, b)
+  const st = [
+    db.prepare("DELETE FROM ledger WHERE ref_type='debt' AND ref_id=?").bind(id),
+    db.prepare('DELETE FROM debt_repays WHERE debt_id=?').bind(id),
+    db.prepare('DELETE FROM debts WHERE id=?').bind(id)
+  ]
+  try { await db.batch(st) } catch (e) { noteFail(e, '删借款'); return c.json({ error: '没删掉，再试一次', code: 'db' }, 500) }
+  await logAudit(db, '删借款', String(d.lender || ''), `本金 ¥${round2(num(d.principal))}（已放进回收站，30 天内可以还原）`, 'debt:' + id, act(c))
+  return c.json({ ok: true, trash: b, text: '已经删了，放进了回收站（30 天内能还原）' })
 })
 
 app.post('/debts/:id/repay', async (c) => {
@@ -3339,15 +3441,29 @@ app.post('/debts/:id/repay', async (c) => {
   const amount = num(b.amount)
   if (!(amount > 0)) return c.json({ error: '还款金额要大于 0' }, 400)
   const date = String(b.date || now()).slice(0, 10)
+  if (await isMonthLocked(db, date.slice(0, 7))) return c.json({ error: `${date.slice(0, 7)} 已结账锁定，这笔还款记不进去（先解锁）`, code: 'month_locked' }, 403)
   const acc = num(b.account_id) || num(d.account_id) || (await defaultAccountId(db))
   const kind = b.kind === 'principal' ? 'principal' : 'interest'
-  await db.prepare('INSERT INTO debt_repays (debt_id, rdate, amount, kind, account_id, remark, created_at) VALUES (?,?,?,?,?,?,?)')
-    .bind(id, date, amount, kind, acc, String(b.remark || ''), now()).run()
-  await db.prepare('INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at, operator) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .bind('out', amount, '还款', (kind === 'principal' ? '还本金' : '付利息') + '：' + (d.lender || ''), 'debt', id, acc, 1, date, String(b.operator || '')).run()
+  if (kind === 'principal') {
+    const reps0 = (await db.prepare('SELECT * FROM debt_repays WHERE debt_id=?').bind(id).all()).results
+    const capLeft = num(debtView(d, reps0).remain)
+    if (amount > capLeft + 0.005) {
+      return c.json({ error: `这笔借款只剩 ${round2(capLeft)} 元本金没还，还不了 ${round2(amount)} 元（多还的部分请记成「付利息」或改借款本金）`, code: 'too_much' }, 400)
+    }
+  }
+  // 还款记录 + 那笔现金流出必须一起落库，否则「还款记录有了、钱没出去」
+  try {
+    await db.batch([
+      db.prepare('INSERT INTO debt_repays (debt_id, rdate, amount, kind, account_id, remark, created_at) VALUES (?,?,?,?,?,?,?)')
+        .bind(id, date, amount, kind, acc, String(b.remark || ''), now()),
+      db.prepare('INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at, operator, month) SELECT ?,?,?,?,?,?,?,?,?,?,?')
+        .bind('out', amount, '还款', (kind === 'principal' ? '还本金' : '付利息') + '：' + (d.lender || ''), 'debt', id, acc, 1, date, String(b.operator || ''), date.slice(0, 7))
+    ])
+  } catch (e) { noteFail(e, '记还款'); return c.json({ error: '没记上，再点一次', code: 'db' }, 500) }
   const reps = (await db.prepare('SELECT * FROM debt_repays WHERE debt_id=?').bind(id).all()).results
   const v = debtView(d, reps)
   if (v.remain <= 0) await db.prepare("UPDATE debts SET status='closed' WHERE id=?").bind(id).run()
+  await logAudit(db, kind === 'principal' ? '还借款本金' : '付借款利息', String(d.lender || ''), `¥${round2(amount)}`, 'debt:' + id, act(c))
   return c.json({ ok: true, remain: v.remain, monthly_interest: v.monthly_interest, closed: v.remain <= 0 })
 })
 
@@ -3591,8 +3707,12 @@ const monthSnapshot = async (db, mm) => {
   const one = async (sql, ...a) => num(((await db.prepare(sql).bind(...a).first()) || {}).t)
   const end = monthEnd(mm)
   const endTs = end + 'T23:59:59Z'
-  const cashIn = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type<>'transfer' AND month=?", mm)
-  const cashOut = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type<>'transfer' AND month=?", mm)
+  // 收/支用经营口径：内部转账、代收代付的税点都不算（税点单列成 tax_in/tax_out）。
+  // 而「现金余额」走下面的 cashFlow（cash=1 全算），所以两者差的就是转账 + 税点，能对上账户余额。
+  const cashIn = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?", mm)
+  const cashOut = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?", mm)
+  const taxIn = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type='tax_ar' AND month=?", mm)
+  const taxOut = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type='tax_ap' AND month=?", mm)
   const orderAdd = await one('SELECT COALESCE(SUM(price),0) t FROM orders WHERE month=?', mm)
   const orderCnt = await one('SELECT COUNT(*) t FROM orders WHERE month=?', mm)
   const payableAdd = await one('SELECT COALESCE(SUM(amount),0) t FROM payables WHERE month=?', mm)
@@ -3610,16 +3730,18 @@ const monthSnapshot = async (db, mm) => {
   // 期末余额（截至该月最后一天）
   const opening = await one('SELECT COALESCE(SUM(opening),0) t FROM accounts')
   const cashFlow = await one("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10)<=?", end)
-  const arLeft = await one('SELECT COALESCE(SUM(CASE WHEN price - paid - COALESCE(written_off,0) > 0 THEN price - paid - COALESCE(written_off,0) ELSE 0 END),0) t FROM orders WHERE substr(created_at,1,10)<=?', end)
-  const apLeft = await one('SELECT COALESCE(SUM(CASE WHEN amount - paid - COALESCE(written_off,0) > 0 THEN amount - paid - COALESCE(written_off,0) ELSE 0 END),0) t FROM payables WHERE substr(created_at,1,10)<=?', end)
-  const debtLeft = await one('SELECT COALESCE(SUM(principal),0) t FROM debts WHERE substr(start_date,1,10)<=?', end)
-  const debtPaid = await one("SELECT COALESCE(SUM(amount),0) t FROM debt_repays WHERE kind='principal' AND substr(COALESCE(rdate,created_at),1,10)<=?", end)
-  const debtB = round2(Math.max(0, debtLeft - debtPaid))
+  // 月末余额按「那天之前真收到的钱 / 真还掉的本金」算，不用 orders.paid 这个今天的累计列
+  const arAt = await arApLeftAt(db, end, 'ar')
+  const apAt = await arApLeftAt(db, end, 'ap')
+  const arLeft = round2(arAt.t)
+  const apLeft = round2(apAt.t)
+  const debtB = await debtLeftAt(db, end)
   const cash = round2(opening + cashFlow)
   return {
     month: mm, period_end: end,
     income: cashIn, outcome: cashOut, net_cash: round2(cashIn - cashOut),
     order_add: orderAdd, order_count: orderCnt, payable_add: payableAdd, payable_count: payableCnt, ledger_count: ledgerCnt,
+    tax_in: taxIn, tax_out: taxOut,
     cash_expense: cashExp, loan_exp: loanExp, mat_cost: matCost, amort, dep, accrue_int: accrue, cost,
     profit, margin: orderAdd > 0 ? round2((profit / orderAdd) * 100) : 0,
     cash_balance: cash, ar_left: arLeft, ap_left: apLeft, debt_left: debtB,
@@ -8282,26 +8404,31 @@ app.get('/books-all', async (c) => {
   const all = c.env.ENV_ALL || c.env
   const onlyOwn = !!(c.get('book_owner') && !c.get('super'))
   const curId = num(c.env.BOOK) || 1
-  const list = []
-  for (const [id, db] of bookDbs(all)) {
-    if (onlyOwn && id !== curId) continue
-    const name = await bookNameOf(db, id)
+  // 9 本账原来是「每本 5 次串行 await」= 最多 45 次往返；改成同一本内部并发、几本之间也并发。
+  const targets = bookDbs(all).filter(([id]) => !onlyOwn || id === curId)
+  const list = await Promise.all(targets.map(async ([id, db]) => {
     let orders = 0
     let ar = 0
     let hasKey = false
     let sealed = false
+    let name = ''
     try {
-      const o = await db.prepare('SELECT COUNT(*) AS c FROM orders').first()
+      const [o, a, k, sl, nm] = await Promise.all([
+        db.prepare('SELECT COUNT(*) AS c FROM orders').first(),
+        db.prepare('SELECT COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price').first(),
+        db.prepare("SELECT value FROM settings WHERE key='access_key'").first(),
+        db.prepare("SELECT value FROM settings WHERE key='sealed'").first(),
+        db.prepare("SELECT value FROM settings WHERE key='book_name'").first()
+      ])
       orders = num(o && o.c)
-      const a = await db.prepare('SELECT COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()
       ar = round2(num(a && a.t))
-      const k = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first()
       hasKey = !!(k && String(k.value).trim())
-      const sl = await db.prepare("SELECT value FROM settings WHERE key='sealed'").first()
       sealed = !!(sl && String(sl.value) === '1')
+      name = String((nm && nm.value) || '').trim() || (BOOK_DEF_NAMES[id - 1] || ('账套' + id))
     } catch (e) { noteFail(e, '账套列表 ' + id) }
-    list.push({ id, name, orders, ar, has_key: hasKey, sealed, binding: bookBindingName(id), current: num(c.env.BOOK) === id })
-  }
+    if (!name) name = await bookNameOf(db, id)
+    return { id, name, orders, ar, has_key: hasKey, sealed, binding: bookBindingName(id), current: curId === id }
+  }))
   return c.json({
     ok: true,
     current: num(c.env.BOOK) || 1,
@@ -8634,7 +8761,7 @@ async function pushWeekly(db) {
       const m = now().slice(0, 7)
       const t = await db.prepare('SELECT receive FROM targets WHERE month=?').bind(m).first()
       if (num(t && t.receive) > 0) {
-        const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND month=?").bind(m).first()
+        const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?").bind(m).first()
         goalTxt = '；目标进度 ' + Math.round(num(inc && inc.t) / num(t.receive) * 1000) / 10 + '%'
       }
     } catch (e) { /* 没设目标就不带 */ }
@@ -8953,11 +9080,14 @@ app.get('/aging', async (c) => {
   const rows = type === 'ar'
     ? (await db.prepare('SELECT id,customer AS party,item_name AS item,price AS total,paid,written_off,created_at,due_date FROM orders WHERE paid + COALESCE(written_off,0) < price ORDER BY id').all()).results
     : (await db.prepare('SELECT id,supplier AS party,COALESCE(remark,\'\') AS item,amount AS total,paid,written_off,created_at,due_date FROM payables WHERE paid + COALESCE(written_off,0) < amount ORDER BY id').all()).results
+  // 账龄一律按「到期日」算（没填到期日就按开单日），跟导出的《应收/应付台账》同一套档位。
+  // 以前这里按开单日分四档、导出按到期日分五档，同一个客户在两个地方落在不同档里。
   const BK = [
-    { k: '30天内', label: '30 天内', key: 'd30', min: 0, max: 30 },
+    { k: '30天内', label: '未超 30 天', key: 'd30', min: 0, max: 30 },
     { k: '31-60天', label: '31-60 天', key: 'd60', min: 31, max: 60 },
     { k: '61-90天', label: '61-90 天', key: 'd90', min: 61, max: 90 },
-    { k: '90天以上', label: '90 天以上', key: 'd999', min: 91, max: 99999 }
+    { k: '91-180天', label: '91-180 天', key: 'd180', min: 91, max: 180 },
+    { k: '180天以上', label: '超过 180 天', key: 'd999', min: 181, max: 99999 }
   ]
   const buckets = BK.map((b) => ({ k: b.k, label: b.label, key: b.key, amount: 0, count: 0, cnt: 0, pct: 0 }))
   const pmap = {}
@@ -8966,14 +9096,14 @@ app.get('/aging', async (c) => {
   for (const r of rows) {
     const unpaid = round2(num(r.total) - num(r.paid) - num(r.written_off))
     if (unpaid <= 0) continue
-    const days = daysSince(r.created_at)
+    const days = daysSince(String(r.due_date || '').slice(0, 10) || r.created_at)
     const bi = Math.max(0, BK.findIndex((b) => days >= b.min && days <= b.max))
     buckets[bi].amount = round2(buckets[bi].amount + unpaid)
     buckets[bi].count += 1
     buckets[bi].cnt += 1
     total = round2(total + unpaid)
     const key = r.party || '(未填)'
-    if (!pmap[key]) pmap[key] = { party: key, total: 0, cnt: 0, b: [0, 0, 0, 0], oldest_days: 0 }
+    if (!pmap[key]) pmap[key] = { party: key, total: 0, cnt: 0, b: [0, 0, 0, 0, 0], oldest_days: 0 }
     const p = pmap[key]
     p.total = round2(p.total + unpaid)
     p.cnt += 1
@@ -8984,8 +9114,9 @@ app.get('/aging', async (c) => {
   for (const b of buckets) b.pct = total ? Math.round((b.amount / total) * 100) : 0
   const parties = Object.keys(pmap).map((k) => pmap[k]).sort((a, b2) => b2.total - a.total)
   bad.sort((a, b2) => b2.days - a.days)
-  const risky = round2(buckets[2].amount + buckets[3].amount)
-  const provision = type === 'ar' ? round2(buckets[2].amount * 0.1 + buckets[3].amount * 0.3) : 0
+  const risky = round2(buckets[2].amount + buckets[3].amount + buckets[4].amount)
+  // 坏账准备：61-90 天 10%、91-180 天 30%、180 天以上 50%（口径写在这，别处不要再算）
+  const provision = type === 'ar' ? round2(buckets[2].amount * 0.1 + buckets[3].amount * 0.3 + buckets[4].amount * 0.5) : 0
   return c.json({
     type, total, count: rows.length, buckets, parties,
     bad: bad.slice(0, 20),
@@ -13207,11 +13338,13 @@ async function packSheets(db, m) {
   bsRows.push(['负债', '金额'], ['应付未付', s.apLeft], ['借款余额', s.debtLeft], ['负债合计', round2(s.apLeft + s.debtLeft)], [])
   bsRows.push(['所有者权益', s.equity], ['负债 + 权益', round2(s.apLeft + s.debtLeft + s.equity)])
   sheets.push({ name: '资产负债表', rows: bsRows })
-  const ars = (await db.prepare('SELECT * FROM orders ORDER BY id').all()).results || []
+  // 只取「本月的单」+「以前开单还没结清的」：以前是整表 `SELECT *` 一把捞，
+  // 三年的单都塞进一张 Excel，导出慢、页签大，而且大部分行跟这个月没关系。
+  const ars = (await db.prepare("SELECT * FROM orders WHERE month=? OR (price - COALESCE(paid,0) - COALESCE(written_off,0)) > 0.005 ORDER BY id").bind(m).all()).results || []
   sheets.push({ name: '应收明细', rows: [['单号', '客户', '产品', '金额', '成本', '已收', '核销', '未收', '开单日', '到期日', '状态']].concat(
     ars.map((o) => [o.id, o.customer, o.item_name, num(o.price), num(o.cost), num(o.paid), num(o.written_off), round2(num(o.price) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || '', num(o.paid) + num(o.written_off) >= num(o.price) ? '已结清' : (num(o.paid) > 0 ? '部分收' : '未收')])
   ) })
-  const aps = (await db.prepare('SELECT * FROM payables ORDER BY id').all()).results || []
+  const aps = (await db.prepare("SELECT * FROM payables WHERE month=? OR (amount - COALESCE(paid,0) - COALESCE(written_off,0)) > 0.005 ORDER BY id").bind(m).all()).results || []
   sheets.push({ name: '应付明细', rows: [['单号', '供应商', '说明', '金额', '已付', '核销', '未付', '开单日', '到期日']].concat(
     aps.map((o) => [o.id, o.supplier, o.remark || '', num(o.amount), num(o.paid), num(o.written_off), round2(num(o.amount) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || ''])
   ) })
@@ -13323,7 +13456,9 @@ app.get('/target', async (c) => {
   const db = c.env.DB
   const m = (c.req.query('month') || now().slice(0, 7))
   const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
-  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND month=?").bind(m).first()
+  // 收款目标只算「客户真给的钱」：内部转账、代收的税点都不算收入，
+  // 否则从这个账户转一笔到另一个账户，目标就自动「完成」了（首页早就排除了，这里漏了）。
+  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?").bind(m).first()
   const add = await db.prepare('SELECT COALESCE(SUM(price),0) a FROM orders WHERE month=?').bind(m).first()
   const receive = round2(num(inc && inc.a))
   const orderAdd = round2(num(add && add.a))
@@ -13455,6 +13590,71 @@ async function trialBalance(db, from, to) {
   return rows
 }
 
+// 截至某一天还欠多少借款本金。
+// 口径：每笔借款的「本金 − 那天之前已还的本金」，逐笔截负（有的借款还多了几块钱，不能拿去抵别的）。
+// 以前有两个错法：①「科目余额表」写 `SUM(amount - repayed) FROM debts`，可 debts 表根本没有
+// amount/repayed 两列，报错被 .catch 吞成 0 → 净资产少减整笔借款；②「月度归档」干脆没减借款。
+// 现在年报 / 科目余额表 / 月度归档 / 家底播报都用这一份，谁也别自己再写一遍 SQL。
+const DEBT_FOREVER = '9999-12-31'
+async function debtLeftAt(db, ymd) {
+  const d = (String(ymd || '').slice(0, 10) || DEBT_FOREVER)
+  const rs = await db.prepare(
+    `SELECT COALESCE(d.principal,0) AS p,
+            COALESCE((SELECT SUM(r.amount) FROM debt_repays r
+                       WHERE r.debt_id = d.id AND r.kind = 'principal'
+                         AND substr(r.rdate,1,10) <= ?),0) AS paid
+       FROM debts d
+      WHERE COALESCE(NULLIF(d.start_date,''), substr(d.created_at,1,10)) <= ?`)
+    .bind(d, d).all().catch((e) => { noteFail(e, '借款余额'); return { results: [] } })
+  let left = 0
+  for (const r of rs.results || []) left += Math.max(0, num(r.p) - num(r.paid))
+  return round2(left)
+}
+
+// 截至某一天还欠多少应收（ar）/ 应付（ap），连带按单位拆开。
+// 口径：那天之前开出的单的金额 − 那天之前真收到/付出去的钱（ledger，cash=1）− 那天之前核销掉的；
+// 每张单各自截到 0（一张单多收了钱，不能拿去抵另一个客户的欠款）。
+// **不能用 orders.paid / written_off 这两个列**：它们是「今天」的累计值，永远在涨，
+// 拿它去算去年年底的余额，去年那个数每年重打一次就变小一次，交出去的报表无法复现。
+async function arApLeftAt(db, ymd, which) {
+  const d = (String(ymd || '').slice(0, 10) || DEBT_FOREVER)
+  const isAr = which !== 'ap'
+  const tb = isAr ? 'orders' : 'payables'
+  const partyCol = isAr ? 'customer' : 'supplier'
+  const amtCol = isAr ? 'price' : 'amount'
+  const rt = isAr ? 'order' : 'payable'
+  const dir = isAr ? 'in' : 'out'
+  const [bills, paid, wos] = await Promise.all([
+    db.prepare(`SELECT id, COALESCE(${partyCol},'') AS party, COALESCE(${amtCol},0) AS amt
+                  FROM ${tb} WHERE substr(created_at,1,10) <= ?`).bind(d).all()
+      .catch((e) => { noteFail(e, '应收应付余额'); return { results: [] } }),
+    db.prepare(`SELECT ref_id AS id, COALESCE(SUM(amount),0) AS s FROM ledger
+                 WHERE ref_type = ? AND direction = ? AND COALESCE(cash,1) = 1 AND substr(created_at,1,10) <= ?
+                 GROUP BY ref_id`).bind(rt, dir, d).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT ref_id AS id, COALESCE(SUM(amount),0) AS s FROM writeoffs
+                 WHERE ref_type = ? AND substr(created_at,1,10) <= ? GROUP BY ref_id`).bind(rt, d).all()
+      .catch(() => ({ results: [] }))
+  ])
+  const pm = new Map(); for (const r of paid.results || []) pm.set(String(num(r.id)), num(r.s))
+  const wm = new Map(); for (const r of wos.results || []) wm.set(String(num(r.id)), num(r.s))
+  const byParty = new Map()
+  let total = 0
+  let n = 0
+  for (const b of bills.results || []) {
+    const left = round2(num(b.amt) - num(pm.get(String(num(b.id)))) - num(wm.get(String(num(b.id)))))
+    if (!(left > 0.005)) continue
+    total += left
+    n += 1
+    const k = String(b.party || '（没写单位）')
+    const x = byParty.get(k) || { party: k, n: 0, t: 0 }
+    x.n += 1
+    x.t = round2(x.t + left)
+    byParty.set(k, x)
+  }
+  const rows = Array.from(byParty.values()).sort((a, b) => b.t - a.t || (a.party < b.party ? -1 : 1))
+  return { t: round2(total), n, rows }
+}
+
 async function archiveSheets(db, kind, q) {
   const sheets = []
   if (kind === 'daily') {
@@ -13498,54 +13698,62 @@ async function archiveSheets(db, kind, q) {
     const mons = []
     for (let i = 1; i <= 12; i++) mons.push(y + '-' + String(i).padStart(2, '0'))
     const ord = await db.prepare("SELECT month mk, COALESCE(SUM(price),0) p, COALESCE(SUM(COALESCE(cost,0)),0) c, COUNT(*) n FROM orders WHERE month>=? AND month<=? GROUP BY mk").bind(mons[0], y + '-12').all().catch(() => ({ results: [] }))
+    // 口径统一（这台机器上所有报表都按这一条来）：
+    //   收款/付款 = 经营口径，排除内部转账和「代收/代付的税点」（税点单列两列）
+    //   现金结余 = 真实现金余额（含税点、含内部转账，因为钱确实在账上），按账户期初 + 逐月累计
     const led = await db.prepare(
       `SELECT month mk,
               COALESCE(SUM(CASE WHEN ${COST_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
-              COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type<>'transfer' THEN amount ELSE 0 END),0) inc,
-              COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') THEN amount ELSE 0 END),0) out
+              COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') THEN amount ELSE 0 END),0) inc,
+              COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') THEN amount ELSE 0 END),0) out,
+              COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ref_type='tax_ar' THEN amount ELSE 0 END),0) tax_in,
+              COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ref_type='tax_ap' THEN amount ELSE 0 END),0) tax_out,
+              COALESCE(SUM(CASE WHEN cash=1 AND direction='in' THEN amount WHEN cash=1 AND direction='out' THEN -amount ELSE 0 END),0) net
          FROM ledger WHERE month>=? AND month<=? GROUP BY mk`).bind(mons[0], y + '-12').all().catch(() => ({ results: [] }))
     const om = new Map((ord.results || []).map((r) => [r.mk, r]))
     const lm = new Map((led.results || []).map((r) => [r.mk, r]))
-    const rows = [['月份', '接单额', '单数', '材料外协成本', '毛利', '收款', '付款/支出', '现金结余', '费用（含非现金）']]
-    let T = { p: 0, c: 0, n: 0, inc: 0, out: 0, exp: 0 }
+    // 年初现金 = 各账户期初 + 去年以前的所有流水
+    const openCashRow = await db.prepare("SELECT COALESCE((SELECT SUM(opening) FROM accounts),0) + COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10) < ?")
+      .bind(y + '-01-01').first().catch(() => ({ t: 0 }))
+    let running = round2(num(openCashRow && openCashRow.t))
+    const rows = [['月份', '接单额', '单数', '材料外协成本', '毛利', '收款', '付款/支出', '现金结余', '费用（含非现金）', '其中代收税点', '其中代付税点']]
+    let T = { p: 0, c: 0, n: 0, inc: 0, out: 0, exp: 0, taxIn: 0, taxOut: 0 }
     for (const m of mons) {
       const o = om.get(m) || {}
       const l = lm.get(m) || {}
       const p = round2(num(o.p))
       const c = round2(num(o.c))
-      rows.push([m, p, num(o.n), c, round2(p - c), round2(num(l.inc)), round2(num(l.out)), round2(num(l.inc) - num(l.out)), round2(num(l.exp))])
+      running = round2(running + num(l.net))
+      rows.push([m, p, num(o.n), c, round2(p - c), round2(num(l.inc)), round2(num(l.out)), running, round2(num(l.exp)), round2(num(l.tax_in)), round2(num(l.tax_out))])
       T.p = round2(T.p + p); T.c = round2(T.c + c); T.n += num(o.n); T.inc = round2(T.inc + num(l.inc)); T.out = round2(T.out + num(l.out)); T.exp = round2(T.exp + num(l.exp))
+      T.taxIn = round2(T.taxIn + num(l.tax_in)); T.taxOut = round2(T.taxOut + num(l.tax_out))
     }
-    rows.push([], ['全年合计', T.p, T.n, T.c, round2(T.p - T.c), T.inc, T.out, round2(T.inc - T.out), T.exp])
+    rows.push([], ['全年合计', T.p, T.n, T.c, round2(T.p - T.c), T.inc, T.out, running, T.exp, T.taxIn, T.taxOut])
+    rows.push([], ['说明：收款/付款不含内部转账和代收代付的税点（税点单列最后两列）；现金结余是真实现金余额，按账户期初 + 逐月累计，含税点。'])
+    rows.push(['/', '口径与「现金」页、「月度报表包」一致；如果两边数字不一样，先看这笔钱是不是内部转账。'])
     sheets.push({ name: y + ' 年 12 个月', rows })
     const ye = y + '-12-31'
-    const [arRows, apRows, cust, sup, cashRow, debtRow] = await Promise.all([
-      db.prepare(`SELECT customer party, COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) left_amt
-                    FROM orders WHERE substr(created_at,1,10) <= ? AND price - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005
-                   GROUP BY customer ORDER BY left_amt DESC`).bind(ye).all().catch(() => ({ results: [] })),
-      db.prepare(`SELECT supplier party, COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) left_amt
-                    FROM payables WHERE substr(created_at,1,10) <= ? AND amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005
-                   GROUP BY supplier ORDER BY left_amt DESC`).bind(ye).all().catch(() => ({ results: [] })),
+    // 年末应收/应付/借款都按「那天之前真发生过的流水」算，不看 orders.paid / written_off
+    // 这两个「今天」的累计列 —— 否则去年那份年报每年重打一次，数字就变小一次。
+    const [arAt, apAt, cust, sup, cashRow, debtLeft] = await Promise.all([
+      arApLeftAt(db, ye, 'ar'),
+      arApLeftAt(db, ye, 'ap'),
       db.prepare("SELECT customer party, COUNT(*) n, COALESCE(SUM(price),0) amt, COALESCE(SUM(price - COALESCE(cost,0)),0) gp FROM orders WHERE month>=? AND month<=? GROUP BY customer ORDER BY amt DESC LIMIT 30").bind(mons[0], y + '-12').all().catch(() => ({ results: [] })),
       db.prepare("SELECT supplier party, COUNT(*) n, COALESCE(SUM(amount),0) amt FROM payables WHERE month>=? AND month<=? GROUP BY supplier ORDER BY amt DESC LIMIT 30").bind(mons[0], y + '-12').all().catch(() => ({ results: [] })),
       // 现金结余必须加上开账时填的「各账户期初余额」，否则跟「科目余额表」永远差这一块
       db.prepare("SELECT (SELECT COALESCE(SUM(opening),0) FROM accounts) + COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10) <= ?").bind(ye).first().catch(() => ({ t: 0 })),
-      // 借款余额 = 那天之前借的本金 − 那天之前已还本金。以前这两条 SQL 都写错了：
-      // ①现金那条只加流水、不加开账时的账户期初；②借款那条写的 amount/repayed 这两个列根本不存在，
-      // 报错被 .catch 吞掉 → 「借款余额」在年报里永远是 0。
-      db.prepare(`SELECT COALESCE(SUM(d.principal),0) - COALESCE((SELECT SUM(r.amount) FROM debt_repays r WHERE r.kind='principal' AND substr(r.rdate,1,10)<=?),0) AS t
-        FROM debts d WHERE COALESCE(d.start_date, substr(d.created_at,1,10)) <= ?`).bind(ye, ye).first().catch(() => ({ t: 0 }))
+      debtLeftAt(db, ye)
     ])
-    const arTot = round2((arRows.results || []).reduce((a, r) => a + num(r.left_amt), 0))
-    const apTot = round2((apRows.results || []).reduce((a, r) => a + num(r.left_amt), 0))
+    const arTot = round2(arAt.t)
+    const apTot = round2(apAt.t)
     sheets.push({ name: '年末余额', rows: [
-      [y + '-12-31 那天的余额', ''], ['应收未收合计', arTot], ['涉及客户数', (arRows.results || []).length],
-      ['应付未付合计', apTot], ['涉及供应商数', (apRows.results || []).length],
-      ['累计现金结余（含账户期初）', round2(num(cashRow && cashRow.t))], ['借款余额', round2(num(debtRow && debtRow.t))],
-      ['净资产（现金+应收−应付−借款）', round2(num(cashRow && cashRow.t) + arTot - apTot - num(debtRow && debtRow.t))]
+      [y + '-12-31 那天的余额', ''], ['应收未收合计', arTot], ['涉及客户数', arAt.rows.length],
+      ['应付未付合计', apTot], ['涉及供应商数', apAt.rows.length],
+      ['累计现金结余（含账户期初）', round2(num(cashRow && cashRow.t))], ['借款余额', round2(num(debtLeft))],
+      ['净资产（现金+应收−应付−借款）', round2(num(cashRow && cashRow.t) + arTot - apTot - num(debtLeft))]
     ] })
-    sheets.push({ name: '年末应收（按客户）', rows: [['客户', '笔数', '未收金额']].concat((arRows.results || []).map((r) => [r.party, num(r.n), round2(num(r.left_amt))])).concat([[], ['合计', '', arTot]]) })
-    sheets.push({ name: '年末应付（按供应商）', rows: [['供应商', '笔数', '未付金额']].concat((apRows.results || []).map((r) => [r.party, num(r.n), round2(num(r.left_amt))])).concat([[], ['合计', '', apTot]]) })
+    sheets.push({ name: '年末应收（按客户）', rows: [['客户', '笔数', '未收金额']].concat(arAt.rows.map((r) => [r.party, r.n, r.t])).concat([[], ['合计', '', arTot]]) })
+    sheets.push({ name: '年末应付（按供应商）', rows: [['供应商', '笔数', '未付金额']].concat(apAt.rows.map((r) => [r.party, r.n, r.t])).concat([[], ['合计', '', apTot]]) })
     sheets.push({ name: '客户年度榜', rows: [['客户', '单数', '接单额', '毛利']].concat((cust.results || []).map((r) => [r.party, num(r.n), round2(num(r.amt)), round2(num(r.gp))])) })
     sheets.push({ name: '供应商年度榜', rows: [['供应商', '笔数', '采购额']].concat((sup.results || []).map((r) => [r.party, num(r.n), round2(num(r.amt))])) })
     return { sheets, title: '年报_' + y }
@@ -13602,7 +13810,11 @@ async function archiveSheets(db, kind, q) {
     for (const l of inRange) groups.get(SUBJ_OF_ROW(l)).rows.push(l)
     const used = Array.from(groups.entries()).filter(([, g]) => g.rows.length || g.open)
       .sort((a, b) => b[1].rows.length - a[1].rows.length)
-    for (const [k, g] of used.slice(0, 30)) {
+    // 以前只放前 30 个科目，超出的直接丢掉 —— 老板导出明细账会以为「就这些科目」。
+    // 现在前 30 个各占一页，剩下的合成一页「其他科目」（明细照样完整，只是不分页签）。
+    const head30 = used.slice(0, 30)
+    const rest = used.slice(30)
+    for (const [k, g] of head30) {
       const rows = [['日期', '摘要', '对方', '收（借）', '付（贷）', '结余', '账户', '是否动现金']]
       let bal = g.open
       rows.push([from + ' 之前结转', '期初余额', '', '', '', g.open, '', ''])
@@ -13614,6 +13826,18 @@ async function archiveSheets(db, kind, q) {
       rows.push([], ['小计', g.rows.length + ' 笔', '', '', '', bal])
       const nm = k.replace(/[\\/?*\[\]:]/g, '').slice(0, 26) || '其他'
       if (!sheets.some((x) => x.name === nm)) sheets.push({ name: nm, rows })
+    }
+    if (rest.length) {
+      const rows = [['科目', '日期', '摘要', '对方', '收（借）', '付（贷）', '账户', '是否动现金']]
+      let n = 0
+      for (const [k, g] of rest) {
+        for (const l of g.rows) {
+          n += 1
+          rows.push([k, ymd(l.created_at), l.remark || '', l.party_name || '', l.direction === 'in' ? num(l.amount) : '', l.direction === 'out' ? num(l.amount) : '', l.acc_name || '', num(l.cash) ? '是' : '否'])
+        }
+      }
+      rows.unshift(['说明', `还有 ${rest.length} 个科目、${n} 笔流水，放在这一页里（前 30 个科目各占一页）`])
+      sheets.push({ name: '其他科目', rows })
     }
     if (!sheets.length) sheets.push({ name: '明细账', rows: [['区间', from + ' ~ ' + to], ['这期间没有流水']] })
     return { sheets, title: '明细账_' + from + '_' + to }
@@ -13632,19 +13856,22 @@ async function archiveSheets(db, kind, q) {
   rows.push([], ['合计', T.open, T.dr, T.cr, T.end, ''])
   sheets.push({ name: '科目余额表', rows })
   // 余额类科目（不在流水里滚的）：应收未收 / 应付未付 / 各账户余额 / 借款
-  const [arS, apS, accs, dbt] = await Promise.all([
-    db.prepare(`SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) t, COUNT(*) n FROM orders WHERE substr(created_at,1,10) <= ? AND price - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005`).bind(to).first().catch(() => ({ t: 0, n: 0 })),
-    db.prepare(`SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) t, COUNT(*) n FROM payables WHERE substr(created_at,1,10) <= ? AND amount - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005`).bind(to).first().catch(() => ({ t: 0, n: 0 })),
+  // 余额类科目一律按「截至 to 那天真发生过的收付/还款」算（见 arApLeftAt / debtLeftAt 的注释）。
+  // 以前借款那条 SQL 写的 amount/repayed 两列在 debts 表里根本不存在，报错被吞成 0，
+  // 于是这张表的「净资产」比年报大出一整笔借款。
+  const [arS, apS, accs, debtLeft] = await Promise.all([
+    arApLeftAt(db, to, 'ar'),
+    arApLeftAt(db, to, 'ap'),
     accountBalances(db).catch(() => []),
-    db.prepare("SELECT COALESCE(SUM(amount - COALESCE(repayed,0)),0) t FROM debts WHERE status='open'").first().catch(() => ({ t: 0 }))
+    debtLeftAt(db, to)
   ])
   sheets.push({ name: '余额类科目', rows: [
     ['科目', '余额', '笔数', '说明'],
-    ['应收未收', round2(num(arS && arS.t)), num(arS && arS.n), '截至 ' + to + ' 还没收回来的'],
-    ['应付未付', round2(num(apS && apS.t)), num(apS && apS.n), '截至 ' + to + ' 还没付出去的'],
+    ['应收未收', round2(arS.t), arS.n, '截至 ' + to + ' 还没收回来的'],
+    ['应付未付', round2(apS.t), apS.n, '截至 ' + to + ' 还没付出去的'],
     ...((accs || []).map((a) => ['账户·' + a.name, round2(num(a.balance)), '', '这个账户现在有多少钱（期初 + 收 − 付）'])),
-    ['借款余额', round2(num(dbt && dbt.t)), '', '还欠银行/私人的'],
-    ['净资产', round2((accs || []).reduce((x, a) => x + num(a.balance), 0) + num(arS && arS.t) - num(apS && apS.t) - num(dbt && dbt.t)), '', '现金 + 应收 − 应付 − 借款（不含押金、借支）']
+    ['借款余额', round2(debtLeft), '', '还欠银行/私人的（本金 − 已还本金）'],
+    ['净资产', round2((accs || []).reduce((x, a) => x + num(a.balance), 0) + arS.t - apS.t - debtLeft), '', '现金 + 应收 − 应付 − 借款（不含押金、借支）']
   ] })
   sheets.push({ name: '本年逐月', rows: [['月份', '收款', '付款/支出', '结余']].concat(
     (await db.prepare(`SELECT month mk, COALESCE(SUM(CASE WHEN direction='in' AND cash=1 THEN amount ELSE 0 END),0) i, COALESCE(SUM(CASE WHEN direction='out' AND cash=1 THEN amount ELSE 0 END),0) o FROM ledger WHERE month>=? AND month<=? GROUP BY mk`).bind(from.slice(0, 7), to.slice(0, 7)).all().catch(() => ({ results: [] }))).results.map((r) => [r.mk, round2(num(r.i)), round2(num(r.o)), round2(num(r.i) - num(r.o))])
@@ -16089,7 +16316,7 @@ app.post('/trash/:id/restore', async (c) => {
   }
   // 按「记录里有的字段」整行还原：以前手写列清单，删一张已核销的单再恢复，
   // written_off 就丢了（坏账变回欠款）；ledger 的 cash/account_id 丢了，非现金流水会变成现金支出。
-  const TABLE_OF = { order: 'orders', payable: 'payables', ledger: 'ledger', process: 'process_log', transfer: 'transfers', writeoff: 'writeoffs' }
+  const TABLE_OF = { order: 'orders', payable: 'payables', ledger: 'ledger', process: 'process_log', transfer: 'transfers', writeoff: 'writeoffs', debt: 'debts', debt_repay: 'debt_repays' }
   let n = 0
   for (const r of rows) {
     const d = JSON.parse(r.data || '{}')
@@ -16663,17 +16890,43 @@ async function readBackupContent(db, id) {
   return Object.assign({}, row, { content: parts.map((x) => x.data).join('') })
 }
 
+// 备份指纹：判断「账有没有变化」。
+// 以前是 46 张表各来一次 `SELECT COUNT(*)`，每条都要把表扫一遍；9 本账 × 每天 3 轮
+// ≈ 每天几十万行的读，只为回答「今天要不要再存一份」。改成一条 UNION ALL 拿每张表的
+// rowid 最大值（走主键索引，不看行内容），一次往返就够。
 async function backupSig(db) {
-  const parts = []
-  for (const t of BACKUP_TABLES) {
-    try {
-      const r = await db.prepare(`SELECT COUNT(*) AS c, COALESCE(MAX(rowid),0) AS m FROM ${t}`).first()
-      parts.push(`${t}:${num(r && r.c)}:${num(r && r.m)}`)
-    } catch (e) {
-      return '' // 有表读不出来就别跳过，老老实实备份（失败会由 buildBackup 抛错）
-    }
+  // 光看「行数 + 最大 rowid」抓不到「改了金额但没新增行」；所以三张记钱的表再带上
+  // 金额合计（订单、应付、流水），设置表带上内容长度合计。只改备注这类不改变这笔钱，
+  // 漏一天备份可以接受；但收了 5000 没进备份不行。
+  // 指纹里带「钱」的合计：只改金额不新增行（比如把一张单从 1000 改成 1200）也要能看出来。
+  const MONEY = {
+    orders: 'COALESCE(SUM(price),0) || COALESCE(SUM(paid),0) || COALESCE(SUM(COALESCE(written_off,0)),0)',
+    payables: 'COALESCE(SUM(amount),0) || COALESCE(SUM(paid),0) || COALESCE(SUM(COALESCE(written_off,0)),0)',
+    ledger: 'COALESCE(SUM(amount),0) || COALESCE(SUM(COALESCE(tax,0)),0)'
   }
-  return fnv1a(parts.join('|'))
+  const one = (t) => {
+    // 每张表都必须给同样的四列，否则 UNION ALL 的列数对不上
+    if (t === 'settings') {
+      // settings 只算配置本身，不算备份自己的脚印：backup_at / backup_sig / cron_at 每次都变，
+      // 算进指纹就永远对不上，「账没变化就跳过」会一直失效（实测连存 8 份才发现）。
+      return `SELECT 'settings' AS t, COALESCE(COUNT(*),0) AS c, COALESCE(MAX(rowid),0) AS m, '' || (SELECT COALESCE(SUM(LENGTH(COALESCE(value,''))),0) FROM settings WHERE key NOT IN ('backup_at','backup_sig','cron_at','last_cron','slow_at')) AS x FROM settings`
+    }
+    const x = MONEY[t] ? `'' || (${MONEY[t]})` : `''`
+    return `SELECT '${t}' AS t, COALESCE(COUNT(*),0) AS c, COALESCE(MAX(rowid),0) AS m, ${x} AS x FROM ${t}`
+  }
+  // 一张表一条 SELECT，46 条塞进一个 db.batch（一次往返）。
+  // 不要写成 UNION ALL：D1/SQLite 会报「too many terms in compound SELECT」（46 段、甚至 10 段都报），
+  // 而以前是一张表一次 COUNT(*)，9 本账一天三轮就是几十万行白读只为决定「要不要备份」。
+  try {
+    const done = await db.batch(BACKUP_TABLES.map((t) => db.prepare(one(t))))
+    const map = new Map()
+    for (const r of done) for (const row of (r.results || [])) map.set(String(row.t), `${num(row.c)}:${num(row.m)}:${String(row.x || '')}`)
+    const parts = BACKUP_TABLES.map((t) => `${t}:${map.get(t) || '0:0:'}`)
+    return fnv1a(parts.join('|'))
+  } catch (e) {
+    noteFail(e, '备份指纹')
+    return '' // 有表读不出来就别跳过，老老实实备份（失败会由 buildBackup 抛错）
+  }
 }
 
 async function saveBackup(db, opts) {
@@ -16701,8 +16954,23 @@ async function saveBackup(db, opts) {
   const BYTES = 500000
   const pieces = sliceByBytes(content, BYTES)
   const chunked = pieces.length > 1
-  const ins = await db.prepare('INSERT INTO backups (content, size, created_at) VALUES (?,?,?)')
-    .bind(chunked ? '' : content, content.length, now()).run()
+  // 顺手把摘要算出来存进 stat：备份列表只要这几个数，不必回头把整份备份读出来再 JSON.parse
+  const statOf = (js) => {
+    try {
+      const d = JSON.parse(js || '{}')
+      const o = Array.isArray(d.orders) ? d.orders : []
+      const p = Array.isArray(d.payables) ? d.payables : []
+      const l = Array.isArray(d.ledger) ? d.ledger : []
+      return JSON.stringify({
+        orders: o.length, order_sum: round2(o.reduce((a, x) => a + num(x.price), 0)),
+        payables: p.length, payable_sum: round2(p.reduce((a, x) => a + num(x.amount), 0)),
+        ledger: l.length
+      })
+    } catch (e) { return '' }
+  }
+  const stat = statOf(content)
+  const ins = await db.prepare('INSERT INTO backups (content, size, stat, created_at) VALUES (?,?,?,?)')
+    .bind(chunked ? '' : content, content.length, stat, now()).run()
   const bid = ins && ins.meta && ins.meta.last_row_id ? ins.meta.last_row_id : 0
   if (chunked && bid) {
     const parts = pieces.map((d, seq) => db.prepare('INSERT INTO backup_parts (bid, seq, data) VALUES (?,?,?)').bind(bid, seq, d))
@@ -16929,22 +17197,34 @@ app.get('/backup-timeline', async (c) => {
   ])
   const cur = { orders: num(curO && curO.c), order_sum: round2(num(curO && curO.t)), payables: num(curP && curP.c), payable_sum: round2(num(curP && curP.t)), ledger: num(curL && curL.c) }
   let rows = []
-  try { rows = (await db.prepare('SELECT id, created_at FROM backups ORDER BY id DESC LIMIT 12').all()).results } catch (e) { rows = [] }
+  try { rows = (await db.prepare('SELECT id, created_at, COALESCE(stat,\'\') AS stat FROM backups ORDER BY id DESC LIMIT 12').all()).results } catch (e) { rows = [] }
   const items = []
   for (const bx of rows) {
-    const r = (await readBackupContent(db, bx.id)) || bx
-    let d = null
-    try { d = JSON.parse(r.content) } catch (e) { d = null }
-    const o = (d && Array.isArray(d.orders)) ? d.orders : []
-    const p = (d && Array.isArray(d.payables)) ? d.payables : []
-    const l = (d && Array.isArray(d.ledger)) ? d.ledger : []
-    const orderSum = round2(o.reduce((a, x) => a + num(x.price), 0))
-    const paySum = round2(p.reduce((a, x) => a + num(x.amount), 0))
+    let o = 0; let orderSum = 0; let p = 0; let paySum = 0; let l = 0
+    if (String(bx.stat || '')) {
+      // 新版备份存了摘要，直接读，不用把几 MB 的备份内容拉回来
+      try {
+        const st = JSON.parse(bx.stat)
+        o = num(st.orders); orderSum = round2(num(st.order_sum)); p = num(st.payables); paySum = round2(num(st.payable_sum)); l = num(st.ledger)
+      } catch (e) { bx.stat = '' }
+    }
+    if (!String(bx.stat || '')) {
+      // 老备份没有 stat：退回原来的办法（读整份 + JSON.parse），只对这几份老数据生效
+      const r = (await readBackupContent(db, bx.id)) || bx
+      let d = null
+      try { d = JSON.parse(r.content) } catch (e) { d = null }
+      const oo = (d && Array.isArray(d.orders)) ? d.orders : []
+      const pp = (d && Array.isArray(d.payables)) ? d.payables : []
+      const ll = (d && Array.isArray(d.ledger)) ? d.ledger : []
+      o = oo.length; orderSum = round2(oo.reduce((a, x) => a + num(x.price), 0))
+      p = pp.length; paySum = round2(pp.reduce((a, x) => a + num(x.amount), 0))
+      l = ll.length
+    }
     items.push({
-      id: r.id, at: r.created_at, date: String(r.created_at || '').slice(0, 10), time: String(r.created_at || '').slice(11, 16),
-      orders: o.length, order_sum: orderSum, payables: p.length, payable_sum: paySum, ledger: l.length,
-      d_orders: cur.orders - o.length, d_order_sum: round2(cur.order_sum - orderSum),
-      d_payables: cur.payables - p.length, d_ledger: cur.ledger - l.length
+      id: bx.id, at: bx.created_at, date: String(bx.created_at || '').slice(0, 10), time: String(bx.created_at || '').slice(11, 16),
+      orders: o, order_sum: orderSum, payables: p, payable_sum: paySum, ledger: l,
+      d_orders: cur.orders - o, d_order_sum: round2(cur.order_sum - orderSum),
+      d_payables: cur.payables - p, d_ledger: cur.ledger - l
     })
   }
   return c.json({
@@ -17227,6 +17507,9 @@ app.get('/month-report', async (c) => {
   const cash = await cashAtEnd(db, m)
   const ar = await arAtEnd(db, m)
   const ap = await apAtEnd(db, m)
+  // 月底还欠多少借款。以前这份「月度归档」只减应收应付，没减借款，
+  // 于是同一个月底，归档说家底 8 万、年报和「科目余额表」说 3 万。
+  const debt = await debtLeftAt(db, monthEndOf(m) || (m + '-28'))
   const head = await db.prepare("SELECT key, value FROM settings WHERE key='report_title'").first()
   const lines = []
   lines.push(`【${(head && head.value) || '加工费记账'}】${m} 月度归档`)
@@ -17254,12 +17537,13 @@ app.get('/month-report', async (c) => {
   lines.push(`现金余额：¥${cash}`)
   lines.push(`别人欠我：¥${ar}`)
   lines.push(`我欠别人：¥${ap}`)
-  lines.push(`净资产：¥${round2(cash + ar - ap)}`)
+  if (debt > 0) lines.push(`还欠借款：¥${debt}`)
+  lines.push(`净资产：¥${round2(cash + ar - ap - debt)}`)
   return c.json({
     month: m, cash_in: round2(num(inc.t)), cash_out: round2(num(out.t)), net: round2(num(inc.t) - num(out.t)),
     order_add: round2(num(oAdd.t)), payable_add: round2(num(pAdd.t)), mat_cost: pl.mat, profit: pl.profit, cats: cats.map((r) => ({ c: r.c, t: round2(num(r.t)) })),
     recon: { total: rr.total, done: rr.done, rate: rr.rate, disputed: rr.disputed, none: rr.none },
-    cash, ar, ap, net_worth: round2(cash + ar - ap), title: (head && head.value) || '', text: lines.join('\n')
+    cash, ar, ap, debt_left: debt, net_worth: round2(cash + ar - ap - debt), title: (head && head.value) || '', text: lines.join('\n')
   })
 })
 
@@ -18837,7 +19121,8 @@ app.get('/target-weeks', async (c) => {
   const dim = new Date(Date.UTC(yy, mm, 0)).getUTCDate()
   const todayM = now().slice(0, 7)
   const todayD = m === todayM ? num(now().slice(8, 10)) : (m < todayM ? dim : 0)
-  const rs = (await db.prepare("SELECT substr(created_at,1,10) d, amount FROM ledger WHERE direction='in' AND cash=1 AND month=?").bind(m).all()).results || []
+  // 内部转账、代收税点不算「收到客户的钱」，否则周目标也会被自己转账刷满
+  const rs = (await db.prepare("SELECT substr(created_at,1,10) d, amount FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?").bind(m).all()).results || []
   const byDay = {}
   rs.forEach((r) => { const d = num(String(r.d).slice(8, 10)); byDay[d] = round2(num(byDay[d]) + num(r.amount)) })
   const spans = [[1, 7], [8, 14], [15, 21], [22, dim]]
@@ -18871,11 +19156,11 @@ app.get('/target-forecast', async (c) => {
   const m = c.req.query('month') || now().slice(0, 7)
   const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
   const tR = round2(num(t && t.receive))
-  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND month=?").bind(m).first()
+  const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?").bind(m).first()
   const got = round2(num(inc && inc.a))
   // 回款率：近 6 个月「实收 / 开单」，下限 30%、上限 100%
   const since = (() => { const d = new Date(Date.now() + TZ_MS); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 5, 1)).toISOString().slice(0, 10) })()
-  const sixIn = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND substr(created_at,1,10)>=?").bind(since).first()
+  const sixIn = await db.prepare("SELECT COALESCE(SUM(amount),0) a FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND substr(created_at,1,10)>=?").bind(since).first()
   const sixOrd = await db.prepare('SELECT COALESCE(SUM(price),0) a FROM orders WHERE substr(created_at,1,10)>=?').bind(since).first()
   const rate = Math.min(1, Math.max(0.3, num(sixOrd && sixOrd.a) > 0 ? num(sixIn && sixIn.a) / num(sixOrd && sixOrd.a) : 0.3))
   // 本月内到期的未结应收（含已逾期的）
@@ -18910,7 +19195,7 @@ async function targetHistory(db, months) {
     const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() - i, 1))
     const m = d.toISOString().slice(0, 7)
     const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
-    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND month=?").bind(m).first()
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?").bind(m).first()
     const ord = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?").bind(m).first()
     const receive = round2(num(inc && inc.t))
     const orderAdd = round2(num(ord && ord.t))
@@ -19031,7 +19316,7 @@ async function pushTargetSummary(db, mm) {
     const t = await db.prepare('SELECT * FROM targets WHERE month=?').bind(m).first()
     const tR = num(t && t.receive)
     if (tR <= 0) return
-    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND month=?").bind(m).first()
+    const inc = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?").bind(m).first()
     const got = round2(num(inc && inc.t))
     const pct = Math.round(got / tR * 1000) / 10
     const title = got >= tR ? '这个月目标达成啦（' + pct + '%）' : '这个月还差 ' + round2(tR - got) + ' 元'

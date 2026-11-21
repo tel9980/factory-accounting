@@ -16,6 +16,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { LocalD1, ensureSchema } from './d1.mjs'
+import { BOOKS, bookBindingOf, bookFileOf } from './books.mjs'
 import worker from '../backend/index.js'
 
 // 版本号：打 exe / 镜像时由构建脚本用 esbuild --define 写死（__FA_VERSION__），
@@ -277,10 +278,9 @@ async function main() {
 
   const schemaSql = readSchema()
   // 本机版和线上一样能开 9 本账（线上是 9 个 D1 绑定，本机是 9 个 .db 文件）。
-  // 以前写死 3 本，文档里说「最多 9 本」在本机版上根本做不到。
-  const BOOKS = 9
+  // 数字来自 server/books.mjs —— build-exe 的自测断言也从那里取，不会再对不上。
   const files = {}
-  for (let i = 1; i <= BOOKS; i++) files[i === 1 ? 'DB' : 'DB' + i] = path.join(dataDir, 'book' + i + '.db')
+  for (let i = 1; i <= BOOKS; i++) files[bookBindingOf(i)] = path.join(dataDir, bookFileOf(i))
   const dbs = {}
   for (const k of Object.keys(files)) {
     dbs[k] = new LocalD1(files[k])
@@ -291,9 +291,6 @@ async function main() {
   }
 
   const env = {
-    DB: dbs.DB,
-    DB2: dbs.DB2,
-    DB3: dbs.DB3,
     BOOK: 1,
     APP_VERSION: APP_VERSION,
     APP_BUILT: APP_BUILT,
@@ -301,6 +298,8 @@ async function main() {
     NOTES_SLUG: process.env.NOTES_SLUG || '',
     NOTES_PASS: process.env.NOTES_PASS || '',
   }
+  // 九本账的绑定：DB、DB2 … DB9（backend 按 bookDbs(env) 自己发现有几本）
+  for (const k of Object.keys(files)) env[k] = dbs[k]
   env.ENV_ALL = env
 
   const ctx = { waitUntil(p) { try { Promise.resolve(p).catch(() => {}) } catch (e) {} }, passThroughOnException() {} }
