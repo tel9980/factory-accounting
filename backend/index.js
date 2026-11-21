@@ -6822,6 +6822,7 @@ app.get('/pc', async (c) => {
     <button onclick="booksAll()">看我的账套</button>
     <span class="tip" style="margin:0">一本账 = 一个数据库，默认开 3 本，最多 9 本。</span>
   </div>
+  <div id="bk_msg" class="tip"></div>
   <div id="bk_list"></div>
   <div class="tip">改名不用切账套：看到哪本改哪本。要操作某一本（导出 / 导入 / 初始化 / 看报表）先点「用这本」，如果那本有自己的口令，重新填一下再点「记住」。</div>
   <div class="tip">存档建议：每个月结完账下一份月报，年底下一份年报，跟整账套 JSON 一起放文件夹；这些表是给人看和打印的，恢复数据还是用上面的整账套。</div>
@@ -6838,12 +6839,28 @@ function saveKey(){
   msg(K.length >= 4 ? '口令记住了（只在这台电脑，跟着当前账套）' : '口令太短，至少 4 位', K.length >= 4)
 }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] }) }
+function bmsg(t, good){
+  var el = document.getElementById('bk_msg')
+  el.textContent = t || ''
+  el.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '')
+}
 function booksAll(){
-  if (needKey()) return
+  if (!K) { bmsg('先在上面第 1 块填口令，点「记住」，再点这里', false); document.getElementById('key').focus(); return }
+  bmsg('正在看……')
   fetch('/books-all', { headers: { 'x-access-key': K, 'X-Book': bookCur() } })
-    .then(function (r) { return r.json() })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        var d = null
+        try { d = JSON.parse(t) } catch (e) { d = { error: String(t).slice(0, 120) } }
+        d = d || {}
+        d._status = r.status
+        return d
+      })
+    })
     .then(function (d) {
-      if (!d.ok) { msg(d.error || '看不了账套列表', false); return }
+      if (d._status === 401) { bmsg('口令不对（或这本账还没设口令），重新填一下第 1 块的口令', false); return }
+      if (d._status === 403) { bmsg('这个口令是员工 / 演示口令，账套列表只有老板口令能看', false); return }
+      if (!d.ok) { bmsg(d.error || ('看不了账套列表（HTTP ' + d._status + '）'), false); return }
       var h = '<table><tr><th>#</th><th>名称</th><th>单数</th><th>应收</th><th>状态</th><th></th></tr>'
       d.books.forEach(function (b) {
         h += '<tr><td>' + (b.current ? '▶ ' : '') + b.id + '</td><td>' + esc(b.name) + '</td><td>' + b.orders + '</td><td>' + b.ar + '</td><td>' + (b.has_key ? '有口令' : '还没设口令') + (b.sealed ? ' · 已封存' : '') + '</td>'
@@ -6851,23 +6868,26 @@ function booksAll(){
       })
       h += '</table><div class="tip">' + esc(d.text || '') + '</div>'
       document.getElementById('bk_list').innerHTML = h
+      bmsg('看到了，一共 ' + d.books.length + ' 本账', true)
     })
-    .catch(function () { msg('网断了，稍后再试', false) })
+    .catch(function () { bmsg('网断了，稍后再试', false) })
 }
 function renBook(id){
   var nm = window.prompt('第 ' + id + ' 本改叫什么名字？（最多 20 个字）')
   if (!nm) return
   fetch('/book-admin', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ book: id, name: nm }) })
     .then(function (r) { return r.json() })
-    .then(function (d) { if (d.ok) { msg('改好了：第 ' + id + ' 本叫「' + d.name + '」', true); booksAll() } else msg(d.error || '改不了', false) })
+    .then(function (d) { if (d.ok) { bmsg('改好了：第 ' + id + ' 本叫「' + d.name + '」', true); booksAll() } else bmsg(d.error || '改不了', false) })
+    .catch(function () { bmsg('网断了，稍后再试', false) })
 }
 function useBook(id){
   document.getElementById('bk').value = String(id)
   keyLoad()
-  msg('已经切到第 ' + id + ' 本' + (K ? '' : '（这本还没在这台电脑上记过口令，填一下再点「记住」）'), !!K)
+  bmsg('已经切到第 ' + id + ' 本' + (K ? '，下面几块都跟着切了' : '（这本还没在这台电脑上记过口令，填一下再点「记住」）'), !!K)
 }
 keyLoad()
 document.getElementById('bk').addEventListener('change', function () { keyLoad() })
+if (K) booksAll()
 function msg(t, good){ var m = document.getElementById('msg'); m.textContent = t; m.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '') }
 function needKey(){ if (!K) { msg('先在上面填口令，点「记住」', false); return true } return false }
 function b64(buf){ var b = new Uint8Array(buf), s = '', i; for (i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s) }

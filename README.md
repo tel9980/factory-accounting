@@ -1526,6 +1526,11 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+316. ✅ **修「点『看我的账套』没反应」**：用户点了没反馈。两个原因：①第 6 块的提示都写在第 3 块的 `#msg` 里，屏幕上要往上滑才看得见；②口令没填 / 口令不对 / 用的是员工或演示口令时，只有那句藏起来的提示，按钮本身毫无变化。
+   - 第 6 块自己加 `#bk_msg` + `bmsg()`，所有反馈写在自己下面：没填口令说「先在上面第 1 块填口令」，401 说「口令不对（或这本账还没设口令）」，403 说「员工/演示口令看不到账套列表，只有老板口令能看」，网络错说「网断了」，成功说「看到了，一共 N 本账」。
+   - 「看我的账套」改成先读 `r.text()` 再自己 `JSON.parse`（原来直接 `.json()`，非 JSON 响应会静默失败），并带上 HTTP 状态码判断。
+   - 页面加载时如果这台电脑已经记过口令，**自动拉一次账套列表**，不用再点一次。
+
 315. ✅ **账套（多本账）能开到 9 本，并且能在电脑网页上管理**：用户问「最多可以开几个账套，账套设置可以在网页上完成吗？手机上不方便设置」。
    - 原来写死三本：`export default fetch` 里 `book === 3 ? env.DB3 : book === 2 ? env.DB2 : env.DB`，`scheduled` 里逐条 `ensureXxx(env.DB2) / (env.DB3)`，`/books` 也是 `[[1, all.DB], [2, all.DB2], [3, all.DB3]]`。
    - 改成**绑定驱动**：`const BOOK_MAX = 9`、`bookBindingName(id) = id === 1 ? 'DB' : 'DB' + id`、`bookDbs(env)` 扫描 `DB / DB2 … DB9` 里存在的绑定；`fetch` 选库改成从 `bookDbs` 里挑（传了没开的 `X-Book: 4` 会退回第 1 本，不会打空）；`scheduled` 的建表兜底与备份循环也改成遍历 `bookDbs`。**加一本账 = 在 `wrangler.toml` 里多一个 `DB4` 绑定 + 建库灌 schema，代码不用改。**
