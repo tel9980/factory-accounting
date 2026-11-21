@@ -1526,6 +1526,16 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+317. ✅ **超级管理员 + 每本账自己的管理员口令**：用户说「最好设一个超级管理员，每个账套都有不同的管理员」。
+   - 原来只有一把口令（存在主账套 `settings.access_key`），所有账套共用。现在两层：
+     - **超级口令**（`settings.super_key`，哈希存，至少 6 位）：一个口令进**任何一本账**都是老板权限，还能给别的账套设管理员口令。只有主账套老板口令或现有超级口令能改它 —— 某一本账的人抢不走。
+     - **每本账自己的管理员口令**（各账本自己的 `settings.access_key`）：中间件先认主账套口令，再认**当前这本账**自己的口令（`c.env.DB !== mainDb` 时才试），认到就 `book_admin`。主账套口令仍然能进所有账套（不然老板记不住）。
+   - 新增 `POST /auth/super {key, password}`（设/改/关，空串=关）、`POST /auth/super-state`、`POST /book-admin-key {book, password}`（只有超级管理员能调，`code:'super_only'`）；`/me` 多返回 `super / super_enabled / book_admin / book_own_key`；`/books-all` 多返回 `super / super_enabled`，每本的 `has_key` 是**那本账自己**的口令。
+   - `/pc` 第 6 块加 **6.1 超级管理员**：一个输入框「设 / 改超级口令」+「关掉」；账套表格里每行多一个「设管理员口令」（只有超级口令登录时才出现）。
+   - 小程序 `/me` 看到 `super` 时顶部显示「👑 超级管理员：哪一本账都能管」；用某本账自己的口令进来显示「🔑 这本账的管理员（别的账套看不到）」。
+   - ⚠️ 踩坑：`/book-admin-key` 一开始插在 `/account-recon` 前面，那里**在鉴权中间件之前**，`c.get('role')` 永远是空 → 一律 403。挪到 `/books-all` 前面（中间件之后）才对。
+   - 新增 `scripts/test-super.mjs`（**36 项**，挂 CI，在 `test-book` 之后）：超级口令太短/与老板口令相同 400、错口令设不了 403、超级口令进第 1/2 本都是 owner、普通老板调 `/book-admin-key` 403 `super_only`、超级管理员给第 2 本设口令后第 2 本可独立登录但那口令进不了第 1 本、主账套口令照样进第 2 本、不存在的账套 404、空/短口令 400、关掉后超级口令 401 而第 2 本自己的口令不受影响、演示口令两个接口都 403。
+
 316. ✅ **修「点『看我的账套』没反应」**：用户点了没反馈。两个原因：①第 6 块的提示都写在第 3 块的 `#msg` 里，屏幕上要往上滑才看得见；②口令没填 / 口令不对 / 用的是员工或演示口令时，只有那句藏起来的提示，按钮本身毫无变化。
    - 第 6 块自己加 `#bk_msg` + `bmsg()`，所有反馈写在自己下面：没填口令说「先在上面第 1 块填口令」，401 说「口令不对（或这本账还没设口令）」，403 说「员工/演示口令看不到账套列表，只有老板口令能看」，网络错说「网断了」，成功说「看到了，一共 N 本账」。
    - 「看我的账套」改成先读 `r.text()` 再自己 `JSON.parse`（原来直接 `.json()`，非 JSON 响应会静默失败），并带上 HTTP 状态码判断。

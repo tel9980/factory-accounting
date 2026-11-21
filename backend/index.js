@@ -1118,6 +1118,16 @@ app.use('*', async (c, next) => {
   let role = ''
   let staffMods = null
   if (given && (await verifyKey(mainDb, given))) role = 'owner'
+  // 每本账可以有自己独立的管理员口令（存在那本账的 settings.access_key 里）
+  else if (given && c.env.DB && c.env.DB !== mainDb && (await verifyKey(c.env.DB, given))) {
+    role = 'owner'
+    c.set('book_owner', true)
+  }
+  // 超级管理员：一个口令管所有账套（存在主账套，哈希）
+  else if (given && (await verifySetting(mainDb, 'super_key', given))) {
+    role = 'owner'
+    c.set('super', true)
+  }
   else if (given === DEMO_KEY) {
     // 内置演示：默认开着（不然审核员进不来），老板可以在设置里关掉
     const offR = await mainDb.prepare("SELECT value FROM settings WHERE key='demo_builtin_off'").first().catch(() => null)
@@ -5264,7 +5274,27 @@ app.get('/me', async (c) => {
   const builtinOff = role === 'owner'
     ? !!(await mainDb.prepare("SELECT value FROM settings WHERE key='demo_builtin_off'").first().catch(() => null) || { value: '' }).value === '1'
     : false
-  return c.json({ role, book: String(c.env.BOOK || '1'), staff_name: myName, staff_enabled: !!staff, demo_enabled: demoEnabled, demo_builtin: role === 'owner' ? !builtinOff : false, sealed: !!(seal && String(seal.value) === '1'), sealed_at: (sealAt && sealAt.value) || '', staff_modules: mods, staff_mod_labels: STAFF_MOD_LABEL })
+  const isSuper = !!c.get('super')
+  // 超级口令开着没有：只有超级管理员/主人看得到（前端据此显示设置入口）
+  const superEnabled = role === 'owner' ? await superKeyOn(mainDb) : false
+  // 这本账自己有没有独立管理员口令（有的话，主账套口令照样能用）
+  const bookKey = c.env.DB && c.env.DB !== mainDb ? await getKey(c.env.DB) : null
+  return c.json({
+    role,
+    book: String(c.env.BOOK || '1'),
+    staff_name: myName,
+    staff_enabled: !!staff,
+    demo_enabled: demoEnabled,
+    demo_builtin: role === 'owner' ? !builtinOff : false,
+    sealed: !!(seal && String(seal.value) === '1'),
+    sealed_at: (sealAt && sealAt.value) || '',
+    staff_modules: mods,
+    staff_mod_labels: STAFF_MOD_LABEL,
+    super: isSuper,
+    super_enabled: superEnabled,
+    book_admin: !!c.get('book_owner'),
+    book_own_key: !!bookKey,
+  })
 })
 // 把 '07-05' / '2026-07-05' / '2026/7/5' 转成 ISO 日期（本地 0 点）
 const addDaysIso = (iso, n) => {
@@ -6825,6 +6855,15 @@ app.get('/pc', async (c) => {
   <div id="bk_msg" class="tip"></div>
   <div id="bk_list"></div>
   <div class="tip">改名不用切账套：看到哪本改哪本。要操作某一本（导出 / 导入 / 初始化 / 看报表）先点「用这本」，如果那本有自己的口令，重新填一下再点「记住」。</div>
+
+  <h2 style="font-size:15px;margin-top:18px">6.1 超级管理员（一个口令管所有账套）</h2>
+  <div class="tip">每个账套都可以有自己的管理员口令（上面表格里「还没设口令」的那几本，用超级管理员给它设一个）。超级口令是给「所有账套都要管的人」用的：拿着它，进哪一本都是老板权限。</div>
+  <div class="row">
+    <input id="sup_pw" class="inp" type="text" placeholder="超级口令（至少 6 位）">
+    <button onclick="setSuper()">设 / 改超级口令</button>
+    <button onclick="setSuper(true)">关掉</button>
+  </div>
+  <div id="sup_msg" class="tip"></div>
   <div class="tip">存档建议：每个月结完账下一份月报，年底下一份年报，跟整账套 JSON 一起放文件夹；这些表是给人看和打印的，恢复数据还是用上面的整账套。</div>
 </div>
 
@@ -6862,15 +6901,51 @@ function booksAll(){
       if (d._status === 403) { bmsg('这个口令是员工 / 演示口令，账套列表只有老板口令能看', false); return }
       if (!d.ok) { bmsg(d.error || ('看不了账套列表（HTTP ' + d._status + '）'), false); return }
       var h = '<table><tr><th>#</th><th>名称</th><th>单数</th><th>应收</th><th>状态</th><th></th></tr>'
+      var isSuper = !!d.super
       d.books.forEach(function (b) {
         h += '<tr><td>' + (b.current ? '▶ ' : '') + b.id + '</td><td>' + esc(b.name) + '</td><td>' + b.orders + '</td><td>' + b.ar + '</td><td>' + (b.has_key ? '有口令' : '还没设口令') + (b.sealed ? ' · 已封存' : '') + '</td>'
-          + '<td><button onclick="renBook(' + b.id + ')">改名</button> <button onclick="useBook(' + b.id + ')">用这本</button></td></tr>'
+          + '<td><button onclick="renBook(' + b.id + ')">改名</button> <button onclick="useBook(' + b.id + ')">用这本</button>'
+          + (isSuper ? ' <button onclick="resBookKey(' + b.id + ')">设管理员口令</button>' : '') + '</td></tr>'
       })
       h += '</table><div class="tip">' + esc(d.text || '') + '</div>'
       document.getElementById('bk_list').innerHTML = h
-      bmsg('看到了，一共 ' + d.books.length + ' 本账', true)
+      var supTip = d.super ? '你用的是超级口令，哪本都能管' : (d.super_enabled ? '超级口令已设（你不知道就别管它）' : '还没设超级口令')
+      bmsg('看到了，一共 ' + d.books.length + ' 本账 · ' + supTip, true)
     })
     .catch(function () { bmsg('网断了，稍后再试', false) })
+}
+function smsg(t, good){
+  var el = document.getElementById('sup_msg')
+  el.textContent = t || ''
+  el.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '')
+}
+function setSuper(off){
+  if (!K) { smsg('先在顶上第 1 块填口令再点', false); return }
+  var pw = off ? '' : String(document.getElementById('sup_pw').value || '').trim()
+  if (!off && pw.length < 6) { smsg('超级口令至少 6 位', false); return }
+  smsg('正在保存……')
+  fetch('/auth/super', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ key: K, password: pw }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) {
+      if (!d.ok) { smsg(d.error || '没设上', false); return }
+      smsg(d.enabled ? '设好了。以后拿这个口令进任何一本账都是老板权限（别忘了它，页面上不再显示）' : '已经关掉，以后每个账套只能用各自的口令', d.enabled)
+      document.getElementById('sup_pw').value = ''
+      booksAll()
+    })
+    .catch(function () { smsg('网断了，稍后再试', false) })
+}
+function resBookKey(id){
+  var pw = window.prompt('给第 ' + id + ' 本账设一个管理员口令（至少 4 位）。\n设好之后，那本账可以只让它的管理员进，不用把主口令给出去。')
+  if (!pw) return
+  smsg('正在设……')
+  fetch('/book-admin-key', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ book: id, password: pw }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) {
+      if (!d.ok) { smsg(d.error || '没设上', false); return }
+      smsg('第 ' + id + ' 本「' + d.name + '」有自己的管理员口令了', true)
+      booksAll()
+    })
+    .catch(function () { smsg('网断了，稍后再试', false) })
 }
 function renBook(id){
   var nm = window.prompt('第 ' + id + ' 本改叫什么名字？（最多 20 个字）')
@@ -7889,6 +7964,72 @@ app.post('/book-name', async (c) => {
 })
 
 // 电脑上管理账套：一次看到所有账套的名称/单数/应收/有没有设口令（老板口令即可，不用逐本切）
+// 超级管理员：一个口令管所有账套（存在主账套 settings.super_key，哈希存，不回明文）
+async function superKeyOn(db) {
+  const r = await db.prepare("SELECT value FROM settings WHERE key='super_key'").first().catch(() => null)
+  return !!(r && String(r.value || '').trim())
+}
+
+// 设 / 改 / 关超级口令。只有「主账套老板口令」或「现有超级口令」能改（防止某一本账的人抢管理权）
+app.post('/auth/super', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  if (!(await getKey(mainDb))) return c.json({ error: '主账套还没设口令，先设主账套口令' }, 400)
+  const givenKey = String(b.key || c.req.header('x-access-key') || '')
+  const okOwner = await verifyKey(mainDb, givenKey)
+  const okSuper = okOwner ? false : await verifySetting(mainDb, 'super_key', givenKey)
+  if (!okOwner && !okSuper) return c.json({ error: '只有主账套老板口令（或现有超级口令）能改这个' }, 403)
+  const pw = String(b.password || '').trim()
+  if (pw && pw.length < 6) return c.json({ error: '超级口令至少 6 位（它管所有账套，要比普通口令长一点）' }, 400)
+  if (pw && (await verifyKey(mainDb, pw))) return c.json({ error: '超级口令不能和主账套口令一样' }, 400)
+  if (pw && (await verifySetting(mainDb, 'staff_key', pw))) return c.json({ error: '超级口令不能和员工口令一样' }, 400)
+  if (pw && (await verifySetting(mainDb, 'demo_key', pw))) return c.json({ error: '超级口令不能和演示口令一样' }, 400)
+  if (!pw) {
+    await mainDb.prepare("DELETE FROM settings WHERE key='super_key'").run()
+    await logAudit(mainDb, '关掉超级口令', '超级管理员', '关掉后每个账套只能用各自的口令', '', '老板')
+    return c.json({ ok: true, enabled: false })
+  }
+  const rec = await makeKeyRecord(pw)
+  const old = await mainDb.prepare("SELECT value FROM settings WHERE key='super_key'").first()
+  if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='super_key'").bind(rec).run()
+  else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('super_key', ?)").bind(rec).run()
+  await logAudit(mainDb, '设超级口令', '超级管理员', '一个口令管所有账套', '', '老板')
+  return c.json({ ok: true, enabled: true })
+})
+
+// 超级口令开着没有（老板可查，不回明文）
+app.post('/auth/super-state', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const gk = String(b.key || c.req.header('x-access-key') || '')
+  const ok = (await verifyKey(mainDb, gk)) || (await verifySetting(mainDb, 'super_key', gk))
+  if (!ok) return c.json({ error: '只有主账套老板口令或超级口令能看' }, 403)
+  return c.json({ ok: true, enabled: await superKeyOn(mainDb) })
+})
+
+// 超级管理员给「任意一本账」设 / 重设管理员口令（不用知道那本原来的口令）
+app.post('/book-admin-key', async (c) => {
+  if ((c.get('role') || '') !== 'owner') return c.json({ error: '只有老板口令能管理账套', code: 'owner_only' }, 403)
+  if (!c.get('super')) return c.json({ error: '只有超级管理员能给别的账套重设管理员口令', code: 'super_only' }, 403)
+  const b = await c.req.json().catch(() => ({}))
+  const id = num(b.book)
+  const pw = String(b.password || '').trim()
+  if (pw.length < 4) return c.json({ error: '管理员口令至少 4 位' }, 400)
+  const all = c.env.ENV_ALL || c.env
+  const hit = bookDbs(all).find(([x]) => x === id)
+  if (!hit) return c.json({ error: '没有第 ' + id + ' 本账', code: 'no_book' }, 404)
+  const db = hit[1]
+  const mainDb = all.DB || c.env.DB
+  if (await verifySetting(mainDb, 'super_key', pw)) return c.json({ error: '这本账的管理员口令不能和超级口令一样' }, 400)
+  try { await ensureBaseTables(db) } catch (e) { noteFail(e, '重设账套口令建表') }
+  const rec = await makeKeyRecord(pw)
+  const old = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first().catch(() => null)
+  if (old) await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(rec).run()
+  else await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(rec).run()
+  await logAudit(mainDb, '重设账套管理员口令', '超级管理员', '第 ' + id + ' 本', '', act(c))
+  return c.json({ ok: true, book: id, name: await bookNameOf(db, id) })
+})
+
 app.get('/books-all', async (c) => {
   if ((c.get('role') || '') !== 'owner') return c.json({ error: '只有老板口令能管理账套', code: 'owner_only' }, 403)
   const all = c.env.ENV_ALL || c.env
@@ -7911,7 +8052,15 @@ app.get('/books-all', async (c) => {
     } catch (e) { noteFail(e, '账套列表 ' + id) }
     list.push({ id, name, orders, ar, has_key: hasKey, sealed, binding: bookBindingName(id), current: num(c.env.BOOK) === id })
   }
-  return c.json({ ok: true, current: num(c.env.BOOK) || 1, max: BOOK_MAX, books: list, text: '现在一共 ' + list.length + ' 本账，最多可以开到 ' + BOOK_MAX + ' 本（每本要一个 D1 库）' })
+  return c.json({
+    ok: true,
+    current: num(c.env.BOOK) || 1,
+    max: BOOK_MAX,
+    books: list,
+    super: !!c.get('super'),
+    super_enabled: await superKeyOn(c.env.ENV_ALL && c.env.ENV_ALL.DB ? c.env.ENV_ALL.DB : c.env.DB),
+    text: '现在一共 ' + list.length + ' 本账，最多可以开到 ' + BOOK_MAX + ' 本（每本要一个 D1 库）',
+  })
 })
 
 // 给指定的那本账改名（老板口令 + 当前账套已登录即可，不用切过去）
@@ -14471,7 +14620,7 @@ app.post('/book-reset', async (c) => {
   let snapId = 0
   try { const sn = await saveBackup(db, 'before-reset'); snapId = num(sn && sn.id) } catch (e) { noteFail(e, '清空前备份') }
   const keepStaff = b.keep_staff === true
-  const KEEP_SET = ['access_key', 'recover_code', 'sign_secret', 'staff_key', 'staff_salt', 'book_name']
+  const KEEP_SET = ['access_key', 'recover_code', 'sign_secret', 'staff_key', 'staff_salt', 'book_name', 'super_key', 'demo_key', 'demo_builtin_off']
   const stmts = []
   const cleared = []
   for (const t of BACKUP_TABLES) {
