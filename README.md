@@ -1526,6 +1526,13 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+309. ✅ **电脑上填表：模板带客户名预填 + 一个 `GET /pc` 网页**：用户一句话点出真问题——「有 70 多客户，要通过手机录入是不实际的」。两件事补上：
+   - **模板预填客户/供应商名**：`/import-template-pack?fill=1` 会把系统里所有客户（`orders.customer` 去重 + `party_profiles` 的名字，最多 300 个）、所有供应商（`payables.supplier`）先写进「应收对账 / 应付对账 / 期初应收 / 期初应付」这几页，会计只对着名字敲金额。**只填名字没填金额的行，预览时当成「还没填」直接跳过，不报错**（`previewImport` 里对 `ar_recon/ap_recon/ar_init/ap_init` 的纯预填行 `continue`）——不然 70 行「金额不是数字」的红字会把人吓退。小程序里「下」按钮现在自动带 `fill=1`。
+   - **`GET /pc` 电脑填表页**（免口令打开，页面里的动作才要口令）：填一次口令记在浏览器里 → 下「开账全套 / 日常台账 / 只下应收对账 / 只下应付对账」→ 用 Excel 填 → 选文件「先看看要导什么」（走 `/import-pack` 的 `dry:true`）→ 确认导入。整页纯 HTML + 原生 JS，没有构建、没有依赖，和打印页同一套路子（`c.html(...)`）。
+   - 小程序模板中心加一行提示「电脑上填更省事 → 点这里复制网址」，点了把 `https://jz.qy663.de5.net/pc` 复制到剪贴板，发到电脑浏览器打开即可。
+   - **验证**：`scripts/test-pack.mjs` 扩到 **58 项**（新增：带 `fill=1` 能下、页签数不变、预填行预览不报错也不计导入、`/pc` 免口令 200 且页面里有下载与上传）；本地全套：`check.mjs` 418 路由 / 57 表 / 634 SQL / 261 调用 / 781 绑定，`smoke` 231 GET 无 5xx，`smoke-write`、`test-demo` 60、`test-modules`、`test-safety` 48、离线三件套全绿。
+   - ⚠️ 动了前端（模板中心那行提示）→ 小程序要重新上传；`/pc` 页面是后端，重新部署即可用。
+
 308. ✅ **小白不用动手：内置演示入口（点一下就进，示例账套，不碰真账）**：上一版加的是「演示口令」，但用户一句话点破了问题——「小白不懂，你可以内置吗」。演示口令还得老板自己去设、再去提审页面填，两步都是小白容易卡住的地方。这一版把它做成**完全内置**：
    - **登录页换了**：以前一进来是系统弹窗（只有一个输入框，小白天知道「口令」是什么），现在是一张卡片：输口令进入 / **「👀 先看看演示（不用口令，示例数据）」** / 「忘了口令？用恢复码重设」。第一次用的账本自动切成「设个口令」，带一句「这是你自己定的记账口令，不是微信密码」。
    - **演示进的是专门的演示账套**（第 3 本账）：第一次有人点「先看看演示」时自动种一批示例数据——3 个客户 6 张单（有的收了钱、有的没收）、4 张应付（硫酸/染料/外发加工费/电费）、工资房租水电辅料 4 笔支出、硫酸与染料两条进料，账户期初现金 5000 / 银行卡 50000，账本名叫「演示账套（示例数据）」。**数据是自洽的**：单据上的已收/已付跟流水一分不差、核销跟 writeoffs 对得上、库存为正，`/selfcheck` 在演示账本上也是 `bad:0`（不然每天 cron 会在日志里报假警）。
@@ -1578,7 +1585,7 @@ node scripts/build-exe.mjs --out dist
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 416 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 417 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1966,7 +1973,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（216）
+**其它（单个接口）**（217）
 
 - `GET /`
 - `GET /access-guide`
@@ -2095,6 +2102,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /pay-speed`
 - `GET /payroll-link`
 - `GET /payroll-print`
+- `GET /pc`
 - `GET /pipeline`
 - `POST /pipeline-summary`
 - `GET /price-anomaly`

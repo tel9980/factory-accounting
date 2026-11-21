@@ -1546,11 +1546,17 @@ Page({
       fail: () => wx.showToast({ title: '保存失败', icon: 'none' })
     })
   },
+  // 70 多个客户在手机上一个个敲不现实：把这个网址发到电脑浏览器，下载模板填好再传回来
+  copyPcUrl() {
+    const u = API_BASE + '/pc'
+    wx.setClipboardData({ data: u, success: () => wx.showModal({ title: '网址已复制', content: u + '\n\n发到自己电脑上打开：填口令 → 下载模板 → 用 Excel 填 → 传回来。手机上不用敲。', showCancel: false }) })
+  },
   packTemplate(e) {
     const p = (e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.p : '') || 'daily'
     wx.showLoading({ title: '生成中…' })
     this.req({
-      url: API_BASE + '/import-template-pack?tpl=' + p,
+      // fill=1：把已有客户/供应商名字先填进对账页，70 多个客户不用一个个手打
+      url: API_BASE + '/import-template-pack?tpl=' + p + '&fill=1',
       success: (res) => {
         wx.hideLoading()
         const d = res.data || {}

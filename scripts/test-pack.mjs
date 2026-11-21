@@ -263,6 +263,30 @@ const main = async () => {
 
   // 4. 整包导入不能把账弄乱：自检里不许出现本次导入的数据
   //（不能直接要求 ok===true —— 同一库上别的测试会故意留不一致的数据来验守卫）
+  // 5. 电脑上填表：预填客户名（fill=1）+ 电脑版页面 /pc
+  {
+    const cname = TAG + '预填客户'
+    await call('POST', '/orders', { customer: cname, price: 100, item_name: '占位' })
+    const f = await call('GET', '/import-template-pack?tpl=daily&fill=1')
+    eq('带预填的模板包能下', f.status, 200)
+    const plain = await call('GET', '/import-template-pack?tpl=daily')
+    eq('…页签跟不带预填时一样多', ((f.d || {}).sheets || []).length, ((plain.d || {}).sheets || []).length)
+    // 预填了客户名但没填金额的行，预览时必须「当成还没填」，不能报错
+    const dry = await call('POST', '/import-pack', { b64: (f.d || {}).b64, dry: true })
+    eq('预填模板能预览', dry.status, 200)
+    const errs = (((dry.d || {}).sheets) || []).reduce((a, x) => a + num0(x.bad_count), 0)
+    eq('预填出来没填金额的行不报错', errs, 0)
+    const imp = (((dry.d || {}).sheets) || []).reduce((a, x) => a + num0(x.ok_count), 0)
+    eq('…也不会被当成要导入的数据', imp, 0)
+  }
+  {
+    // /pc 是给电脑浏览器用的：不需要口令就能打开（页面里的动作才要口令）
+    const r = await fetch(BASE + '/pc', { headers: { 'user-agent': 'test-pack' } })
+    eq('电脑填表页能打开（免口令）', r.status, 200)
+    const h = await r.text()
+    ok(/下载模板/.test(h) && /上传填好的表/.test(h) && /import-pack/.test(h) ? '…页面里有下载和上传' : '…页面内容不对')
+  }
+
   const sc = await call('GET', '/selfcheck')
   eq('自检接口通', sc.status, 200)
   const mine = ((sc.d && sc.d.issues) || []).filter((x) => String(x).indexOf(TAG) >= 0)

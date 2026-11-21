@@ -1025,6 +1025,7 @@
     <view class="form">
       <view class="prev-h">📦 两个模板包（一个文件好几页，一次传全导进去）</view>
       <view class="tip">新建账套用「开账全套」走一遍；日常就维护「日常台账」这一个文件，哪天哪页有新的就填哪页，填完整本传上来，程序按页签名自己分。</view>
+      <view class="tip">下下来时已经把你现有的客户 / 供应商名字填在对账页里了，只填金额就行。<text class="red" bindtap="copyPcUrl">电脑上填更省事 → 点这里复制网址</text></view>
       <view class="tpl-row" wx:for="{{tp_packs}}" wx:key="p">
         <view class="tpl-main">
           <view class="tpl-n">📦 {{item.n}}</view>

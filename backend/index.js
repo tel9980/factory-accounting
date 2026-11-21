@@ -1105,7 +1105,7 @@ app.use('*', async (c, next) => {
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
   // /version 放在口令外面：部署完不用口令就能确认线上跑的是哪一版（它不返回任何账目数据）
   if (path === '/version') return c.json({ ok: true, version: String((c.env && c.env.APP_VERSION) || 'dev'), built: String((c.env && c.env.APP_BUILT) || ''), commit: String((c.env && c.env.APP_COMMIT) || ''), ray: c.req.header('cf-ray') || '' })
-  if (path === '/' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c, true); return }
+  if (path === '/' || path === '/pc' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c, true); return }
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -6629,16 +6629,198 @@ app.get('/import-template-pack', async (c) => {
     cats = (r.results || []).map((x) => String(x.name || '').trim()).filter((x) => x && x.indexOf(',') < 0)
   } catch (e) { cats = [] }
   if (!cats.length) cats = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
+  // fill=1：把手上所有客户 / 供应商的名字先填进「应收对账 / 应付对账 / 期初应收 / 期初应付」，
+  // 电脑上只要对着名字敲金额 —— 70 多个客户一个个手打名字最容易错，也最费时间。
+  const doFill = String(c.req.query('fill') || '') === '1'
+  let custs = []
+  let sups = []
+  if (doFill) {
+    try {
+      const r1 = await c.env.DB.prepare("SELECT DISTINCT customer AS n FROM orders WHERE TRIM(COALESCE(customer,''))<>'' ORDER BY n LIMIT 300").all()
+      custs = (r1.results || []).map((x) => String(x.n || '').trim()).filter(Boolean)
+      const r2 = await c.env.DB.prepare("SELECT DISTINCT name AS n FROM party_profiles WHERE TRIM(COALESCE(name,''))<>'' ORDER BY n LIMIT 300").all()
+      for (const x of r2.results || []) {
+        const n = String(x.n || '').trim()
+        if (n && custs.indexOf(n) < 0) custs.push(n)
+      }
+      const r3 = await c.env.DB.prepare("SELECT DISTINCT supplier AS n FROM payables WHERE TRIM(COALESCE(supplier,''))<>'' ORDER BY n LIMIT 300").all()
+      sups = (r3.results || []).map((x) => String(x.n || '').trim()).filter(Boolean)
+    } catch (e) { noteFail(e, '模板预填客户名') }
+  }
   const sheets = P.sheets.map((s) => {
     let dv = []
     if (s.dv) dv = [{ sq: s.dv[0], list: s.dv[1] }]
     else if (s.type === 'expense') dv = [{ sq: 'B2:B200', list: cats }]
     else if (s.type === 'reimb') dv = [{ sq: 'C2:C200', list: cats }]
     else if (s.type === 'ap') dv = [{ sq: 'B2:B200', list: AP_CATS }]
-    return { name: s.sheet, rows: s.rows, dv }
+    let rows = s.rows
+    if (doFill && (s.type === 'ar_recon' || s.type === 'ar_init') && custs.length) {
+      rows = [s.rows[0]].concat(custs.map((n) => (s.type === 'ar_recon' ? [n, '', '', ''] : [n, '', ''])))
+    }
+    if (doFill && (s.type === 'ap_recon' || s.type === 'ap_init') && sups.length) {
+      rows = [s.rows[0]].concat(sups.map((n) => (s.type === 'ap_recon' ? [n, '', '', '', ''] : [n, '', ''])))
+    }
+    return { name: s.sheet, rows, dv }
   })
   const xlsx = await makeXlsxSheets(sheets)
   return c.json({ ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc, sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })), b64: toB64(xlsx) })
+})
+
+// 电脑上填表 / 上传：手机上一个个敲 70 多个客户不现实，这个页面就干两件事 ——
+// 下载带客户名的模板、把填好的 Excel 传回来（同一个口令，不经过小程序）
+app.get('/pc', async (c) => {
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>电脑填表 · 上传回来</title>
+<style>
+ body{margin:0;font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#222}
+ .wrap{max-width:860px;margin:0 auto;padding:28px 20px 60px}
+ h1{font-size:22px;margin:0 0 6px}
+ .sub{color:#777;font-size:13px;margin-bottom:22px}
+ .card{background:#fff;border-radius:12px;padding:20px 22px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+ .card h2{font-size:16px;margin:0 0 12px}
+ .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+ input[type=password],input[type=text]{flex:1;min-width:220px;padding:9px 12px;border:1px solid #d8dbe0;border-radius:8px;font-size:15px}
+ button{padding:9px 16px;border:1px solid #d8dbe0;background:#fff;border-radius:8px;font-size:15px;cursor:pointer}
+ button.p{background:#2f6fed;border-color:#2f6fed;color:#fff}
+ button:disabled{opacity:.55;cursor:default}
+ .tip{color:#777;font-size:13px;margin-top:10px}
+ .ok{color:#197a3a}.bad{color:#c0392b}
+ table{width:100%;border-collapse:collapse;margin-top:12px;font-size:14px}
+ th,td{border-bottom:1px solid #eef0f3;padding:8px 6px;text-align:left;vertical-align:top}
+ th{color:#666;font-weight:500;font-size:13px}
+ .hide{display:none}
+ code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+</style></head><body><div class="wrap">
+<h1>电脑上填表，填完传回来</h1>
+<div class="sub">下载 → 用 Excel / WPS 在电脑上填 → 保存成 xlsx → 在这里上传。手机上不用一个个敲。</div>
+
+<div class="card">
+  <h2>1. 口令</h2>
+  <div class="row">
+    <input type="password" id="key" placeholder="就是你记账用的那个口令"/>
+    <button onclick="saveKey()">记住</button>
+  </div>
+  <div class="tip">只存在这台电脑的浏览器里。忘记可以去小程序「用恢复码重设」。</div>
+</div>
+
+<div class="card">
+  <h2>2. 下载模板</h2>
+  <div class="row">
+    <button class="p" onclick="dl('open')">开账全套（7 页签）</button>
+    <button class="p" onclick="dl('daily')">日常台账（6 页签）</button>
+    <button onclick="dlSheet('ar_recon')">只下应收对账</button>
+    <button onclick="dlSheet('ap_recon')">只下应付对账</button>
+  </div>
+  <label class="tip"><input type="checkbox" id="fill" checked/> 把系统里已有的客户 / 供应商名字先填好（你只填金额）</label>
+  <div class="tip">页签名别改 · 一家一行只填金额 · 月份可以留空（留空算当月）· 没填金额的行会自己跳过</div>
+</div>
+
+<div class="card">
+  <h2>3. 上传填好的表</h2>
+  <div class="row">
+    <input type="file" id="f" accept=".xlsx"/>
+    <button class="p" id="btn1" onclick="preview()">先看看要导什么</button>
+  </div>
+  <div id="msg" class="tip"></div>
+  <div id="res"></div>
+  <div class="row" id="confirmRow" style="margin-top:14px">
+    <button class="p hide" id="btn2" onclick="doImport()">确认导入</button>
+    <button class="hide" id="btn0" onclick="reset()">重选文件</button>
+  </div>
+</div>
+
+<script>
+var K = localStorage.getItem('fa_key') || ''
+document.getElementById('key').value = K
+function saveKey(){
+  K = document.getElementById('key').value.trim()
+  localStorage.setItem('fa_key', K)
+  msg(K.length >= 4 ? '口令记住了（只在这台电脑）' : '口令太短，至少 4 位', K.length >= 4)
+}
+function msg(t, good){ var m = document.getElementById('msg'); m.textContent = t; m.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '') }
+function needKey(){ if (!K) { msg('先在上面填口令，点「记住」', false); return true } return false }
+function b64(buf){ var b = new Uint8Array(buf), s = '', i; for (i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s) }
+function saveBlob(b, name){ var a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name; a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href) }, 4000) }
+function dl(tpl){
+  if (needKey()) return
+  var fill = document.getElementById('fill').checked ? '1' : ''
+  msg('正在生成…')
+  fetch('/import-template-pack?tpl=' + tpl + (fill ? '&fill=1' : ''), { headers: { 'x-access-key': K } })
+    .then(function(r){ return r.json() }).then(function(d){
+      if (!d.ok) { msg(d.error || '生成失败（口令对吗？）', false); return }
+      var bin = atob(d.b64), n = bin.length, u = new Uint8Array(n)
+      for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i)
+      saveBlob(new Blob([u], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name || (tpl + '.xlsx'))
+      msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill ? '（已把客户/供应商名字填好）' : ''), true)
+    }).catch(function(e){ msg('下载失败：' + e, false) })
+}
+function dlSheet(t){
+  if (needKey()) return
+  msg('正在生成…')
+  fetch('/import-template-xlsx?type=' + t, { headers: { 'x-access-key': K } })
+    .then(function(r){ return r.json() }).then(function(d){
+      if (!d.ok) { msg(d.error || '生成失败（口令对吗？）', false); return }
+      var bin = atob(d.b64), n = bin.length, u = new Uint8Array(n)
+      for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i)
+      saveBlob(new Blob([u], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name || (t + '.xlsx'))
+      msg('下载好了：' + (d.name || t + '.xlsx'), true)
+    }).catch(function(e){ msg('下载失败：' + e, false) })
+}
+function readFile(){
+  return new Promise(function(ok, bad){
+    var f = document.getElementById('f').files[0]
+    if (!f) { bad('先选一个 xlsx 文件'); return }
+    if (f.size > 12 * 1024 * 1024) { bad('文件超过 12MB，分月导吧'); return }
+    var rd = new FileReader()
+    rd.onload = function(){ ok(b64(rd.result)) }
+    rd.onerror = function(){ bad('读不了这个文件') }
+    rd.readAsArrayBuffer(f)
+  })
+}
+function show(d){
+  var rows = d.sheets || [], h = '<table><tr><th>页签</th><th>认成</th><th>结果</th></tr>'
+  rows.forEach(function(s){
+    var t = s.empty || s.skipped ? (s.note || '这页没填')
+      : (s.imported != null ? s.text : (s.count ? (s.ok_count + '/' + s.count + ' 行能导' + (s.dup_count ? '，' + s.dup_count + ' 行像重复' : '') + (s.bad_count ? '，' + s.bad_count + ' 行有问题' : '')) : '—'))
+    h += '<tr><td>' + s.sheet + '</td><td>' + (s.type_name || s.type || '—') + '</td><td>' + t +
+      ((s.errors || []).length ? '<div class="bad" style="font-size:12px">' + s.errors.join('<br/>') + '</div>' : '') + '</td></tr>'
+  })
+  h += '</table>'
+  if (d.total_imported != null) h += '<div class="tip ok">这次一共导进 ' + d.total_imported + ' 行，合计 ¥' + (d.total_amount || 0) + '</div>'
+  document.getElementById('res').innerHTML = h
+}
+function preview(){
+  if (needKey()) return
+  readFile().then(function(b64s){
+    msg('正在检查…')
+    return fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K }, body: JSON.stringify({ b64: b64s, dry: true }) })
+      .then(function(r){ return r.json() }).then(function(d){
+        if (!d.ok) { msg(d.error || '这个文件读不了', false); return }
+        show(d)
+        window._b64 = b64s
+        document.getElementById('btn2').classList.remove('hide')
+        document.getElementById('btn0').classList.remove('hide')
+        msg('上面是预览，确认没问题再点「确认导入」', true)
+      })
+  }).catch(function(e){ msg(String(e), false) })
+}
+function doImport(){
+  if (needKey()) return
+  if (!window._b64) { msg('先点「先看看要导什么」', false); return }
+  var b = document.getElementById('btn2'); b.disabled = true; msg('正在导…')
+  fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K }, body: JSON.stringify({ b64: window._b64, force: true }) })
+    .then(function(r){ return r.json() }).then(function(d){
+      b.disabled = false
+      if (!d.ok) { msg(d.error || '导入失败', false); return }
+      show(d)
+      if (d.dup_file) msg('这份表之前导过了，没有再导一遍', false)
+      else { msg('导完了', true); document.getElementById('btn2').classList.add('hide') }
+    }).catch(function(e){ b.disabled = false; msg(String(e), false) })
+}
+function reset(){ window._b64 = null; document.getElementById('res').innerHTML = ''; document.getElementById('btn2').classList.add('hide'); document.getElementById('btn0').classList.add('hide'); msg('') }
+</script></div></body></html>`
+  return c.html(html)
 })
 
 // 整包导入：一个工作簿里几个页签，按页签名分别当成应收对账 / 支出 / …，一次全导
@@ -6742,6 +6924,11 @@ async function previewImport(db, type, rawRows) {
   const parsed = []
   for (const row of rows) {
     const p = row.slice()
+    // 预填了客户名、还没敲金额的行（模板包会把老客户名单先填好）：当成「这行还没填」，不报错
+    if (type === 'ar_recon' || type === 'ap_recon' || type === 'ar_init' || type === 'ap_init') {
+      const cells = p.map((x) => String(x === null || x === undefined ? '' : x).trim())
+      if (cells[0] && cells.slice(1).every((x) => !x)) continue
+    }
     let d = t
     let dateGiven = false
     if (p.length > 1 && looksLikeDate(p[p.length - 1])) { d = toIsoDate(p.pop()); dateGiven = true }
