@@ -6867,6 +6867,28 @@ app.get('/pc', async (c) => {
   <div class="tip">存档建议：每个月结完账下一份月报，年底下一份年报，跟整账套 JSON 一起放文件夹；这些表是给人看和打印的，恢复数据还是用上面的整账套。</div>
 </div>
 
+<div class="card">
+  <h2>7. 人员与权限（员工账号）</h2>
+  <div class="tip">员工用<b>自己的 4 位口令</b>登录，记的账自动记上名字；能做什么按「权限」勾。员工永远不能删改单据、看不到毛利和金额类分析。<br>
+  注意：员工账号是<b>所有账套共用</b>的（同一个人在哪个账套记账都是这个口令），但「只看自己负责的客户」是按账套分的。</div>
+  <div class="row">
+    <button onclick="loadStaff()">看员工账号</button>
+    <label class="tip" style="margin:0"><input type="checkbox" id="sp_self_own"> 员工只能看自己录的单</label>
+    <label class="tip" style="margin:0"><input type="checkbox" id="sp_scope_own"> 员工只能看自己负责的客户</label>
+    <button onclick="saveStaffPerms()">保存这两项</button>
+  </div>
+  <div id="st_msg" class="tip"></div>
+  <div id="st_list"></div>
+
+  <h2 style="font-size:15px;margin-top:18px">7.1 加一个人</h2>
+  <div class="row">
+    <input id="st_name" class="inp" type="text" placeholder="名字（如 小王）">
+    <input id="st_pin" class="inp" type="text" placeholder="4 位口令（留空自动生成）">
+  </div>
+  <div id="st_mods" class="tip">模块权限：</div>
+  <div class="row"><button onclick="addStaff()">加这个员工</button></div>
+</div>
+
 <script>
 var K = ''
 function bookCur(){ var el = document.getElementById('bk'); return (el && el.value) || '1' }
@@ -6946,6 +6968,125 @@ function resBookKey(id){
       booksAll()
     })
     .catch(function () { smsg('网断了，稍后再试', false) })
+}
+var MODS = []
+var LABELS = {}
+function smsg2(t, good){
+  var el = document.getElementById('st_msg')
+  el.textContent = t || ''
+  el.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '')
+}
+function modBoxes(id, sel){
+  var h = '<div class="mods">'
+  MODS.forEach(function(k){
+    h += '<label><input type="checkbox" data-mod="' + k + '"' + (sel.indexOf(k) >= 0 ? ' checked' : '') + '> ' + (LABELS[k] || k) + '</label> '
+  })
+  return h + '</div>'
+}
+function pickedMods(scope){
+  var out = []
+  var box = document.getElementById(scope)
+  if (!box) return out
+  var ins = box.querySelectorAll('input[type=checkbox]')
+  for (var i = 0; i < ins.length; i++) if (ins[i].checked) out.push(ins[i].getAttribute('data-mod'))
+  return out
+}
+function loadStaff(){
+  if (!K) { smsg2('先在顶上第 1 块填口令再点', false); return }
+  smsg2('正在看……')
+  fetch('/staff-users', { headers: { 'x-access-key': K, 'X-Book': bookCur() } })
+    .then(function (r) { return r.json() })
+    .then(function (d) {
+      if (!d.ok) { smsg2(d.error || '看不了员工列表', false); return }
+      MODS = d.all_mods || []
+      LABELS = d.labels || {}
+      var form = document.getElementById('st_mods')
+      if (!/checkbox/.test(form.innerHTML)) form.innerHTML = '模块权限（新加的人默认全开，可以取消）：' + modBoxes(0, MODS)
+      var h = '<table><tr><th>名字</th><th>口令</th><th>能做什么</th><th>状态</th><th></th></tr>'
+      ;(d.rows || []).forEach(function (u) {
+        h += '<tr><td>' + esc(u.name) + '</td>'
+          + '<td>' + (u.pin_set ? '已设' : '还没设') + '</td>'
+          + '<td>' + esc(u.mod_text || '全部') + '</td>'
+          + '<td>' + (Number(u.active) ? '在用' : '停用') + '</td>'
+          + '<td><button onclick="chgStaffPin(' + u.id + ',&quot;' + String(u.name || '').replace(/&quot;/g, '') + '&quot;)">换口令</button> '
+          + '<button onclick="chgStaffMods(' + u.id + ')">改权限</button> '
+          + '<button onclick="toggleStaff(' + u.id + ',' + (Number(u.active) ? 0 : 1) + ')">' + (Number(u.active) ? '停用' : '启用') + '</button> '
+          + '<button onclick="delStaff(' + u.id + ',&quot;' + String(u.name || '').replace(/&quot;/g, '') + '&quot;)">删</button></td></tr>'
+          + '<tr id="mrow_' + u.id + '" style="display:none"><td colspan="5">' + modBoxes(u.id, u.mods || []) + '<button onclick="saveStaffMods(' + u.id + ')">保存权限</button></td></tr>'
+      })
+      h += '</table>'
+      document.getElementById('st_list').innerHTML = h
+      document.getElementById('sp_self_own').checked = !!d.self_only
+      smsg2(d.text || '看好了', true)
+      return fetch('/staff-perms', { headers: { 'x-access-key': K, 'X-Book': bookCur() } }).then(function (r) { return r.json() }).then(function (p) {
+        if (p && p.ok) document.getElementById('sp_scope_own').checked = p.scope === 'own'
+      })
+    })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
+}
+function addStaff(){
+  if (!K) { smsg2('先在顶上第 1 块填口令再点', false); return }
+  var name = String(document.getElementById('st_name').value || '').trim()
+  var pin = String(document.getElementById('st_pin').value || '').replace(/\D/g, '')
+  var mods = pickedMods('st_mods')
+  if (!name) { smsg2('先填名字', false); return }
+  fetch('/staff-users', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ name: name, pin: pin, mods: mods }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) {
+      if (!d.ok) { smsg2(d.error || '没加成功', false); return }
+      smsg2('加好了：' + d.name + '，口令 ' + d.pin + '（只显示这一次，抄下来给他）', true)
+      document.getElementById('st_name').value = ''
+      document.getElementById('st_pin').value = ''
+      loadStaff()
+    })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
+}
+function chgStaffPin(id, name){
+  var pin = window.prompt('给「' + name + '」设一个新的 4 位口令：')
+  if (!pin) return
+  fetch('/staff-users/' + id, { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ pin: pin }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) {
+      if (!d.ok) { smsg2(d.error || '没改成', false); return }
+      smsg2('「' + name + '」的新口令是 ' + d.pin + '（只显示这一次）', true)
+      loadStaff()
+    })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
+}
+function chgStaffMods(id){
+  var row = document.getElementById('mrow_' + id)
+  row.style.display = (row.style.display === 'none' ? '' : 'none')
+}
+function saveStaffMods(id){
+  var mods = pickedMods('mrow_' + id)
+  if (!mods.length) { smsg2('至少给他留一个模块', false); return }
+  fetch('/staff-users/' + id, { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ mods: mods }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) { if (d.ok) { smsg2('权限改好了', true); loadStaff() } else smsg2(d.error || '没改成', false) })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
+}
+function toggleStaff(id, on){
+  fetch('/staff-users/' + id, { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ active: on }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) { if (d.ok) { smsg2(on ? '已经启用' : '已经停用（他的口令暂时进不来）', true); loadStaff() } else smsg2(d.error || '没改成', false) })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
+}
+function delStaff(id, name){
+  if (!window.confirm('真的删掉「' + name + '」？删了他就再也进不来了（他记的账不会删）。')) return
+  fetch('/staff-users/' + id, { method: 'DELETE', headers: { 'x-access-key': K, 'X-Book': bookCur() } })
+    .then(function (r) { return r.json() })
+    .then(function (d) { if (d.ok) { smsg2('删掉了', true); loadStaff() } else smsg2(d.error || '没删掉', false) })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
+}
+function saveStaffPerms(){
+  if (!K) { smsg2('先在顶上第 1 块填口令再点', false); return }
+  var body = { self_only: document.getElementById('sp_self_own').checked, scope: document.getElementById('sp_scope_own').checked ? 'own' : 'all' }
+  if (!MODS.length) body.modules = ['ar', 'ap', 'exp', 'import', 'contact', 'asset']
+  smsg2('正在保存……')
+  fetch('/staff-perms', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    .then(function (r) { return r.json() })
+    .then(function (d) { smsg2(d.ok ? '这两项改好了（员工下次刷新就生效）' : (d.error || '没改成'), !!d.ok) })
+    .catch(function () { smsg2('网断了，稍后再试', false) })
 }
 function renBook(id){
   var nm = window.prompt('第 ' + id + ' 本改叫什么名字？（最多 20 个字）')

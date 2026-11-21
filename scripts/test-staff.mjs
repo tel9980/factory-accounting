@@ -1,0 +1,146 @@
+// 员工账号与权限：网页能加人、换口令、改权限、停用、删除；员工只能做被允许的事
+const BASE = (process.argv.includes('--base') ? process.argv[process.argv.indexOf('--base') + 1] : 'http://127.0.0.1:8791').replace(/\/$/, '')
+const KEY = process.argv.includes('--key') ? process.argv[process.argv.indexOf('--key') + 1] : '8888'
+
+let pass = 0
+const bad = []
+const yes = (m, ok, extra) => { if (ok) { pass++; console.log('  ✅ ' + m + (extra !== undefined ? '（' + extra + '）' : '')) } else { bad.push(m + (extra !== undefined ? ' → ' + extra : '')); console.log('  ❌ ' + m + (extra !== undefined ? ' → ' + extra : '')) } }
+const eq = (m, got, want) => yes(m, String(got) === String(want), got)
+
+async function req(method, path, opts = {}) {
+  const headers = { 'content-type': 'application/json' }
+  if (opts.key !== null) headers['x-access-key'] = opts.key === undefined ? KEY : opts.key
+  if (opts.book) headers['X-Book'] = String(opts.book)
+  const r = await fetch(BASE + path, { method, headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) })
+  let d = null
+  try { d = await r.json() } catch (e) { d = null }
+  return { s: r.status, d: d || {} }
+}
+
+const TAG = 'staff' + Date.now().toString(36).replace(/[0-9]/g, (d) => 'abcdefghij'[Number(d)]).slice(-4)
+
+async function waitUp() {
+  for (let i = 0; i < 60; i++) {
+    try { if ((await fetch(BASE + '/version')).ok) return } catch (e) {}
+    await new Promise((r) => setTimeout(r, 700))
+  }
+  throw new Error('服务没起来：' + BASE)
+}
+
+async function main() {
+  await waitUp()
+  await req('POST', '/auth/setup', { key: null, body: { key: KEY } })
+  console.log('\n[1] 加人、看列表')
+
+  let r = await req('GET', '/staff-users')
+  eq('老板能看员工列表', r.s, 200)
+  const before = (r.d.rows || []).length
+  yes('列表里有模块名对照', !!(r.d.labels && r.d.labels.ar), Object.keys(r.d.labels || {}).length + ' 个模块')
+
+  r = await req('POST', '/staff-users', { body: { name: '小' + TAG, mods: ['ar'] } })
+  eq('加一个只开「应收」的员工', r.s, 200)
+  const pin = r.d.pin
+  const sid = r.d.id
+  yes('返回了 4 位口令', /^\d{4,6}$/.test(String(pin)), pin)
+
+  r = await req('GET', '/staff-users')
+  eq('列表里多了一个', (r.d.rows || []).length, before + 1)
+  const row = (r.d.rows || []).find((x) => Number(x.id) === Number(sid))
+  yes('权限文字是「应收」', /应收/.test(row.mod_text || ''), row.mod_text)
+  eq('列表不回明文口令', row.pin, '')
+
+  console.log('\n[2] 员工只能做被允许的事')
+
+  r = await req('GET', '/me', { key: pin })
+  eq('员工口令能登录', r.s, 200)
+  eq('  身份是员工', r.d.role, 'staff')
+  eq('  名字记上了', r.d.staff_name, '小' + TAG)
+
+  r = await req('GET', '/ar', { key: pin })
+  eq('能看应收', r.s, 200)
+
+  r = await req('GET', '/ap', { key: pin })
+  eq('没开应付 → 403', r.s, 403)
+  eq('  提示是 staff_module', r.d.code, 'staff_module')
+
+  r = await req('GET', '/staff-users', { key: pin })
+  eq('员工看不到员工列表', r.s, 403)
+
+  r = await req('GET', '/export-all', { key: pin })
+  eq('员工导不走整库', r.s, 403)
+
+  console.log('\n[3] 改权限 / 换口令 / 停用 / 删除')
+
+  r = await req('POST', '/staff-users/' + sid, { body: { mods: ['ar', 'ap'] } })
+  eq('给他加上应付', r.s, 200)
+  r = await req('GET', '/ap', { key: pin })
+  eq('  现在能看应付了', r.s, 200)
+
+  r = await req('POST', '/staff-users/' + sid, { body: { mods: [] } })
+  eq('一个模块都不给 → 400', r.s, 400)
+
+  r = await req('POST', '/staff-users/' + sid, { body: { pin: '2468' } })
+  eq('换口令', r.s, 200)
+  eq('  返回新口令', r.d.pin, '2468')
+
+  r = await req('GET', '/me', { key: pin })
+  eq('旧口令立刻失效', r.s, 401)
+  r = await req('GET', '/me', { key: '2468' })
+  eq('新口令能进', r.s, 200)
+
+  r = await req('POST', '/staff-users', { body: { name: '重复' + TAG, pin: '2468' } })
+  eq('口令被别人占用 → 409', r.s, 409)
+
+  r = await req('POST', '/staff-users/' + sid, { body: { active: 0 } })
+  eq('停用', r.s, 200)
+  r = await req('GET', '/me', { key: '2468' })
+  eq('  停用后进不来', r.s, 401)
+
+  r = await req('POST', '/staff-users/' + sid, { body: { active: 1 } })
+  eq('启用回来', r.s, 200)
+  r = await req('GET', '/me', { key: '2468' })
+  eq('  又能进了', r.s, 200)
+
+  console.log('\n[4] 两个总开关')
+
+  r = await req('GET', '/staff-perms')
+  eq('老板能看员工权限总开关', r.s, 200)
+  const oldSelf = !!r.d.self_only
+  const oldScope = r.d.scope
+
+  r = await req('POST', '/staff-perms', { body: { modules: r.d.on, self_only: true, scope: 'own' } })
+  eq('打开「只看自己录的单 + 只看自己负责的客户」', r.s, 200)
+  r = await req('GET', '/staff-perms')
+  eq('  自己录的单：开着', r.d.self_only, true)
+  eq('  只看自己负责的客户：开着', r.d.scope, 'own')
+
+  await req('POST', '/staff-perms', { body: { modules: r.d.on, self_only: oldSelf, scope: oldScope } })
+  r = await req('GET', '/staff-perms')
+  eq('改回原样', r.d.scope, oldScope)
+
+  console.log('\n[5] 演示口令碰不到这些')
+
+  r = await req('GET', '/staff-users', { key: 'demo-look' })
+  eq('演示口令看不到员工列表', r.s, 403)
+  r = await req('POST', '/staff-perms', { key: 'demo-look', body: { modules: ['ar'] } })
+  eq('演示口令改不了员工权限', r.s, 403)
+
+  console.log('\n[6] 删除')
+
+  r = await req('DELETE', '/staff-users/' + sid)
+  eq('删掉这个员工', r.s, 200)
+  r = await req('GET', '/me', { key: '2468' })
+  eq('  删了他就进不来了', r.s, 401)
+  r = await req('GET', '/staff-users')
+  eq('  列表里也没了', (r.d.rows || []).some((x) => Number(x.id) === Number(sid)), false)
+
+  console.log('')
+  if (bad.length) {
+    console.log('❌ 员工账号回归 ' + bad.length + ' 项失败：')
+    bad.forEach((x) => console.log('   · ' + x))
+    process.exit(1)
+  }
+  console.log('✅ 员工账号与权限 ' + pass + ' 项全部通过')
+}
+
+main().catch((e) => { console.error('测试崩了：', e); process.exit(1) })
