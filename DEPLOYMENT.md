@@ -517,6 +517,41 @@ cd backend && ./node_modules/.bin/wrangler deploy
 返回对象**不能再 `.bind()`**（本地 miniflare 会报 `st.bind is not a function`）——要追加参数就一次拼齐再 bind。
 `scripts/test-staff.mjs` 第 [7] 组专门验「两种模式下顶部数字与列表笔数一致」。
 
+### 4.17 员工 / 演示身份能做什么（白名单，不是黑名单）
+
+改权限之前先看这条规则：**员工能写的动作走白名单（`STAFF_WRITE_OK`），其余一律 403。**
+
+以前是反过来的——一长串「不许……」的正则，每加一个接口都要记得补一条。结果是每轮都能查出漏网的：
+`POST /transfer`（当时只拦了复数 `/transfers`）、`/export`（只拦了 `/export-all`）、`/archive-json`（新接口）、
+`/bank-flows/:id/unmatch`（撤销流水认领）、`/collect-config`（催款口径）、`/target`（目标）、
+`/networth-snapshot`（写家底存档）、`/term-default` `/term-auto`（批量改客户账期）、`/run-fixed`、
+`/onboarding/apply`、`/wx-test`。页面上什么都没露，员工 4 位 PIN 就能改掉全厂的口径。
+另外 `GET /trash`（别人的单据）、`/tax-summary`、`/audit-logs`、`/month-archives`（家底月月快照）、
+`/report-link`（直接生成含毛利的报表链接）、`/party-staff`（客户归属）也都该关，一并关了。
+
+**白名单里有什么**（员工记账本身需要的动作）：
+
+| 做什么 | 接口 |
+|---|---|
+| 开单 / 收款 | `POST /orders`、`/orders/:id/receive`、`/orders/:id/status`、`/receive-batch`、`/quick` |
+| 进货 / 付款 | `POST /payables`、`/payables/:id/pay`、`/pay-batch` |
+| 支出 / 借支 | `POST /expenses`、`/advances`、`/loans`、`/loans/:id/return`、`/loans/:id/reimburse` |
+| 导入 | `POST /import`、`/import-rows`、`/import-xlsx`、`/import-pack`、`/parse-import`、`/detect-import` |
+| 对账 / 催款 | `POST /reconcile`、`/recon-confirm`、`/pipeline-summary`、`/statement-log(+ack/resolve)`、`/party-terms(+apply)`、`/dunning-log`、`/profiles` |
+| 车间 / 家底登记 | `POST /materials`、`/material-moves`、`/frame-prices`、`/outsource(+back)`、`/rework`、`/invoices`、`/attachments` |
+| 改单申请 | `POST /edit-request`、`/edit-requests/:id/cancel`（改单本身要老板批） |
+| 只读批量 | `POST /batch` |
+
+**新加接口默认是关的**：加完记得想两件事——① 员工要不要用？要用就补进 `STAFF_WRITE_OK`；
+② 老板要不要看？要就把读取路径从 `denyStaff` 的 GET 名单里放出来。`scripts/test-perm.mjs` 会把
+源码里所有写接口逐个用员工口令打一遍，白名单外没 403 就红——忘了想权限它会提醒你。
+
+演示口令另外一套：**能看账、不能碰系统**。`/error-log`、`/slow-log`、`/selfcheck`、`/books`、
+`/books-check`、`/audit-logs`、`/party-staff` 全部 403（里面有内部表名、报错原文、别本账的应收合计）；
+导出/备份/改账套/初始化一律 403。内置演示（`demo-look`）只能进第 3 本账，`demo_seeded=1` 时才允许试记，
+那本账里一旦有真数据就立刻退回只读。
+
+
 ### 5.0 最省事：什么都不用配（内置演示入口）
 
 登录页有一行 **「👀 先看看演示（不用口令，示例数据）」**——审核员点它就直接进演示账套

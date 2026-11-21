@@ -97,8 +97,11 @@ const run = async () => {
   const im = await post('/import-all', { pkg, mode: 'replace', confirm: '覆盖' })
   eq('导入状态码', im.s, 200)
   yes('导入返回 ok', im.d.ok === true, im.d && im.d.error)
-  const ar1 = await get('/ar?status=all')
-  eq('导回来后单数一致', Array.isArray(ar1.d) ? ar1.d.length : -1, ordersBefore)
+  // 数总单数不能用 /ar —— 它有分页（一页 60），库里超过一页就会「少」，
+  // 这条断言以前在干净库上绿、在攒了 96 张单的库上假红。用导出包自带的 counts 数。
+  const ex2 = await get('/export-all')
+  const ordersAfter = num0((ex2.d && ex2.d.counts && ex2.d.counts.orders) || 0)
+  eq('导回来后单数一致', ordersAfter, ordersBefore)
   const me2 = await get('/me')
   eq('整本覆盖后口令还在（否则下次打不开）', me2.d.role, 'owner')
 

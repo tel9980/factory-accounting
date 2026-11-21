@@ -1281,7 +1281,10 @@ app.use('*', async (c, next) => {
     const dm = c.req.method
     // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
     const denyDemo = dm !== 'OPTIONS' && (
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|archive-json|month-pack|month-pack-file|month-reports|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset)/.test(path) ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|archive-json|month-pack|month-pack-file|month-reports|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset|party-staff|audit-logs)/.test(path) ||
+      // 系统内部状态：报错原文、慢接口、自检明细、账套清单 —— 演示身份不需要看这些，
+      // 里面还会出现别本账的应收合计与内部表名。
+      (/^\/(error-log|slow-log|selfcheck|books|books-check)$/.test(path) && dm !== 'OPTIONS') ||
       // 模块清单可以看（前端要据此藏入口），但改不了
       (/^\/modules$/.test(path) && dm !== 'GET')
     )
@@ -1314,7 +1317,34 @@ app.use('*', async (c, next) => {
   // 员工权限：只能记账/收付/查询，不能删改单、不能看毛利与成本、不能改设置
   if (role === 'staff') {
     const m = c.req.method
+    // 员工能「写」的动作走白名单。以前这里是一长串「不许……」的正则，每加一个接口都要记得补一条，
+    // 漏一条就是越权 —— /transfer（单数）、/export、/archive-json、/bank-flows/:id/unmatch、
+    // /collect-config、/target、/networth-snapshot 都是这么漏出去的。现在反过来：
+    // 只有「记账这件事本身需要的动作」放行，其余一律 403，新接口默认是关的（关错顶多不方便，开错就是越权）。
+    const STAFF_WRITE_OK = [
+      /^\/orders$/, /^\/orders\/\d+\/receive$/, /^\/orders\/\d+\/status$/,
+      /^\/receive-batch$/, /^\/pay-batch$/, /^\/quick$/,
+      /^\/payables$/, /^\/payables\/\d+\/pay$/,
+      /^\/expenses$/, /^\/advances$/, /^\/loans$/, /^\/loans\/\d+\/(return|reimburse)$/,
+      /^\/attachments?$/, /^\/batch$/,
+      // 员工提「改单申请」、撤自己的申请 —— 这是员工本来就该有的路（改单要老板批）
+      /^\/edit-request$/, /^\/edit-requests\/\d+\/cancel$/,
+      // 导入（模块开关另外管一层）
+      /^\/(import|import-rows|import-xlsx|import-pack|parse-import|detect-import)$/,
+      // 对账与催款：员工对账、登记发出对账单、记催款，这些是日常活
+      /^\/(reconcile|recon-confirm|pipeline-summary)$/,
+      /^\/statement-log$/, /^\/statement-log\/\d+\/(ack|resolve)$/,
+      /^\/party-terms$/, /^\/party-terms\/apply$/, /^\/dunning-log$/, /^\/profiles$/,
+      // 车间/家底类日常登记
+      /^\/(materials|material-moves|frame-prices|outsource|rework|invoices)$/, /^\/outsource\/\d+\/back$/
+    ]
+    if (m !== 'GET' && m !== 'OPTIONS' && !STAFF_WRITE_OK.some((re) => re.test(path))) {
+      return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
+    }
     const denyStaff = m === 'PATCH' || m === 'DELETE' ||
+      // 这几条是「看得见金额的汇总」与「系统内部状态」，员工口令不该看：
+      // 归档历史（家底/净资产的月月快照）、税金汇总、审计日志、回收站（都是别人的单据）。
+      (/^\/(party-staff|month-archives?|report-link|report-print|tax-summary|audit-logs|trash)$/.test(path) && m !== 'OPTIONS') ||
       (/^\/(profit-compare|cash-bridge|aging|weekly-text|dunning-effect|backup|backup-list|backup-get|cloud-backup|restore|backup-to-notes)$/.test(path) && m !== 'OPTIONS') ||
       // 这几条以前漏在外面：/import-all 一句 confirm 就能逐表 DELETE 清空整库，/export-all 能把
       // 全量数据（含单据照片）拖走，/backup-restore 能把线上覆盖成任意一份旧备份，
@@ -1404,7 +1434,8 @@ app.use('*', async (c, next) => {
         if (data && typeof data === 'object') {
           if (moneyPath) { staffScrub(data, STAFF_MONEY_KEEP[path]); data.staff_hidden = STAFF_HIDDEN_NOTE }
           // 成本和毛利只对「应收/应付/单子详情」这几类剥掉，别把员工该看的金额一起抹了
-          if (costPath) { costScrub(data); data.profit_hidden = '这一单的成本和毛利只有老板能看' }
+          // /ar、/ap 返回的是裸数组，往数组上挂说明字段会被 JSON.stringify 丢掉 —— 那种就只剥不写说明
+          if (costPath) { costScrub(data); if (!Array.isArray(data)) data.profit_hidden = '这一单的成本和毛利只有老板能看' }
           c.res = new Response(JSON.stringify(data), res)
         }
       } catch (e) { /* 不是 JSON 就算了，不拦 */ }
