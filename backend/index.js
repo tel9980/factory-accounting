@@ -1158,7 +1158,7 @@ app.use('*', async (c, next) => {
     const dm = c.req.method
     // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
     const denyDemo = dm !== 'OPTIONS' && (
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name)/.test(path) ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name)/.test(path) ||
       // 模块清单可以看（前端要据此藏入口），但改不了
       (/^\/modules$/.test(path) && dm !== 'GET')
     )
