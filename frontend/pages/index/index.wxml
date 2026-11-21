@@ -400,6 +400,11 @@
         <input class="inp half" wx:if="{{o_tax_kind}}" type="digit" placeholder="税率% 如13" value="{{o_tax_rate}}" bindinput="onOTaxRate"/>
       </view>
       <view class="tip" wx:if="{{o_tax_hint}}">{{o_tax_hint}}</view>
+      <view class="chips">
+        <text class="chip-label">这笔钱是：</text>
+        <text class="chip {{o_ar_cat===item?'on':''}}" wx:for="{{ar_cats}}" wx:key="*this" bindtap="pickArCat" data-k="{{item}}">{{item}}</text>
+      </view>
+      <view class="tip" wx:if="{{o_ar_cat}}">选「{{o_ar_cat}}」以后就能在报表里看到钱是从哪来的（货款/加工费分开算）；不选也不影响记账。</view>
       <view class="duesoon" wx:if="{{price_warn}}">{{price_warn}} —— 确认是这个价再记</view>
       <view class="{{chint && chint.level=='red' ? 'duesoon red' : 'tip'}}" wx:if="{{chint && chint.text}}">{{chint.text}}</view>
       <view class="tip" wx:if="{{chint && chint.processes.length}}">人工估算：{{chint.processes[0].process}} ¥{{chint.processes[0].amount}} 等 {{chint.processes.length}} 道工序，平均每张单 ¥{{chint.labor}}</view>
@@ -451,6 +456,16 @@
       <view class="su"><view class="sun green">{{ar_sum.month_settled || 0}}</view><view class="sul">本月已收 · 新单 {{ar_sum.month_new || 0}}</view></view>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadStale">⏳ 有哪些单卡住了</button>
+      </view>
+      <!-- 应收按分类：钱是从哪来的（货款/加工费/打样费分开看）。点一行只看这一类，再点一次看全部。 -->
+      <view class="form" wx:if="{{ar_cat_rows.length}}">
+        <view class="tip">{{ar_cat_text}}　（点一行只看这类，再点一次看全部）</view>
+        <view class="tpl-row" wx:for="{{ar_cat_rows}}" wx:key="cat" bindtap="pickArCatFilter" data-c="{{item.cat}}">
+          <view class="tpl-main">
+            <view class="tpl-n {{ar_cat==item.cat?'red':''}}">{{item.cat}}{{ar_cat==item.cat?' ✓':''}}</view>
+            <view class="tpl-d">本月开单 {{item.month_add}} · 本月已收 {{item.month_paid}} · 还欠 {{item.open}}（{{item.open_count}} 单）</view>
+          </view>
+        </view>
       </view>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadOutsource">🏭 外协台账（发出去的活）</button>
@@ -687,7 +702,7 @@
     <view class="list" wx:if="{{ar_view=='order'}}">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.price}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总{{item.price}}{{item.ar_cat ? ' · ' + item.ar_cat : ''}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="row2" wx:if="{{item.cost>0}}">成本 {{item.cost}} · 毛利 {{item.gross}}（{{item.gross_pct}}%）</view>
         <view class="row2">{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.settled?' · 已结清':''}}</view>
         <!-- 一行只留最常用的三个：收款 / 收清 / 更多。以前一行 15 个 mini 按钮，

@@ -1719,11 +1719,20 @@ node scripts/build-exe.mjs --out dist
    - **发 v1.3.0**：`docker-compose.yml`、README、DEPLOYMENT 的镜像标签统一到 `v1.3.0`（`check-version.mjs` 在 CI 里盯住），Release 的校验和改成三个文件、Release 说明自动带本轮改动清单。
    - ⚠️ **动了前端**（切账套、收付弹窗、单据按钮、分页）→ 小程序要重新上传发布；后端要重新部署。
 
+323. ✅ **应收也分类了：钱是从哪来的（货款 / 加工费 / 打样费 / 模具费 / 运费代垫）**：应付分类回答「钱花在哪」（硫酸、染料、外发加工费），应收这边以前只有一个金额，月底看报表只知道收了多少、不知道「卖货收的」和「来料加工收的」各多少——而这家的两种生意毛利完全不同。
+   - **一个字段打通全链路**：`orders` 加 `ar_cat` 列（`EXTRA_COLS` 自动给老库补），`POST /orders`、`PATCH /orders/:id`（改单时会写进「改了什么都记下来」）、`fmtOrder`、`/ar` 列表、导入、模板全部带上。标准名单 8 项：货款、加工费、打样费、模具费、运费代垫、包装代垫、维修费、其他。
+   - **写法宽松**（不然没人愿意填）：「加工费(含打样)」「代垫运费」「开模费」「样品费」「货款-甲客户」都能归到标准分类（`AR_ALIAS` 一张小映射表）；认不出就原样留着手输，**不拦、不报错**。
+   - **新接口 `GET /ar-by-category?month=`**：跟应付那份同构——本月开单、本月已收、还欠多少、几单；`/ar?cat=加工费` 能按分类筛（点报表里的一行就只看这一类，再点一次看全部）。前端「应收」页顶部多一张分类卡，录单时多一排「这笔钱是：」chips，单据行上也会显示分类。
+   - **导入也认**：应收对账模板第 5 列是「分类(可空)」，带下拉；粘贴「张老板 加工费 12000」直接认出来；老格式「张老板 12800」照样导，分类空着（加一列不能把老文件导坏）。顺带修了粘贴解析的一个坑：`ar_recon` 以前把第二个词一律当备注，现在认得出来是分类就先当分类。
+   - **新增 `scripts/test-arcat.mjs`（33 项，已挂 CI，在 `test-apcat` 之后）**：模板第 5 列有下拉 / 日常台账包有应收对账页 / 粘贴认出分类并且金额不串位 / 老格式金额对分类空 / 四种宽松写法 / 手工建单带分类 / 改分类回 `changed` 且落库变了 / 按分类筛时别的类不出现 / `/ar-by-category` 的开单·已收·还欠对得上。
+   - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
+   - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 427 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 428 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2114,7 +2123,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（224）
+**其它（单个接口）**（225）
 
 - `GET /`
 - `GET /access-guide`
@@ -2125,6 +2134,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /ap`
 - `GET /ap-by-category`
 - `GET /ar`
+- `GET /ar-by-category`
 - `GET /ar-summary`
 - `GET /archive-kinds`
 - `GET /archive-pack`

@@ -108,7 +108,8 @@ Page({
     ar_kw: '', ap_kw: '', ex_kw: '',
     rb_customer: '', rb_amount: '', rb_date: '',
     today_income: 0, top_customer: '', top_unpaid: 0,
-    o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_operator: '', o_date: '',
+    o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_operator: '', o_date: '', o_ar_cat: '',
+    ar_cats: ['货款', '加工费', '打样费', '模具费', '运费代垫', '包装代垫', '维修费', '其他'],
     mb_type: 'customer', mb_month: '', mb: null, ns: null,
     p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', p_category: '',
     ar_off: 0, ap_off: 0, ex_off: 0, ar_more: false, ap_more: false, ex_more: false, import_file_name: '',
@@ -217,6 +218,7 @@ Page({
     // 应付的分类：硫酸、磷酸、硝酸、染料、除油剂、包装、报纸、外发加工费…（和后台 AP_CATS 一致）
     ap_cats: ['硫酸', '磷酸', '硝酸', '染料', '除油剂', '包装', '报纸', '外发加工费', '运费', '电费', '五金配件'],
     ap_cat: '', ap_cat_rows: [], ap_cat_text: '',
+    ar_cat: '', ar_cat_rows: [], ar_cat_text: '',
     ar_view: 'order', ap_view: 'order', ar_groups: [], ap_groups: [], ar_open: '', ap_open: '',
     detail_show: false, detail_title: '', detail_head: '', detail_rows: [],
     ar_filters: [{ k: 'open', n: '全部未结' }, { k: 'overdue', n: '逾期 30 天+' }, { k: 'due', n: '7 天内到期' }, { k: 'closed', n: '已结清' }],
@@ -1861,6 +1863,7 @@ Page({
     this.req({ url: API_BASE + '/ar-summary?type=ar', success: (res) => this.setData({ ar_sum: res.data || {} }) })
     this.req({ url: API_BASE + '/ar-summary?type=ap', success: (res) => this.setData({ ap_sum: res.data || {} }) })
     this.loadApCats()
+    this.loadArCats()
   },
   // 应付按分类看：这个月硫酸/染料/外发加工费各花了多少、还欠多少
   loadApCats() {
@@ -1868,6 +1871,18 @@ Page({
       const d = res.data || {}
       this.setData({ ap_cat_rows: d.rows || [], ap_cat_text: d.text || '' })
     } })
+  },
+  // 应收按分类（钱是从哪来的）：货款/加工费/打样费分开看
+  loadArCats() {
+    this.req({ url: API_BASE + '/ar-by-category', success: (res) => {
+      const d = res.data || {}
+      this.setData({ ar_cat_rows: d.rows || [], ar_cat_text: d.text || '' })
+    } })
+  },
+  pickArCatFilter(e) {
+    const c = e.currentTarget.dataset.c || ''
+    this.setData({ ar_cat: this.data.ar_cat === c ? '' : c })
+    this.loadAr()
   },
   // 表单里选分类（再点一下取消）
   pickPCat(e) {
@@ -1998,7 +2013,7 @@ Page({
     const off = more ? this.data.ar_off : 0
     // 搜索词要下推给后端：以前只在前端筛「已经加载的那 60 条」，
     // 单子一多，老的单在后台有、页面上搜不到，还提示「没有」。
-    const kwq = this.data.ar_kw ? '&kw=' + encodeURIComponent(this.data.ar_kw) : ''
+    const kwq = (this.data.ar_kw ? '&kw=' + encodeURIComponent(this.data.ar_kw) : '') + (this.data.ar_cat ? '&cat=' + encodeURIComponent(this.data.ar_cat) : '')
     const q = '&status=' + this.data.ar_filter + '&sort=' + this.data.ar_sort + kwq
     if (more) this._loading('ar', true)
     this.req({ url: API_BASE + '/ar?offset=' + off + '&limit=' + this.PAGE + q, success: (res) => {
@@ -2615,6 +2630,11 @@ Page({
   onODeliver(e) { this.setData({ o_deliver: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
   pickCustomer(e) { const n = e.currentTarget.dataset.n; this.setData({ o_customer: n }); this.applyLastDeal('ar', n) },
+  // 应收分类：客户为什么给这笔钱。点一下选中，再点一下取消。
+  pickArCat(e) {
+    const k = String(e.currentTarget.dataset.k || '')
+    this.setData({ o_ar_cat: this.data.o_ar_cat === k ? '' : k })
+  },
   onPSupplier(e) { this.setData({ p_supplier: e.detail.value }) },
   onPAmount(e) { this.setData({ p_amount: e.detail.value }) },
   onPRemark(e) { this.setData({ p_remark: e.detail.value }) },
@@ -2678,7 +2698,7 @@ Page({
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
       queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }),
-      data: { customer: o_customer, item_name: o_item, price: priceN, cost: costN, due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
+      data: { customer: o_customer, item_name: o_item, price: priceN, cost: costN, due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, ar_cat: this.data.o_ar_cat || '', client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' })
@@ -3152,7 +3172,8 @@ Page({
       { k: 'customer', t: '客户', v: String(it.customer || ''), num: false },
       { k: 'item_name', t: '产品', v: String(it.item_name || ''), num: false },
       { k: 'price', t: '金额', v: String(it.price || 0), num: true },
-      { k: 'cost', t: '成本', v: String(it.cost || 0), num: true }
+      { k: 'cost', t: '成本', v: String(it.cost || 0), num: true },
+      { k: 'ar_cat', t: '分类', v: String(it.ar_cat || ''), num: false, empty: true }
     ]
     this._editFields(fields, API_BASE + '/orders/' + id, { rev: it.rev })
   },

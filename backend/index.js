@@ -265,7 +265,7 @@ const EXTRA_COLS = {
   // rate 记税率%、amt 记税额。amt 有值时以手填为准（票面就是这样），否则按 kind+rate 推。
   // deliver_date / created_by 是后来加的两列：老库（本机版 / 早就建好的 D1）里没有，
   // 不补的话「预计交付日」和「员工只看自己录的单」在那些库上一查询就报 no such column。
-  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT'], ['deliver_date', 'TEXT'], ['created_by', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
+  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT'], ['deliver_date', 'TEXT'], ['created_by', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0'], ['ar_cat', 'TEXT']],
   payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['created_by', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
   // 有没有票是收付款那一刻才知道的（用户原话），所以记在流水上，不记在单上。
   ledger: [['account_id', 'INTEGER DEFAULT 0'], ['cash', 'INTEGER DEFAULT 1'], ['import_batch', 'TEXT'], ['inv_state', "TEXT DEFAULT ''"], ['inv_no', "TEXT DEFAULT ''"], ['tax', 'REAL DEFAULT 0']],
@@ -4247,9 +4247,11 @@ const parseImportRows = (type, text) => {
         row.item = names[1] || '期初欠款'
       }
     } else if (type === 'ar_recon') {
-      // 贴「张老板 12800」就是这家这个月的对账金额
-      row.item = '月度对账'
+      // 贴「张老板 12800」就是这家这个月的对账金额；
+      // 有第二个字且认得出来是应收分类（加工费/货款…）就顺手记上分类。
       row.amount = nums[0] || 0
+      const arC = arCatOf(names[1])
+      if (arC) { row.category = arC; row.item = names[2] || '月度对账' } else row.item = names[1] || '月度对账'
     } else if (type === 'ap_recon') {
       row.amount = nums[0] || 0
       const cat = apCatOf(names[1])
@@ -4328,7 +4330,7 @@ app.post('/import-rows', async (c) => {
   const arr = rows.map((r) => {
     const date = r.date || ''
     if (type === 'ar') return [r.party, r.item || '批量导入', num(r.amount), num(r.cost) || '', date].filter((x, i) => !(i === 3 && (x === '' || x === 0)))
-    if (type === 'ar_recon') return [r.party, num(r.amount), date, r.item || '']
+    if (type === 'ar_recon') return [r.party, num(r.amount), date, r.item || '', r.category || '']
     if (type === 'ar_init') return [r.party, num(r.amount), date]
     if (type === 'ap') return [r.party, r.category || '', num(r.amount), r.item || '', date]
     if (type === 'ap_recon') return [r.party, num(r.amount), r.category || '', date, r.item || '']
@@ -6768,10 +6770,35 @@ const apCatOf = (s) => {
   return hit || ''
 }
 
+// 应收分类：客户为什么给这笔钱（货款/加工费/打样费/运费代垫…）。
+// 跟应付分类分开：应付是「钱花在哪」，应收是「钱从哪来」，两套标准名单不该混在一起。
+const AR_CATS = ['货款', '加工费', '打样费', '模具费', '运费代垫', '包装代垫', '维修费', '其他']
+// 常见别写法：「代垫运费」/「运费」都是运费代垫，「开模费」是模具费，「打样」是打样费
+const AR_ALIAS = {
+  代垫运费: '运费代垫', 垫付运费: '运费代垫', 运费: '运费代垫',
+  代垫包装: '包装代垫', 包装: '包装代垫',
+  开模费: '模具费', 开模: '模具费', 模具: '模具费',
+  打样: '打样费', 样品费: '打样费',
+  加工: '加工费', 货款收入: '货款', 货: '货款', 维修: '维修费'
+}
+const arCatOf = (v) => {
+  const t = String(v === null || v === undefined ? '' : v).trim()
+  if (!t) return ''
+  const exact = AR_CATS.find((c) => c === t)
+  if (exact) return exact
+  const alias = AR_ALIAS[t]
+  if (alias) return alias
+  // 带括号/后缀的写法：「加工费(含打样)」「货款-甲客户」「运费代垫 顺丰」
+  const hit = AR_CATS.find((c) => c !== '其他' && (t.includes(c) || (t.length >= 2 && c.includes(t))))
+  if (hit) return hit
+  const hit2 = Object.keys(AR_ALIAS).find((k) => k.length >= 2 && t.includes(k))
+  return hit2 ? AR_ALIAS[hit2] : ''
+}
+
 const IMPORT_TEMPLATES = {
   ar: { name: '应收导入模板', rows: [['客户', '产品', '金额', '成本(可空)', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['张老板', '外壳加工', 5000, 3000, '12-05', '小王', '11-05'], ['李老板', '法兰件', 3200, '', '', '', '']] },
   // 按客户对账金额导入：一个月跟每个客户对一次账，一行就是一家，不用拆成一张张单。
-  ar_recon: { name: '应收对账导入模板（按客户对账金额）', rows: [['客户', '对账金额', '月份(可空)', '备注(可空)'], ['张老板', 12800, '2026-11', ''], ['李老板', 9600, '', '含打样费']] },
+  ar_recon: { name: '应收对账导入模板（按客户对账金额）', rows: [['客户', '对账金额', '月份(可空)', '备注(可空)', '分类(可空)'], ['张老板', 12800, '2026-11', '', '货款'], ['李老板', 9600, '', '含打样费', '加工费']] },
   ar_init: { name: '期初应收模板', rows: [['客户', '金额', '日期(可空)'], ['张老板', 5000, ''], ['李老板', 3000, '07-01']] },
   ap: { name: '应付导入模板', rows: [['供应商', '分类', '金额', '备注', '到期日(可空)', '经手人(可空)', '日期(可空)'], ['某某化工', '硫酸', 2000, '98% 一吨', '11-30', '小王', '11-05'], ['某某染料行', '染料', 5000, '', '', '', ''], ['某某外协厂', '外发加工费', 8000, '这批外发', '', '', '']] },
   // 按供应商 / 外发对账金额导入：同样一个月一行，外发就在分类里写「外发加工费」。
@@ -6834,7 +6861,7 @@ const IMPORT_PACKS = {
         ['6. 页签名别改、页签别删 —— 程序按页签名认这一页是什么账。'],
         ['7. 想只导某一类，也可以去「每天要用的模板」里单独下那一张。']
       ] },
-      { sheet: '应收对账', type: 'ar_recon', rows: [['客户', '对账金额', '月份(可空)', '备注(可空)']] },
+      { sheet: '应收对账', type: 'ar_recon', rows: [['客户', '对账金额', '月份(可空)', '备注(可空)', '分类(可空)']] },
       { sheet: '应付对账', type: 'ap_recon', rows: [['供应商', '对账金额', '分类(可空)', '月份(可空)', '备注(可空)']], dv: ['C2:C200', AP_CATS] },
       { sheet: '支出', type: 'expense', rows: [['金额', '分类', '备注', '经手人(可空)', '日期(可空)']] },
       // 借支要排在报销前面：这一包是一次按页签顺序导的，先借出去才有得报
@@ -6888,6 +6915,7 @@ app.get('/import-template-xlsx', async (c) => {
     dv = [{ sq: 'B2:B200', list: AP_CATS }]
   }
   if (t === 'ap_recon') dv = [{ sq: 'C2:C200', list: AP_CATS }]
+  if (t === 'ar_recon') dv = [{ sq: 'E2:E200', list: AR_CATS }]
   if (t === 'prepaid') dv = [{ sq: 'D2:D200', list: PREPAID_CATS }]
   const sheetName = t === 'expense' ? '支出' : t === 'reimb' ? '报销' : t === 'prepaid' ? '预付' : t === 'ar_recon' ? '应收对账' : t === 'ap_recon' ? '应付对账' : '导入'
   const xlsx = await makeXlsxSheets([{ name: sheetName, rows: T.rows, dv }])
@@ -6932,7 +6960,7 @@ app.get('/import-template-pack', async (c) => {
     else if (s.type === 'ap') dv = [{ sq: 'B2:B200', list: AP_CATS }]
     let rows = s.rows
     if (doFill && (s.type === 'ar_recon' || s.type === 'ar_init') && custs.length) {
-      rows = [s.rows[0]].concat(custs.map((n) => (s.type === 'ar_recon' ? [n, '', '', ''] : [n, '', ''])))
+      rows = [s.rows[0]].concat(custs.map((n) => (s.type === 'ar_recon' ? [n, '', '', '', ''] : [n, '', ''])))
     }
     if (doFill && (s.type === 'ap_recon' || s.type === 'ap_init') && sups.length) {
       rows = [s.rows[0]].concat(sups.map((n) => (s.type === 'ap_recon' ? [n, '', '', '', ''] : [n, '', ''])))
@@ -7617,9 +7645,11 @@ async function previewImport(db, type, rawRows) {
     else if (type === 'loan') { const [sf, am, rm] = p; party = sf || ''; item = rm || ''; amount = num(am) }
     else if (type === 'reimb') { const [sf, am, cat, rm] = p; party = sf || ''; amount = num(am); category = cat || ''; item = rm || '' }
     else if (type === 'ar_recon') {
-      // 按客户对账金额：客户, 对账金额, 月份(可空), 备注(可空)
-      const [c, am, mon, rm] = p
+      // 按客户对账金额：客户, 对账金额, 月份(可空), 备注(可空), 分类(可空)
+      const [c, am, mon, rm, ct] = p
       party = c || ''; amount = num(am); item = '月度对账'
+      category = arCatOf(ct) || String(ct || '').trim()
+      if (category) extra = '分类：' + category
       const me = monthEndOf(mon, todayIso())
       if (me) { d = me; dateGiven = true; extra = '记到 ' + me + '（' + me.slice(0, 7) + ' 月底）' }
       if (rm) extra = (extra ? extra + ' ' : '') + String(rm)
@@ -8841,6 +8871,7 @@ const dayDiff = (iso) => {
 }
 const fmtOrder = (r) => ({
   ...r,
+  ar_cat: String(r.ar_cat || ''),
   cost: round2(num(r.cost)),
   gross: round2(num(r.price) - num(r.cost)),
   gross_pct: num(r.price) > 0 ? round2(((num(r.price) - num(r.cost)) / num(r.price)) * 100) : 0,
@@ -8902,6 +8933,12 @@ app.get('/ar', async (c) => {
   if (kw) {
     conds.push('(customer LIKE ? OR item_name LIKE ? OR COALESCE(operator,\'\') LIKE ?)')
     b.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%')
+  }
+  // 按应收分类筛（报表里点一行就只看这一类）
+  const arCatQ = String(new URL(c.req.url).searchParams.get('cat') || '').trim()
+  if (arCatQ) {
+    if (arCatQ === '未分类') conds.push("COALESCE(NULLIF(TRIM(ar_cat),''),'') = ''")
+    else { conds.push("COALESCE(NULLIF(TRIM(ar_cat),''),'未分类') = ?"); b.push(arCatQ) }
   }
   const payExpr = '(price - paid - COALESCE(written_off,0))'
   const { results } = await db.prepare(`SELECT * FROM orders WHERE ${conds.join(' AND ')} ORDER BY ${orderBy.replace('{A}', payExpr)} LIMIT ? OFFSET ?`)
@@ -9209,6 +9246,36 @@ app.get('/ap-by-category', async (c) => {
     ok: true, month, rows,
     total_add: totalAdd, total_open: totalOpen,
     text: `${month} 应付共 ¥${totalAdd}，还欠 ¥${totalOpen}` + (rows.length ? `；花得最多的是「${rows[0].cat}」¥${rows[0].month_add}` : '')
+  })
+})
+
+// 本月应收按「客户为什么给钱」分组（跟应付分类同构，但名单不一样）
+app.get('/ar-by-category', async (c) => {
+  const db = c.env.DB
+  const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const CAT = "COALESCE(NULLIF(TRIM(ar_cat),''),'未分类')"
+  const [addR, paidR, openR] = await Promise.all([
+    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=? GROUP BY c ORDER BY t DESC`).bind(month).all(),
+    db.prepare(`SELECT ${CAT} c, COALESCE(SUM(l.amount),0) t FROM ledger l JOIN orders o ON o.id=l.ref_id WHERE l.ref_type='order' AND l.direction='in' AND l.month=? GROUP BY c`).bind(month).all().catch(() => ({ results: [] })),
+    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY c ORDER BY t DESC`).all().catch(() => ({ results: [] }))
+  ])
+  const paidMap = new Map((paidR.results || []).map((x) => [x.c, round2(num(x.t))]))
+  const openMap = new Map((openR.results || []).map((x) => [x.c, { n: num(x.n), t: round2(num(x.t)) }]))
+  const cats = new Set([...(addR.results || []).map((x) => x.c), ...paidMap.keys(), ...openMap.keys()])
+  const rows = [...cats].map((cat) => ({
+    cat,
+    month_add: round2(num((addR.results || []).find((x) => x.c === cat)?.t)),
+    month_count: num((addR.results || []).find((x) => x.c === cat)?.n),
+    month_paid: paidMap.get(cat) || 0,
+    open: (openMap.get(cat) || {}).t || 0,
+    open_count: (openMap.get(cat) || {}).n || 0
+  })).sort((a, b) => (b.month_add - a.month_add) || (b.open - a.open))
+  const totalAdd = round2(rows.reduce((a, x) => a + x.month_add, 0))
+  const totalOpen = round2(rows.reduce((a, x) => a + x.open, 0))
+  return c.json({
+    ok: true, month, rows, cats: AR_CATS,
+    total_add: totalAdd, total_open: totalOpen,
+    text: `${month} 开单 ¥${totalAdd}，还欠 ¥${totalOpen}` + (rows.length ? `；最多的是「${rows[0].cat}」¥${rows[0].month_add}` : '')
   })
 })
 
@@ -9986,8 +10053,10 @@ app.post('/orders', async (c) => {
   const tk = String(body.tax_kind || '').trim() === '含税' ? '含税' : (String(body.tax_kind || '').trim() === '不含税' ? '不含税' : '')
   const trate = Math.max(0, Math.min(100, num(body.tax_rate)))
   const tAmt = taxOf(tk, trate, body.tax_amt, price)
-  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by, deliver_date, tax_kind, tax_rate, tax_amt) VALUES (?,?,?,0,0,?,?,?,?,?,?,?,?,?)')
-    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c), toIsoDate(deliver_date) || null, tk, trate, tAmt).run()
+  // 应收分类：客户为什么给这笔钱。认标准名单（「加工费」也认「98加工费」这种写法），认不出就原样留着手输
+  const arCat = arCatOf(body.ar_cat) || String(body.ar_cat || '').trim()
+  await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, due_date, operator, cost, created_at, created_by, deliver_date, tax_kind, tax_rate, tax_amt, ar_cat) VALUES (?,?,?,0,0,?,?,?,?,?,?,?,?,?,?)')
+    .bind(customer, item_name || '', num(price), due || null, String(operator || '').trim() || null, round2(num(cost)), created, act(c), toIsoDate(deliver_date) || null, tk, trate, tAmt, arCat || null).run()
   await opMark(db, cid, 'order', 0)
   await logAudit(db, '新增应收', customer, `${customer} ${item_name || ''} ¥${num(price)}`, '', act(c))
   // 超信用额度提醒（不拦，只提醒）
@@ -11613,7 +11682,7 @@ async function importRows(db, type, rows, opts) {
     } else if (type === 'ar_recon') {
       // 按客户对账金额：一家一条，记在月末。同客户同月同金额已经导过就跳过（一天导两遍不会翻倍）。
       // 列序按模板：客户, 对账金额, 月份(可空), 备注(可空)
-      const [customer, price, mon, remark] = p
+      const [customer, price, mon, remark, catIn] = p
       const me = monthEndOf(mon, todayIso())
       if (me) d = me
       // 记的月份被改成月末了，得拿新日期再查一次锁：
@@ -11624,8 +11693,9 @@ async function importRows(db, type, rows, opts) {
         const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,7)=?").bind(customer, num(price), mm).first()
         if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar_recon' }); continue }
         const dueIso = await due(customer, d, 'ar')
-        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, created_at, import_batch) VALUES (?,?,?,0,0,0,?,?,?)')
-          .bind(customer, String(remark || '').trim() || '月度对账', num(price), dueIso || null, d, batch).run()
+        const arCat = arCatOf(catIn) || String(catIn || '').trim()
+        const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, created_at, import_batch, ar_cat) VALUES (?,?,?,0,0,0,?,?,?,?)')
+          .bind(customer, String(remark || '').trim() || '月度对账', num(price), dueIso || null, d, batch, arCat || null).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(price)
         n++
@@ -16000,14 +16070,16 @@ app.patch('/orders/:id', async (c) => {
     ? taxOf(ntkind, ntrate, body.tax_amt, p)
     : (touchedTax ? taxOf(ntkind, ntrate, 0, p)
       : (round2(num(o.tax_amt)) > 0 && p === round2(num(o.price)) ? round2(num(o.tax_amt)) : taxOf(ntkind, ntrate, 0, p)))
-  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, deliver_date=?, tax_kind=?, tax_rate=?, tax_amt=?, rev=COALESCE(rev,0)+1 WHERE id=?')
-    .bind(ncust, nitem, p, nd, op, nc, ndd, ntkind, ntrate, ntamt, id).run()
+  const ncat = body.ar_cat !== undefined ? (arCatOf(body.ar_cat) || String(body.ar_cat || '').trim()) : String(o.ar_cat || '')
+  await db.prepare('UPDATE orders SET customer=?, item_name=?, price=?, due_date=?, operator=?, cost=?, deliver_date=?, tax_kind=?, tax_rate=?, tax_amt=?, ar_cat=?, rev=COALESCE(rev,0)+1 WHERE id=?')
+    .bind(ncust, nitem, p, nd, op, nc, ndd, ntkind, ntrate, ntamt, ncat || null, id).run()
   const d = diffText([
     ['客户', o.customer, ncust], ['产品', o.item_name, nitem],
     ['金额', round2(num(o.price)), p], ['成本', round2(num(o.cost)), nc],
     ['经手人', o.operator, op], ['到期日', (o.due_date || '').slice(0, 10), (nd || '').slice(0, 10)],
     ['交货日', (o.deliver_date || '').slice(0, 10), (ndd || '').slice(0, 10)],
-    ['含税', o.tax_kind || '没标', ntkind || '没标'], ['税额', round2(num(o.tax_amt)), ntamt]
+    ['含税', o.tax_kind || '没标', ntkind || '没标'], ['税额', round2(num(o.tax_amt)), ntamt],
+    ['分类', o.ar_cat || '没标', ncat || '没标']
   ])
   await logAudit(db, '编辑应收', ncust, d || '（没改动）', `order:${id}`)
   return c.json({ ok: true, changed: d })

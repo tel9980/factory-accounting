@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS orders (
   -- 税额有值时以手填为准（票面常跟算出来的差几分），否则按 kind+rate 推：含税单 tax=总额-总额/(1+r)。
   tax_kind TEXT DEFAULT '',           -- '含税' / '不含税' / 空=没标
   tax_rate REAL DEFAULT 0,            -- 税率百分比，如 13
-  tax_amt REAL DEFAULT 0              -- 这一单的税额
+  tax_amt REAL DEFAULT 0,             -- 这一单的税额
+  ar_cat TEXT                         -- 应收分类（货款/加工费/打样费/模具费/运费代垫/包装代垫/维修费/其他）
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer);
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
