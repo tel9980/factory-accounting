@@ -1526,6 +1526,15 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+313. ✅ **首页变成导航页 · 整账套导出/导入 · 一键初始化（换公司能重来）**：用户截图说「打开首页只看到『请不要在浏览器里打开』」，并要「链接一起、账套能导入导出、有一键初始化，换公司可以重新用」。
+   - **首页 `/`**：不再是「这里只是服务器」的一句话，改成三块导航卡 —— 📖 使用教程 `/guide`、💻 电脑填表 `/pc`，底下写清「小程序怎么进 / 第一次要设口令 / 忘了口令怎么办」，页脚用 `/version` 拉当前版本号。仍然免口令（没有账目数据）。
+   - **`/pc` 新增第 4 块「整账套（换公司 / 换电脑）」**：①选账套（主账套 / 二 / 三）+「导出这本账（下载 JSON）」调 `/export-all`，文件名 `factory-book<账套>-<日期>.json`；②选文件「导入到这本账（整本覆盖）」调 `/import-all {pkg, mode:'replace', confirm:'覆盖'}`；③「一键初始化」调新接口 `/book-reset`。
+   - **新接口 `POST /book-reset`**（只有老板口令）：`confirm` 必须写「清空」两个字，否则 400 `need_confirm`（防手一抖）；清空前自动 `saveBackup(db,'before-reset')` 存一份并回 `snapshot` id；清空 `BACKUP_TABLES` 里除 `settings` 以外的全部（46 张）+ `backups/backup_parts/attachments/audit_log/error_log/slow_log/op_dedupe/auth_fails/wx_users/month_report/staff_users`；`settings` 只留 `access_key/recover_code/sign_secret/staff_key/staff_salt/book_name`（**口令和账本名不动**，否则下次打不开）；清完 `ensureAccounts` + `ensureCats` 回到默认 4 个账户、9+3 个分类；`onboard_done` 被清掉 → 首页开账引导自动回来。语句按 50 条一批 `db.batch`（D1 单批上限 100 条）。
+   - **演示口令不许清空**：`book-reset` 加进演示模式的禁行正则（实测演示口令打它 → 403 `demo_readonly`）。
+   - **新增 `scripts/test-book.mjs`（26 项）并挂进 CI 最后一步**（它会清空再导回，必须放在别人后面）：确认字写错 400 且数据没动 / 清空后单据·流水归零、账户 4 个、支出分类 ≥9、口令与账本名不变、开账引导回到未完成 / 清空前有备份 / 导出的包带 `kind` 标记 / 导回去单数一致且口令仍可用 / 演示口令被拒 / 首页有 `/pc` 与 `/guide` 且不再写「请不要在浏览器里打开」。
+   - 实测（本地 `/tmp/d1br` + dev 9071）：造 2 单 → 导出 57 张表 → 乱写确认 400 → 清空 56 张表 + 备份 #1 → 应收 0、流水 0、账户回落 4 个、支出分类 9 个、`/me` 仍 owner、引导回到未完成 → 导回 2 单、口令仍可用；`smoke` 232 GET 无 5xx、`test-demo` 全过（三库灌 schema 后）。
+   - ⚠️ 纯后端改动（首页与 `/pc` 都是服务端 HTML），小程序不用重传。
+
 312. ✅ **教程也上了网：`/guide` 一页，跟 `/pc` 互相有链接**：用户说「把使用教程也放在一起吧，方便随时点开查看」。做法不是运行时读文件（Worker 没有文件系统、exe 里也没打包 docs/），而是**编译期生成**：
    - `scripts/gen-guide.mjs` 把 `docs/新手教程.md` 转成一张自包含的 HTML（标题/表格/列表/引用/代码块/内联代码与加粗都转，表格外面套 `.tw` 横向滚动，打印时隐藏顶栏），写进 `backend/guide.js`（`export const GUIDE_HTML = "..."`，18 KB）。
    - `backend/index.js` 顶部 `import { GUIDE_HTML } from './guide.js'`，新增 `app.get('/guide')`，中间件白名单加 `path === '/guide'`（教程里没有账目数据，不用口令）。

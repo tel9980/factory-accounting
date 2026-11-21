@@ -1159,7 +1159,7 @@ app.use('*', async (c, next) => {
     const dm = c.req.method
     // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
     const denyDemo = dm !== 'OPTIONS' && (
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name)/.test(path) ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset)/.test(path) ||
       // 模块清单可以看（前端要据此藏入口），但改不了
       (/^\/modules$/.test(path) && dm !== 'GET')
     )
@@ -4942,11 +4942,42 @@ app.get('/', (c) => c.html(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>小工厂记账</title>
-<style>body{font-family:-apple-system,sans-serif;max-width:520px;margin:12vh auto;padding:0 24px;color:#333;line-height:1.7}h1{font-size:20px}.ok{font-size:44px}a{color:#07c}</style>
-</head><body><div class="ok">✅</div><h1>小工厂记账 · 服务已就绪</h1>
-<p>这里是记账小程序的<strong>服务器</strong>，给微信小程序提供数据接口，不是网页。</p>
-<p>请不要在浏览器里打开，请到<strong>微信开发者工具</strong>或<strong>手机微信</strong>里使用小程序。</p>
-<p>第一次打开小程序时会让你<strong>设置一个访问口令</strong>，之后每台设备输一次口令即可记账。</p>
+<style>
+ body{margin:0;font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#222}
+ .wrap{max-width:620px;margin:0 auto;padding:40px 20px 60px}
+ h1{font-size:22px;margin:0 0 4px}
+ .sub{color:#777;font-size:13px;margin-bottom:20px}
+ .card{display:block;background:#fff;border-radius:12px;padding:18px 20px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.06);text-decoration:none;color:inherit;transition:.15s}
+ .card:hover{box-shadow:0 3px 10px rgba(0,0,0,.1);transform:translateY(-1px)}
+ .card .t{font-size:17px;font-weight:600;margin-bottom:2px}
+ .card .d{color:#777;font-size:13px}
+ .n{color:#999;font-size:12px;margin-top:22px;line-height:1.9}
+ code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
+</style></head><body><div class="wrap">
+<h1>小工厂记账</h1>
+<div class="sub">记账本身在微信小程序里（手机）；电脑上填表、查教程用下面两个链接。</div>
+
+<a class="card" href="/pc">
+  <div class="t">💻 电脑上填表</div>
+  <div class="d">下载 Excel 模板 → 电脑上填客户/金额 → 传回来；也能导出整账套、导入、一键初始化</div>
+</a>
+<a class="card" href="/guide">
+  <div class="t">📖 使用教程</div>
+  <div class="d">从建账套开始，一步一步；免口令，能直接打印</div>
+</a>
+
+<div class="n">
+  微信里搜小程序「小工厂记账」或用你收藏的小程序卡片打开。<br/>
+  第一次打开会让你设一个访问口令（至少 4 位）；之后每台设备输一次就行。<br/>
+  忘了口令：小程序里点「用恢复码重设」，或在这台电脑上打开 <a href="/pc">电脑填表</a> 页最下面。<br/>
+  <span id="ver"></span>
+</div>
+</div>
+<script>
+fetch('/version').then(function(r){return r.json()}).then(function(d){
+  document.getElementById('ver').textContent = '版本 ' + (d.version || '') + (d.commit ? ' · ' + d.commit : '')
+}).catch(function(){})
+</script>
 </body></html>`))
 
 // 除 /auth/* 外全部需要口令
@@ -6741,6 +6772,27 @@ app.get('/pc', async (c) => {
   </div>
 </div>
 
+<div class="card">
+  <h2>4. 整账套（换公司 / 换电脑）</h2>
+  <div class="row">
+    <select id="bk" style="padding:9px 12px;border:1px solid #d8dbe0;border-radius:8px;font-size:15px">
+      <option value="1">主账套</option><option value="2">账套二</option><option value="3">账套三</option>
+    </select>
+    <button class="p" onclick="bookOut()">导出这本账（下载 JSON）</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <input type="file" id="bf" accept=".json,application/json"/>
+    <button class="p" onclick="bookIn()">导入到这本账（整本覆盖）</button>
+  </div>
+  <div class="tip">导出的是账目本身（单据、流水、客户档案、材料、工资…），<b>不含</b>口令，也不含单据照片。换电脑、换账套、留个底都用它；导入会先自动备份现在的数据，再整本覆盖。</div>
+  <hr style="border:none;border-top:1px solid #eef0f3;margin:16px 0"/>
+  <div class="row">
+    <input type="text" id="rs" placeholder="要清空就输入两个字：清空"/>
+    <button onclick="bookReset()">一键初始化（清空重来）</button>
+  </div>
+  <div class="tip">换公司、或者试用完想从头来时用。清空的是<b>上面选中的这本账</b>：单据、流水、客户、材料、工资、备份、照片全清，账户和分类回到默认；<b>口令和账本名留着</b>；清空前会自动备份一份，点错了还能退回去。</div>
+</div>
+
 <script>
 var K = localStorage.getItem('fa_key') || ''
 document.getElementById('key').value = K
@@ -6765,6 +6817,46 @@ function dl(tpl){
       saveBlob(new Blob([u], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name || (tpl + '.xlsx'))
       msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill ? '（已把客户/供应商名字填好）' : ''), true)
     }).catch(function(e){ msg('下载失败：' + e, false) })
+}
+function bk(){ return document.getElementById('bk').value }
+function bookOut(){
+  if (needKey()) return
+  msg('正在导出…')
+  fetch('/export-all', { headers: { 'x-access-key': K, 'X-Book': bk() } })
+    .then(function(r){ return r.json() }).then(function(d){
+      if (!d.ok) { msg(d.error || '导出失败', false); return }
+      var txt = JSON.stringify(d)
+      saveBlob(new Blob([txt], { type: 'application/json' }), 'factory-book' + bk() + '-' + new Date().toISOString().slice(0, 10) + '.json')
+      msg('导出好了：' + Object.keys(d.tables || {}).length + ' 张表 / ' + (d.rows_total || 0) + ' 行', true)
+    }).catch(function(e){ msg('导出失败：' + e, false) })
+}
+function bookIn(){
+  if (needKey()) return
+  var f = document.getElementById('bf').files[0]
+  if (!f) { msg('先选一个导出的 .json 文件', false); return }
+  if (!confirm('导入会用这个文件覆盖当前这本账的全部数据（先自动备份一份）。继续？')) return
+  var rd = new FileReader()
+  rd.onload = function(){
+    var pkg
+    try { pkg = JSON.parse(String(rd.result)) } catch (e) { msg('这个文件不是导出的 JSON', false); return }
+    msg('正在导入…')
+    fetch('/import-all', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bk(), 'Content-Type': 'application/json' }, body: JSON.stringify({ pkg: pkg, mode: 'replace', confirm: '覆盖' }) })
+      .then(function(r){ return r.json() }).then(function(d){
+        if (d.ok) msg('导入好了：' + Object.keys(d.done || {}).length + ' 张表', true)
+        else msg('导入没做完：' + (d.error || '') + (d.failed && d.failed.length ? '（' + d.failed.slice(0, 3).join('；') + '）' : ''), false)
+      }).catch(function(e){ msg('导入失败：' + e, false) })
+  }
+  rd.readAsText(f)
+}
+function bookReset(){
+  if (needKey()) return
+  if (document.getElementById('rs').value.trim() !== '清空') { msg('要清空请先在框里输入「清空」两个字', false); return }
+  var sel = document.getElementById('bk')
+  if (!confirm('清空「' + sel.options[sel.selectedIndex].text + '」的全部账目？\n口令和账本名会留着，清空前会自动备份一份。')) return
+  msg('正在清空…')
+  fetch('/book-reset', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bk(), 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: '清空' }) })
+    .then(function(r){ return r.json() }).then(function(d){ msg(d.ok ? d.text : (d.error || '清空失败'), !!d.ok) })
+    .catch(function(e){ msg('清空失败：' + e, false) })
 }
 function dlSheet(t){
   if (needKey()) return
@@ -13890,6 +13982,51 @@ app.get('/export-all', async (c) => {
   const nm = await getTitle(db).catch(() => ({ title: '' }))
   d.book = (nm && nm.title) || ''
   return c.json(d)
+})
+
+// 一键初始化：把当前账套的账目清空，回到刚建好的样子（口令、账本名留着）。
+// 换公司 / 试用完想重来的时候用。清之前先自动存一份备份，点错了还能从备份恢复。
+app.post('/book-reset', async (c) => {
+  const db = c.env.DB
+  if (c.get('role') !== 'owner') return c.json({ error: '只有老板口令能清空账套', code: 'owner_only' }, 403)
+  const b = await c.req.json().catch(() => ({}))
+  if (String(b.confirm || '').trim() !== '清空') {
+    return c.json({ error: '这一步会清空当前账套的全部账目（单据、流水、客户档案、材料、工资…）。真要清空，请在确认里写「清空」两个字。', code: 'need_confirm' }, 400)
+  }
+  let snapId = 0
+  try { const sn = await saveBackup(db, 'before-reset'); snapId = num(sn && sn.id) } catch (e) { noteFail(e, '清空前备份') }
+  const keepStaff = b.keep_staff === true
+  const KEEP_SET = ['access_key', 'recover_code', 'sign_secret', 'staff_key', 'staff_salt', 'book_name']
+  const stmts = []
+  const cleared = []
+  for (const t of BACKUP_TABLES) {
+    if (t === 'settings') continue
+    if (t === 'staff_users' && keepStaff) continue
+    stmts.push(db.prepare('DELETE FROM ' + t))
+    cleared.push(t)
+  }
+  // 备份、照片、审计、日志这些不在 BACKUP_TABLES 里，换公司也不该带着上一家的东西
+  for (const t of ['backups', 'backup_parts', 'attachments', 'audit_log', 'error_log', 'slow_log', 'op_dedupe', 'auth_fails', 'wx_users', 'month_report', 'staff_users']) {
+    if (t === 'staff_users' && keepStaff) continue
+    stmts.push(db.prepare('DELETE FROM ' + t))
+    cleared.push(t)
+  }
+  stmts.push(db.prepare('DELETE FROM settings WHERE key NOT IN (' + KEEP_SET.map(() => '?').join(',') + ')').bind(...KEEP_SET))
+  try {
+    // 分批跑：一次塞 60 条以内（D1 单批上限 100 条语句）
+    for (let i = 0; i < stmts.length; i += 50) await db.batch(stmts.slice(i, i + 50))
+  } catch (e) {
+    noteFail(e, '清空账套')
+    return c.json({ error: '清空的时候出错了：' + String((e && e.message) || e).slice(0, 120) + '（清空前已自动备份，可在「报表 → 备份列表」里退回去）', code: 'reset_failed' }, 500)
+  }
+  // 回到刚建库的样子：默认账户 + 默认分类
+  try { await ensureAccounts(db) } catch (e) { noteFail(e, '清空后建账户') }
+  try { await ensureCats(db) } catch (e) { noteFail(e, '清空后建分类') }
+  try { await logAudit(db, '一键初始化', String(c.env.BOOK || '1'), `清空 ${cleared.length} 张表${snapId ? `，清空前备份 #${snapId}` : ''}`) } catch (e) {}
+  return c.json({
+    ok: true, cleared: cleared.length, tables: cleared, snapshot: snapId,
+    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}），想反悔可以在「报表 → 备份列表」里恢复。` : '')
+  })
 })
 
 // 整包恢复：replace=先清空再灌（同 id 保留）；merge=只补缺的行
