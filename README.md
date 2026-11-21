@@ -122,14 +122,14 @@ npx wrangler secret put NOTES_PASS     # 笔记站的编辑口令
 在 GitHub 的 **Releases** 页下载对应系统的文件（<https://github.com/tel9980/factory-accounting/releases>）。
 推一个 `v*` tag 时由 `.github/workflows/release.yml` 自动构建（Node SEA：node 运行时和整份后端打成一个文件，约 90–122 MB）。
 
-当前 v1.2.0 的四个文件：
+当前 v1.3.0 的四个文件：
 
 | 文件 | 系统 | 大小 |
 |---|---|---|
-| `factory-accounting-windows-x64.exe` | Windows 10/11 x64 | 90.9 MB |
-| `factory-accounting-linux-x64` | Linux x64（glibc） | 122.3 MB |
-| `factory-accounting-macos-arm64` | macOS Apple 芯片（M 系列） | 117.2 MB |
-| `SHA256SUMS.txt` | 三个文件的校验和 | — |
+| `factory-accounting-windows-x64.exe` | Windows 10/11 x64 | 91.2 MB |
+| `factory-accounting-linux-x64` | Linux x64（glibc） | 122.6 MB |
+| `factory-accounting-macos-arm64` | macOS Apple 芯片（M 系列） | 117.5 MB |
+| `SHA256SUMS.txt` | 上面三个文件的校验和（三行，少一行就是发版脚本又覆盖了） | — |
 
 Intel 芯片的 Mac 没有现成包（GitHub 的 macOS 机器都是 arm64，交叉打不出来），可以在自己机器上按下面「自己打一个」跑一遍。
 
@@ -137,7 +137,7 @@ Intel 芯片的 Mac 没有现成包（GitHub 的 macOS 机器都是 arm64，交�
   先设一个口令（就是小程序里要输的那个），下面会给出恢复码，抄下来。
 - **Linux / macOS**：`chmod +x factory-accounting-linux-x64` 后直接跑；macOS 第一次打开如果提示
   「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。
-- 数据在**程序旁边的 `data/` 目录**（`book1.db` / `book2.db` / `book3.db`，对应三本账）。
+- 数据在**程序旁边的 `data/` 目录**（`book1.db` … `book9.db`，一本账一份文件；默认只开 3 本，多开的空库不占地方）。
   把整个 `data/` 拷走就是备份；换电脑时拷回来接着用。
 - 命令行参数：`--port 8787`（换端口）、`--host 127.0.0.1`（只允许本机访问）、
   `--data <目录>`（换数据位置）、`--no-cron`（不跑每日维护）、`--no-open`（不自动开浏览器）。
@@ -170,7 +170,7 @@ docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
 
 镜像 `linux/amd64` + `linux/arm64` 都推了（群晖 ARM 也能跑），数据在容器里的 `/data`。
 `docker logs factory` 能看到启动信息；健康检查打的是 `/version`。
-v1.2.0 的镜像 digest 是 `sha256:b6fcef9f246e95b9d75ecb5103bba6f67581c5ceb2607f23396eaaf61c42d756`
+v1.3.0 的镜像 digest 是 `sha256:fef72f93249d303ddb93c56a4bd1c4b2c601f025cbed4398df0385dc2fbd122b`
 （多架构索引，`docker pull` 时按机器自动挑 amd64 / arm64）。这个包是**公开**的，直接 pull 就行、不用登录；
 万一哪天改成私有，再 `echo <PAT> | docker login ghcr.io -u tel9980 --password-stdin`（PAT 勾 `read:packages`）。
 
