@@ -17,6 +17,7 @@ async function req(method, path, opts = {}) {
   return { s: r.status, d: d || {} }
 }
 
+const PB = String(1000 + (Date.now() % 9000))
 const TAG = 'staff' + Date.now().toString(36).replace(/[0-9]/g, (d) => 'abcdefghij'[Number(d)]).slice(-4)
 
 async function waitUp() {
@@ -125,7 +126,43 @@ async function main() {
   r = await req('POST', '/staff-perms', { key: 'demo-look', body: { modules: ['ar'] } })
   eq('演示口令改不了员工权限', r.s, 403)
 
-  console.log('\n[6] 删除')
+  console.log('\n[6] 员工按账套分开（这本账的人进不了别的账套）')
+
+  r = await req('POST', '/staff-users', { book: 1, body: { name: '一本小王', pin: PB, mods: ['ar'] } })
+  eq('第 1 本加一个员工', r.s, 200)
+  const s1 = r.d.id
+
+  r = await req('GET', '/me', { key: PB, book: 1 })
+  eq('  他在第 1 本能进', r.s, 200)
+  r = await req('GET', '/me', { key: PB, book: 2 })
+  eq('  到第 2 本就进不来（401）', r.s, 401)
+
+  r = await req('GET', '/staff-users', { book: 2 })
+  eq('第 2 本的员工列表里没有他', (r.d.rows || []).some((x) => Number(x.id) === Number(s1)), false)
+
+  r = await req('POST', '/staff-users', { book: 2, body: { name: '二厂小王', pin: PB, mods: ['ar', 'ap'] } })
+  eq('第 2 本可以加一个同口令的人', r.s, 200)
+  const s2 = r.d.id
+  r = await req('GET', '/me', { key: PB, book: 2 })
+  eq('  他在第 2 本能进', r.s, 200)
+  eq('  名字是二厂那个', r.d.staff_name, '二厂小王')
+
+  r = await req('GET', '/me', { key: PB, book: 1 })
+  eq('同一串口令在第 1 本还是原来那个人', r.d.staff_name, '一本小王')
+
+  r = await req('GET', '/ar', { key: PB, book: 1 })
+  eq('第 1 本的人能看第 1 本应收', r.s, 200)
+  r = await req('GET', '/ap', { key: PB, book: 1 })
+  eq('  但他没开应付 → 403', r.s, 403)
+  r = await req('GET', '/ap', { key: PB, book: 2 })
+  eq('第 2 本那个人开了应付 → 200', r.s, 200)
+
+  await req('DELETE', '/staff-users/' + s2, { book: 2 })
+  await req('DELETE', '/staff-users/' + s1, { book: 1 })
+  r = await req('GET', '/me', { key: PB, book: 2 })
+  eq('删掉第 2 本那个后，同一口令在第 2 本进不来', r.s, 401)
+
+  console.log('\n[7] 删除')
 
   r = await req('DELETE', '/staff-users/' + sid)
   eq('删掉这个员工', r.s, 200)

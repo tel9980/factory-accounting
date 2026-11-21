@@ -1675,6 +1675,15 @@ node scripts/build-exe.mjs --out dist
    - 文档：`DEPLOYMENT.md` 新增 **4.14 网页上管人与权限**、`docs/新手教程.md` 新增 **1.2.3 在电脑上加员工、给权限**；`node scripts/gen-guide.mjs` 重生成。
    - 这一轮**没动小程序**（只动 Worker 里的 `/pc` 页面）→ 小程序不用重传，刷新网页即可。
 
+320. ✅ **员工按账套分开（纠正 319 的一处设计错误）**：用户看完 319 直接指出「不是应该哪个账套的员工只能做哪个账套的账吗」——他是对的，319 里员工账号存在主账套、三本账共用，等于二厂的人拿同一个口令也能进一厂记账。
+   - **改动（`backend/index.js`）**：员工认人从 `mainDb` 改成**当前这本账** `c.env.DB` —— `ensureStaffTable / staffPinReady / pinHash / migrateStaffPins / staff_users 查询` 全部按账套走；整体员工口令（`settings.staff_key`）也改成每本账各存一份；`/staff-users`（增删改查）、`/staff-perms`（六类模块 + 两个「只看自己」开关）、`selfOnly / scopeOwn`、`/me` 里的 `staff_name / staff_modules` 全部读当前账套。
+   - **盐和就绪标记也要按库分开**：`staff_salt` 原来是个模块级 `let _pinSalt`（全进程一份），多本账会互相串；改成 `WeakMap` 按库缓存。`staffPinReady` 的 `_pinReadyDb` 同理改成 `WeakSet`。
+   - **`/auth/staff`、`/auth/staff-off` 的授权口径**：主账套老板、这本账自己的管理员、超级管理员都能设/停这本账的整体员工口令（不再只认主账套口令）。
+   - **界面**：`/pc` 第 7 块标题下写明「员工是按账套分开的，现在列的是第 N 本；要在别的账套加人，先把账套切过去再加一次」；`/staff-users` 的文案带上账套号。
+   - **回归（`test-staff.mjs` 从 37 项扩到 49 项）**：第 1 本加的人到第 2 本登录 → 401；第 2 本的员工列表里没有他；两本账可以各有一个**同一串口令**的人，各自登录回各自的名字；第 1 本那个人没开应付 → `/ap` 403，第 2 本那个开了 → 200；删掉第 2 本的人后，同一口令在第 2 本进不来。测试里口令按时间随机，可重复跑（上一版写死 `1357`，跑第二遍 409）。
+   - **验证**：`test-staff` 49 项、`test-book` 36、`test-super` 36、`test-demo`、`smoke` 235 GET 无 5xx、`check.mjs` 全绿。
+   - 从旧版本升上来的注意：**原来那批员工只在主账套有效**，二厂/三厂要重新加一次（各账套原来根本没有员工表，第一条登录会自动建）。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）

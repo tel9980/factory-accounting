@@ -555,16 +555,18 @@ function fnv1a(str) {
 // ---- 员工口令：用一个全局盐（不能每行随机盐，否则没法按口令直接查到人） ----
 // 4 位数字本身就不抗暴力，真正的防线是上面的试错锁定；这里做到「库里不留明文」，
 // 免得备份/截图/一眼扫过 D1 控制台就把别人的口令看光。
-let _pinSalt = ''
+// 盐按账套分开：员工账号现在存在每本账自己的库里，盐也必须各存各的（同一串口令在不同账本哈希不同）
+const _pinSalts = new WeakMap()
 async function staffSalt(db) {
-  if (_pinSalt) return _pinSalt
+  const cached = _pinSalts.get(db)
+  if (cached) return cached
   let v = ''
   try { const r = await db.prepare("SELECT value FROM settings WHERE key='staff_salt'").first(); v = r ? String(r.value) : '' } catch (e) { v = '' }
   if (!v) {
     v = randHex(16)
     try { await db.prepare("INSERT OR IGNORE INTO settings (key,value) VALUES ('staff_salt',?)").bind(v).run() } catch (e) {}
   }
-  _pinSalt = v
+  _pinSalts.set(db, v)
   return v
 }
 async function pinHash(db, pin) { return hashKey(await staffSalt(db), 'sp|' + String(pin)) }
@@ -572,15 +574,15 @@ async function pinHash(db, pin) { return hashKey(await staffSalt(db), 'sp|' + St
 // 结构就绪（列/索引/盐）：每个 isolate 只跑一次。
 // 注意别套 _memoDdl —— 那个包装器只 await 不返回，返回值会被吞掉，
 // 这里必须把「到底有没有 pin_hash 列」这个结论带回去。
-let _pinReadyDb = null
+const _pinReadyDbs = new WeakSet()
 async function staffPinReady(db) {
-  if (_pinReadyDb === db) return true
+  if (_pinReadyDbs.has(db)) return true
   const cols = ((await db.prepare('PRAGMA table_info(staff_users)').all()).results) || []
   if (!cols.length) return false
   if (!cols.some((x) => x.name === 'pin_hash')) await db.prepare('ALTER TABLE staff_users ADD COLUMN pin_hash TEXT').run().catch(() => {})
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_hash ON staff_users(pin_hash)').run().catch(() => {})
   await staffSalt(db)
-  _pinReadyDb = db
+  _pinReadyDbs.add(db)
   return true
 }
 
@@ -872,30 +874,39 @@ const getStaffKey = async (db) => {
 app.post('/auth/staff', async (c) => {
   const { key, password } = await c.req.json()
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const db = c.env.DB || mainDb
   const saved = await getKey(mainDb)
   if (!saved) return c.json({ error: '尚未设置老板口令' }, 400)
-  if (!(await verifyKey(mainDb, key))) return c.json({ error: '只有老板口令能设员工口令' }, 403)
+  // 主账套老板、这本账自己的管理员、超级管理员，都能设
+  const okWho = (await verifyKey(mainDb, key))
+    || (db !== mainDb && (await verifyKey(db, key)))
+    || (await verifySetting(mainDb, 'super_key', key))
+  if (!okWho) return c.json({ error: '只有老板口令能设员工口令' }, 403)
   const pw = String(password || '').trim()
   if (pw && pw.length < 4) return c.json({ error: '员工口令至少 4 位' }, 400)
   if (pw && (await verifyKey(mainDb, pw))) return c.json({ error: '员工口令不能和老板口令一样' }, 400)
   const rec = pw ? await makeKeyRecord(pw) : ''
-  const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
-  if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_key'").bind(rec).run()
-  else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('staff_key', ?)").bind(rec).run()
-  return c.json({ ok: true, enabled: !!pw })
+  const old = await db.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
+  if (old) await db.prepare("UPDATE settings SET value=? WHERE key='staff_key'").bind(rec).run()
+  else await db.prepare("INSERT INTO settings (key, value) VALUES ('staff_key', ?)").bind(rec).run()
+  return c.json({ ok: true, enabled: !!pw, book: String(c.env.BOOK || '1') })
 })
 
 // 一键停用员工口令（离职/换人时立刻止损，不用先「改成空」）
 app.post('/auth/staff-off', async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const db = c.env.DB || mainDb
   const saved = await getKey(mainDb)
   if (!saved) return c.json({ error: '尚未设置老板口令' }, 400)
-  if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板口令能停用员工口令' }, 403)
-  const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
+  const okWho = (await verifyKey(mainDb, b.key))
+    || (db !== mainDb && (await verifyKey(db, b.key)))
+    || (await verifySetting(mainDb, 'super_key', b.key))
+  if (!okWho) return c.json({ error: '只有老板口令能停用员工口令' }, 403)
+  const old = await db.prepare("SELECT value FROM settings WHERE key='staff_key'").first()
   if (!old || !old.value) return c.json({ ok: true, enabled: false, note: '本来就没开员工口令' })
-  await mainDb.prepare("DELETE FROM settings WHERE key='staff_key'").run()
-  await logAudit(mainDb, '停用员工口令', '员工口令', (b.note || '离职/换人'), '', '老板')
+  await db.prepare("DELETE FROM settings WHERE key='staff_key'").run()
+  await logAudit(db, '停用员工口令', '员工口令', (b.note || '离职/换人'), '', '老板')
   return c.json({ ok: true, enabled: false, note: '已停用：他手机上那个口令现在进不去了' })
 })
 
@@ -1138,14 +1149,16 @@ app.use('*', async (c, next) => {
     // 一人一个口令：认到人就按这个人的名字和权限走
     let su = null
     try {
-      await ensureStaffTable(mainDb)
-      if (await staffPinReady(mainDb)) {
-        const h = await pinHash(mainDb, given)
-        su = await mainDb.prepare('SELECT * FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
+      // 员工按账套分开：只认「当前这本账」里的员工，别人的账套进不来
+      const sdb = c.env.DB || mainDb
+      await ensureStaffTable(sdb)
+      if (await staffPinReady(sdb)) {
+        const h = await pinHash(sdb, given)
+        su = await sdb.prepare('SELECT * FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
         if (!su) {
           // 老库刚升级：第一次有人用口令登录时把明文 PIN 补成哈希，然后重试一次
-          const n = await migrateStaffPins(mainDb)
-          if (n) su = await mainDb.prepare('SELECT * FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
+          const n = await migrateStaffPins(sdb)
+          if (n) su = await sdb.prepare('SELECT * FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
         }
       }
     } catch (e) { su = null }
@@ -1154,7 +1167,8 @@ app.use('*', async (c, next) => {
       c.set('staff_name', String(su.name || ''))
       staffMods = String(su.modules || '').split(',').map((x) => x.trim()).filter(Boolean)
     } else {
-      if (await verifySetting(mainDb, 'staff_key', given)) role = 'staff'
+      // 整体员工口令也按账套走（老功能，兜底用）
+      if (await verifySetting(c.env.DB || mainDb, 'staff_key', given)) role = 'staff'
     }
   }
   if (!role) {
@@ -1237,7 +1251,7 @@ app.use('*', async (c, next) => {
     if (denyStaff) return c.json({ error: '这是老板才能用的功能（员工口令不能删改单据、看不到毛利）', code: 'staff_denied' }, 403)
     const mod = staffModOf(path)
     if (mod) {
-      const mods = staffMods || await getStaffModules(mainDb)
+      const mods = staffMods || await getStaffModules(c.env.DB || mainDb)
       if (!mods.includes(mod)) return c.json({ code: 'staff_module', error: '这个员工口令没有开「' + (STAFF_MOD_LABEL[mod] || mod) + '」，要开让老板去 设置 → 员工账号 勾上' }, 403)
     }
   }
@@ -1282,7 +1296,8 @@ app.use('*', async (c, next) => {
 
 // 员工账号：一人一个 4 位口令，各自授权限；谁记的账自动带名字
 app.get('/staff-users', async (c) => {
-  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  // 员工按账套分开：列的是「当前这本账」的人
+  const db = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   await ensureStaffTable(db)
   await staffPinReady(db)
   await migrateStaffPins(db)
@@ -1293,11 +1308,12 @@ app.get('/staff-users', async (c) => {
   return c.json({
     ok: true, rows: mods, count: mods.length, active_count: mods.filter((r) => num(r.active)).length,
     labels: STAFF_MOD_LABEL, all_mods: Object.keys(STAFF_MOD_LABEL), global_mods: global,
-    text: mods.length ? `有 ${mods.length} 个员工账号（在用 ${mods.filter((r) => num(r.active)).length} 个）。每人一个 4 位口令，记账时会自动记上名字。` : '还没有员工账号。加一个，把 4 位口令给他，他记的账就自动记上名字，也能单独限权。'
+    book: String(c.env.BOOK || '1'),
+    text: mods.length ? `第 ${String(c.env.BOOK || '1')} 本账有 ${mods.length} 个员工账号（在用 ${mods.filter((r) => num(r.active)).length} 个）。每人一个 4 位口令，记账时会自动记上名字；他们只能进这一本账。` : `第 ${String(c.env.BOOK || '1')} 本账还没有员工账号。员工是按账套分开的——加一个，把 4 位口令给他，他只能进这一本账。`
   })
 })
 app.post('/staff-users', async (c) => {
-  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const db = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   await ensureStaffTable(db)
   const b = await c.req.json().catch(() => ({}))
   const name = String(b.name || '').trim().slice(0, 12)
@@ -1316,7 +1332,7 @@ app.post('/staff-users', async (c) => {
   return c.json({ ok: true, id: (r.meta && r.meta.last_row_id) || 0, name, pin, text: `加好了：${name}，口令 ${pin}。把口令给他，他在小程序里输这个口令就能记账，记的账会自动记上「${name}」。` })
 })
 app.post('/staff-users/:id', async (c) => {
-  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const db = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   await ensureStaffTable(db)
   const id = num(c.req.param('id'))
   const row = await db.prepare('SELECT * FROM staff_users WHERE id=?').bind(id).first()
@@ -1344,7 +1360,7 @@ app.post('/staff-users/:id', async (c) => {
   return c.json({ ok: true, pin: typeof newPin === 'string' ? newPin : '' })
 })
 app.delete('/staff-users/:id', async (c) => {
-  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const db = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   await ensureStaffTable(db)
   const id = num(c.req.param('id'))
   const row = await db.prepare('SELECT * FROM staff_users WHERE id=?').bind(id).first()
@@ -1358,7 +1374,7 @@ app.delete('/staff-users/:id', async (c) => {
 async function selfOnly(c) {
   const role = c.get && c.get('role')
   if (role !== 'staff') return { on: false, who: '' }
-  const main = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const main = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   const row = await main.prepare("SELECT value FROM settings WHERE key='staff_self_only'").first().catch(() => null)
   if (!row || String(row.value) !== '1') return { on: false, who: '' }
   const nm = (c.get && c.get('staff_name')) || ''
@@ -1374,7 +1390,7 @@ async function partyStaffTable(db) {
 // 员工 + 开了「只看自己负责的客户」时返回 {on, name}（name = 员工名，用于过滤）
 async function scopeOwn(c) {
   if (!c.get || c.get('role') !== 'staff') return { on: false, name: '' }
-  const main = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const main = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   const row = await main.prepare("SELECT value FROM settings WHERE key='staff_scope'").first().catch(() => null)
   if (!row || String(row.value) !== 'own') return { on: false, name: '' }
   const nm = String((c.get && c.get('staff_name')) || '').trim()
@@ -5183,7 +5199,7 @@ app.post('/unseal', async (c) => {
 
 // 员工权限：能开哪些模块（老板专用）
 app.get('/staff-perms', async (c) => {
-  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const mainDb = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   const mods = await getStaffModules(mainDb)
   const rows = Object.keys(STAFF_MOD_LABEL).map((k) => ({ k, label: STAFF_MOD_LABEL[k], on: mods.includes(k) }))
   const off = rows.filter((r) => !r.on).map((r) => r.label)
@@ -5202,7 +5218,7 @@ app.post('/staff-perms', async (c) => {
   const want = Array.isArray(body.modules) ? body.modules : []
   const mods = want.map((x) => String(x)).filter((x) => STAFF_MOD_LABEL[x])
   if (!mods.length) return c.json({ error: '至少给员工留一个模块，不然他进来什么都点不了' }, 400)
-  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const mainDb = c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
   const v = mods.join(',')
   const old = await mainDb.prepare("SELECT value FROM settings WHERE key='staff_modules'").first()
   if (old) await mainDb.prepare("UPDATE settings SET value=? WHERE key='staff_modules'").bind(v).run()
@@ -5259,14 +5275,15 @@ app.post('/modules', async (c) => {
 app.get('/me', async (c) => {
   const role = c.get('role') || 'owner'
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
-  const staff = await getStaffKey(mainDb)
+  const bookDb = c.env.DB || mainDb
+  const staff = await getStaffKey(bookDb)
   const seal = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed'").first().catch(() => null)
   const sealAt = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed_at'").first().catch(() => null)
   // 一人一个口令时，权限按这个人的来；没有个人账号就用整体员工权限
   const myName = String(c.get('staff_name') || '')
-  let mods = role === 'staff' ? await getStaffModules(mainDb) : Object.keys(STAFF_MOD_LABEL)
+  let mods = role === 'staff' ? await getStaffModules(bookDb) : Object.keys(STAFF_MOD_LABEL)
   if (role === 'staff' && myName) {
-    const su = await mainDb.prepare('SELECT modules FROM staff_users WHERE name=? AND active=1 ORDER BY id DESC').bind(myName).first().catch(() => null)
+    const su = await bookDb.prepare('SELECT modules FROM staff_users WHERE name=? AND active=1 ORDER BY id DESC').bind(myName).first().catch(() => null)
     if (su && String(su.modules || '').trim()) mods = String(su.modules).split(',').map((x) => x.trim()).filter(Boolean)
   }
   // demo_enabled 只给老板看（前端据此决定要不要显示「设演示口令」按钮），不回明文
@@ -6870,7 +6887,7 @@ app.get('/pc', async (c) => {
 <div class="card">
   <h2>7. 人员与权限（员工账号）</h2>
   <div class="tip">员工用<b>自己的 4 位口令</b>登录，记的账自动记上名字；能做什么按「权限」勾。员工永远不能删改单据、看不到毛利和金额类分析。<br>
-  注意：员工账号是<b>所有账套共用</b>的（同一个人在哪个账套记账都是这个口令），但「只看自己负责的客户」是按账套分的。</div>
+  <b>员工是按账套分开的</b>：现在列的是「<span id="st_book">当前</span>」这本账的人。要在别的账套加人，先把上面的账套切过去，再加一次（同一个人可以只在一本账里有账号）。</div>
   <div class="row">
     <button onclick="loadStaff()">看员工账号</button>
     <label class="tip" style="margin:0"><input type="checkbox" id="sp_self_own"> 员工只能看自己录的单</label>
@@ -7016,6 +7033,8 @@ function loadStaff(){
       })
       h += '</table>'
       document.getElementById('st_list').innerHTML = h
+  var sb = document.getElementById('st_book')
+  if (sb) sb.textContent = '第 ' + (d.book || bookCur()) + ' 本'
       document.getElementById('sp_self_own').checked = !!d.self_only
       smsg2(d.text || '看好了', true)
       return fetch('/staff-perms', { headers: { 'x-access-key': K, 'X-Book': bookCur() } }).then(function (r) { return r.json() }).then(function (p) {
