@@ -1247,3 +1247,14 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **写接口 / 列表接口里这两组字段不能删**：`delivered_at`（交付时间要显示）、`tax_net`/`gross_net`
   （含税/不含税要核对）、`rev`（乐观锁）、`month`（老备份补月要验）。`SLIM_DROP` 只允许放
   `created_by` / `import_batch` 这种确实没人读的列。
+
+**补一条（这一轮 CI 抓回来的）**：换数据访问写法时，**本机版和线上是两套驱动，两边都要跑**。
+`backend/index.js` 里改成 `db.batch([...SELECT...])` 之后，线上 D1 正常（batch 对 SELECT 也回
+`results` 数组），但 `server/d1.mjs` 的 `batch` 原来一律走 `run()`、rows 全丢 —— 本机版备份出来
+是 1 KB 空包，恢复直接报「这份备份里没有账目数据」。现在两边都改好：`server/d1.mjs` 按
+`select/with/pragma/explain` 分流走 `all()`，`buildBackup` / `dumpAll` 再加一道断言
+（batch 结果缺 `results` 就抛错退回逐表读）。**任何「读不到」都不能被当成「这张表是空的」**——
+备份里少一张表，恢复时会先 DELETE 再插 0 行，整本账就被清空了。
+改完的验证顺序：`node scripts/run-all.mjs --base <wrangler dev> --key ...`（线上语义）
+**加上** `node server/main.mjs --port 8792 --data /tmp/fa-local --no-open --no-cron` +
+`smoke.mjs` + `smoke-write.mjs`（本机语义），两边都绿再推。

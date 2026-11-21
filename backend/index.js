@@ -16383,8 +16383,12 @@ async function dumpAll(db) {
   let firstPages = null
   try {
     const rs = await db.batch(tabs.map((t) => db.prepare(`SELECT rowid AS __rid, * FROM ${t} WHERE rowid > ? ORDER BY rowid LIMIT ${PAGE}`).bind(0)))
+    // 同上：batch 没回 rows 就不能当成「每张表都空」，退回逐表读（下面 else 分支）
+    if (!Array.isArray(rs) || rs.length !== tabs.length || rs.some((r) => !r || !Array.isArray(r.results))) {
+      throw new Error('batch 没回 rows（实现不是 D1 语义），退回逐表读')
+    }
     firstPages = new Map()
-    tabs.forEach((t, i) => firstPages.set(t, (rs[i] && rs[i].results) || []))
+    tabs.forEach((t, i) => firstPages.set(t, rs[i].results))
   } catch (e) {
     noteFail(e, '导出整批')
     firstPages = null
@@ -18174,7 +18178,13 @@ async function buildBackup(db) {
   try {
     // settings 是 key/value 表，没有 id 列，统一按 rowid 排（SQLite 里 id INTEGER PRIMARY KEY 就是 rowid）
     const rs = await db.batch(BACKUP_TABLES.map((t) => db.prepare('SELECT * FROM ' + t + ' ORDER BY rowid')))
-    BACKUP_TABLES.forEach((t, i) => { out[t] = pick(t, (rs[i] && rs[i].results) || []) })
+    // batch 对 SELECT 必须回 rows（真 D1 的结果是 D1Result，带 results 数组）。万一换了实现、
+    // 只回 meta 不回 rows，绝不能把「读不到」当成「这张表是空的」写进备份文件 —— 那样恢复时
+    // 会先 DELETE 再插 0 行，整本账被清空。宁可退回逐表读（下面 catch 里那一套）。
+    if (!Array.isArray(rs) || rs.length !== BACKUP_TABLES.length || rs.some((r) => !r || !Array.isArray(r.results))) {
+      throw new Error('batch 没回 rows（实现不是 D1 语义），退回逐表读')
+    }
+    BACKUP_TABLES.forEach((t, i) => { out[t] = pick(t, rs[i].results) })
   } catch (e) {
     for (const t of BACKUP_TABLES) {
       try {

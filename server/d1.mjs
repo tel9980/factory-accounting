@@ -119,7 +119,11 @@ export class LocalD1 {
     try {
       for (const s of list) {
         if (!s || typeof s.run !== 'function') throw new Error('batch 里只能是 db.prepare(...) 出来的语句')
-        out.push(await s.run())
+        // 真 D1 的 batch 对 SELECT 也回 rows（结果是 D1Result，带 results 数组），
+        // 以前这里一律走 run()，SELECT 的 rows 全被丢掉 —— 本机版「备份出来是空的」
+        // 就是这条造成的（线上没事，本机看起来像坏了，最难查的那种）。
+        const isRead = /^\s*(select|with|pragma|explain)\b/i.test(String(s.sql || ''))
+        out.push(isRead ? await s.all() : await s.run())
       }
       this.raw.exec('COMMIT')
     } catch (e) {
