@@ -1728,6 +1728,17 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+330. ✅ **两个人同时点会怎样：一单收了两次钱、同一笔应收生成两张单，都实测出来了**：这一轮问的是「不只一个人、不只一台手机」时账会不会歪。做法是写了一个并发测试（`scripts/test-concurrency.mjs`，60 项）：每组先造一笔账，然后用 `Promise.all` 同时发**七八个请求**，最后验的不是状态码，而是**账本身对不对**——单据已收金额、流水合计、预收剩多少、核销记录合计、自检有没有孤儿流水。
+   - **真 bug 1：预收/预付抵扣并发会凭空多记收入**。`/orders/:id/apply-advance` 原来只给「改单」加了一道闸（`paid + written_off + ? <= price`）。两个人同时点、都读到 `paid=0`、预收只剩 500 时，两条改单都满足条件 → **单据变成收了 1000，而预收只扣了一次 500**。现在改单语句再加两道条件：`paid BETWEEN 老值 ± 0.005`（有人先改过就作废）与「这家预收还剩 ≥ 本次抵扣」；批后发现没扣上就回滚已记的那条 `cash=0` 分录并回 409「预收款刚被别人用掉了」。
+   - **真 bug 2：撤销银行流水认领会退两次钱**。`POST /bank-flows/:id/unmatch` 三条语句都不带条件，两个人同时点，单据的已收被退两次、流水删两条。现在第一条先「占位」：`UPDATE bank_flows SET matched_type='', matched_id=0 WHERE id=? AND COALESCE(matched_type,'')<>''`，没占到就 409「这笔流水刚被别人撤销过」。
+   - **真 bug 3：防重是「先查后写」，并发下双双放行**。`/orders`（同客户同额 2 分钟内）、`/payables`（7 天内）、`/expenses`（同日同分类同额）都是先 `SELECT` 再 `INSERT`，中间那点缝足够两个请求都通过。现在条件写进 `INSERT ... SELECT ... WHERE NOT EXISTS (...)`，写不进去才回 409 —— 查出来的那句提示语只留给人看。
+   - **真 bug 4：还本金并发会多还**。`/debts/:id/repay` 原来按「当前剩余」判断，两个 1000 的请求在只剩 1000 时都通过 → 还款记录 2000。现在两条语句（流水 + 还款记录）带同一个条件：本次金额 ≤ 本金 − 已还本金合计。
+   - **真 bug 5：`client_id` 去重也是「先查后写」**。前端连点两下/弱网重发时靠 `client_id` 只记一笔，但 `opSeen`（查）+ `opMark`（干完再登记）在并发下双双放行——实测「点两下」在收款上记了 800（本该 400）。现在改成**先占坑**：`opClaim` 是一条 `INSERT OR IGNORE`（`op_dedupe.client_id` 本来就是唯一索引），占到坑的才能往下走，干完 `opMark` 把坑标成真单号，失败 `opRelease` 放坑；占坑 60 秒还没标完的（进程被杀了）下次先清掉，免得用户永远被告「刚记过了」。
+   - **顺手把几处「主表 + 流水」拆成一次落库**：预收/预付、借支、内部转账原来是「先插主表、再插流水」，中间断一下就出现「记了预收、账上没钱」或者「转账转出有、转入没」。现在各自成对写，失败就把主表那条撤掉。
+   - **一个反直觉的发现（重要）**：本地 `wrangler dev` **经常把请求串行化**——把上面那些闸门全部回退，测试仍然全绿。所以「并发靠测试」是假的，真正的保证是**每条 SQL 自己带条件**。于是测试里加了第 19 组「静态护栏」：直接读源码，断言那些条件片段还在（14 条），谁哪天清理代码把它们删了，测试立刻红。
+   - **验证**（干净库 `/tmp/d1cc2` + dev 9331，三本账都灌 schema，严格 CI 顺序）：`check.mjs` 429 路由 / 57 表 / **654** SQL（多了 8 条：占坑、条件插入、成对落库）/ 263 调用 / 774 绑定；`smoke` 237 GET 无 5xx；`test-modules` / `smoke-write` / `crossmonth 16` / `apcat 31` / `import-xlsx 32` / `onboarding` / `safety 48` / `demo` / `archive 41` / `book 40` / `restore 65` / `super 36` / `staff 58` / `perm 108` / `arcat 36` / `pack 65` / `tax 54` / `list` / `numbers 55` / `bookiso 38` / **`concurrency 60`** / `oldbackup 58` 全绿；离线 `test-batch` / `test-key-queue` / `test-firstscreen` 全绿。
+   - 只改后端与测试，前端没动 → **小程序不用重传**，但线上要重新部署。
+
 329. ✅ **账套之间会不会串：备份、恢复、导出、设置 逐条试了，一个会串账的坑**：前三轮都在查「单本账里算得对不对」，这一轮问的是另一件事——三本账各是独立数据库，但**备份 id 是每本账自己从 1 数的**，而界面上三本都叫「回到某一天」。于是有三种串法：①列表没跟着切账套一起刷，点上一本留下的那一行 → 恢复的是这一本**完全不同**的那份（还显示「回来了」）；②把 A 的整库包导进 B，B 的账本名 / 模块开关 / 演示开关被 A 的包带走；③`/restore` 里夹带 `settings` 行，可以改掉目标账套的 `book_name`、`modules_off`、`access_key`。
    - **真 bug 1：`/backup-restore` 不认「这份备份是哪本账的」**。`/backup-list` 的行现在带 `book`，`/backup-restore` 收 `book` 参数，和当前账套对不上直接 `409 book_mismatch`（文案：「这份备份是第 1 本账的，现在打开的是第 2 本。请切回那本账再恢复。」）。不带 `book` 的老调用方式照旧能用，向后兼容。
    - **真 bug 2：`/restore` 会把「这台机器自己的设置」盖成包里的**。`restoreCore` 原来只跳过 `BACKUP_SETTINGS_SKIP` 那 8 个键，`book_name`/`modules_off`/`super_key`/`demo_key`/`demo_builtin_off` 是「包里有什么就盖什么」——所以「把 A 的备份恢复到 B」之后，数据是 B 的、设置是 A 的，账本名都变成 A 的。现在 `RESTORE_SETTINGS_SKIP` = 那 8 个 + 这 5 个，包里的同名键一律不认（`/import-all` 上一轮已经这么做了，`/restore` 这条路径漏了）。

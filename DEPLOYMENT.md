@@ -619,6 +619,34 @@ cd backend && ./node_modules/.bin/wrangler deploy
 
 回归：`node scripts/test-bookiso.mjs --base http://127.0.0.1:8791 --key 8888`（38 项，已挂 CI）。
 
+### 4.21 两个人同时点同一笔，会不会记两遍？
+
+会——这一轮之前会。典型场景：厂长和会计都在催同一笔尾款，两个人几乎同时点「收清」；
+或者弱网下手机连点两下；或者 `/pc` 网页和小程序同时提交同一份表。
+
+现在有三层保证，**从下往上依次是**：
+
+1. **每条 SQL 自带条件**（最靠得住的一层）。收款是
+   `UPDATE orders SET paid = paid + ? WHERE id = ? AND paid + COALESCE(written_off,0) + ? <= price + 0.005`，
+   流水那条用同样的条件 `INSERT ... SELECT ... WHERE (...)`，两条捆在一个 `db.batch` 里。
+   谁先把金额占满，第二个请求影响 0 行 → 回 `409 {code:'stale'}`，页面提示「刷新再看一眼」。
+   `/payables/:id/pay`、两条 `writeoff`、`/loans/:id/return`、`/debts/:id/repay`、
+   `/bank-flows/:id/unmatch`（先占位再退钱）都是这个套路。
+2. **`client_id` 先占坑**。前端每笔操作带一个 `client_id`，后端 `opClaim()` 用
+   `INSERT OR IGNORE INTO op_dedupe (client_id, ...)` 抢坑：抢到才往下走，抢不到直接回
+   `{ok:true, dup_ok:true}`（页面显示「这笔刚记过了」，`200` 不是错误，离线队列会把它清掉）。
+   干完 `opMark()` 把坑标成真单号，失败 `opRelease()` 放坑；**占坑超过 60 秒没标完的**（进程被杀了）
+   下次来先清掉，免得用户永远被「刚记过了」挡住。
+3. **防重用 `INSERT ... WHERE NOT EXISTS (...)`**。`/orders`（同客户同额 2 分钟内）、
+   `/payables`（7 天内）、`/expenses`（同日同分类同额）以前是「先查再写」，中间那点缝
+   两个请求都能过；现在条件写进 `INSERT` 本身，写不进去才回 409。
+
+回归：`node scripts/test-concurrency.mjs --base http://127.0.0.1:8791 --key 8888`（60 项，已挂 CI）。
+
+> ⚠️ **一个反直觉的坑**：本地 `wrangler dev` 经常把请求串行化，把这些闸门全删掉测试**照样全绿**。
+> 所以别信「测试过了就是并发安全」——真正的保证是第 1 层。测试里专门有一组「静态护栏」，
+> 直接读源码断言那些 SQL 条件片段还在（14 条），谁清理代码时删掉了就红。
+
 ### 5.0 最省事：什么都不用配（内置演示入口）
 
 登录页有一行 **「👀 先看看演示（不用口令，示例数据）」**——审核员点它就直接进演示账套
@@ -683,8 +711,13 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'x-access-key: 你的演示�
 
 ## 推送遇到 TLS 报错（本机代理问题）
 
-如果 `git push` 报 `gnutls_handshake() failed: The TLS connection was non-properly terminated`，是本机 `http_proxy`（192.168.2.22:20172）对 GitHub 的 TLS 握手不稳，不是仓库问题。绕过代理推即可：
+如果 `git push` 报 `GnuTLS recv error (-110)`、`Error in the HTTP2 framing layer` 或
+`Failed to connect to github.com port 443 after ... ms`，是**直连**不稳，不是仓库问题。
+这台机器上正确做法是**显式带上代理**（别用 `env -u` 去绕过）：
 
 ```bash
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY git -c http.proxy= -c https.proxy= push origin main
+P=http://192.168.2.22:20172
+git -c http.proxy=$P -c https.proxy=$P push origin main
 ```
+
+反例（别再用）：`env -u http_proxy ... git push` 走直连，经常要重试十几次、每次卡两分钟。
