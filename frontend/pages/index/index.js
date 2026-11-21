@@ -1968,7 +1968,9 @@ Page({
   // 以前每次都发请求、每次都 offset=同一个数，回来三份一样的行 —— 列表里同一张单出现三遍，
   // 点哪一行都不知道点的是哪一份。现在：一次只发一个请求，回来的按 id 去重。
   _appendPage(cur, page, more) {
-    const base = Array.isArray(cur) ? cur : []
+    // more=false 是「重新拉第一页」：必须从空开始，否则旧行（同 id）会被当成重复留下，
+    // 新数据全被丢掉 —— 收了款列表还显示「欠5000」、删掉的单还挂在上面、切账套显示别家的单。
+    const base = more ? (Array.isArray(cur) ? cur : []) : []
     const seen = new Set(base.map((x) => String(x.id)))
     const add = []
     // 后端某次回的不是数组（比如 {ok:true, error:…}）时不能直接 for…of，

@@ -40,6 +40,7 @@ jobs:
       - run: node scripts/test-batch.mjs
       - run: node scripts/test-key-queue.mjs
       - run: node scripts/test-firstscreen.mjs
+      - run: node scripts/test-list.mjs
 
   exe:
     name: 打包 ${{ matrix.name }}

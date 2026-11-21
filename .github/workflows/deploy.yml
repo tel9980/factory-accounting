@@ -54,6 +54,8 @@ jobs:
         run: node scripts/test-key-queue.mjs
       - name: 首屏分波回归（第一波只发首屏要用的，第二波延后补）
         run: node scripts/test-firstscreen.mjs
+      - name: 列表分页回归（重新拉第一页不许在旧列表后面追加）
+        run: node scripts/test-list.mjs
 
   smoke:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍
