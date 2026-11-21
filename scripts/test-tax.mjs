@@ -69,6 +69,9 @@ const main = async () => {
   if (!(await wait())) { console.error('服务没起来：' + BASE); process.exit(1) }
   let r = await call('POST', '/auth/setup', { key: KEY })
   if (r.status !== 200 && r.status !== 400 && r.status !== 409) { console.error('设口令失败', r.status, r.d); process.exit(1) }
+  // 本月税金的基线：同一个库反复跑也照样能精确比对增量
+  r = await call('GET', '/tax-summary?month=' + MONTH)
+  const base = (r.d && r.d.ok) ? r.d : { sales_tax: 0, buy_tax: 0 }
 
   // ── 1. 不含税 13%：金额 1000 → 税额 130，不含税 1000
   const cA = '税测试甲' + TAG
@@ -188,10 +191,11 @@ const main = async () => {
   const ts = r.d || {}
   eq('汇总 ok', ts.ok, true)
   eq('汇总月份', ts.month, MONTH)
-  if (!(Number(ts.sales_tax) >= 176)) no('销项税应 ≥ 176（46+130）', ts.sales_tax)
-  else ok('销项税 ≥ 176（收款里的 46 + 单独收的 130）')
-  if (!(Number(ts.buy_tax) >= 131)) no('进项税应 ≥ 131（41.28+90）', ts.buy_tax)
-  else ok('进项税 ≥ 131（付款里的 41.28 + 单独付的 90）')
+  // 用「本月新增」而不是绝对值：同一个库重复跑也不会变。以前写 >= 176，随便算错一点也过。
+  const salesTax = r2(Number(ts.sales_tax) - Number(base.sales_tax || 0))
+  const buyTax = r2(Number(ts.buy_tax) - Number(base.buy_tax || 0))
+  eq('销项税增量 = 176（收款 46 + 单独收的 130）', salesTax, 176)
+  eq('进项税增量 = 131.28（付款 41.28 + 单独付的 90）', buyTax, 131.28)
   eq('净额 = 销项 - 进项', r2(Number(ts.sales_tax) - Number(ts.buy_tax)), ts.net)
   if (!ts.no_inv_out || !(Number(ts.no_inv_out.count) >= 1)) no('没票的支出应 ≥1 笔', ts.no_inv_out)
   else ok('没票的支出统计到了（' + ts.no_inv_out.count + ' 笔 ¥' + ts.no_inv_out.amount + '）')

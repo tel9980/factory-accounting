@@ -7,3 +7,18 @@ node_modules/
 dist/
 build/
 data/
+
+# 本机版跑起来会生成的数据库（book1.db … book9.db）；这些都是账，绝不能进仓库
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 本地口令 / 令牌 / 调试变量，绝不提交
+.env
+.env.*
+.dev.vars
+*.pem
+
+# wrangler 的临时标识（每个开发者不一样，提交了会互相覆盖）
+.d1_id

@@ -276,12 +276,18 @@ async function main() {
   fs.mkdirSync(dataDir, { recursive: true })
 
   const schemaSql = readSchema()
-  const files = { DB: path.join(dataDir, 'book1.db'), DB2: path.join(dataDir, 'book2.db'), DB3: path.join(dataDir, 'book3.db') }
+  // 本机版和线上一样能开 9 本账（线上是 9 个 D1 绑定，本机是 9 个 .db 文件）。
+  // 以前写死 3 本，文档里说「最多 9 本」在本机版上根本做不到。
+  const BOOKS = 9
+  const files = {}
+  for (let i = 1; i <= BOOKS; i++) files[i === 1 ? 'DB' : 'DB' + i] = path.join(dataDir, 'book' + i + '.db')
   const dbs = {}
   for (const k of Object.keys(files)) {
     dbs[k] = new LocalD1(files[k])
     const r = await ensureSchema(dbs[k], schemaSql)
     if (r.after !== r.before) console.log(`  ${k} 建好 ${r.after - r.before} 张表（共 ${r.after} 张）`)
+    if (r.added && r.added.length) console.log(`  ${k} 老库补上 ${r.added.length} 个列：` + r.added.slice(0, 8).join('、') + (r.added.length > 8 ? ' …' : ''))
+    for (const f of r.failed || []) console.log(`  ⚠️ ${k} 有一个列没补上（不影响启动，但那一列的数据读不到）：` + f)
   }
 
   const env = {

@@ -174,7 +174,7 @@ async function ensureStaffTable(db) {
   await db.prepare('CREATE INDEX IF NOT EXISTS idx_staff_hash ON staff_users(pin_hash)').run().catch(() => {})
 }
 ensureStaffTable = _memoDdl(ensureStaffTable, 'stafftable')
-
+// ensureMonthCols 现在每个请求都会走一次兜底，必须记忆化，不然每条请求都要跑 3 次 PRAGMA + 一次回填 UPDATE
 async function ensureMonthCols(db) {
   for (const t of ['orders', 'ledger', 'payables']) {
     let has = false
@@ -190,6 +190,7 @@ async function ensureMonthCols(db) {
     try { await db.prepare("UPDATE " + t + " SET month=substr(created_at,1,7) WHERE month IS NULL AND created_at IS NOT NULL").run() } catch (e) {}
   }
 }
+ensureMonthCols = _memoDdl(ensureMonthCols, 'monthcols')
 
 // 早期就有的 7 张表（借款/还款/发票/内部转账/核销/月度目标/信用额度）一直没有建表语句：
 // 线上库是更早版本的 schema 建的，所以一直没暴露；但按现在的 schema.sql 新装一本账，
@@ -249,8 +250,10 @@ const EXTRA_COLS = {
   statement_log: [['ack', "TEXT DEFAULT ''"], ['ack_at', 'TEXT'], ['resolved_at', 'TEXT']],
   // 税相关三列：税率不固定（13/9/6/3/1 都见，也有按点数谈的），所以 kind 记「含税/不含税」，
   // rate 记税率%、amt 记税额。amt 有值时以手填为准（票面就是这样），否则按 kind+rate 推。
-  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
-  payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
+  // deliver_date / created_by 是后来加的两列：老库（本机版 / 早就建好的 D1）里没有，
+  // 不补的话「预计交付日」和「员工只看自己录的单」在那些库上一查询就报 no such column。
+  orders: [['cost', 'REAL DEFAULT 0'], ['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['no_invoice', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['delivered_at', 'TEXT'], ['deliver_date', 'TEXT'], ['created_by', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
+  payables: [['written_off', 'REAL DEFAULT 0'], ['rev', 'INTEGER DEFAULT 0'], ['import_batch', 'TEXT'], ['created_by', 'TEXT'], ['tax_kind', "TEXT DEFAULT ''"], ['tax_rate', 'REAL DEFAULT 0'], ['tax_amt', 'REAL DEFAULT 0']],
   // 有没有票是收付款那一刻才知道的（用户原话），所以记在流水上，不记在单上。
   ledger: [['account_id', 'INTEGER DEFAULT 0'], ['cash', 'INTEGER DEFAULT 1'], ['import_batch', 'TEXT'], ['inv_state', "TEXT DEFAULT ''"], ['inv_no', "TEXT DEFAULT ''"], ['tax', 'REAL DEFAULT 0']],
   accounts: [['inv_default', "TEXT DEFAULT ''"]],
@@ -475,12 +478,15 @@ async function verifyKey(db, given) {
 
 // 打印链接的签名密钥：以前直接拿口令当密钥，口令一改成哈希，已经发出去的链接会全失效。
 // 所以单独存一份 sign_secret，第一次用到时种进去（老账本先沿用明文口令，老链接继续有效）。
-let _signCache = null
+// 缓存必须按库分开：以前是一个变量，多账套下 A 库的密钥会顶掉 B 库的，
+// 于是「同一个客户链接有时好、有时说已失效」。用 WeakMap，库对象本身当键。
+const _signCache = new WeakMap()
 async function seedSignSecret(db, v) {
   try { await db.prepare("INSERT OR IGNORE INTO settings (key,value) VALUES ('sign_secret',?)").bind(String(v)).run() } catch (e) {}
 }
 async function signSecret(db) {
-  if (_signCache && Date.now() - _signCache.at < 300000) return _signCache.v
+  const hit = _signCache.get(db)
+  if (hit && Date.now() - hit.at < 300000) return hit.v
   let v = ''
   try { const r = await db.prepare("SELECT value FROM settings WHERE key='sign_secret'").first(); v = r ? String(r.value) : '' } catch (e) { v = '' }
   if (!v) {
@@ -488,7 +494,7 @@ async function signSecret(db) {
     v = k && !isHashed(k) ? k : randHex(24)
     await seedSignSecret(db, v)
   }
-  _signCache = { v, at: Date.now() }
+  _signCache.set(db, { v, at: Date.now() })
   return v
 }
 
@@ -737,23 +743,78 @@ app.post('/auth/setup', async (c) => {
 
 app.post('/auth/change', async (c) => {
   const { old_key, new_key } = await c.req.json()
-  const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
-  const saved = await getKey(db)
-  if (!saved) return c.json({ error: '尚未设置口令' }, 400)
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const curDb = c.env.DB || mainDb
   const ip = clientIp(c)
-  const wait = await authLocked(db, ip)
+  const wait = await authLocked(mainDb, ip)
   if (wait) return c.json(tooMany(wait), 429)
-  if (!(await verifyKey(db, old_key))) {
-    const f = await authFail(db, ip)
+  // 改口令要改「你这把口令属于哪本账」那一本：
+  // 以前一律改主账套，于是二厂管理员永远报「旧口令不对」，超管在第 2 本改口令会改到第 1 本。
+  let target = null
+  let which = ''
+  if (curDb !== mainDb && (await verifyKey(curDb, String(old_key || '')))) { target = curDb; which = 'book' }
+  else if (await verifyKey(mainDb, String(old_key || ''))) { target = mainDb; which = 'main' }
+  if (!target) {
+    if (await verifySetting(mainDb, 'super_key', String(old_key || ''))) {
+      return c.json({ error: '这是超级口令，请到「报表 → 超级管理员」里改（它管所有账套，不在这改）', code: 'super_key' }, 400)
+    }
+    const f = await authFail(mainDb, ip)
     if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
-    return c.json({ error: '旧口令不对', code: 'bad_key', left: f.left }, 403)
+    return c.json({ error: which ? '旧口令不对' : '旧口令不对', code: 'bad_key', left: f.left }, 403)
   }
-  await authOk(db, ip)
+  await authOk(mainDb, ip)
   const nk = String(new_key || '').trim()
   if (nk.length < 4) return c.json({ error: '新口令至少 4 位' }, 400)
-  await db.prepare("UPDATE settings SET value=? WHERE key='access_key'").bind(await makeKeyRecord(nk)).run()
-  _signCache = null
-  return c.json({ ok: true })
+  // 新口令不能跟超级口令、演示口令撞（否则改完把别的入口覆盖了）
+  if (await verifySetting(mainDb, 'super_key', nk)) return c.json({ error: '这个新口令跟超级口令一样，换一个' }, 400)
+  if (await verifySetting(mainDb, 'demo_key', nk)) return c.json({ error: '这个新口令跟演示口令一样，换一个' }, 400)
+  await target.prepare("INSERT INTO settings (key,value) VALUES ('access_key',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(await makeKeyRecord(nk)).run()
+  try { _signCache.delete(target) } catch (e) {}
+  return c.json({ ok: true, book: which === 'main' ? 1 : num(c.env.BOOK) || 1, text: which === 'main' ? '主账套的口令改好了' : ('第 ' + (num(c.env.BOOK) || 1) + ' 本账的口令改好了') })
+})
+
+// 忘了先切哪一本？拿口令挨本试一下，告诉前端该切到哪一本。
+// 为什么要有：员工 PIN 是按账套存的，二厂的人在小程序里默认进第 1 本，必然「口令错误」，
+// 而原来的登录卡连「这本账里没有你这个口令」都不说，用户以为按钮坏了。
+app.post('/auth/find-book', async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const k = String(b.key || '').trim()
+  if (!k) return c.json({ ok: false, code: 'empty' }, 400)
+  const ip = clientIp(c)
+  const wait = await authLocked((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, ip)
+  if (wait) return c.json(tooMany(wait), 429)
+  if (k === DEMO_KEY) return c.json({ ok: true, book: 3, role: 'demo', name: '演示账套' })
+  const all = c.env.ENV_ALL || c.env
+  const hits = []
+  for (const [id, db] of bookDbs(all)) {
+    try {
+      if (await verifyKey(db, k)) { hits.push({ book: id, role: 'owner', name: await bookNameOf(db, id) }); continue }
+      await ensureStaffTable(db)
+      if (await staffPinReady(db)) {
+        const h = await pinHash(db, k)
+        const su = await db.prepare('SELECT name FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
+        if (su) { hits.push({ book: id, role: 'staff', name: String(su.name || '') }); continue }
+        const n = await migrateStaffPins(db)
+        if (n) {
+          const su2 = await db.prepare('SELECT name FROM staff_users WHERE pin_hash=? AND active=1').bind(h).first()
+          if (su2) { hits.push({ book: id, role: 'staff', name: String(su2.name || '') }); continue }
+        }
+      }
+      if (await verifySetting(db, 'staff_key', k)) hits.push({ book: id, role: 'staff', name: '' })
+    } catch (e) { /* 这本读不出来就跳过 */ }
+  }
+  if (!hits.length) {
+    // 这个接口也是猜口令的入口，必须和正常登录共用试错计数，否则 4 位 PIN 能被无锁爆破
+    const f = await authFail((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    // 401 而不是 200：前端只看 res.status 决定要不要弹「口令不对」，回 200 会被当成成功
+    return c.json({ ok: false, error: '这个口令哪一本账都对不上', code: 'bad_key', left: f.left, tried: bookDbs(all).length }, 401)
+  }
+  await authOk((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, ip)
+  // 同一个口令在几本账里都成立（例如几本都设了同一串老板口令）：优先当前这本，否则取第一本
+  const cur = num(c.env.BOOK) || 1
+  const hit = hits.find((x) => x.book === cur) || hits[0]
+  return c.json({ ok: true, ...hit, other_books: hits.length > 1 ? hits.map((x) => x.book) : [] })
 })
 
 
@@ -856,7 +917,7 @@ app.post('/auth/recover', async (c) => {
   }
   if (pw.length < 4) return c.json({ error: '新口令至少 4 位', code: 'bad_password' }, 400)
   await setSettingRaw(db, 'access_key', await makeKeyRecord(pw))
-  _signCache = null
+  try { _signCache.delete(db) } catch (e) {}
   await delSettingRaw(db, 'recover_fail')
   await delSettingRaw(db, 'recover_lock')
   await logAudit(db, '用恢复码重设口令', '口令', '恢复码验证通过，口令已重设').catch(() => {})
@@ -1078,6 +1139,14 @@ app.get('/access-guide', async (c) => {
 })
 
 // 打印链接签名（不暴露访问口令）
+// 签名里必须带账套号：以前只签「客户名 + 类型」，而各账套的 sign_secret 收敛成同一串，
+// 于是第 1 本发出的客户链接把 ?book=2 一改就能看第 2 本同名客户的账。
+const sigBook = async (keyOrDb, bk, party, type) => {
+  const key = keyOrDb && typeof keyOrDb === 'object' ? await signSecret(keyOrDb) : String(keyOrDb || '')
+  const data = new TextEncoder().encode(String(key) + '|b' + String(num(bk) || 1) + '|' + String(party) + '|' + String(type))
+  const buf = await crypto.subtle.digest('SHA-256', data)
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20)
+}
 const sigOf = async (keyOrDb, party, type) => {
   // 传 db 就自己取签名密钥（sign_secret），传字符串就按老办法直接用
   const key = keyOrDb && typeof keyOrDb === 'object' ? await signSecret(keyOrDb) : String(keyOrDb || '')
@@ -1183,7 +1252,7 @@ app.use('*', async (c, next) => {
     const dm = c.req.method
     // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
     const denyDemo = dm !== 'OPTIONS' && (
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset)/.test(path) ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|month-pack|month-pack-file|month-reports|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset)/.test(path) ||
       // 模块清单可以看（前端要据此藏入口），但改不了
       (/^\/modules$/.test(path) && dm !== 'GET')
     )
@@ -1211,7 +1280,9 @@ app.use('*', async (c, next) => {
       // 这几条以前漏在外面：/import-all 一句 confirm 就能逐表 DELETE 清空整库，/export-all 能把
       // 全量数据（含单据照片）拖走，/backup-restore 能把线上覆盖成任意一份旧备份，
       // /db-clean 会批量删旧数据。员工只有 4 位 PIN，必须一律拦住。
-      (/^\/(import-all|export-all|backup-restore|db-clean|backup-timeline|month-pack-run)$/.test(path) && m !== 'OPTIONS') ||
+      (/^\/(import-all|export-all|backup-restore|db-clean|backup-timeline|month-pack-run|month-pack|month-pack-file|month-reports|archive-pack|archive-kinds)$/.test(path) && m !== 'OPTIONS') ||
+      // 系统内部的东西也不给员工看：报错原文、慢接口、账套清单（带别家的应收合计）
+      (/^\/(error-log|slow-log|selfcheck|books|books-all|schema-check|books-check)$/.test(path) && m !== 'OPTIONS') ||
       (/^\/auth\/(change|staff)$/.test(path)) ||
       (/^\/(report-head|book-name|wx-config)$/.test(path)) ||
       (/^\/month-lock/.test(path)) ||
@@ -1258,7 +1329,7 @@ app.use('*', async (c, next) => {
   c.set('role', role)
   // 功能模块开关：关掉的模块，接口直接 403（前端入口也会藏起来，这里再兜一层）
   try {
-    const off = await modulesOff(mainDb)
+    const off = await modulesOff(c.env.DB || mainDb)
     if (off.size) {
       const mOff = moduleOfPath(path)
       if (mOff && off.has(mOff.k)) {
@@ -2560,8 +2631,8 @@ app.get('/payroll-link', async (c) => {
   const saved = await getKey(mainDb)
   const mm = String(c.req.query('month') || now().slice(0, 7))
   const base = new URL(c.req.url).origin
-  const t = await sigOf(mainDb, 'payroll', 'wage:' + mm)
-  return c.json({ ok: true, month: mm, url: `${base}/payroll-print?month=${mm}&t=${t}` })
+  const t = await sigBook(mainDb, c.env.BOOK, 'payroll', 'wage:' + mm)
+  return c.json({ ok: true, month: mm, url: `${base}/payroll-print?month=${mm}&t=${t}&book=${num(c.env.BOOK) || 1}` })
 })
 
 app.get('/payroll-print', async (c) => {
@@ -2571,7 +2642,7 @@ app.get('/payroll-print', async (c) => {
   const t = String(c.req.query('t') || '')
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
-  const good = t && t === (await sigOf(mainDb, 'payroll', 'wage:' + mm))
+  const good = t && t === (await sigBook(mainDb, c.env.BOOK, 'payroll', 'wage:' + mm))
   if (!good) return c.html(a4Page({ title: '链接已失效', body: '<h1>链接已失效</h1><p>工资单链接是绑月份的，月份变了或链接被改过就打不开了。回小程序重新点「打工资单」。</p>' }))
   const p = await payrollOf(db, mm)
   const head = await getTitle(db)
@@ -2725,8 +2796,8 @@ app.get('/statement-batch', async (c) => {
     if (left <= 0.005) continue
     const due = r.first_due ? String(r.first_due).slice(0, 10) : ''
     const over = due && due < today ? daysSince(due) : 0
-    const t = saved ? await sigOf(mainDb, r.party, type) : ''
-    const url = t ? base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(r.party || '') + '&t=' + t : ''
+    const t = saved ? await sigBook(mainDb, c.env.BOOK, r.party, type) : ''
+    const url = t ? base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(r.party || '') + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) : ''
     const newAmt = round2(num(newMap[r.party]))
     const lines = isAr
       ? [`${r.party}，对一下账：`,
@@ -2765,9 +2836,9 @@ app.get('/statement-link', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
   if (!party) return c.json({ error: '缺少对账单位' }, 400)
-  const t = await sigOf(mainDb, party, type)
+  const t = await sigBook(mainDb, c.env.BOOK, party, type)
   const base = new URL(c.req.url).origin
-  const url = base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(party) + '&t=' + t
+  const url = base + '/statement-print?type=' + type + '&party=' + encodeURIComponent(party) + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1)
   return c.json({ ok: true, url })
 })
 
@@ -2778,9 +2849,9 @@ app.get('/track-link', async (c) => {
   const saved = await getKey(mainDb)
   const party = String(c.req.query('party') || '').trim()
   if (!party) return c.json({ error: '缺少客户名' }, 400)
-  const t = await sigOf(mainDb, party, 'track')
+  const t = await sigBook(mainDb, c.env.BOOK, party, 'track')
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/track?party=' + encodeURIComponent(party) + '&t=' + t })
+  return c.json({ ok: true, url: base + '/track?party=' + encodeURIComponent(party) + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/track', async (c) => {
@@ -2789,7 +2860,7 @@ app.get('/track', async (c) => {
   const saved = await getKey(mainDb)
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
-  const good = saved && party ? await sigOf(mainDb, party, 'track') : ''
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'track') : ''
   if (!good || want !== good) return c.html('<meta name="viewport" content="width=device-width,initial-scale=1"><div style="padding:24px;font-size:16px;line-height:1.8">链接已失效：请让对方在小程序里重新发一次进度链接。</div>')
   const t = await getTitle(db)
   const docs = await db.prepare('SELECT * FROM orders WHERE customer=? ORDER BY id DESC LIMIT 40').bind(party).all().then((r) => r.results)
@@ -2974,9 +3045,9 @@ async function handoverData(db, env) {
 app.get('/handover', async (c) => {
   const d = await handoverData(c.env.DB, c.env)
   const saved = await getKey((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
-  const t = saved ? await sigOf((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, 'handover', 'ho') : ''
+  const t = saved ? await sigBook((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, c.env.BOOK, 'handover', 'ho') : ''
   const base = new URL(c.req.url).origin
-  return c.json({ ...d, url: t ? base + '/handover-print?t=' + t : '' })
+  return c.json({ ...d, url: t ? base + '/handover-print?t=' + t + '&book=' + (num(c.env.BOOK) || 1) : '' })
 })
 
 app.post('/handover-note', async (c) => {
@@ -2999,7 +3070,7 @@ app.get('/handover-print', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'handover', 'ho') : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'handover', 'ho') : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成交接包。</h3>')
   const d = await handoverData(db, c.env)
   const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -3058,7 +3129,7 @@ app.get('/statement-print', async (c) => {
   const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
   // 链接里带签名，不含口令本身（口令泄露风险）
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, party, type) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, party, type) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印版」生成新链接。</h3>')
   if (!party) return c.html('<h3>缺少对账单位。</h3>')
   const today = now().slice(0, 10)
@@ -3835,9 +3906,9 @@ app.get('/report-link', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const mm = String(c.req.query('month') || month()).slice(0, 7)
-  const t = await sigOf(mainDb, 'report:' + mm, 'rp')
+  const t = await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp')
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t })
+  return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 // 单张加工单 / 送货单：老板或车间直接打印，客户签字带回
@@ -3850,9 +3921,9 @@ app.get('/order-print-link', async (c) => {
   const row = await db.prepare('SELECT id FROM orders WHERE id=?').bind(id).first()
   if (!row) return c.json({ error: '没找到这张单' }, 404)
   if (!saved) return c.json({ error: '先设访问口令才能生成打印页' }, 400)
-  const t = await sigOf(mainDb, String(id), 'order')
+  const t = await sigBook(mainDb, c.env.BOOK, String(id), 'order')
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/order-print?id=' + id + '&t=' + t })
+  return c.json({ ok: true, url: base + '/order-print?id=' + id + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/order-print', async (c) => {
@@ -3861,7 +3932,7 @@ app.get('/order-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const good = saved && id ? await sigOf(mainDb, String(id), 'order') : ''
+  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, String(id), 'order') : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印加工单」生成新链接。</h3>')
   const d = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!d) return c.html('<h3>没找到这张单。</h3>')
@@ -3903,7 +3974,7 @@ app.get('/report-print', async (c) => {
   const mm = String(c.req.query('month') || month()).slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.html('<h3>月份格式不对（应为 2026-11）</h3>')
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'report:' + mm, 'rp') : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp') : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印报表」生成新链接。</h3>')
   const head = await getTitle(db)
   const snap = await snapOf(db, mm)
@@ -4547,9 +4618,9 @@ app.get('/recon-print-link', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   if (!party) return c.json({ error: '缺少对账单位' }, 400)
-  const t = await sigOf(mainDb, party, 'recon:' + month + ':' + type)
+  const t = await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/recon-print?type=' + type + '&month=' + month + '&party=' + encodeURIComponent(party) + '&t=' + t })
+  return c.json({ ok: true, url: base + '/recon-print?type=' + type + '&month=' + month + '&party=' + encodeURIComponent(party) + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 // A4 对账确认单（双方签字用）
@@ -4561,7 +4632,7 @@ app.get('/recon-print', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   const want = String(c.req.query('t') || '')
-  const good = saved && party ? await sigOf(mainDb, party, 'recon:' + month + ':' + type) : ''
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成对账确认单。</h3>')
   const o = await conclusionOf(db, type, party, month)
   const title = await getTitle(db)
@@ -6817,6 +6888,7 @@ app.get('/pc', async (c) => {
     <button class="p hide" id="btn2" onclick="doImport()">确认导入</button>
     <button class="hide" id="btn0" onclick="reset()">重选文件</button>
   </div>
+  <label class="tip" style="display:block;margin-top:8px"><input type="checkbox" id="force1"/> 这份表我确实要再导一遍（同一份文件默认只导一次，防止手抖翻倍）</label>
 </div>
 
 <div class="card">
@@ -7279,7 +7351,10 @@ function doImport(){
   if (needKey()) return
   if (!window._b64) { msg('先点「先看看要导什么」', false); return }
   var b = document.getElementById('btn2'); b.disabled = true; msg('正在导…')
-  fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K }, body: JSON.stringify({ b64: window._b64, force: true }) })
+  // force 不能再写死：以前永远带 force，同一份表点两次就导两遍，应收直接翻倍。
+  // 只有用户勾了「这份表我确实要再导一遍」才带。
+  var force = !!(document.getElementById('force1') && document.getElementById('force1').checked)
+  fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K }, body: JSON.stringify({ b64: window._b64, force: force }) })
     .then(function(r){ return r.json() }).then(function(d){
       b.disabled = false
       if (!d.ok) { msg(d.error || '导入失败', false); return }
@@ -7874,7 +7949,8 @@ const REQ_SCHEMA = {
 }
 app.get('/schema-check', async (c) => {
   const all = c.env.ENV_ALL || c.env
-  const defs = [['1', all.DB, '主账本'], ['2', all.DB2, '第二本'], ['3', all.DB3, '第三本']]
+  // 账套不写死 3 本：现在最多 9 本，写死的话第 4 本缺列永远查不出来
+  const defs = bookDbs(all).map(([id, db]) => [String(id), db, BOOK_DEF_NAMES[id - 1] || ('账套' + id)])
   const books = []
   for (const [id, db, def] of defs) {
     if (!db) continue
@@ -7891,7 +7967,9 @@ app.get('/schema-check', async (c) => {
     books.push({ id, name: def, ok: miss.length === 0, issues: miss })
   }
   const bad = books.filter((b) => !b.ok)
-  return c.json({ ok: true, clean: bad.length === 0, books, bad_count: bad.length,
+  // ok 现在表示「结构检查本身成功、而且真的没问题」。
+  // 以前恒为 true，CI 里判 `d.ok === false` 永远不成立 —— 线上真缺列也照样绿。
+  return c.json({ ok: bad.length === 0, clean: bad.length === 0, books, bad_count: bad.length,
     text: bad.length === 0
       ? '三个账本的结构都是齐的。'
       : books.filter((b) => !b.ok).map((b) => b.name + '：' + b.issues.map((x) => x.table + ' 少 ' + x.missing.join('/')).join('，')).join('；') })
@@ -8096,10 +8174,14 @@ const bookNameOf = (db, id) => {
 
 app.get('/books', async (c) => {
   const all = c.env.ENV_ALL || c.env
+  const cur = num(c.env.BOOK) || 1
+  // 「只有某本账的管理员」不该看到别家的单数和应收合计：只回自己那一本
+  const onlyOwn = !!(c.get('book_owner') && !c.get('super'))
   const list = []
   for (const [id, db] of bookDbs(all)) {
+    if (onlyOwn && id !== cur) continue
     const def = BOOK_DEF_NAMES[id - 1] || ('账套' + id)
-    let name = def, orders = 0, ar = 0
+    let name = def, orders = 0, ar = 0, needsSchema = false
     try {
       const n = await db.prepare("SELECT value FROM settings WHERE key='book_name'").first()
       if (n && n.value) name = String(n.value)
@@ -8107,10 +8189,15 @@ app.get('/books', async (c) => {
       orders = o ? num(o.c) : 0
       const a = await db.prepare('SELECT COALESCE(SUM(price-paid-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()
       ar = a ? round2(num(a.t)) : 0
-    } catch (e) { }
-    list.push({ id, name, orders, ar })
+    } catch (e) {
+      // 读不出来 = 这本库还没灌表结构。以前静默跳过，界面显示成「一本干净的 0 单空账」，
+      // 老板切进去记第一笔就 500，还以为系统坏了。
+      needsSchema = true
+      noteFail(e, '账套列表（可能没灌 schema） ' + id)
+    }
+    list.push({ id, name, orders, ar, needs_schema: needsSchema })
   }
-  return c.json({ current: c.env.BOOK || 1, books: list })
+  return c.json({ current: cur, books: list, only_own: onlyOwn })
 })
 
 app.post('/book-name', async (c) => {
@@ -8193,8 +8280,11 @@ app.post('/book-admin-key', async (c) => {
 app.get('/books-all', async (c) => {
   if ((c.get('role') || '') !== 'owner') return c.json({ error: '只有老板口令能管理账套', code: 'owner_only' }, 403)
   const all = c.env.ENV_ALL || c.env
+  const onlyOwn = !!(c.get('book_owner') && !c.get('super'))
+  const curId = num(c.env.BOOK) || 1
   const list = []
   for (const [id, db] of bookDbs(all)) {
+    if (onlyOwn && id !== curId) continue
     const name = await bookNameOf(db, id)
     let orders = 0
     let ar = 0
@@ -8232,12 +8322,20 @@ app.post('/book-admin', async (c) => {
   if (!nm) return c.json({ error: '账套名称不能为空' }, 400)
   if (nm.length > 20) return c.json({ error: '名称最多 20 个字' }, 400)
   const all = c.env.ENV_ALL || c.env
+  const curId = num(c.env.BOOK) || 1
+  // 先判「有没有这一本」（404），再判「你能不能改」（403）：
+  // 反过来的话，改第 9 本会得到「要用超级口令」，让人以为那本账存在、只是没权限。
   const hit = bookDbs(all).find(([x]) => x === id)
   if (!hit) return c.json({ error: '没有第 ' + id + ' 本账（现在开了 ' + bookDbs(all).length + ' 本）', code: 'no_book' }, 404)
+  // 「只有某本账的管理员」只能改自己那一本的名字；改别家要超级口令
+  if (!c.get('super') && id !== curId) {
+    return c.json({ error: '你只管第 ' + curId + ' 本账，改第 ' + id + ' 本的名字要用超级口令', code: 'super_only' }, 403)
+  }
   const db = hit[1]
   try { await ensureBaseTables(db) } catch (e) { noteFail(e, '账套改名建表') }
   await db.prepare("INSERT INTO settings (key, value) VALUES ('book_name', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(nm).run()
-  await logAudit(c.env.DB, '账套改名', '设置', '第 ' + id + ' 本 → ' + nm, '', act(c))
+  // 审计要写进被改的那本（以前写当前这本，回头在第 5 本查日志看不到这次改名）
+  await logAudit(db, '账套改名', '设置', '第 ' + id + ' 本 → ' + nm, '', act(c))
   return c.json({ ok: true, book: id, name: nm })
 })
 
@@ -9637,15 +9735,15 @@ app.post('/quotes/:id/send', async (c) => {
   const r = await qGet(db, id)
   if (!r) return c.json({ error: '报价单不存在' }, 404)
   const saved = await getKey(mainDb)
-  const t = saved ? await sigOf(mainDb, 'quote', 'q:' + id) : ''
+  const t = saved ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id) : ''
   const at = now()
   await db.prepare("UPDATE quotes SET status='sent', token=?, sent_at=? WHERE id=?").bind(t, at, id).run()
   const base = c.req.url.split('/quotes/')[0]
   const q = qSlim(Object.assign({}, r, { status: 'sent', sent_at: at }))
   const text = [`${q.party}，${q.item || '这个活'}的报价：${q.amount} 元（${q.qty > 1 ? q.qty + ' × ' + q.price + ' 元，' : ''}含税不含运费），报价 ${q.valid_days} 天内有效。`,
-    '您点开看一眼，行就说一声，我这边排产：' + (t ? `${base}/quote-print?id=${id}&t=${t}` : '（链接生成失败，请在电脑上重试）')].join('\n')
+    '您点开看一眼，行就说一声，我这边排产：' + (t ? `${base}/quote-print?id=${id}&t=${t}&book=${num(c.env.BOOK) || 1}` : '（链接生成失败，请在电脑上重试）')].join('\n')
   await logAudit(db, '发报价', q.party, `${q.no || ''} ${q.party} ¥${q.amount}`, '', act(c))
-  return c.json({ ok: true, url: t ? `${base}/quote-print?id=${id}&t=${t}` : '', text, quote: q })
+  return c.json({ ok: true, url: t ? `${base}/quote-print?id=${id}&t=${t}&book=${num(c.env.BOOK) || 1}` : '', text, quote: q })
 })
 
 app.get('/quote-print', async (c) => {
@@ -9654,7 +9752,7 @@ app.get('/quote-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const good = saved && id ? await sigOf(mainDb, 'quote', 'q:' + id) : ''
+  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请让对方重新发一次报价。</h3>')
   const r = await qGet(db, id)
   if (!r) return c.html('<h3>这份报价已经不在了。</h3>')
@@ -9701,7 +9799,7 @@ app.post('/quote-ack', async (c) => {
   const id = num(b.id)
   const want = String(b.t || '')
   const saved = await getKey(mainDb)
-  const good = saved && id ? await sigOf(mainDb, 'quote', 'q:' + id) : ''
+  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id) : ''
   if (!good || want !== good) return c.json({ error: '链接已失效，请让老板重发' }, 403)
   const r = await qGet(db, id)
   if (!r) return c.json({ error: '这份报价已经不在了' }, 404)
@@ -11387,6 +11485,9 @@ async function importRows(db, type, rows, opts) {
       const [customer, price, mon, remark] = p
       const me = monthEndOf(mon, todayIso())
       if (me) d = me
+      // 记的月份被改成月末了，得拿新日期再查一次锁：
+      // 以前只在读最后一列日期时查过一次，于是「填的是上月 5 号、钱记到上月 31 号」能写进已结账的月份
+      if (locked(d)) { skippedLocked++; continue }
       if (customer && num(price) > 0) {
         const mm = monthOf(d)
         const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,7)=?").bind(customer, num(price), mm).first()
@@ -11404,6 +11505,7 @@ async function importRows(db, type, rows, opts) {
       const [supplier, amount, catIn, mon, remark] = p
       const me = monthEndOf(mon, todayIso())
       if (me) d = me
+      if (locked(d)) { skippedLocked++; continue }
       const category = apCatOf(catIn) || String(catIn || '').trim()
       if (supplier && num(amount) > 0) {
         const mm = monthOf(d)
@@ -11429,7 +11531,8 @@ async function importRows(db, type, rows, opts) {
         const note = String(rm || '').trim().slice(0, 200)
         const old = await db.prepare('SELECT id FROM party_profiles WHERE party=?').bind(name).first()
         if (old) {
-          await db.prepare('UPDATE party_profiles SET kind=?, contact=?, phone=?, addr=?, note=? WHERE id=?')
+          // 空单元格表示「这次没改」，不能拿空串覆盖掉上次填的联系人和电话
+          await db.prepare("UPDATE party_profiles SET kind=?, contact=COALESCE(NULLIF(?,''),contact), phone=COALESCE(NULLIF(?,''),phone), addr=COALESCE(NULLIF(?,''),addr), note=COALESCE(NULLIF(?,''),note) WHERE id=?")
             .bind(kind, contact, phone, addr, note, old.id).run()
         } else {
           const w = await db.prepare('INSERT INTO party_profiles (party,kind,contact,phone,addr,note,created_at) VALUES (?,?,?,?,?,?,?)')
@@ -11444,14 +11547,23 @@ async function importRows(db, type, rows, opts) {
       const amt = num(amount)
       const mo = Math.max(0, num(months))
       if (startIn && looksLikeDate(startIn)) d = toIsoDate(startIn)
+      if (locked(d)) { skippedLocked++; continue }
       if (nm && amt > 0) {
+        const sd = (d || t).slice(0, 10)
+        const hitP = await db.prepare('SELECT id FROM prepaids WHERE name=? AND total=? AND substr(start_date,1,7)=?').bind(String(nm), amt, sd.slice(0, 7)).first()
+        if (hitP && !o.confirmDup) { dups.push({ party: String(nm), amount: amt, date: sd, id: hitP.id, kind: 'prepaid' }); continue }
         const accI = await accountId()
-        const w = await db.prepare('INSERT INTO prepaids (name, total, months, start_date, category, account_id, remark, active, created_at) VALUES (?,?,?,?,?,?,?,1,?)')
-          .bind(String(nm), amt, mo, (d || t).slice(0, 10), String(cat || '').trim() || '厂房租金', accI, String(remark || ''), now()).run()
-        const pid = w.meta && w.meta.last_row_id
+        // 预付和它的那笔现金流水必须一起成 / 一起不成：以前分两次提交，
+        // 第二步失败就剩一条「有预付、没付钱」的账，摊销还照摊，成本凭空多出来
+        const doneP = await db.batch([
+          db.prepare('INSERT INTO prepaids (name, total, months, start_date, category, account_id, remark, active, created_at) VALUES (?,?,?,?,?,?,?,1,?)')
+            .bind(String(nm), amt, mo, sd, String(cat || '').trim() || '厂房租金', accI, String(remark || ''), now()),
+          // ref_id 用同一个 batch 里的 (SELECT MAX(id)) —— batch 是顺序执行的，拿到的一定是刚插的那条
+          db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,'prepaid',(SELECT MAX(id) FROM prepaids),?,1,?)")
+            .bind(amt, PREPAID_CAT, '预付 ' + String(nm) + (mo ? '（' + mo + ' 个月）' : '（押金，不摊）'), accI, d)
+        ])
+        const pid = doneP && doneP[0] && doneP[0].meta && doneP[0].meta.last_row_id
         if (pid) ids.push(pid)
-        await db.prepare("INSERT INTO ledger (direction, amount, category, remark, ref_type, ref_id, account_id, cash, created_at) VALUES ('out',?,?,?,?,?,?,1,?)")
-          .bind(amt, PREPAID_CAT, '预付 ' + String(nm) + (mo ? '（' + mo + ' 个月）' : '（押金，不摊）'), 'prepaid', pid, accI, d).run()
         total += amt
         n++
       }
@@ -11495,6 +11607,9 @@ async function importRows(db, type, rows, opts) {
       const [staff, v, remark] = p
       const amt = cellNumber(v)
       if (staff && amt !== null && amt > 0) {
+        // 期初是一次性的余额，同一份文件传两遍不该翻倍
+        const hit0 = await db.prepare('SELECT id FROM loans WHERE staff=? AND amount=? AND remark=?').bind(String(staff).trim(), round2(amt), String(remark || '')).first()
+        if (hit0 && !o.confirmDup) { dups.push({ party: String(staff), amount: round2(amt), date: (d || t).slice(0, 10), id: hit0.id, kind: 'loan_open' }); continue }
         const w = await db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at, import_batch) VALUES (?,?,0,0,?,0,?,?)')
           .bind(String(staff).trim(), round2(amt), String(remark || ''), d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
@@ -11506,6 +11621,8 @@ async function importRows(db, type, rows, opts) {
       const [lender, v, rate, startIn, termIn] = p
       const amt = cellNumber(v)
       if (lender && amt !== null && amt > 0) {
+        const hitD = await db.prepare('SELECT id FROM debts WHERE lender=? AND principal=? AND status=?').bind(String(lender).trim(), round2(amt), 'open').first()
+        if (hitD && !o.confirmDup) { dups.push({ party: String(lender), amount: round2(amt), date: (d || t).slice(0, 10), id: hitD.id, kind: 'debt_open' }); continue }
         const sd = startIn && looksLikeDate(startIn) ? toIsoDate(startIn).slice(0, 10) : (d || t).slice(0, 10)
         const w = await db.prepare("INSERT INTO debts (lender, kind, principal, rate, start_date, term_months, pay_kind, account_id, remark, status, created_at) VALUES (?,?,?,?,?,?,?,0,'','open',?)")
           .bind(String(lender).trim(), 'bank', round2(amt), round2(cellNumber(rate) || 0), sd, Math.max(0, Math.round(cellNumber(termIn) || 0)), 'interest', batch).run()
@@ -11528,15 +11645,23 @@ async function importRows(db, type, rows, opts) {
       }
     } else if (type === 'loan') {
       const [staff, amount, remark] = p
+      if (locked(d)) { skippedLocked++; continue }
       if (staff && num(amount) > 0) {
+        const dk = (d || t).slice(0, 10)
+        const hitL = await db.prepare("SELECT id FROM loans WHERE staff=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(String(staff), num(amount), addDaysIso(dk, -7), dk).first()
+        if (hitL && !o.confirmDup) { dups.push({ party: String(staff), amount: num(amount), date: dk, id: hitL.id, kind: 'loan' }); continue }
         const accI = await accountId()
-        const r = await db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at, import_batch) VALUES (?,?,0,0,?,?,?,?)')
-          .bind(staff, num(amount), remark || '', accI, d, batch).run()
-        const lid = r.meta && r.meta.last_row_id ? r.meta.last_row_id : 0
+        // 借支单和那笔支出必须一起成：以前先插 loans 再插流水，第二步失败就剩一条
+        // 「借出去的钱记在某人头上、但现金没动」的记录，对账时怎么都对不上
+        const doneL = await db.batch([
+          db.prepare('INSERT INTO loans (staff, amount, used, returned, remark, account_id, created_at, import_batch) VALUES (?,?,0,0,?,?,?,?)')
+            .bind(String(staff).trim(), num(amount), remark || '', accI, d, batch),
+          db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','loan',(SELECT MAX(id) FROM loans),?,'借支',?,?,1,?)")
+            .bind(num(amount), `借支 ${staff}${remark ? ' ' + remark : ''}`, accI, d)
+        ])
+        const lid = doneL && doneL[0] && doneL[0].meta && doneL[0].meta.last_row_id
         if (lid) ids.push(lid)
         total += num(amount)
-        await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','loan',?,?,'借支',?,?,1,?)")
-          .bind(lid, num(amount), `借支 ${staff}${remark ? ' ' + remark : ''}`, accI, d).run()
         n++
       }
     } else if (type === 'reimb') {
@@ -11645,8 +11770,9 @@ app.get('/recon-calendar', async (c) => {
     r.send_text = r.left > 0
       ? `${r.party}，对一下账：到 ${today}，还有 ${n} 笔${r.kind === 'ap' ? '货款' : '加工费'}没结，共 ${r.left} 元。明细我发你对账单，方便的话今天核一下，有出入随时说。`
       : `${r.party}，${today} 对一下账：这边账上你这边的款都结清了，你看有没有对不上的地方。`
-    const t = saved ? await sigOf(mainDb, r.party, r.kind) : ''
-    r.url = t ? `${base}/statement-print?type=${r.kind}&party=${encodeURIComponent(r.party)}&t=${t}` : ''
+    const t = saved ? await sigBook(mainDb, c.env.BOOK, r.party, r.kind) : ''
+    // book 必须带：签名里绑了账套号，链接丢了这个参数就打不开（多账套下默认会落到第 1 本）
+    r.url = t ? `${base}/statement-print?type=${r.kind}&party=${encodeURIComponent(r.party)}&t=${t}&book=${num(c.env.BOOK) || 1}` : ''
   }
   const pick = (st) => rows.filter((r) => r.state === st)
   const todayList = pick('today'), over = pick('overdue'), soon = pick('upcoming')
@@ -12632,10 +12758,10 @@ app.get('/statement-ack-link', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const party = String(c.req.query('party') || '').trim()
   if (!party) return c.json({ error: '要指定是哪一家' }, 400)
-  const t = await sigOf(mainDb, party, 'ack:' + type)
+  const t = await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type)
   const base = new URL(c.req.url).origin
   const m = String(c.req.query('month') || '').slice(0, 7)
-  return c.json({ ok: true, url: base + '/statement-ack?type=' + type + '&party=' + encodeURIComponent(party) + (m ? '&month=' + m : '') + '&t=' + t })
+  return c.json({ ok: true, url: base + '/statement-ack?type=' + type + '&party=' + encodeURIComponent(party) + (m ? '&month=' + m : '') + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/statement-ack', async (c) => {
@@ -12646,7 +12772,7 @@ app.get('/statement-ack', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
   const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigOf(mainDb, party, 'ack:' + type) : ''
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type) : ''
   if (!good || want !== good) return c.html(ackPage('<div class="card"><h3>链接已失效</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
   const t = await getTitle(db)
   const d = await conclusionOf(db, type, party, month)
@@ -12689,7 +12815,7 @@ app.post('/statement-ack', async (c) => {
   const type = b.type === 'ap' ? 'ap' : 'ar'
   const party = String(b.party || '').trim()
   const month = String(b.month || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigOf(mainDb, party, 'ack:' + type) : ''
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type) : ''
   if (!good || String(b.t || '') !== good) return c.json({ error: '链接已失效，请让老板重新发一次' }, 403)
   const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
   const amt = round2(num(b.amount))
@@ -13402,15 +13528,20 @@ async function archiveSheets(db, kind, q) {
                    GROUP BY supplier ORDER BY left_amt DESC`).bind(ye).all().catch(() => ({ results: [] })),
       db.prepare("SELECT customer party, COUNT(*) n, COALESCE(SUM(price),0) amt, COALESCE(SUM(price - COALESCE(cost,0)),0) gp FROM orders WHERE month>=? AND month<=? GROUP BY customer ORDER BY amt DESC LIMIT 30").bind(mons[0], y + '-12').all().catch(() => ({ results: [] })),
       db.prepare("SELECT supplier party, COUNT(*) n, COALESCE(SUM(amount),0) amt FROM payables WHERE month>=? AND month<=? GROUP BY supplier ORDER BY amt DESC LIMIT 30").bind(mons[0], y + '-12').all().catch(() => ({ results: [] })),
-      db.prepare("SELECT COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10) <= ?").bind(ye).first().catch(() => ({ t: 0 })),
-      db.prepare("SELECT COALESCE(SUM(amount - COALESCE(repayed,0)),0) t FROM debts WHERE status='open'").first().catch(() => ({ t: 0 }))
+      // 现金结余必须加上开账时填的「各账户期初余额」，否则跟「科目余额表」永远差这一块
+      db.prepare("SELECT (SELECT COALESCE(SUM(opening),0) FROM accounts) + COALESCE(SUM(CASE WHEN direction='in' THEN amount ELSE -amount END),0) t FROM ledger WHERE cash=1 AND substr(created_at,1,10) <= ?").bind(ye).first().catch(() => ({ t: 0 })),
+      // 借款余额 = 那天之前借的本金 − 那天之前已还本金。以前这两条 SQL 都写错了：
+      // ①现金那条只加流水、不加开账时的账户期初；②借款那条写的 amount/repayed 这两个列根本不存在，
+      // 报错被 .catch 吞掉 → 「借款余额」在年报里永远是 0。
+      db.prepare(`SELECT COALESCE(SUM(d.principal),0) - COALESCE((SELECT SUM(r.amount) FROM debt_repays r WHERE r.kind='principal' AND substr(r.rdate,1,10)<=?),0) AS t
+        FROM debts d WHERE COALESCE(d.start_date, substr(d.created_at,1,10)) <= ?`).bind(ye, ye).first().catch(() => ({ t: 0 }))
     ])
     const arTot = round2((arRows.results || []).reduce((a, r) => a + num(r.left_amt), 0))
     const apTot = round2((apRows.results || []).reduce((a, r) => a + num(r.left_amt), 0))
     sheets.push({ name: '年末余额', rows: [
       [y + '-12-31 那天的余额', ''], ['应收未收合计', arTot], ['涉及客户数', (arRows.results || []).length],
       ['应付未付合计', apTot], ['涉及供应商数', (apRows.results || []).length],
-      ['累计现金结余', round2(num(cashRow && cashRow.t))], ['借款余额', round2(num(debtRow && debtRow.t))],
+      ['累计现金结余（含账户期初）', round2(num(cashRow && cashRow.t))], ['借款余额', round2(num(debtRow && debtRow.t))],
       ['净资产（现金+应收−应付−借款）', round2(num(cashRow && cashRow.t) + arTot - apTot - num(debtRow && debtRow.t))]
     ] })
     sheets.push({ name: '年末应收（按客户）', rows: [['客户', '笔数', '未收金额']].concat((arRows.results || []).map((r) => [r.party, num(r.n), round2(num(r.left_amt))])).concat([[], ['合计', '', arTot]]) })
@@ -13799,8 +13930,8 @@ app.get('/year-review-print-link', async (c) => {
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
   const saved = await getKey(c.env.DB)
-  const t = saved ? await sigOf((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, 'yearreview', 'yr:' + y) : ''
-  return c.json({ ok: true, url: `${c.req.url.split('/year-review-print-link')[0]}/year-review-print?year=${encodeURIComponent(y)}&t=${encodeURIComponent(t)}`, year: y })
+  const t = saved ? await sigBook((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, c.env.BOOK, 'yearreview', 'yr:' + y) : ''
+  return c.json({ ok: true, url: `${c.req.url.split('/year-review-print-link')[0]}/year-review-print?year=${encodeURIComponent(y)}&t=${encodeURIComponent(t)}&book=${num(c.env.BOOK) || 1}`, year: y })
 })
 
 app.get('/year-review-print', async (c) => {
@@ -13809,7 +13940,7 @@ app.get('/year-review-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'yearreview', 'yr:' + y) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearreview', 'yr:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度回顾。</h3>')
   const d = await yearReview(db, y)
   const t = await getTitle(db)
@@ -14100,9 +14231,9 @@ app.get('/year-close-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigOf(mainDb, 'year', 'yc:' + y)
+  const t = await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-close-print?year=' + y + '&t=' + t })
+  return c.json({ ok: true, url: base + '/year-close-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/year-close-print', async (c) => {
@@ -14111,7 +14242,7 @@ app.get('/year-close-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'year', 'yc:' + y) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度封账单。</h3>')
   const d = await yearBook(db, y)
   const s = await yearCloseScan(db, y)
@@ -14144,9 +14275,9 @@ app.get('/year-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigOf(mainDb, 'year', 'yb:' + y)
+  const t = await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-print?year=' + y + '&t=' + t })
+  return c.json({ ok: true, url: base + '/year-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/year-print', async (c) => {
@@ -14155,7 +14286,7 @@ app.get('/year-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'year', 'yb:' + y) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度总账打印页。</h3>')
   const d = await yearBook(db, y)
   const t = await getTitle(db)
@@ -14281,9 +14412,9 @@ app.get('/year-open-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigOf(mainDb, 'yearopen', 'yo:' + y)
+  const t = await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t })
+  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/year-open-print', async (c) => {
@@ -14292,7 +14423,7 @@ app.get('/year-open-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'yearopen', 'yo:' + y) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成结转凭据。</h3>')
   const d = await yearOpenData(db, y)
   const t = await getTitle(db)
@@ -14789,11 +14920,19 @@ app.post('/book-reset', async (c) => {
     stmts.push(db.prepare('DELETE FROM ' + t))
     cleared.push(t)
   }
-  // 备份、照片、审计、日志这些不在 BACKUP_TABLES 里，换公司也不该带着上一家的东西
-  for (const t of ['backups', 'backup_parts', 'attachments', 'audit_log', 'error_log', 'slow_log', 'op_dedupe', 'auth_fails', 'wx_users', 'month_report', 'staff_users']) {
+  // 照片、审计、日志这些不在 BACKUP_TABLES 里，换公司也不该带着上一家的东西
+  for (const t of ['attachments', 'audit_log', 'error_log', 'slow_log', 'op_dedupe', 'auth_fails', 'wx_users', 'month_report', 'staff_users']) {
     if (t === 'staff_users' && keepStaff) continue
     stmts.push(db.prepare('DELETE FROM ' + t))
     cleared.push(t)
+  }
+  // 备份表要小心：刚做完的那份是「反悔用的」，绝不能跟着一起删。
+  // 以前把 backups/backup_parts 整表删掉，返回文案却写「想反悔可以在备份列表恢复」——
+  // 点了会发现列表空了，那份快照早就没了。现在只清掉旧的，留着刚做的那份。
+  if (snapId) {
+    stmts.push(db.prepare('DELETE FROM backups WHERE id <> ?').bind(snapId))
+    stmts.push(db.prepare('DELETE FROM backup_parts WHERE bid <> ?').bind(snapId))
+    cleared.push('backups(旧的)')
   }
   stmts.push(db.prepare('DELETE FROM settings WHERE key NOT IN (' + KEEP_SET.map(() => '?').join(',') + ')').bind(...KEEP_SET))
   try {
@@ -14809,7 +14948,7 @@ app.post('/book-reset', async (c) => {
   try { await logAudit(db, '一键初始化', String(c.env.BOOK || '1'), `清空 ${cleared.length} 张表${snapId ? `，清空前备份 #${snapId}` : ''}`) } catch (e) {}
   return c.json({
     ok: true, cleared: cleared.length, tables: cleared, snapshot: snapId,
-    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}），想反悔可以在「报表 → 备份列表」里恢复。` : '')
+    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}，旧的备份已清掉），想反悔可以在「报表 → 备份列表」里恢复。` : '清空前那次自动备份没成功（看错误日志），这次的旧备份都还留着。')
   })
 })
 
@@ -15386,7 +15525,7 @@ app.get('/health-print', async (c) => {
   const saved = await getKey(mainDb)
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigOf(mainDb, 'health', 'hr:' + days) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'health', 'hr:' + days) : ''
   if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成体检报告单。</h3>')
   const r = await healthReport(db, days)
   const t = await getTitle(db)
@@ -16498,6 +16637,22 @@ app.get('/backup', async (c) => {
 // 云端备份：写一份快照进 backups 表，保留最近 30 份
 // 备份指纹：只数「每张表多少行、最大 rowid」，不读内容。
 // 46 次 COUNT(*)/MAX(rowid) 是索引级操作，比把整库拼成 9MB JSON 再写进 D1 便宜两个数量级。
+// 按 UTF-8 字节数切字符串（中文 3 字节，直接按 length 切会切成 2.7MB 一片）
+function sliceByBytes(str, limit) {
+  const out = []
+  let cur = ''
+  let n = 0
+  for (const ch of String(str)) {
+    const c = ch.charCodeAt(0)
+    const b = c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xd800 && c <= 0xdbff ? 4 : c >= 0xdc00 && c <= 0xdfff ? 0 : 3
+    if (n + b > limit) { out.push(cur); cur = ''; n = 0 }
+    cur += ch
+    n += b
+  }
+  if (cur) out.push(cur)
+  return out.length ? out : ['']
+}
+
 // 读一份备份的内容：正常是一整行 content；超过 90 万字符的会被切成多片存在 backup_parts，
 // 这里按 seq 拼回去，调用方拿到的还是同一个字符串（对外行为完全不变）。
 async function readBackupContent(db, id) {
@@ -16541,18 +16696,25 @@ async function saveBackup(db, opts) {
   // D1 单行上限 2MB（字符串上限 1MB 更保守）：整库备份到几千单就会超，超了 INSERT 直接被拒，
   // 表现是「每天备份静默失败、备份列表里只剩很久以前那份」。本机 SQLite 没这个限制，测不出来。
   // 超过 90 万字符就切成多片存 backup_parts，content 留空、真实长度记在 size。
-  const CHUNK = 900000
-  const chunked = content.length > CHUNK
+  // 按「字节」切，不能按字符切：中文一个字 3 字节，90 万字符能到 2.7MB，
+  // 单片就超了 D1 的单行上限 —— 主行已经写成空 content，分片又插不进去，等于这份备份是空的。
+  const BYTES = 500000
+  const pieces = sliceByBytes(content, BYTES)
+  const chunked = pieces.length > 1
   const ins = await db.prepare('INSERT INTO backups (content, size, created_at) VALUES (?,?,?)')
     .bind(chunked ? '' : content, content.length, now()).run()
   const bid = ins && ins.meta && ins.meta.last_row_id ? ins.meta.last_row_id : 0
   if (chunked && bid) {
-    const parts = []
-    for (let i = 0, seq = 0; i < content.length; i += CHUNK, seq++) {
-      parts.push(db.prepare('INSERT INTO backup_parts (bid, seq, data) VALUES (?,?,?)').bind(bid, seq, content.slice(i, i + CHUNK)))
+    const parts = pieces.map((d, seq) => db.prepare('INSERT INTO backup_parts (bid, seq, data) VALUES (?,?,?)').bind(bid, seq, d))
+    try {
+      // D1 一次 batch 最多 100 条，50 条一批提交
+      for (let i = 0; i < parts.length; i += 50) await db.batch(parts.slice(i, i + 50))
+    } catch (e) {
+      // 分片没写完就把主行删掉：留一个 content 为空的备份比没有更糟 —— 它会让人以为「备份好了」
+      try { await db.prepare('DELETE FROM backup_parts WHERE bid=?').bind(bid).run() } catch (e2) { noteFail(e2, '清理半份备份分片') }
+      try { await db.prepare('DELETE FROM backups WHERE id=?').bind(bid).run() } catch (e2) { noteFail(e2, '清理半份备份') }
+      throw e
     }
-    // D1 一次 batch 最多 100 条，50 条一批提交
-    for (let i = 0; i < parts.length; i += 50) await db.batch(parts.slice(i, i + 50))
   }
   await db.prepare('DELETE FROM backups WHERE id NOT IN (SELECT id FROM backups ORDER BY id DESC LIMIT 30)').run()
   // 顺带清掉没人认领的分片（备份只留 30 份，删掉的那份的分片也跟着删）
@@ -16658,18 +16820,19 @@ async function restoreCore(db, data, opts) {
     if (!o.customer || num(o.price) <= 0) { skipped.orders++; continue }
     // no_invoice / delivered_at / import_batch 以前漏了：恢复后「已开票」标记和交货日全丢，
     // 交期提醒会把这批单重新当成没交付
-    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at, cost, written_off, progress, rev, no_invoice, delivered_at, import_batch) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now(), num(o.cost), num(o.written_off), o.progress || '', num(o.rev), num(o.no_invoice), o.delivered_at || null, o.import_batch || null))
+    // tax_* / created_by 以前漏了：恢复后含税口径和税额全丢，报表里税金那一块直接归零
+    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at, cost, written_off, progress, rev, no_invoice, delivered_at, import_batch, tax_kind, tax_rate, tax_amt, created_by, month) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now(), num(o.cost), num(o.written_off), o.progress || '', num(o.rev), num(o.no_invoice), o.delivered_at || null, o.import_batch || null, o.tax_kind || '', num(o.tax_rate), num(o.tax_amt), o.created_by || null, o.month || String(o.created_at || now()).slice(0, 7)))
   }
   for (const p of payables) {
     if (!p.supplier || num(p.amount) <= 0) { skipped.payables++; continue }
-    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, due_date, created_at, written_off, rev, import_batch) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.due_date || null, p.created_at || now(), num(p.written_off), num(p.rev), p.import_batch || null))
+    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, due_date, created_at, written_off, rev, import_batch, tax_kind, tax_rate, tax_amt, created_by, month) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.due_date || null, p.created_at || now(), num(p.written_off), num(p.rev), p.import_batch || null, p.tax_kind || '', num(p.tax_rate), num(p.tax_amt), p.created_by || null, p.month || String(p.created_at || now()).slice(0, 7)))
   }
   for (const l of ledger) {
     if (num(l.amount) <= 0 || !l.direction) { skipped.ledger++; continue }
-    stmts.push(db.prepare('INSERT INTO ledger (id, direction, ref_type, ref_id, amount, category, remark, operator, created_at, account_id, cash, import_batch) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now(), num(l.account_id), l.cash === undefined ? 1 : num(l.cash), l.import_batch || null))
+    stmts.push(db.prepare('INSERT INTO ledger (id, direction, ref_type, ref_id, amount, category, remark, operator, created_at, account_id, cash, import_batch, inv_state, inv_no, tax, month) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now(), num(l.account_id), l.cash === undefined ? 1 : num(l.cash), l.import_batch || null, l.inv_state || '', l.inv_no || '', num(l.tax), l.month || String(l.created_at || now()).slice(0, 7)))
   }
   try { await runBatch(db, stmts) } catch (e) { throw fail(e) }
   // 账目以外的家底也一起还原（老备份没有这些字段就跳过，不算错）
@@ -16682,14 +16845,21 @@ async function restoreCore(db, data, opts) {
       const info = (await db.prepare('PRAGMA table_info(' + t + ')').all()).results || []
       const cols = info.map((x) => x.name)
       if (!cols.length) continue
-      const st = [t === 'settings'
-        ? db.prepare("DELETE FROM settings WHERE key NOT IN ('access_key','staff_key','sign_secret','sealed','sealed_at','sealed_note')")
-        : db.prepare('DELETE FROM ' + t)]
+      // settings 的删除名单以前写死 6 个键，于是恢复一份老备份会把超级口令、账本名、
+      // 模块开关、演示开关全清掉。现在 = 「这几个必须留着」+「这份备份里有的键」。
+      let st
+      if (t === 'settings') {
+        const keep = Array.from(new Set(['access_key', 'recover_code', 'recover_hash', 'recover_fail', 'recover_lock', 'sign_secret', 'staff_key', 'staff_salt', 'book_name', 'super_key', 'demo_key', 'demo_builtin_off', 'sealed', 'sealed_at', 'sealed_note', 'backup_sig', 'backup_at']
+          .concat(rows.map((r) => String((r && r.key) || '')).filter(Boolean))))
+        st = [db.prepare('DELETE FROM settings WHERE key NOT IN (' + keep.map(() => '?').join(',') + ')').bind(...keep)]
+      } else {
+        st = [db.prepare('DELETE FROM ' + t)]
+      }
       for (const r of rows) {
         if (t === 'settings' && BACKUP_SETTINGS_SKIP.includes(String(r.key))) continue
         const use = cols.filter((cn) => r[cn] !== undefined)
         if (!use.length) continue
-        st.push(db.prepare('INSERT INTO ' + t + ' (' + use.join(',') + ') VALUES (' + use.map(() => '?').join(',') + ')').bind(...use.map((cn) => r[cn])))
+        st.push(db.prepare('INSERT OR REPLACE INTO ' + t + ' (' + use.join(',') + ') VALUES (' + use.map(() => '?').join(',') + ')').bind(...use.map((cn) => r[cn])))
       }
       // 有的表（工钱、材料、返工）month 列没有触发器，恢复时补一遍，不然按月查会缺这几块
       if (MONTH_TABLES.includes(t) && cols.includes('month')) {
@@ -16704,7 +16874,14 @@ async function restoreCore(db, data, opts) {
     }
   }
   if (!isRollback) await logAudit(db, '数据恢复', '', `恢复 应收${orders.length - skipped.orders} 应付${payables.length - skipped.payables} 流水${ledger.length - skipped.ledger} 家底${Object.keys(extra).length}类`)
-  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, extra, skipped }
+  // 员工口令不随备份走（怕 PIN 跟着文件流传出去）。所以恢复完要说清这本账现在有几个员工：
+  // 在老库上恢复人还在；换电脑 / 换库恢复就是 0 个，得在「设置 → 员工账号」重新加一次。
+  let staffN = 0
+  try { const r2 = await db.prepare('SELECT COUNT(*) AS c FROM staff_users WHERE active=1').first(); staffN = num(r2 && r2.c) } catch (e) { staffN = -1 }
+  const staffNote = staffN === 0
+    ? '员工口令不在备份里（安全起见），所以这本账现在是 0 个员工，要在「设置 → 员工账号」重新加一次。'
+    : staffN > 0 ? '这本账现在有 ' + staffN + ' 个员工，员工口令沿用原来的，没被备份覆盖。' : ''
+  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, extra, skipped, staff_count: staffN, staff_note: staffNote }
 }
 
 // 恢复中途失败：用 restoreCore 存下的快照（错误对象上挂的 snapshotId）重放回去。
@@ -18489,21 +18666,38 @@ export default {
     // 多账套：根据请求头 X-Book（1/2/3）选择对应的 D1 库
     const avail = bookDbs(env)
     let book = 1
+    let wantBook = 0
     try {
       const hb = Number(req.headers.get('X-Book') || 1)
       const u = new URL(req.url)
       const qb = Number(u.searchParams.get('book') || 0)
-      const want = hb > 1 ? hb : qb
-      // 只认真的存在的绑定；没开第 4 本却传 X-Book:4 时退回第 1 本，不会把请求打空
-      if (want && avail.some(([i]) => i === want)) book = want
-    } catch (e) { book = 1 }
+      wantBook = hb > 1 ? hb : qb
+      if (wantBook && avail.some(([i]) => i === wantBook)) book = wantBook
+    } catch (e) { book = 1; wantBook = 0 }
+    let isDemoReq = false
+    try { isDemoReq = String(req.headers.get('x-access-key') || '').trim() === DEMO_KEY } catch (e) { isDemoReq = false }
     // 内置演示：只看第 3 本账（示例数据），碰不到真账本。放在选库之前，所以连 X-Book 都盖掉。
-    try { if (String(req.headers.get('x-access-key') || '').trim() === DEMO_KEY) book = 3 } catch (e) { /* 头解析失败就按原样 */ }
+    if (isDemoReq) book = 3
+    // 传了没开的那本（X-Book:4 但 DB4 没绑）要明说，不能静默退回第 1 本 ——
+    // 那会把二厂的账记进一厂，两边都错，而日志里看不出来。
+    if (wantBook && !isDemoReq && !avail.some(([i]) => i === wantBook)) {
+      return new Response(JSON.stringify({ code: 'book_unavailable', error: '第 ' + wantBook + ' 本账在这台服务上没开（现在开了 ' + avail.length + ' 本）', books: avail.map(([i]) => i) }), { status: 400, headers: { 'content-type': 'application/json; charset=utf-8' } })
+    }
     const picked = avail.find(([i]) => i === book)
+    // 演示口令只认第 3 本账。这本没开就明说「演示还没准备好」，
+    // 绝不能 fallback 到 avail[0]（那是真主账本）：示例数据会灌进老板的账里。
+    if (isDemoReq && !picked) {
+      return new Response(JSON.stringify({ code: 'demo_not_ready', error: '演示账套还没开：这台服务只绑了 ' + avail.length + ' 本账，演示用的是第 3 本。' }), { status: 503, headers: { 'content-type': 'application/json; charset=utf-8' } })
+    }
     const db = picked ? picked[1] : (avail[0] && avail[0][1])
     // 老账本上缺的 7 张基础表在这里兜一次底（_memoDdl 记忆，一个 isolate 只跑一次，之后 0 开销）
     try { await ensureBaseTables(db) } catch (e) { noteFail(e, '建表兜底') }
     try { await ensureExtraCols(db) } catch (e) { noteFail(e, '补列兜底') }
+    // month 列也要在这里补：以前只有定时任务里补，而本机版用 --no-cron 跑、
+    // 或云端 cron 还没到点（部署后第一次打开），老单据的 month 就是空的 ——
+    // 首页按时段统计、按月查账全部少一块，自检还会天天报「单据没记上月份」。
+    // ensureMonthCols 自己有 PRAGMA 判断，列齐了就只剩两三条查询，每个 isolate 一次。
+    try { await ensureMonthCols(db) } catch (e) { noteFail(e, '补月份兜底') }
     return app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx)
   },
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站

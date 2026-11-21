@@ -12,7 +12,7 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 632 条 SQL 在新库上跑不跑得通、
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 652 条 SQL 在新库上跑不跑得通、
 前端 258 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
@@ -104,13 +104,13 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 值：  线上那本账的老板口令
 ```
 
-这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/smoke.mjs`（230 个 GET，
+这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/smoke.mjs`（235 个 GET，
 只读不写）；②问一次 `/schema-check`，线上真缺列就直接红，并打印缺哪张表哪个字段。
 为什么不配也能跑：`check.mjs` 只能证明「`schema.sql` 在空库上建得出来」，证明不了
 「线上那个库缺不缺列」——这两个 secret 都不配时，CI 只能保证「代码能跑」，保证不了「线上是对的」。
 
 > 早期文档写的是「把 index.js 粘进 Cloudflare 编辑器」，那是 2025 年的做法，
-> 现在只有一个 1.7 万行的单文件，别再粘贴了——用 `wrangler deploy`。
+> 现在只有一个 1.9 万行的单文件，别再粘贴了——用 `wrangler deploy`。
 
 **部署后怎么确认跑的是哪一版**：`curl https://你的域名/version` 会回
 `{"ok":true,"version":"20261119-2140","built":"2026-11-19T13:40:12Z","commit":"a1b2c3d","ray":"..."}`
@@ -172,6 +172,11 @@ npx wrangler tail --format pretty      # 带表格线，人看着舒服些
 > 有一部分列是**运行时兜底**建的（`ensureMonthCols()` 补 `month` 列和触发器、
 > `ensureBaseTables()` 补那 11 张老表），所以老库即使不补灌 schema 也不会当场崩；
 > 但补灌一次更干净，数据自检也就绿了。
+>
+> **本机版 / Docker 不用手动补灌**：`server/d1.mjs` 启动时会按 `schema.sql` 对一遍每条表，
+> 缺的列自己 `ALTER TABLE ADD COLUMN`（启动日志会打「老库补上 N 个列」）。
+> 这是 2026-11-21 补的——在那之前，老库（几个月前的 `data/`）升级后会直接
+> `启动失败：Error: no such column: month`，看起来像文件坏了。
 
 ---
 
@@ -264,7 +269,8 @@ docker compose up -d
 docker compose logs -f        # 看启动日志，Ctrl-C 退出
 ```
 
-打开 `http://<这台机器IP>:8787` → 设老板口令 → 抄下恢复码。数据在 `./data`（`book1.db`/`book2.db`/`book3.db`）。
+打开 `http://<这台机器IP>:8787` → 设老板口令 → 抄下恢复码。数据在 `./data`
+（启动时自动建 `book1.db` … `book9.db` 九本，和线上一样最多 9 本账；只用到第 1 本的话别管另外 8 个文件）。
 
 日常运维：
 
@@ -310,7 +316,7 @@ macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签
 - 本机版**照样跑那 4 条 cron**（每日维护 / 固定支出摊销预提折旧 / 每周一汇总 / 每月 1 号报表包），
   按 UTC 到点就触发，错过（关机、睡眠）下次起来补一次；`--no-cron` 可以关掉
   （关了之后固定支出/摊销/预提/折旧要手动点）。
-- 多账套照样能用（`book1.db` / `book2.db` / `book3.db`），口令各管各的。
+- 多账套照样能用（`book1.db` … `book9.db`，最多 9 本），口令各管各的。
 
 ---
 

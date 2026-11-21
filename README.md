@@ -1684,11 +1684,25 @@ node scripts/build-exe.mjs --out dist
    - **验证**：`test-staff` 49 项、`test-book` 36、`test-super` 36、`test-demo`、`smoke` 235 GET 无 5xx、`check.mjs` 全绿。
    - 从旧版本升上来的注意：**原来那批员工只在主账套有效**，二厂/三厂要重新加一次（各账套原来根本没有员工表，第一条登录会自动建）。
 
+321. ✅ **第七轮审计 31 条：别把二厂的账记进一厂、备份别再撞 2MB、CI 不再假绿**：用户问「还有哪些可以优化的空间」，三路只读审计（后端 / 前端 / 工程化）+ 我逐条回代码核实，合并成 31 条。这一轮的主线是**多账套（最多 9 本、三层口令）带来的新坑**——前几轮的单账本假设散落在很多地方。
+   - **A1 多账套串账（6 条）**：①演示入口（`demo-look`）在只绑了一本账的机器上会 **fallback 到真账本**，还执行 `seedDemoBook` —— 示例数据直接灌进老板的账，而且演示口令可写可删。改成 400 `book_unavailable` / 503 `demo_not_ready`，绝不退回第 1 本。②`/modules` 读写当前账套、**拦截却用主账套**（`modulesOff(mainDb)`）→ 在第 2 本关掉「计件工资」，第 2 本照常用；在第 1 本关掉则全部账套被拦。③`/auth/change` 只改主账套的 `access_key` → **只有第 2 本口令的管理员永远「旧口令不对」**，超级管理员在第 2 本改口令会改到第 1 本。改成「旧口令匹配哪本就改哪本」，超级口令则明确提示去 `/auth/super`。④新增 **`POST /auth/find-book`**：小白/员工在小程序里只有一句「口令错误」，因为员工 PIN 是按账套存的、登录卡又没有账套选择。现在输完口令先问一句「这口令属于哪一本」，是别本就自动切过去并提示「已切到「二厂」」；验证失败走 `authFail` 计数（不计数就等于 4 位 PIN 可以无锁爆破）。⑤`signSecret` 用**单值全局缓存**（`let _signCache`），多账套下 A 库密钥顶掉 B 库，另一实例没缓存时签名不一致 → 对账单/打印链接时好时坏；改 `WeakMap` 按库缓存。⑥签名原文里**没有账套号** → 第 1 本发出去的对账单链接加 `&book=2` 就能看第 2 本同名客户。新增 `sigBook(mainDb, c.env.BOOK, party, type)`，29 处调用全换，生成的链接一律带 `&book=`。**老链接会失效一次**（签名变了），要重新发。
+   - **A1 权限收窄**：`/books`（原来连 role 都不判）、`/books-all`、`/book-admin` 只认 `owner` → 二厂管理员能看到全部账套的单数和应收，还能给主账套改名。现在「只有某本账的管理员」只看得到自己那本、改不了别家名字（403 `super_only`），改名的审计日志写进**被改的那本**（以前写当前这本，回头在第 5 本查日志看不到）。
+   - **A2 备份恢复（5 条）**：⑦`/book-reset` 先做快照、随后又把 `backups`/`backup_parts` 一起删了 —— 返回文案还写着「想反悔可以在备份列表恢复」。改成只留刚做的那份快照。⑧恢复备份的 INSERT **漏了税列和票据状态**（`tax_kind/tax_rate/tax_amt`、`inv_state/inv_no/tax`）→ 恢复完含税单全变不含税、有票的流水全变「没标」。⑨恢复一份老备份会把 `super_key`/`book_name`/`modules_off` 全清掉（删除名单写死 6 个键）。改成「必须留着的键 + 这份备份里有的键」。⑩备份分片按**字符**切（`CHUNK = 900000`），中文 3 字节 → 单片 2.7MB，超 D1 单行 2MB，主行已写 `content=''` 而分片插失败 = 假备份。改成 `sliceByBytes(str, 500000)` 按 UTF-8 字节切，分片失败时连主行一起删。⑪`staff_users` 不进备份（PIN 不外流，这条保留），但恢复完要**明说**「这本账现在是 0 个员工，要重新加一次」。
+   - **A3 记账正确性（4 条）**：⑫对账类导入（`ar_recon`/`ap_recon`/付房东）原来只在读「最后一列日期」时查月结锁，而真正的记账月份是后面才算出来的 → 能写进已结账的月份。改成算出记账日期后再查一次。⑬年报「累计现金结余」只加流水、**不加开账时填的账户期初**（跟科目余额表永远差一块）；顺手发现「借款余额」那条 SQL 写的 `amount - COALESCE(repayed,0) FROM debts` 两个列**根本不存在**，报错被 `.catch` 吞掉 → 年报借款余额永远是 0。改成 `SUM(principal) − debt_repays(kind='principal')`。⑭付房东和借支导入**不是事务**（先插单据再插流水），第二步失败就剩「有借支、现金没动」；四类期初（借支/借款/预付）也没有去重，传两遍翻倍。改成 `db.batch` + 同键去重。⑮客户名单导入用 `SET contact=?` 直接覆盖 → 空着的那几列把已有电话清空。改成 `COALESCE(NULLIF(?,''),contact)`。
+   - **A4 手机端（5 条）**：⑯登录卡点「先不看」整屏卡死（排队的请求被直接清空、不回调 `fail/complete`，而「记账中」那个 mask 遮罩只靠 `complete` 收尾）→ 现在逐个收尾 + `wx.hideLoading()`。⑰点「先看看演示」会把刚才**没登录成功的那笔写操作重放进示例账套**（用户以为记上了，回真账本一看没有）→ 只重放 GET，写操作提示「演示账套只是看看，刚才那 N 笔没记」。⑱合批成功不调 `complete` → 「加载更多」的分页锁永不复位，只能成功一次。⑲同一份表传两次翻倍：`/pc` 写死 `force:true`，小程序「再导一次」还是默认按钮 → 都改成**默认不导**（`/pc` 加勾选框，弹窗主按钮改「知道了」）。⑳「下载改好的表」再选回来白屏：3MB base64 塞进 `setData`（上限 1MB）→ 移进实例变量 `this._riB64`。
+   - **A5 报表权限（3 条）**：员工能 `GET /archive-pack`、`/month-pack`（含毛利）、能读 `/error-log`、`/slow-log`、`/selfcheck`、`/books`；演示口令能 GET `/month-pack`。全部补进 `denyStaff` / `denyDemo`。
+   - **B CI 假绿（4 条）**：㉔`/schema-check` 的 `ok` 恒为 `true`，而 CI 判的是 `d.ok === false` → 线上真缺列也绿。改成 `ok = bad.length === 0`，CI 两样都判。㉕没配 `CF_API_TOKEN` 时只打一条 `::warning`（要展开日志才看到）→ 现在同时写进 GitHub 运行摘要页（「⚠️ 这次 push 没有部署到线上」+ 怎么配），并新增一步「线上版本 vs 这次 push」把线上 `/version` 的 commit 和本次 sha 并排写进摘要。㉖**本机版/Docker 老库升级直接崩**：`ensureSchema` 整段 `exec(schema.sql)`，`CREATE TABLE IF NOT EXISTS` 跳过已存在的表 → 后来加的列永远补不上，实测老库启动 `启动失败：Error: no such column: month`。新增 `completeColumns()`：按 `schema.sql` 的建表定义逐列对比 `PRAGMA table_info`，缺的 `ALTER TABLE ADD COLUMN`，启动日志打「老库补上 12 个列」。㉗测试假绿：`test-book` 的 `dm.s === 403 || dm.s === 503`、`all_done === false || done === 0`（等于恒真）；`test-tax` 的 `>= 176`（算错一点也过，改成**本月增量必须正好 176 / 131.28**）；`smoke-write` 自检只判 `Number(v) > 0`（后端改键名就永远漏检，先断言 10 个键都在）。
+   - **C 文档与卫生（4 条）**：㉘`DEPLOYMENT` 的「230 个 GET」→235、「1.7 万行」→1.9 万；README 的接口数由 `gen-api-list` 自动生成（427 个）。㉙`gen-api-list.mjs` 新增 `--check`（只比对不改文件，不一致退出码 1）和 `--out`，CI 加一步「README 接口清单是不是最新的」——以前想验只能真跑，跑完工作区就脏了。㉚本机版写死 3 本账（文档却说 9 本）→ 现在启动建 `book1.db`…`book9.db`。㉛新增 `SECURITY.md`（口令怎么存、备份故意不含什么、对账单链接怎么作废）；`.gitignore` 补 `*.db`、`.env*`、`.dev.vars`、`*.pem`、`.d1_id`，并把误跟踪的 `.d1_id` 从库里移除。
+   - **这一轮自己踩出来的 4 个坑（都值得记）**：①`debts` 表没有 `amount/repayed` 两列，年报那条「借款余额」SQL 一直报错被吞（改对之后 CI 立刻红了一版才发现）。②写「按字节切」时第一版按 `charCodeAt` 累加，遇到 emoji 代理对会算错（改成代理对算 4 字节、低位代理算 0）。③`completeColumns` 第一版按逗号切列定义，**注释里的中文逗号**把 `created_by` 切丢；第二版修了注释又踩 `DEFAULT 'ar,ap,exp…'` 里的逗号，凭空在 `staff_users` 里加了 `ap/exp/import/contact` 四列、最后一块还 `unrecognized token: "'"`。最终版逐字符扫：跳过 `--` 注释、单引号字符串、括号三样。④`ensureMonthCols` 只在定时任务里跑，`--no-cron` 的本机版和「刚部署、cron 还没到点」的线上，老单据的 `month` 一直是空的 → 现在每个 isolate 在请求入口兜一次（`_memoDdl` 记忆化，之后 0 开销）。
+   - **验证**（干净库 `/tmp/d1a7` + dev 9161，三本账都灌 schema，按 CI 顺序）：`check.mjs` 427 路由 / 57 表 / 652 SQL / 262 调用 / 781 绑定；`smoke` 235 GET 无 5xx；`test-modules` → `smoke-write`（主流程 + 写路由 + 备份恢复闭环 + 恢复模块默认 + 自检 10 类全 0）→ `test-crossmonth` 16 → `test-apcat` 31 → `test-import-xlsx` 32 → `test-onboarding` → `test-safety` 48 → `test-demo` 60 → `test-archive` 41 → `test-book` 40 → `test-super` 36 → `test-staff` 49 → `test-pack` 65 → `test-tax` 52，离线 `test-batch` / `test-key-queue` / `test-firstscreen` 全绿。
+   - **本机版专项验证**：造一个「只有 10 列的老 `book1.db`」启动 → 日志「老库补上 12 个列」，老单据照常读出来、`month` 自动回填成 `2026-01`、自检 `month_null: 0`；同时建出 9 本账；`smoke` 235 + `smoke-write` 全通。
+   - ⚠️ **动了前端**（登录卡、导入弹窗、分页）→ 小程序要重新上传发布；后端要重新部署。老的对账单/进度链接需要重新发（签名里多了账套号）。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 417 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 427 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -1970,18 +1984,21 @@ node scripts/build-exe.mjs --out dist
 - `GET /attachments`
 - `POST /attachments`
 
-**auth**（10）
+**auth**（13）
 
 - `GET /auth/recover-info`
 - `POST /auth/change`
 - `POST /auth/demo`
 - `POST /auth/demo-builtin`
 - `POST /auth/demo-state`
+- `POST /auth/find-book`
 - `POST /auth/recover`
 - `POST /auth/recover-code`
 - `POST /auth/setup`
 - `POST /auth/staff`
 - `POST /auth/staff-off`
+- `POST /auth/super`
+- `POST /auth/super-state`
 
 **collect-config**（2）
 
@@ -2076,7 +2093,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（217）
+**其它（单个接口）**（224）
 
 - `GET /`
 - `GET /access-guide`
@@ -2088,6 +2105,8 @@ node scripts/build-exe.mjs --out dist
 - `GET /ap-by-category`
 - `GET /ar`
 - `GET /ar-summary`
+- `GET /archive-kinds`
+- `GET /archive-pack`
 - `GET /asset-maint`
 - `GET /audit-logs`
 - `GET /backup`
@@ -2100,10 +2119,14 @@ node scripts/build-exe.mjs --out dist
 - `POST /bank-auto-match`
 - `POST /bank-import`
 - `POST /batch`
+- `POST /book-admin`
+- `POST /book-admin-key`
 - `POST /book-name`
+- `POST /book-reset`
 - `POST /book-template/apply`
 - `GET /book-templates`
 - `GET /books`
+- `GET /books-all`
 - `GET /books-check`
 - `GET /break-even`
 - `GET /cash-bridge`
@@ -2147,6 +2170,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /forecast`
 - `GET /frame-check`
 - `GET /funding`
+- `GET /guide`
 - `GET /handover`
 - `POST /handover-note`
 - `GET /handover-print`

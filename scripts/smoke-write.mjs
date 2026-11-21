@@ -349,6 +349,10 @@ async function consistency() {
     ['流水挂的账户已删除', d.account_orphan],
     ['单据没记上月份', d.month_null]
   ]
+  // 以前只判 `Number(v) > 0`：后端把某个键改名之后 v 是 undefined，这条就永远漏检，
+  // 自检看起来「10 类全是 0」其实只查了 7 类。现在先要求每个键都真的在返回里。
+  const missing = items.filter(([k, v]) => v === undefined || v === null || !Number.isFinite(Number(v))).map(([k]) => k)
+  if (missing.length) no('账本自检返回的字段缺了', missing.join('、'))
   const broke = items.filter(([, v]) => Number(v) > 0)
   if (broke.length) {
     no('账本自检', broke.map(([k, v]) => `${k} ${v} 处`).join('；') + (d.issues && d.issues.length ? `\n     ${d.issues.slice(0, 6).join('\n     ')}` : ''))

@@ -142,11 +142,89 @@ export class LocalD1 {
 
 // 首次启动时把 schema.sql 整段跑一遍。schema 里全是 IF NOT EXISTS，重复执行安全，
 // 所以每次启动都跑（700 行、几毫秒），老版本升级时新表新列能自己补上。
+// 老库升级：schema.sql 里全是 CREATE TABLE IF NOT EXISTS，表已经在的时候整句被跳过，
+// 于是「后来加的列」永远补不上 —— 表现是老库一启动就
+// `Error: no such column: month`，用户以为文件坏了。
+// 这里按 schema.sql 里的建表定义，把缺的列一条条 ALTER 上去（ADD COLUMN 失败就记下来，不中断启动）。
+export async function completeColumns(db, schemaSql) {
+  const added = []
+  const failed = []
+  const defs = []
+  const re = /CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_][\w]*)\s*\(([\s\S]*?)\n\);/g
+  let m
+  while ((m = re.exec(schemaSql))) defs.push({ table: m[1], body: m[2] })
+  for (const d of defs) {
+    let cols
+    try { cols = (await db.prepare('PRAGMA table_info(' + d.table + ')').all()).results || [] } catch (e) { continue }
+    if (!cols.length) continue
+    const have = new Set(cols.map((x) => String(x.name)))
+    // 切列定义要同时躲开三种「逗号/减号陷阱」，否则会切出假的列名，甚至拿
+    // DEFAULT 字符串里的片段去 ALTER TABLE（踩过两次：注释里的逗号让 created_by 补不上；
+    // `modules TEXT DEFAULT 'ar,ap,exp…'` 被切成了 ap / exp / import 三列，
+    // 数据库里凭空多出三列，最后一块 `asset'` 还报 unrecognized token）。
+    //   1. 行注释 --…（要跳过；注释里常有中文逗号，也可能有 ,）
+    //   2. 单引号字符串（DEFAULT '…'）
+    //   3. 括号（CHECK (x IN (0,1))）
+    const parts = []
+    let depth = 0
+    let cur = ''
+    let quote = false
+    const src2 = String(d.body)
+    for (let i = 0; i < src2.length; i++) {
+      const ch = src2[i]
+      if (quote) {
+        cur += ch
+        if (ch === "'") quote = false
+        continue
+      }
+      if (ch === '-' && src2[i + 1] === '-') {
+        while (i < src2.length && src2[i] !== '\n') i++
+        cur += '\n'
+        continue
+      }
+      if (ch === "'") { quote = true; cur += ch; continue }
+      if (ch === '(') depth++
+      if (ch === ')') depth--
+      if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue }
+      cur += ch
+    }
+    if (cur.trim()) parts.push(cur)
+    for (const raw of parts) {
+      const line = raw.trim().replace(/\s+/g, ' ')
+      if (!line) continue
+      const nm = (line.match(/^([A-Za-z_][\w]*)/) || [])[1]
+      if (!nm) continue
+      const low = line.toLowerCase()
+      if (low.startsWith('primary ') || low.startsWith('unique') || low.startsWith('foreign') || low.startsWith('check') || low.startsWith('constraint')) continue
+      if (have.has(nm)) continue
+      try {
+        await db.prepare('ALTER TABLE ' + d.table + ' ADD COLUMN ' + line).run()
+        added.push(d.table + '.' + nm)
+      } catch (e) {
+        // NOT NULL 又没有默认值的列 SQLite 加不上（ALTER 的限制），记下来让启动日志提示
+        failed.push(d.table + '.' + nm + ': ' + String((e && e.message) || e))
+      }
+    }
+  }
+  return { added, failed }
+}
+
 export async function ensureSchema(db, schemaSql) {
   const CNT = "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
   const has = await db.prepare(CNT).first()
   const before = Number((has && has.n) || 0)
-  await db.exec(schemaSql)
+  let firstErr = null
+  try {
+    await db.exec(schemaSql)
+  } catch (e) {
+    // 老库上可能因为「索引建在新列上、而那个列还没加」直接抛错。
+    // 先补列，再整段重跑一次；第二次还失败才算真问题。
+    firstErr = e
+  }
+  const cols = await completeColumns(db, schemaSql)
+  if (firstErr) {
+    try { await db.exec(schemaSql) } catch (e) { throw e }
+  }
   const after = await db.prepare(CNT).first()
-  return { before, after: Number((after && after.n) || 0) }
+  return { before, after: Number((after && after.n) || 0), added: cols.added, failed: cols.failed }
 }

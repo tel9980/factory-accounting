@@ -31,8 +31,12 @@ const eq = (label, got, want) => (String(got) === String(want) ? ok(`${label} = 
 const yes = (label, cond, d) => (cond ? ok(label) : no(label, d))
 const num0 = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 
+// 第 4 个参数以前只当口令用；现在多一种用法 { book } —— 带 X-Book 走到指定账套
 const call = async (method, p, body, key) => {
   const h = { 'Content-Type': 'application/json' }
+  let bk = 0
+  if (key && typeof key === 'object') { bk = Number(key.book) || 0; key = KEY }
+  if (bk) h['X-Book'] = String(bk)
   if (key !== null) h['X-Access-Key'] = key || KEY
   const r = await fetch(BASE + p, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) })
   const txt = await r.text()
@@ -85,7 +89,9 @@ const run = async () => {
   const me = await get('/me')
   eq('口令没被动过', me.d.role, 'owner')
   const ob = await get('/onboarding')
-  yes('开账引导回到「没做完」', ob.d.all_done === false || num0(ob.d.done) === 0, ob.d.done)
+  // 这里以前写 `all_done === false || done === 0`，两个条件任一成立就算过 —— 等于恒真。
+  // 清空之后必须真的是「一步都没做」。
+  yes('开账引导回到「没做完」', ob.d.all_done === false && num0(ob.d.done) === 0, JSON.stringify(ob.d).slice(0, 120))
 
   // 4. 导回去（换电脑/换账套的主路径）
   const im = await post('/import-all', { pkg, mode: 'replace', confirm: '覆盖' })
@@ -98,23 +104,34 @@ const run = async () => {
 
   // 5. 演示口令不许清空
   const dm = await post('/book-reset', { confirm: '清空' }, DEMO)
-  yes('演示口令清空被拒', dm.s === 403 || dm.s === 503, dm.s + ' ' + (dm.d && (dm.d.code || dm.d.error)))
-  if (dm.s === 403) eq('拒绝原因是只读', dm.d.code, 'demo_readonly')
+  // 503 是「演示账套还没就绪」（库没灌 schema），不是「被拒」。以前两者都算过。
+  eq('演示口令清空被拒（403，不是 503）', dm.s, 403)
+  eq('拒绝原因是只读', dm.d.code, 'demo_readonly')
 
   // 6. 账套管理（电脑上改名 / 看每本有多少账）
   const all = await get('/books-all')
   yes('/books-all 能列出账套', all.s === 200 && Array.isArray(all.d.books) && all.d.books.length >= 1, all.s + ' ' + JSON.stringify(all.d).slice(0, 120))
   yes('  说了最多能开几本', num0(all.d.max) >= 3, all.d.max)
   yes('  标出了当前账套', (all.d.books || []).some((b) => b.current === true), all.d.books)
+  // 改名：现在是「谁的口令改哪本」。只有第 1 本的口令，改第 2 本必须被拒（以前谁都能改别家名字）。
+  const nm1 = TAG + '一厂'
+  const ren1 = await post('/book-admin', { book: 1, name: nm1 })
+  yes('改自己这本的名字 → 200', ren1.s === 200 && ren1.d.ok === true, ren1.s)
+  const after1 = await get('/books-all')
+  yes('  改名生效', (after1.d.books || []).some((b) => b.id === 1 && b.name === nm1), (after1.d.books || []).map((b) => b.name))
+  await post('/book-admin', { book: 1, name: '主账套' })
+  ok('  名字改回去了')
   if ((all.d.books || []).some((b) => b.id === 2)) {
-    const nm2 = TAG + '二厂'
-    const ren = await post('/book-admin', { book: 2, name: nm2 })
-    yes('给第 2 本改名 → 200', ren.s === 200 && ren.d.ok === true, ren.s)
-    const after = await get('/books-all')
-    yes('  改名生效', (after.d.books || []).some((b) => b.id === 2 && b.name === nm2), (after.d.books || []).map((b) => b.name))
-    await post('/book-admin', { book: 2, name: '账套二' })
+    const bad2 = await post('/book-admin', { book: 2, name: TAG + '二厂' })
+    yes('拿第 1 本的口令改第 2 本 → 403（要超级口令）', bad2.s === 403 && bad2.d.code === 'super_only', bad2.s + ' ' + (bad2.d && bad2.d.code))
+    // 切到第 2 本再改自己的名字，应该通
+    const ren2 = await post('/book-admin', { book: 2, name: TAG + '二厂' }, { book: 2 })
+    yes('切到第 2 本改自己的名字 → 200', ren2.s === 200 && ren2.d.ok === true, ren2.s)
+    const after2 = await get('/books-all')
+    yes('  改名生效', (after2.d.books || []).some((b) => b.id === 2 && b.name === TAG + '二厂'), (after2.d.books || []).map((b) => b.name))
+    await post('/book-admin', { book: 2, name: '账套二' }, { book: 2 })
     ok('  名字改回去了')
-  } else { ok('这台机器只开了一本账，跳过改名测试') }
+  } else { ok('这台机器只开了一本账，跳过第 2 本的改名测试') }
   const noBook = await post('/book-admin', { book: 9, name: '不存在的' })
   yes('改不存在的账套 → 404', noBook.s === 404 && noBook.d.code === 'no_book', noBook.s + ' ' + (noBook.d && noBook.d.code))
   const emptyName = await post('/book-admin', { book: 1, name: '  ' })

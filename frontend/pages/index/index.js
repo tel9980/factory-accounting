@@ -511,7 +511,10 @@ Page({
             // 微信审核员也不知道，3.3「登录受限」就是这么被驳回的。现在改成站内一张卡片：
             // 输口令 / 先看看演示（内置示例账套，不用口令、不碰真账）/ 忘了口令用恢复码。
             this._keyCtx = { done, replayKey, doReq }
-            this.setData({ key_open: true, key_input: '', key_err: '', key_mode: code === 'no_key' ? 'set' : 'enter' })
+            const why = code === 'bad_key'
+              ? (String((res.data && res.data.error) || '口令不对') + ((res.data && res.data.left) ? '，还能试 ' + res.data.left + ' 次' : ''))
+              : ''
+            this.setData({ key_open: true, key_input: '', key_err: why, key_mode: code === 'no_key' ? 'set' : 'enter' })
             return
           }
           if (res.statusCode >= 400) {
@@ -610,6 +613,9 @@ Page({
           // 合批前 caller 明确说了 cache:false（动态数据），这里也要遵守，不能无脑缓存。
           if ((o.cache !== false || q[i].wantCache) && !(o.method && o.method.toUpperCase() !== 'GET')) this._cachePut(q[i].path, val)
           o.success && o.success({ data: val, statusCode: 200 })
+          // 以前合批成功不调 complete：分页的 _pagBusy 只能靠 complete 复位，
+          // 于是「加载更多」第二次就没反应了（要退出重进）。成功也要走 complete。
+          o.complete && o.complete({ data: val, statusCode: 200 })
         })
         if (this._offShown) { this._offShown = false; this.setData({ offline_at: '' }) }
       },
@@ -1606,10 +1612,12 @@ Page({
         this.setData({ pk_busy: false })
         const d = res.data || {}
         if (d.dup_file) {
+          // 默认按钮必须是「知道了」。以前默认是「还是再导一次」，手一抖就把同一份表导两遍，
+          // 账上的应收直接翻倍。
           return wx.showModal({
             title: '这份表导过了', content: d.error || '同一个文件不会重复入账。',
-            confirmText: '还是再导一次', cancelText: '知道了',
-            success: (m) => { if (m.confirm) { this.setData({ pk_force: true }); this.packConfirm() } }
+            confirmText: '知道了', cancelText: '确实要再导一次',
+            success: (m) => { if (!m.confirm && m.cancel) { this.setData({ pk_force: true }); this.packConfirm() } }
           })
         }
         if (!d.ok) return wx.showToast({ title: d.error || '导入失败', icon: 'none' })
@@ -1637,7 +1645,10 @@ Page({
             const d = res.data || {}
             if (!d.ok) return wx.showModal({ title: '读不了这个表', content: d.error || '稍后再试', showCancel: false })
             const rows = (d.changes || []).map((x) => Object.assign({}, x, { pick: x.state === 'ok' }))
-            this.setData({ ri: Object.assign({}, d, { changes: rows }), ri_type: t, ri_b64: fr.data })
+            // 文件内容（base64，最大 3MB）放实例变量，不进 setData：
+            // 小程序单次 setData 上限 1MB，塞进去会直接白屏，而且白屏时没有任何提示。
+            this._riB64 = fr.data
+            this.setData({ ri: Object.assign({}, d, { changes: rows }), ri_type: t, ri_b64: '' })
             if (!rows.length) wx.showToast({ title: '都和账上一样，不用改', icon: 'none' })
           },
           fail: () => wx.hideLoading() })
@@ -1651,7 +1662,7 @@ Page({
     rows[i].pick = !rows[i].pick
     this.setData({ 'ri.changes': rows })
   },
-  closeRi() { this.setData({ ri: null, ri_b64: '' }) },
+  closeRi() { this._riB64 = ''; this.setData({ ri: null, ri_b64: '' }) },
   applyRi() {
     const d = this.data.ri
     if (!d) return
@@ -1660,7 +1671,7 @@ Page({
     wx.showModal({ title: '确认改这 ' + pick.length + ' 行？', content: '只改勾上的，别的行一分不动；改完在「编辑留痕」里能看到改了哪几处。', success: (r) => {
       if (!r.confirm) return
       this.req({ url: API_BASE + '/import-xlsx', method: 'POST', once: 'applyRi',
-        data: { type: this.data.ri_type, b64: this.data.ri_b64, apply: true, changes: pick.map((x) => ({ id: x.id, set: x.set })) },
+        data: { type: this.data.ri_type, b64: this._riB64 || '', apply: true, changes: pick.map((x) => ({ id: x.id, set: x.set })) },
         success: (res) => {
           const x = res.data || {}
           if (!x.ok) return wx.showModal({ title: '没改成', content: x.error || '稍后再试', showCancel: false })
@@ -1957,10 +1968,13 @@ Page({
   // 以前每次都发请求、每次都 offset=同一个数，回来三份一样的行 —— 列表里同一张单出现三遍，
   // 点哪一行都不知道点的是哪一份。现在：一次只发一个请求，回来的按 id 去重。
   _appendPage(cur, page, more) {
-    const base = more ? (cur || []) : []
+    const base = Array.isArray(cur) ? cur : []
     const seen = new Set(base.map((x) => String(x.id)))
     const add = []
-    for (const row of page || []) if (!seen.has(String(row.id))) { seen.add(String(row.id)); add.push(row) }
+    // 后端某次回的不是数组（比如 {ok:true, error:…}）时不能直接 for…of，
+    // 那会抛 TypeError 把整页渲染带死，而错误还看不见。
+    const rows = Array.isArray(page) ? page : []
+    for (const row of rows) if (!seen.has(String(row.id))) { seen.add(String(row.id)); add.push(row) }
     return base.concat(add)
   },
   _loading(key, on) { this._pagBusy = this._pagBusy || {}; this._pagBusy[key] = !!on },
@@ -5994,11 +6008,19 @@ Page({
   closeKey() {
     const c = this._keyCtx
     this._keyCtx = null
-    // 点了「先不看」：排队的请求既不放行也不留着 —— 否则下次进来会突然冒出别人的数据
+    // 点了「先不看」：排队的请求既不放行也不留着 —— 否则下次进来会突然冒出别人的数据。
+    // 但必须逐个收尾：不少地方只靠 complete 收尾（比如「记账中」那个 mask 遮罩），
+    // 以前直接清空数组，遮罩就永远转下去，整屏点不动。
+    const q = this._keyQueue || []
     this._keyQueue = []
     this._askingKey = false
+    q.forEach((o) => {
+      try { o.fail && o.fail({ statusCode: 0, cancelled: true }) } catch (e) { /* 单个失败不影响别的 */ }
+      try { o.complete && o.complete({ statusCode: 0, cancelled: true }) } catch (e) { /* 同上 */ }
+    })
+    try { wx.hideLoading() } catch (e) { /* 没有遮罩就忽略 */ }
     if (c) c.done()
-    this.setData({ key_open: false, key_input: '', key_err: '' })
+    this.setData({ key_open: false, key_input: '', key_err: '', no_key: true })
   },
   // 输口令进（或者第一次用：设口令）
   submitKey() {
@@ -6025,20 +6047,62 @@ Page({
       })
       return
     }
-    wx.setStorageSync('ak', k)
-    this._keyCtx = null
-    this.setData({ key_open: false, key_err: '' })
-    if (c) { c.done(); c.doReq(k); c.replayKey(k) }
-    this.loadMe()
+    this.setData({ key_err: '' })
+    // 员工 PIN 是按账套存的。二厂的人默认进的是第 1 本，必然「口令错误」，
+    // 而小程序里没有「选账套」这一屏。于是先问一句「这个口令属于哪一本」，是别本账就自动切过去。
+    wx.request({
+      url: API_BASE + '/auth/find-book', method: 'POST', data: { key: k },
+      success: (r) => {
+        const d = r.data || {}
+        const cur = String(wx.getStorageSync('book') || 1)
+        if (d.ok && d.book && String(d.book) !== cur) {
+          try { wx.setStorageSync('book', d.book) } catch (e) { /* 存不进去就照旧 */ }
+          this.setData({ book: Number(d.book) })
+          wx.showToast({ title: '已切到「' + String(d.name || ('第 ' + d.book + ' 本账')) + '」', icon: 'none' })
+        }
+        wx.setStorageSync('ak', k)
+        this._keyCtx = null
+        this.setData({ key_open: false, key_err: '' })
+        if (c) { c.done(); c.doReq(k); c.replayKey(k) }
+        this.loadMe()
+        this.refresh({ lite: true })
+      },
+      // 这个接口挂了不该拦住登录：照原来的路走，进不去再提示
+      fail: () => {
+        wx.setStorageSync('ak', k)
+        this._keyCtx = null
+        this.setData({ key_open: false, key_err: '' })
+        if (c) { c.done(); c.doReq(k); c.replayKey(k) }
+        this.loadMe()
+      }
+    })
   },
   // 先看看演示：内置口令直接进演示账套（示例数据），不用问任何人要口令
   enterDemoLook() {
     const c = this._keyCtx
+    const q = this._keyQueue || []
     wx.setStorageSync('ak', DEMO_KEY)
+    this._keyQueue = []
     this._keyCtx = null
     this.setData({ key_open: false, demo: true, role: 'demo' })
-    if (c) { c.done(); c.doReq(DEMO_KEY); c.replayKey(DEMO_KEY) }
+    if (c) c.done()
+    let skippedWrite = 0
+    q.forEach((o) => {
+      const m = String((o && o.method) || 'GET').toUpperCase()
+      if (m !== 'GET') {
+        // 刚才没登录成功的那笔「记一笔 / 收款」不能拿去示例账套里执行：
+        // 记录会落在演示账本上，用户以为自己的账记上了，回真账本一看没有。
+        skippedWrite++
+        try { o.fail && o.fail({ statusCode: 0, demo: true }) } catch (e) { /* 忽略 */ }
+        try { o.complete && o.complete({ statusCode: 0, demo: true }) } catch (e) { /* 忽略 */ }
+        return
+      }
+      try { this._send(o, DEMO_KEY) } catch (e) { /* 单个失败不影响别的 */ }
+    })
+    if (c) c.doReq(DEMO_KEY)
+    if (skippedWrite) wx.showToast({ title: '演示账套只是看看，刚才那 ' + skippedWrite + ' 笔没记；记账请输自己的口令', icon: 'none', duration: 2600 })
     this.loadMe()
+    this.refresh({ lite: true })
   },
   keyRecover() {
     this.closeKey()
