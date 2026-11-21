@@ -1283,6 +1283,8 @@
         <view class="plrow"><text class="pll">销项税（收进来的税）</text><text class="plv">{{tax.sales_tax}}</text></view>
         <view class="plrow"><text class="pll">进项税（付出去的税）</text><text class="plv">{{tax.buy_tax}}</text></view>
         <view class="plrow"><text class="pll strong">这个月大概要交</text><text class="plv ok">¥{{tax.net}}</text></view>
+        <view class="plrow" wx:if="{{tax.tax_no_buy > 0}}"><text class="pll">没票/没标票的税额</text><text class="plv bad">¥{{tax.tax_no_buy}}（抵不了）</text></view>
+        <view class="plrow" wx:if="{{tax.tax_no_sales > 0}}"><text class="pll">没票的收入里的税额</text><text class="plv">¥{{tax.tax_no_sales}}（不算销项）</text></view>
         <view class="plrow"><text class="pll">没票的支出</text><text class="plv bad">{{tax.no_inv_out.count}} 笔 ¥{{tax.no_inv_out.amount}}</text></view>
         <view class="plrow"><text class="pll">没票的收入</text><text class="plv">{{tax.no_inv_in.count}} 笔 ¥{{tax.no_inv_in.amount}}</text></view>
         <view class="tip">{{tax.text}}</view>
@@ -3088,6 +3090,8 @@
         <button class="btn" size="mini" bindtap="loadFlows">查一下</button>
       </view>
       <view class="tip" wx:if="{{flows}}">共 {{flows.count}} 笔　收 {{flows.total_in}}　付 {{flows.total_out}}　结余 {{flows.net}}{{flows.tip ? '　' + flows.tip : ''}}</view>
+      <view class="tip" wx:if="{{flows && flows.op_text}}">{{flows.op_text}}</view>
+      <view class="tip" wx:if="{{flows && flows.no_cash_text}}">{{flows.no_cash_text}}</view>
       <view wx:if="{{flows && flows.by_cat.length}}">
         <view class="plrow" wx:for="{{flows.by_cat}}" wx:key="name">
           <text class="pll">{{item.name}}</text><text class="plv">{{item.amount}}</text>
@@ -3100,7 +3104,7 @@
           <text class="nm">{{item.date}} · {{item.dir_text}} {{item.amount}}</text>
           <text class="amt {{item.dir=='in'?'ok':'red'}}">{{item.dir=='in'?'+':'-'}}{{item.amount}}</text>
         </view>
-        <view class="row2">{{item.cat_text}}{{item.remark ? ' · ' + item.remark : ''}} · {{item.account}}{{item.ref_text ? ' · ' + item.ref_text : ''}}</view>
+        <view class="row2">{{item.cat_text}}{{item.remark ? ' · ' + item.remark : ''}} · {{item.account}}{{item.ref_text ? ' · ' + item.ref_text : ''}}{{item.no_cash ? ' · 不动现金' : ''}}</view>
         <view class="frow">
           <button class="btn ghost" size="mini" bindtap="delFlow" data-id="{{item.id}}">删</button>
         </view>

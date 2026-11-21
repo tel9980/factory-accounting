@@ -194,8 +194,14 @@ const main = async () => {
   // 用「本月新增」而不是绝对值：同一个库重复跑也不会变。以前写 >= 176，随便算错一点也过。
   const salesTax = r2(Number(ts.sales_tax) - Number(base.sales_tax || 0))
   const buyTax = r2(Number(ts.buy_tax) - Number(base.buy_tax || 0))
-  eq('销项税增量 = 176（收款 46 + 单独收的 130）', salesTax, 176)
-  eq('进项税增量 = 131.28（付款 41.28 + 单独付的 90）', buyTax, 131.28)
+  const noSales = r2(Number(ts.tax_no_sales || 0) - Number(base.tax_no_sales || 0))
+  const noBuy = r2(Number(ts.tax_no_buy || 0) - Number(base.tax_no_buy || 0))
+  // 口径：只有「有票」的税额才算销项/进项。没票的照样记下来，但单独放在 tax_no_* 里，
+  // 因为没票本来就抵不了税，算进「进项」会让人以为能少交。
+  eq('销项税增量 = 130（只算有票的那笔 130）', salesTax, 130)
+  eq('进项税增量 = 90（只算有票的那笔 90）', buyTax, 90)
+  eq('没票的销项税额 = 46 单列', noSales, 46)
+  eq('没票的进项税额 = 41.28 单列', noBuy, 41.28)
   eq('净额 = 销项 - 进项', r2(Number(ts.sales_tax) - Number(ts.buy_tax)), ts.net)
   if (!ts.no_inv_out || !(Number(ts.no_inv_out.count) >= 1)) no('没票的支出应 ≥1 笔', ts.no_inv_out)
   else ok('没票的支出统计到了（' + ts.no_inv_out.count + ' 笔 ¥' + ts.no_inv_out.amount + '）')
