@@ -84,7 +84,8 @@
       <view class="chips" wx:if="{{phrases.length}}">
         <view class="chip" wx:for="{{phrases}}" wx:key="id" bindtap="pickPhrase" data-t="{{item.text}}" bindlongpress="delPhrase" data-id="{{item.id}}">{{item.text}}</view>
       </view>
-      <view class="tip">支持：收张老板5000 · 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘语音说话</view>
+      <view class="tip">支持：张老板加工费5000（开一张应收单）· 付王五金货款3000 · 工资5000 · 水电300；也可点输入框用键盘语音说话</view>
+      <view class="tip">⚠ 这里写「收…」是<text class="b">又开了一张单</text>，不是收到钱。收到钱请在下面列表里点开那张单，点「💰 收钱」。</view>
     </view>
 
     <view class="alertbar" wx:if="{{overdue_count > 0 || due_soon_count > 0 || pay_soon_count > 0}}" bindtap="jumpTodo">
@@ -203,6 +204,7 @@
       </view>
     </view>
     <view class="aline bad" wx:if="{{dash_err}}" bindtap="loadDashboard">{{dash_err}}（点这里重试）</view>
+    <view class="aline bad" wx:if="{{degraded}}" bindtap="loadDashboard">首页有 {{degraded}} 块没算出来（{{degraded_text}}），这几个数字可能偏小，点这里重试；一直这样就看「错误日志」</view>
     <view class="monthline">手上现金：本月收 {{month_income}} · 付 {{month_outcome}} · 剩 {{month_profit}}</view>
     <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="card" wx:if="{{ns || (mw && mw.count>0)}}">
@@ -315,14 +317,14 @@
     </view>
     <view class="issuebar" wx:if="{{issue_count>0}}" bindtap="showIssue">⚠ 数据自检发现 {{issue_count}} 处对不上（点开看）</view>
     <view class="monthline" bindtap="setTab" data-t="contact">💰 手头现金合计 ¥{{cash_balance}}（点此管账户/改期初）</view>
-    <view class="cfcard" wx:if="{{role!='staff' && cf && cf.days}}" bindtap="showCashflow">
-      <view class="cfh">未来 {{cf.days}} 天现金　<text class="cfl">点开看明细</text></view>
-      <view class="cfrow"><text>手头现金</text><text class="{{cf.cash<0?'red':'green'}}">¥{{cf.cash}}</text></view>
-      <view class="cfrow"><text>预计收进来（{{cf.in_count}} 笔）</text><text class="green">+¥{{cf.inflow}}</text></view>
-      <view class="cfrow"><text>预计付出去（{{cf.out_count}} 笔）</text><text class="red">-¥{{cf.outflow}}</text></view>
-      <view class="cfrow"><text>{{cf.days}} 天后预计</text><text class="{{cf.end<0?'red':'green'}}">¥{{cf.end}}</text></view>
-      <view class="cfwarn" wx:if="{{cf.risk}}">⚠ 按现在的收付，{{cf.min_date}} 会缺钱，最低见底 ¥{{cf.min_balance}}。提前催收或把付款往后挪。</view>
-      <view class="cfwarn ok" wx:elif="{{cf.inflow+cf.outflow>0}}">✔ 未来 {{cf.days}} 天不会缺钱</view>
+    <view class="cfcard" wx:if="{{role!='staff' && cfl && cfl.days}}" bindtap="showCashflow">
+      <view class="cfh">未来 {{cfl.days}} 天现金　<text class="cfl">点开看明细</text></view>
+      <view class="cfrow"><text>手头现金</text><text class="{{cfl.cash<0?'red':'green'}}">¥{{cfl.cash}}</text></view>
+      <view class="cfrow"><text>预计收进来（{{cfl.in_count}} 笔）</text><text class="green">+¥{{cfl.inflow}}</text></view>
+      <view class="cfrow"><text>预计付出去（{{cfl.out_count}} 笔）</text><text class="red">-¥{{cfl.outflow}}</text></view>
+      <view class="cfrow"><text>{{cfl.days}} 天后预计</text><text class="{{cfl.end<0?'red':'green'}}">¥{{cfl.end}}</text></view>
+      <view class="cfwarn" wx:if="{{cfl.risk}}">⚠ 按现在的收付，{{cfl.min_date}} 会缺钱，最低见底 ¥{{cfl.min_balance}}。提前催收或把付款往后挪。</view>
+      <view class="cfwarn ok" wx:elif="{{cfl.inflow+cfl.outflow>0}}">✔ 未来 {{cfl.days}} 天不会缺钱</view>
     </view>
     <view class="goalcard" wx:if="{{role!='staff' && tgt}}" bindtap="openTargetEdit">
       <view class="goalh">本月目标　<text class="cfl">{{tgt.has_target ? '点此改目标' : '还没设目标，点这里设一个'}}</text></view>
@@ -334,7 +336,7 @@
       </block>
       <view class="goalsub" wx:else>{{tgt.receive}} 元已收，{{tgt.order_add}} 元接单。设个目标，首页就有进度条。</view>
     </view>
-    <view class="topcust" wx:if="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}</view>
+    <view class="topcust" wx:if="{{top_customer}}" bindtap="topCustTap" data-p="{{top_customer}}">欠款最多：{{top_customer}} ¥{{top_unpaid}}　<text class="cfl">点开看欠了哪些单</text></view>
     <view class="goalform" wx:if="{{tgt_edit}}">
       <view class="tip">月度目标（留空或填 0 = 取消）</view>
       <input class="inp" placeholder="这个月想收多少钱" type="digit" value="{{tgt_receive}}" bindinput="onTgtReceive"/>
@@ -420,7 +422,13 @@
         </picker>
         <text class="dateClr" wx:if="{{o_date}}" data-f="o_date" bindtap="clearDate">今天</text>
       </view>
-      <button class="btn" size="mini" bindtap="addOrder">记一笔应收</button>
+      <view class="chips">
+        <text class="chip-label">补记：</text>
+        <text class="chip" data-f="o_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="o_date" data-n="2" bindtap="quickDate">前天</text>
+        <text class="chip" data-f="o_date" data-n="3" bindtap="quickDate">3 天前</text>
+      </view>
+      <button class="btn btn-main" bindtap="addOrder">记一笔应收</button>
       <view class="chips" wx:if="{{contacts_ar.length}}">
         <text class="chip-label">常用客户：</text>
         <text class="chip" wx:for="{{contacts_ar}}" wx:key="name" wx:if="{{index < 8}}" bindtap="pickCustomer" data-n="{{item.name}}">{{item.name}}</text>
@@ -753,7 +761,13 @@
         </picker>
         <text class="dateClr" wx:if="{{p_date}}" data-f="p_date" bindtap="clearDate">今天</text>
       </view>
-      <button class="btn" size="mini" bindtap="addPayable">记一笔应付</button>
+      <view class="chips">
+        <text class="chip-label">补记：</text>
+        <text class="chip" data-f="p_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="p_date" data-n="2" bindtap="quickDate">前天</text>
+        <text class="chip" data-f="p_date" data-n="3" bindtap="quickDate">3 天前</text>
+      </view>
+      <button class="btn btn-main" bindtap="addPayable">记一笔应付</button>
       <view class="chips" wx:if="{{contacts_ap.length}}">
         <text class="chip-label">常用供应商：</text>
         <text class="chip" wx:for="{{contacts_ap}}" wx:key="name" wx:if="{{index < 8}}" bindtap="pickSupplier" data-n="{{item.name}}">{{item.name}}</text>
@@ -935,7 +949,13 @@
         </picker>
         <text class="dateClr" wx:if="{{e_date}}" data-f="e_date" bindtap="clearDate">今天</text>
       </view>
-      <button class="btn" size="mini" bindtap="addExpense">记支出</button>
+      <view class="chips">
+        <text class="chip-label">补记：</text>
+        <text class="chip" data-f="e_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="e_date" data-n="2" bindtap="quickDate">前天</text>
+        <text class="chip" data-f="e_date" data-n="3" bindtap="quickDate">3 天前</text>
+      </view>
+      <button class="btn btn-main" bindtap="addExpense">记支出</button>
     </view>
 
     <view class="form">
@@ -1297,6 +1317,12 @@
     <view class="form">
       <view class="tip">手机看报表（不用开 Excel）　月份如 2026-11，不填=本月</view>
       <input class="inp" placeholder="月份，如 2026-11（不填=本月）" value="{{rv_month}}" bindinput="onRvMonth"/>
+      <view class="chips">
+        <text class="chip" data-n="0" bindtap="pickRvMonth">本月</text>
+        <text class="chip" data-n="1" bindtap="pickRvMonth">上月</text>
+        <text class="chip" data-n="2" bindtap="pickRvMonth">再上月</text>
+        <text class="chip" wx:if="{{rv_month}}" bindtap="clearRvMonth">回到本月</text>
+      </view>
       <view class="frow">
         <button class="btn" size="mini" bindtap="loadReportView">看这个月</button>
         <button class="btn ghost" size="mini" bindtap="loadAnomaly">🔎 异常提醒</button>
@@ -3517,6 +3543,11 @@
         <button class="btn" size="mini" wx:if="{{!sealed}}" bindtap="sealBook">🔒 封存这本账</button>
         <button class="btn ghost" size="mini" wx:if="{{sealed}}" bindtap="unsealBook">🔓 解封</button>
       </view>
+      <view class="tip">⚠ 一键初始化：换了生意 / 想从头记，把<text class="b">这一本账</text>清空。口令、账本名不动；员工要不要一起清，下面两个按钮自己选。清空前会自动存一份快照，以前的备份也都还在——以前只能在电脑上做。</view>
+      <view class="frow" wx:if="{{role=='owner'}}">
+        <button class="btn ghost" size="mini" bindtap="bookResetTap" data-keep="0">🧹 清空这本账重来</button>
+        <button class="btn ghost" size="mini" bindtap="bookResetTap" data-keep="1">🧹 清空但留着员工</button>
+      </view>
       <block wx:if="{{bck}}">
         <view class="card">
           <view class="bck-adv">{{bck.advice}}</view>
@@ -3612,7 +3643,7 @@
       <view class="paytt">{{pay_title}}</view>
       <view class="tip" wx:if="{{pay_remain > 0}}">这张单还剩 ¥{{pay_remain}}</view>
       <input class="inp full" type="digit" value="{{pay_amt}}" data-f="pay_amt" bindinput="onPayField"
-        placeholder="{{pay_taxonly ? '不用填（税金看下面）' : '收/付多少（不填=一次结清 ' + pay_remain + '）'}}" disabled="{{pay_taxonly}}" />
+        placeholder="{{pay_taxonly ? '不用填（税金看下面）' : '这次收/付多少（整笔点「收清 ' + pay_remain + '」）'}}" disabled="{{pay_taxonly}}" />
       <picker range="{{acc_names}}" bindchange="onPayAcc"><view class="picker">账户：{{acc_names[acc_idx] || '现金'}} ▾</view></picker>
       <view class="tip">这笔有票吗？（选了账户会带出这户平时的习惯，可以改）</view>
       <view class="chips">

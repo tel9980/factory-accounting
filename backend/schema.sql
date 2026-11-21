@@ -329,6 +329,8 @@ CREATE TABLE IF NOT EXISTS statement_log (
 CREATE INDEX IF NOT EXISTS idx_statement_log_party ON statement_log(party);
 
 -- 运行出错留痕（线上 5xx 会记一条，报表页「数据体检」里能查）
+-- ray / ref / params 是后来补的三列：出 500 时得能说清「是哪一次请求、动的是哪张单、带了什么参数」，
+-- 只记路径的话，同一路径有 8 个写接口，根本判断不出是哪一笔。
 CREATE TABLE IF NOT EXISTS error_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   book INTEGER,
@@ -337,6 +339,9 @@ CREATE TABLE IF NOT EXISTS error_log (
   status INTEGER,
   msg TEXT,
   ms INTEGER,
+  ray TEXT DEFAULT '',
+  ref TEXT DEFAULT '',
+  params TEXT DEFAULT '',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_error_created ON error_log(created_at);

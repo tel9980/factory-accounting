@@ -98,7 +98,7 @@ Page({
     mg_open: false, mg_type: 'ar', mg_text: '', mg_date: '', mg_cost_mode: 'none', mg_margin: 30, mgp: null,
     tab: 'home', group: 'home',
     ar_total: 0, ap_total: 0,
-    month_income: 0, month_outcome: 0, month_profit: 0, dash_err: '', net_bad: false,
+    month_income: 0, month_outcome: 0, month_profit: 0, dash_err: '', degraded: 0, degraded_text: '', net_bad: false,
     month_order_add: 0, month_payable_add: 0, profit_biz: 0,
     overdue_count: 0, overdue: [],
     due_soon_count: 0, due_soon: [], pay_soon_count: 0, pay_soon: [],
@@ -135,7 +135,7 @@ Page({
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日', '客户名单：名称,类型,联系人,电话'],
     role: 'owner', staff_enabled: false, demo: false, demo_enabled: false, demo_builtin: true,
     super: false, super_enabled: false, book_admin: false, book_own_key: false,
-    key_open: false, key_input: '', key_mode: 'enter', key_err: '', cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
+    key_open: false, key_input: '', key_mode: 'enter', key_err: '', cf: null, cfl: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
@@ -403,6 +403,16 @@ Page({
       }
     })
   },
+  // 记账时给个反应。以前点「记上」到表单清空之间屏幕上什么都没有（客户名和金额还在屏幕外），
+  // 看着像没点上，客户就再点一次 —— 于是弹「刚记过一样的」，人会以为第一次没成。
+  // 返回的函数摘圈；6 秒兜底一定要摘（哪怕回调一个都没来，也不能让圈永远转）。
+  _busy(label) {
+    try { wx.showLoading({ title: label || '记着…', mask: true }) } catch (e) {}
+    const hid = () => { clearTimeout(this._busyT); try { wx.hideLoading() } catch (e) {} }
+    clearTimeout(this._busyT)
+    this._busyT = setTimeout(hid, 6000)
+    return hid
+  },
   req(opts) {
     // 兜底补域名：以前有 6 处写成 url: '/xxx'（少了 API_BASE +），wx.request 直接报「url 不合法」，
     // 对应功能（账户对账、使用向导、客户卡片、月对账单、对账单据、今天收工）在真机上一次都没成功过。
@@ -429,7 +439,7 @@ Page({
       : '')
     if (guard) {
       this._once = this._once || {}
-      if (this._once[guard]) return
+      if (this._once[guard]) { opts.complete && opts.complete({ statusCode: 0, dup_guard: true }); return }
       this._once[guard] = true
       const tag = guard
       const relF = () => { if (this._once) delete this._once[tag] }
@@ -1986,7 +1996,7 @@ Page({
             month_profit: N(res.data.month_profit),
             month_order_add: N(res.data.month_order_add), month_payable_add: N(res.data.month_payable_add),
             profit_biz: N(res.data.profit_biz),
-            dash_err: '',
+            dash_err: '', degraded: 0, degraded_text: '',
             month_amort: res.data.month_amort || 0, month_accrue_int: res.data.month_accrue_int || 0, month_dep: res.data.month_dep || 0,
             month_expense_cash: res.data.month_expense_cash || 0,
             overdue_count: res.data.overdue_count, overdue: res.data.overdue || [],
@@ -2002,7 +2012,10 @@ Page({
             budget_over: res.data.budget_over || [], budget_alert_count: res.data.budget_alert_count || 0,
             cash_balance: res.data.cash_balance || 0,
             role: res.data.role || 'owner',
-            issue_count: res.data.issue_count || 0, issue_at: res.data.issue_at || ''
+            issue_count: res.data.issue_count || 0, issue_at: res.data.issue_at || '',
+            // 后端算某一块时出错了会把数字当 0 返回，同时在 degraded 里点名。
+            // 以前这个字段从来没被读过 —— 于是「这个月赚了 0」和「算不出来所以显示 0」长得一样。
+            degraded: (res.data.degraded || []).length, degraded_text: (res.data.degraded || []).slice(0, 2).join('；')
           })
           if (res.data.role === 'staff') this.askStaffName()
         } else {
@@ -2245,6 +2258,7 @@ Page({
     } else if (t === 'import') {
       this.loadReconLog(); this.loadImportLog(); this.loadReconProgress()
     } else if (t === 'report') {
+      this.loadReportView()
       this.loadFixed(); this.loadMonthLocks(); this.loadArchives(); this.loadAuditLogs()
       this.loadTrash(); this.loadPhrases(); this.loadBudgets()
       this.loadProfitCompare(); this.loadMarginBy(); this.loadPacks(); this.loadTaxSummary()
@@ -2486,9 +2500,21 @@ Page({
     if (t === 'ar' || t === 'ap' || t === 'expense') this.loadSuggest()
   },
   // 工作台待办点击跳转（reminders 里的 tab: ar/ap/expense/nw/home）
+  // 以前只把 tab 切到「应收」，筛选还停在「全部未结」的第一页：说好「有 3 笔逾期」，
+  // 点进去看到的是一堆没逾期的单子，还得自己再点一次「逾期 30 天+」再往下翻。
+  // 现在直接把筛选也带上，并按「最久未结」排，第一眼就是那几笔。
   jumpTodo() {
-    if (this.data.overdue_count > 0 || this.data.due_soon_count > 0) this.setData({ tab: 'ar' })
-    else if (this.data.pay_soon_count > 0) this.setData({ tab: 'ap' })
+    const down = this.data.overdue_count > 0 ? { f: 'overdue', s: 'old' } : this.data.due_soon_count > 0 ? { f: 'due', s: 'due' } : null
+    if (down) {
+      this.setData({ tab: 'ar', ar_filter: down.f, ar_sort: down.s })
+      this._arAll = []
+      this.enterTab('ar')
+    } else if (this.data.pay_soon_count > 0) {
+      this.setData({ tab: 'ap', ap_filter: 'overdue', ap_sort: 'due' })
+      this._apAll = []
+      this.enterTab('ap')
+    }
+    wx.pageScrollTo({ scrollTop: 0, duration: 200 })
   },
   loadHealth() {
     this.req({
@@ -2803,6 +2829,15 @@ Page({
   // 补录日期：picker 选日期，可清除（清除=默认今天）
   onDatePick(e) { this.setData({ [e.currentTarget.dataset.f]: e.detail.value }) },
   clearDate(e) { this.setData({ [e.currentTarget.dataset.f]: '' }) },
+  // 补记昨天的单：以前只能点日期选择器一层层往回翻（默认还老是今天），
+  // 补录两三张纸质单要点十几次。这里给「昨天/前天/3 天前」三个快键。
+  quickDate(e) {
+    const f = e.currentTarget.dataset.f
+    const back = Number(e.currentTarget.dataset.n) || 0
+    const d = new Date(Date.now() + 8 * 3600 * 1000)
+    d.setUTCDate(d.getUTCDate() - back)
+    this.setData({ [f]: d.toISOString().slice(0, 10) })
+  },
   onImportType(e) { this.setData({ import_type: Number(e.detail.value) }) },
   onImportText(e) { this.setData({ import_text: e.detail.value }) },
   // 这张单是含税价还是不含税价（税率不固定，13/9/6/3/1 都见过，自己填）
@@ -2850,15 +2885,19 @@ Page({
     if (priceN === null || priceN <= 0) return wx.showToast({ title: '金额只能填数字（8000 或 8,000）', icon: 'none' })
     const costN = String(o_cost === null || o_cost === undefined ? '' : o_cost).trim() === '' ? 0 : this.toAmount(o_cost)
     if (costN === null) return wx.showToast({ title: '成本只能填数字，不填就留空', icon: 'none' })
+    const hidO = this._busy('记着…')
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
-      queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' }),
+      complete: hidO,
+      queued: () => { hidO(); this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' }) },
       data: { customer: o_customer, item_name: o_item, price: priceN, cost: costN, due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, ar_cat: this.data.o_ar_cat || '', client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         // 分类也要清：下一单可能是别的客户别的事，留着上一次的会把分类记错
+        hidO()
         this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' })
         this.refresh({ lite: true }); this.loadSuggest()
+        wx.showToast({ title: '记上了', icon: 'success', duration: 700 })
         this.showChecks(res)
         const w = res.data && res.data.warn
         if (w) {
@@ -2875,11 +2914,13 @@ Page({
     if (!p_supplier) return wx.showToast({ title: '供应商必填', icon: 'none' })
     const pAmt = this.toAmount(p_amount)
     if (pAmt === null || pAmt <= 0) return wx.showToast({ title: '金额只能填数字（8000 或 8,000）', icon: 'none' })
+    const hidP = this._busy('记着…')
     this.req({
       url: API_BASE + '/payables', method: 'POST', once: 'add-payable', queue: '记应付',
-      queued: () => this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }),
+      complete: hidP,
+      queued: () => { hidP(); this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_due: '', p_date: '', last_tip: '' }) },
       data: { supplier: p_supplier, amount: pAmt, category: p_category, remark: p_remark, operator: p_operator, due_date: p_due, date: p_date, client_id: this.newCid(), tax_kind: this.data.p_tax_kind || '', tax_rate: Number(this.data.p_tax_rate || 0) }, dupRetry: true,
-      success: (res) => { this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh({ lite: true }); this.loadSuggest(); this.showChecks(res) }
+      success: (res) => { hidP(); this.setData({ p_supplier: '', p_amount: '', p_remark: '', p_operator: '', p_due: '', p_date: '', last_tip: '' }); this.refresh({ lite: true }); this.loadSuggest(); wx.showToast({ title: '记上了', icon: 'success', duration: 700 }); this.showChecks(res) }
     })
   },
   // 「按实发数入账」：不开计件工资时，工资就是「这个月实际发出去多少钱」，
@@ -2896,11 +2937,13 @@ Page({
     const { e_amount, e_remark, categories, e_category, e_operator, e_date } = this.data
     const eAmt = this.toAmount(e_amount)
     if (eAmt === null || eAmt <= 0) return wx.showToast({ title: '金额只能填数字（8000 或 8,000）', icon: 'none' })
+    const hidE = this._busy('记着…')
     this.req({
       url: API_BASE + '/expenses', method: 'POST', dupRetry: true, once: 'add-expense', queue: '记支出',
-      queued: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_date: '' }) },
+      complete: hidE,
+      queued: () => { hidE(); wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_date: '' }) },
       data: { amount: eAmt, category: categories[e_category], remark: e_remark, operator: e_operator, account_id: this.data.acc_id, date: e_date, client_id: this.newCid() },
-      success: () => { wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh({ lite: true }); this.loadSuggest() }
+      success: () => { hidE(); wx.setStorageSync('last_cat', e_category); this.setData({ e_amount: '', e_remark: '', e_operator: '', e_date: '' }); this.refresh({ lite: true }); this.loadSuggest(); wx.showToast({ title: '记上了', icon: 'success', duration: 700 }) }
     })
   },
   // 记完自查：后端挑出的「可能记错」的地方，一条条摆出来（不影响已记上的账）
@@ -3000,9 +3043,11 @@ Page({
     const d = this.data
     if (d.pay_busy) return
     const isAr = d.pay_kind === 'ar'
+    // 走 toAmount：她填「1.2万」「8,000」才对得上（以前这里把非数字全剔掉，
+    // 「1.2万」变成 1.2，一天少收一万）。填不出来就当 0，下面会提示重新填。
     const num2 = (v) => {
-      const n = Number(String(v === null || v === undefined ? '' : v).replace(/[^\d.]/g, ''))
-      return Number.isFinite(n) ? n : 0
+      const n = this.toAmount(v)
+      return n === null ? 0 : n
     }
     const tax = num2(d.pay_tax)
     let amt = num2(d.pay_amt)
@@ -3518,6 +3563,56 @@ Page({
         if (!d.ok) return wx.showToast({ title: '读取失败', icon: 'none' })
         this.setData({ pbal: d, pbal_type: type })
       }
+    })
+  },
+  // 首页那行「欠款最多：X ¥N」看着像能点，点了以前没反应 ——
+  // 想看「他到底欠哪几笔」只有一个入口：翻到最底下单位页再搜。
+  topCustTap(e) {
+    const p = e.currentTarget.dataset.p
+    if (!p) return
+    this.oneLiner({ currentTarget: { dataset: { n: p, type: 'ar' } } })
+  },
+  // 一键初始化：以前只有电脑上的 /pc 才有（还要开电脑、连同一个 WiFi），手机上翻遍找不到；
+  // 多账套的老板想清空第 2 本，得记得去电脑上切到那本再清。
+  // 这里放设置页，两道确认、第二道要手打「清空」两个字 —— 不会手一抖就清掉。
+  bookResetTap(e) {
+    if (this.data.role !== 'owner') return wx.showToast({ title: '只有老板能清空账本', icon: 'none' })
+    const keep = String(e.currentTarget.dataset.keep) === '1'
+    const bk = this.data.book_name || ('第 ' + (this.data.book || 1) + ' 本')
+    wx.showModal({
+      title: '清空「' + bk + '」？',
+      content: '这本账里的单据、流水、客户、材料、工资记录都会清空，账户和分类回到默认。口令、账本名、员工' + (keep ? '' : '和员工') + '都' + (keep ? '保留' : '会一起清掉') + '。清空前会自动存一份快照，以前的备份也都还在。',
+      confirmText: '继续', confirmColor: '#c0392b',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.showModal({
+          title: '最后确认一次',
+          editable: true, placeholderText: '手打「清空」两个字',
+          content: '', confirmText: '清空', confirmColor: '#c0392b',
+          success: (r2) => {
+            if (!r2.confirm) return
+            if (String(r2.content || '').trim() !== '清空') return wx.showToast({ title: '没打「清空」，已取消', icon: 'none' })
+            this.doBookReset(keep)
+          }
+        })
+      }
+    })
+  },
+  doBookReset(keep) {
+    const hid = this._busy('正在清空…')
+    this.req({
+      url: API_BASE + '/book-reset', method: 'POST', once: 'book-reset', complete: hid,
+      data: { confirm: '清空', keep_staff: !!keep },
+      success: (res) => {
+        hid()
+        const d = res.data || {}
+        if (!d.ok) return wx.showModal({ title: '没清成', content: d.error || '清空失败', showCancel: false })
+        wx.showModal({
+          title: '清空了', content: d.text || '已经清空，可以重新开始记账了。', showCancel: false,
+          success: () => { this.setData({ btl: null, bv: null, cloud_backup_at: '' }); this.refresh() }
+        })
+      },
+      fail: () => hid()
     })
   },
   closePartyBalance() { this.setData({ pbal: null }) },
@@ -5348,6 +5443,16 @@ Page({
     })
   },
   onRvMonth(e) { this.setData({ rv_month: e.detail.value }) },
+  // 以前进来是一张空表，得自己手打「2026-11」再点按钮，打错了还报格式错。
+  // 现在给三个快键，而且进这个页就先把本月拉出来。
+  pickRvMonth(e) {
+    const back = Number(e.currentTarget.dataset.n) || 0
+    const d = new Date(Date.now() + 8 * 3600 * 1000)
+    d.setUTCDate(1)
+    d.setUTCMonth(d.getUTCMonth() - back)
+    this.setData({ rv_month: d.toISOString().slice(0, 7) }, () => this.loadReportView())
+  },
+  clearRvMonth() { this.setData({ rv_month: '' }, () => this.loadReportView()) },
   onYsYear(e) { this.setData({ ys_year: e.detail.value }) },
   loadReportView() {
     const m = (this.data.rv_month || '').trim()
@@ -6595,10 +6700,12 @@ Page({
   // 现金流预测（未来 45 天会不会缺钱）
   loadCashflow() {
     if (this.data.role === 'staff') return
-    this.req({ url: API_BASE + '/cashflow?days=45', success: (res) => this.setData({ cf: res.data || null }) })
+    this.req({ url: API_BASE + '/cashflow?days=45', success: (res) => this.setData({ cfl: res.data || null }) })
   },
   showCashflow() {
-    const cf = this.data.cf || {}
+    // 这张卡读的是 /cashflow（未来 45 天），跟上面那张 /cash-forecast（14 天）是两份不同的数据。
+    // 以前两者都往 data.cf 里塞，谁后返回谁覆盖，于是每次刷新总有一张卡渲染成 ¥undefined。
+    const cf = this.data.cfl || {}
     if (!cf.days) return
     const ins = (cf.in_items || []).map((x) => `· ${x.date.slice(5)} 收 ${x.party} ¥${x.amount}${x.overdue ? '（已逾期）' : ''}`).join('\n')
     const outs = (cf.out_items || []).map((x) => `· ${x.date.slice(5)} 付 ${x.party} ¥${x.amount}`).join('\n')

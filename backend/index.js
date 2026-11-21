@@ -18,8 +18,13 @@ async function logError(c, status, msg, ms) {
     const db = c.env && c.env.DB
     if (!db) return
     const u = new URL(c.req.url)
-    await db.prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,?,?)')
-      .bind(num(c.env.BOOK || 1), c.req.method, u.pathname, status, String(msg || '').slice(0, 300), ms, now()).run()
+    // cf-ray 是 Cloudflare 每次请求的唯一编号：拿它去 CF 控制台能查到这次请求的全部信息。
+    // ref 记「动的是哪张单」（前端出问题时带上 ?ref=order-123 就行），params 记查询串。
+    const ray = (c.req.header && c.req.header('cf-ray')) || ''
+    const ref = u.searchParams.get('ref') || u.searchParams.get('client_id') || ''
+    await db.prepare('INSERT INTO error_log (book,method,path,status,msg,ms,ray,ref,params,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(c.env.BOOK || 1), c.req.method, u.pathname, status, String(msg || '').slice(0, 400), ms,
+        String(ray).slice(0, 60), String(ref).slice(0, 80), String(u.search || '').slice(0, 300), now()).run()
   } catch (e) { /* 留痕失败不影响主流程 */ }
 }
 // 慢接口留痕：超过 800ms 记一条（同一接口每小时最多一条），用来回答"最近是不是越用越慢"
@@ -136,6 +141,21 @@ function noteFailDb(db, e, tag, book) {
     const msg = String((e && (e.message || e.error)) || e || 'unknown').slice(0, 300)
     db.prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,?,?)')
       .bind(num(book) || 1, 'CRON', tag || 'scheduled', 0, msg, 0, now()).run()
+  } catch (_) {}
+}
+// 页面上的「静默降级」也要留痕：首页/自检里几十条统计各自 try/catch，出错就当 0，
+// 以前只在响应的 degraded 字段里带一下，而前端从来没读过它 —— 于是「这个月赚了 0」和
+// 「SQL 写错了所以算不出来」在屏幕上完全一样，error_log 里也一条都没有。
+// 这里把降级的块名写进 error_log；同一个 isolate 里 10 分钟最多写一条，避免每次刷首页都多一行。
+let _quietAt = 0
+function noteQuiet(db, book) {
+  try {
+    if (!db || !failBucket.length) return
+    const t = Date.now()
+    if (t - _quietAt < 600000) return
+    _quietAt = t
+    db.prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,0,?)')
+      .bind(num(book) || 1, 'QUIET', 'degraded', 0, String(failBucket.slice().join(' ; ')).slice(0, 400), now()).run()
   } catch (_) {}
 }
 // 断网补发去重：手机端把没发出去的记账先存本地，联网后重发；同一个 client_id 只入账一次
@@ -300,7 +320,10 @@ const EXTRA_COLS = {
   net_snapshots: [['cash', 'REAL DEFAULT 0']],
   trash: [['ref_id', 'INTEGER DEFAULT 0'], ['batch', 'TEXT'], ['deleted_at', 'TEXT']],
   audit_log: [['ref_id', 'INTEGER DEFAULT 0']],
-  edit_requests: [['ref_id', 'INTEGER DEFAULT 0'], ['reason', "TEXT DEFAULT ''"], ['status', "TEXT DEFAULT 'open'"]]
+  edit_requests: [['ref_id', 'INTEGER DEFAULT 0'], ['reason', "TEXT DEFAULT ''"], ['status', "TEXT DEFAULT 'open'"]],
+  // 出 500 时要能说清「是哪一次请求、动的是哪张单、带了什么参数」。
+  // 以前只记路径，而同一个路径上挂着 8 个写接口，根本判断不出是哪一笔出的错。
+  error_log: [['ray', "TEXT DEFAULT ''"], ['ref', "TEXT DEFAULT ''"], ['params', "TEXT DEFAULT ''"]]
 }
 
 async function ensureExtraCols(db) {
@@ -6276,9 +6299,12 @@ app.post('/advances', async (c) => {
   const db = c.env.DB
   const cid = String(body.client_id || '')
   if (await opSeen(db, cid)) return c.json({ ok: true, dup_ok: true })
-  if (await isMonthLocked(db, now().slice(0, 7))) return c.json({ error: '本月已结账锁定，先解锁再记账' }, 403)
   const badDA = badDate(date)
   if (badDA) return c.json({ error: badDateMsg(badDA), code: 'bad_date' }, 400)
+  // 锁的是「这笔钱记到哪个月」，不是「今天」。以前只判本月：
+  // 12 月打开账，塞一笔日期是 11-20 的预收款照样能进，11 月已经结账归档的账就对不上了。
+  const aMonth = String(normDate(date) || now()).slice(0, 7)
+  if (await isMonthLocked(db, aMonth)) return c.json({ error: `${aMonth} 已结账锁定，先解锁再记账`, code: 'month_locked' }, 403)
   if (!(await opClaim(db, cid, 'advance'))) return c.json({ ok: true, dup_ok: true })
   const acc = num(account_id) || (await defaultAccountId(db))
   const created = normDate(date)
@@ -7559,7 +7585,7 @@ function dl(tpl){
   if (needKey()) return
   var fill = document.getElementById('fill').checked ? '1' : ''
   msg('正在生成…')
-  fetch('/import-template-pack?tpl=' + tpl + (fill ? '&fill=1' : ''), { headers: { 'x-access-key': K } })
+  fetch('/import-template-pack?tpl=' + tpl + (fill ? '&fill=1' : ''), { headers: { 'x-access-key': K, 'X-Book': bk() } })
     .then(function(r){ return r.json() }).then(function(d){
       if (!d.ok) { msg(d.error || '生成失败（口令对吗？）', false); return }
       var bin = atob(d.b64), n = bin.length, u = new Uint8Array(n)
@@ -7660,7 +7686,7 @@ function bookReset(){
 function dlSheet(t){
   if (needKey()) return
   msg('正在生成…')
-  fetch('/import-template-xlsx?type=' + t, { headers: { 'x-access-key': K } })
+  fetch('/import-template-xlsx?type=' + t, { headers: { 'x-access-key': K, 'X-Book': bk() } })
     .then(function(r){ return r.json() }).then(function(d){
       if (!d.ok) { msg(d.error || '生成失败（口令对吗？）', false); return }
       var bin = atob(d.b64), n = bin.length, u = new Uint8Array(n)
@@ -7689,6 +7715,10 @@ function show(d){
       ((s.errors || []).length ? '<div class="bad" style="font-size:12px">' + s.errors.join('<br/>') + '</div>' : '') + '</td></tr>'
   })
   h += '</table>'
+  // 没写日期的行会被记成「今天」：补录上个月的单子都进了本月，而「那个月已结账」的锁也判不出来
+  var nd = 0, ndWarn = ''
+  rows.forEach(function(x){ nd += Number(x.no_date_count || 0); if (!ndWarn && x.warn) ndWarn = x.warn })
+  if (nd) h += '<div class="bad" style="margin-top:10px">有 ' + nd + ' 行没写日期</div><div class="tip" style="font-size:12px">' + (ndWarn || '这些行会记成今天。如果是补录以前月份的单子，先把日期列填上再传。') + '</div>'
   // 试算：这批真进去之后，首页那几个数字会变成多少（以前只能导完再去看，发现不对已经晚了）
   var im = d.impact
   if (im) {
@@ -7734,7 +7764,7 @@ function preview(){
   if (needKey()) return
   readFile().then(function(b64s){
     msg('正在检查…')
-    return fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K }, body: JSON.stringify({ b64: b64s, dry: true }) })
+    return fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K, 'X-Book': bk() }, body: JSON.stringify({ b64: b64s, dry: true }) })
       .then(function(r){ return r.json() }).then(function(d){
         if (!d.ok) { msg(d.error || '这个文件读不了', false); return }
         show(d)
@@ -7752,7 +7782,7 @@ function doImport(){
   // force 不能再写死：以前永远带 force，同一份表点两次就导两遍，应收直接翻倍。
   // 只有用户勾了「这份表我确实要再导一遍」才带。
   var force = !!(document.getElementById('force1') && document.getElementById('force1').checked)
-  fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K }, body: JSON.stringify({ b64: window._b64, force: force }) })
+  fetch('/import-pack', { method: 'POST', headers: { 'content-type': 'application/json', 'x-access-key': K, 'X-Book': bk() }, body: JSON.stringify({ b64: window._b64, force: force }) })
     .then(function(r){ return r.json() }).then(function(d){
       b.disabled = false
       if (!d.ok) { msg(d.error || '导入失败', false); return }
@@ -7954,6 +7984,8 @@ app.post('/import-pack', async (c) => {
           dup_rows: dupRows.slice(0, 200).map((x) => ({ row: x.i, text: x.dup_text || '像重复', party: x.party || '', amount: num(x.amount), date: x.date || '' })),
           dup_more: Math.max(0, dupRows.length - 200),
           errors: badRows.slice(0, 3).map((x) => `第 ${x.i} 行：${x.error || '导不进去'}`),
+          // 没写日期的行会被记成「今天」：补录上个月的纸质单最容易踩，这里要让前端能显式提醒
+          no_date_count: num(pv.no_date_count), warn: pv.warn || '',
           text: pv.text
         })
       } else {
@@ -8168,12 +8200,18 @@ async function previewImport(db, type, rawRows) {
   const badCnt = out.filter((x) => !x.ok).length
   const lockCnt = out.filter((x) => x.locked).length
   const total = round2(out.filter((x) => x.ok && !x.locked).reduce((a, x) => a + x.amount, 0))
+  // 没写日期的行会被记成「今天」。补录上个月的单子最容易踩：以为进的是 9 月，其实全进了本月，
+  // 而「9 月已结账」的那道锁也判不出来（锁是按这行认到的日期判的）。这里显式报个数让人先看一眼。
+  const noDateCnt = type === 'ar_init' || type === 'ap_init' ? 0 : out.filter((x) => x.ok && !x.locked && !x.date_given).length
   const parts = [`认出 ${out.length} 行`]
   if (okCnt) parts.push(`能导 ${okCnt} 行（合计 ¥${total}）`)
   if (dupCnt) parts.push(`${dupCnt} 行像重复`)
   if (badCnt) parts.push(`${badCnt} 行有问题`)
   if (lockCnt) parts.push(`${lockCnt} 行在已结账月份`)
+  if (noDateCnt) parts.push(`${noDateCnt} 行没写日期、会记成今天`)
   return { header_skipped: st.skipped, rows: out, count: out.length, ok_count: okCnt, dup_count: dupCnt, bad_count: badCnt, locked_count: lockCnt, total,
+    no_date_count: noDateCnt,
+    warn: noDateCnt ? `${noDateCnt} 行没写日期，会记成今天（${todayIso()}）。如果是补录以前月份的单子，先把日期列填上，否则会记错月。` : '',
     text: parts.join('，') + '。确认没问题再点「确认导入」。' }
 }
 
@@ -9091,6 +9129,9 @@ app.get('/dashboard', async (c) => {
   const role = c.get('role') || 'owner'
   const hideProfit = role === 'staff'
   const scRow = { value: agg.sc_cnt }, scAt = { value: agg.sc_at }
+  // 统计算出错时以前只把数字当 0、照常回 200，error_log 里一条都没有 —— 页面上「这个月赚了 0」和
+  // 「真没赚钱」长得一模一样。这里把降级的块名落一条日志（同一个 isolate 10 分钟最多一条，免得刷屏）。
+  noteQuiet(db, c.env.BOOK)
   return c.json({
     role,
     hide_profit: hideProfit,
@@ -12138,7 +12179,7 @@ app.post('/quick', async (c) => {
   const am = stripped.match(/(\d+(?:\.\d+)?)\s*(?:元|块)|[¥￥]\s*(\d+(?:\.\d+)?)/)
   const nums = [...stripped.matchAll(/\d+(?:\.\d+)?/g)].map((m) => m[0])
   const amtText = am ? (am[1] || am[2]) : nums.length ? nums.reduce((a, b) => (num(b) > num(a) ? b : a)) : ''
-  if (!s || !amtText) return c.json({ error: '没识别出内容，请带上金额，如：收张老板加工费5000' }, 400)
+  if (!s || !amtText) return c.json({ error: '没识别出内容，请带上金额，如：张老板加工费5000' }, 400)
   const amount = num(amtText)
   if (amount <= 0) return c.json({ error: '金额无效' }, 400)
   const rest = s.replace(amtText, '').replace(/[元块钱\s¥￥]/g, '')
@@ -12151,11 +12192,24 @@ app.post('/quick', async (c) => {
   const qRun = (stmt) => stmt.run().catch(async (e) => { await opRelease(db, cidQ); throw e })
   const cats = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
   let summary = ''
+  let warn = ''
   if (/收/.test(s)) {
     const name = rest.replace(/[收收到到自从]/g, '').replace(/[的了给]/g, '').trim() || '客户'
+    // 这一支建的是「新开一张应收单」，不是「收到钱」。
+    // 以前提示语写的是「收张老板加工费5000」，照这句话打的人以为记了一笔收款，
+    // 结果客户欠款反而又多了一笔。现在返回的话改成「新开一张应收单」，
+    // 名字本来还欠着钱的再补一句提醒：想记收款应该点开那张单点「收钱」。
+    let owed = 0
+    try {
+      const ow = await db.prepare("SELECT COALESCE(SUM(price - COALESCE(written_off,0) - COALESCE(paid,0)),0) t FROM orders WHERE customer=? AND status<>2").bind(name).first()
+      owed = num(ow && ow.t)
+    } catch (e) { noteFail(e, '一句话记账查欠款') }
     await qRun(db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at) VALUES (?,?,?,0,0,?)')
       .bind(name, '一句话记账', amount, t))
-    summary = `应收 ${name} ${amount} 元`
+    summary = `新开一张应收单：${name} ${amount} 元（欠款变成 ${round2(owed + amount)}）`
+    if (owed > 0.005) {
+      warn = `${name} 原来还欠 ¥${round2(owed)}。这句记的是「又开了一张单」，欠款变成 ¥${round2(owed + amount)}；如果你是想记收到的钱，请点开那张单点「💰收钱」。`
+    }
   } else if (/付|转给|打给|给了?/.test(s) && cats.some((k) => s.includes(k))) {
     const cat = cats.find((k) => s.includes(k))
     const name = rest.replace(/付给|付款|支付|付|转给|打给|给了?/g, '').replace(cat, '').replace(/[的了]/g, '').trim() || '其他'
@@ -12175,11 +12229,11 @@ app.post('/quick', async (c) => {
     summary = `支出 ${cat} ${amount} 元`
   } else {
     await opRelease(db, cidQ)
-    return c.json({ error: '没识别出收/付/分类，请写如：收张老板5000、付货款3000、工资5000' }, 400)
+    return c.json({ error: '没识别出收/付/分类，请写如：张老板加工费5000、付货款3000、工资5000' }, 400)
   }
   await logAudit(db, '一句话记账', '', summary, '', act(c))
   await opMark(db, cidQ, 'quick', 0)
-  return c.json({ ok: true, summary })
+  return c.json({ ok: true, summary, warn })
 })
 
 // 批量导入
@@ -16532,17 +16586,37 @@ function daysTxtPrint(n) { return num(n) <= 0 ? '今天刚出现' : `${num(n)} �
 // 运行日志（出错留痕查询）
 app.get('/error-log', async (c) => {
   const db = c.env.DB
-  const days = Math.min(60, Math.max(1, num(c.req.query('days'), 7)))
+  // 保留 90 天、但要能一次看到更多：以前固定只给最近 7 天、固定 30 行、msg 切到 160 字，
+  // 于是「三天前那次 500」既翻不到、也看不清错误原文。现在天数/行数/关键字都能自己定。
+  const days = Math.min(90, Math.max(1, num(c.req.query('days'), 7)))
+  const limit = Math.min(300, Math.max(5, num(c.req.query('limit'), 50)))
+  const offset = Math.max(0, num(c.req.query('offset'), 0))
+  const kw = String(c.req.query('kw') || '').trim()
+  const only = String(c.req.query('status') || '').trim()
   const since = new Date(Date.now() + TZ_MS - days * 86400000).toISOString()
-  const rows = (await db.prepare('SELECT * FROM error_log WHERE created_at >= ? ORDER BY id DESC LIMIT 100').bind(since).all()).results
+  const where = ['created_at >= ?']
+  const bind = [since]
+  if (kw) { where.push('(path LIKE ? OR msg LIKE ? OR ray LIKE ? OR ref LIKE ?)'); bind.push('%' + kw + '%', '%' + kw + '%', '%' + kw + '%', '%' + kw + '%') }
+  if (only === '500') where.push('status >= 500')
+  else if (only === 'quiet') where.push("method = 'QUIET'")
+  else if (only === '4xx') where.push('status >= 400 AND status < 500')
+  const rows = (await db.prepare(`SELECT * FROM error_log WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ? OFFSET ?`).bind(...bind, limit, offset).all()).results
   const byPath = {}
   for (const r of rows) { const k = (r.method || 'GET') + ' ' + (r.path || ''); byPath[k] = (byPath[k] || 0) + 1 }
+  const total = await db.prepare(`SELECT COUNT(*) n FROM error_log WHERE ${where.join(' AND ')}`).bind(...bind).first().catch(() => null)
   return c.json({
     ok: true,
-    days,
+    days, limit, offset,
     count: rows.length,
+    total: num(total && total.n),
     grouped: Object.entries(byPath).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([k, n]) => ({ path: k, count: n })),
-    rows: rows.slice(0, 30).map((r) => ({ id: r.id, when: r.created_at, path: (r.method || '') + ' ' + (r.path || ''), status: r.status, ms: r.ms, msg: (r.msg || '').slice(0, 160) }))
+    rows: rows.map((r) => ({
+      id: r.id, when: r.created_at, book: num(r.book),
+      path: (r.method || '') + ' ' + (r.path || ''), status: r.status, ms: r.ms,
+      msg: String(r.msg || '').slice(0, 400),
+      // 拿着这一串去 Cloudflare 控制台的 Logs 里搜，就能看到这次请求的完整现场
+      ray: r.ray || '', ref: r.ref || '', params: r.params || ''
+    }))
   })
 })
 app.get('/slow-log', async (c) => {
@@ -19102,20 +19176,54 @@ app.post('/bank-import', async (c) => {
     return c.json({ ok: true, imported: 0, dup_file: true, rows: [], layout: parsed.layout, skipped: parsed.skipped,
       error: '这份账单已经导入过了（同一份文件不会重复入账）' })
   }
+  let keepRef = []
+  let dupRowsRef = []
   try {
-    for (const r of rows) {
-      await db.prepare('INSERT INTO bank_flows (date, direction, amount, memo, matched_type, matched_id, created_at) VALUES (?,?,?,?,?,0,?)')
-        .bind(r.date, r.direction, r.amount, `${r.memo}${acc ? ' [账户' + acc + ']' : ''}`, null, now()).run()
+    // 换个导出区间再导一次（这次导 9/1–10/31，下次导 9/1–11/30，重叠的 9 月会再来一遍）
+    // 时，文件内容就不一样了，文件指纹拦不住 → 流水翻倍，认领两次就是两倍收款。
+    // 这里按「日期 + 收/付 + 金额 + 摘要」逐笔对一遍库里已有的流水，重复的直接跳过。
+    // 只跟库里的比、不跟同一份文件里的其他行比：真连着刷了两笔一模一样的，两笔都得进。
+    const dates = rows.map((r) => String(r.date || '').slice(0, 10)).filter(Boolean).sort()
+    const seen = new Set()
+    if (dates.length) {
+      try {
+        const ex = await db.prepare('SELECT date, direction, amount, memo FROM bank_flows WHERE date>=? AND date<=?')
+          .bind(dates[0], dates[dates.length - 1]).all()
+        for (const x of (ex.results || [])) {
+          seen.add([String(x.date || '').slice(0, 10), x.direction, round2(num(x.amount)), String(x.memo || '')].join('|'))
+        }
+      } catch (e) { noteFail(e, '银行流水·查重') }
     }
+    const keep = []
+    const dupRows = []
+    for (const r of rows) {
+      const memo = `${r.memo}${acc ? ' [账户' + acc + ']' : ''}`
+      const k = [String(r.date || '').slice(0, 10), r.direction, round2(num(r.amount)), memo].join('|')
+      if (seen.has(k)) { dupRows.push(r); continue }
+      keep.push({ date: r.date, direction: r.direction, amount: r.amount, memo })
+    }
+    for (const r of keep) {
+      await db.prepare('INSERT INTO bank_flows (date, direction, amount, memo, matched_type, matched_id, created_at) VALUES (?,?,?,?,?,0,?)')
+        .bind(r.date, r.direction, r.amount, r.memo, null, now()).run()
+    }
+    dupRowsRef = dupRows
+    keepRef = keep
   } catch (e) {
     // 插到一半炸了：把坑放开，别让用户永远被自己挡住
     if (claimBk) await db.prepare('DELETE FROM settings WHERE key=?').bind(fpKey).run().catch(() => {})
     throw e
   }
-  try { await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(`${rows.length} 笔 @ ${now()}`, fpKey).run() } catch (e) { noteFail(e, '银行流水·导入指纹') }
-  await logAudit(db, '导入银行流水', '银行流水', `导入 ${rows.length} 笔`)
   const LAYOUT_CN = { wallet: '微信/支付宝账单', bank: '银行流水（借方/贷方）', simple: '通用表格（日期/收付/金额）', plain: '简单格式（日期,收付,金额,摘要）' }
-  return c.json({ ok: true, imported: rows.length, rows, layout: parsed.layout, layout_text: LAYOUT_CN[parsed.layout] || parsed.layout, skipped: parsed.skipped })
+  if (!keepRef.length) {
+    return c.json({ ok: true, imported: 0, dup_file: true, dup_rows: dupRowsRef.length, rows: [], layout: parsed.layout,
+      layout_text: LAYOUT_CN[parsed.layout] || parsed.layout, skipped: parsed.skipped,
+      error: `这 ${dupRowsRef.length} 笔在账里都已经有了（换区间重导不会重复入账）` })
+  }
+  try { await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(`${keepRef.length} 笔 @ ${now()}`, fpKey).run() } catch (e) { noteFail(e, '银行流水·导入指纹') }
+  await logAudit(db, '导入银行流水', '银行流水', `导入 ${keepRef.length} 笔${dupRowsRef.length ? '，跳过重复 ' + dupRowsRef.length + ' 笔' : ''}`)
+  return c.json({ ok: true, imported: keepRef.length, dup_rows: dupRowsRef.length, rows: keepRef, layout: parsed.layout,
+    layout_text: LAYOUT_CN[parsed.layout] || parsed.layout, skipped: parsed.skipped,
+    hint: dupRowsRef.length ? `另有 ${dupRowsRef.length} 笔账里已经有了，跳过了` : '' })
 })
 
 app.get('/bank-flows', async (c) => {

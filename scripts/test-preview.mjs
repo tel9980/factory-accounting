@@ -28,6 +28,11 @@ const ok = (msg) => { pass++; console.log('  ✅ ' + msg) }
 const no = (msg, detail) => { bad.push(msg); console.log('  ❌ ' + msg + (detail === undefined ? '' : ' → ' + JSON.stringify(detail))) }
 const eq = (label, got, want) => (String(got) === String(want) ? ok(`${label} = ${want}`) : no(`${label} 应为 ${want}`, got))
 const num0 = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
+const day = (back) => {
+  const d = new Date(Date.now() + 8 * 3600 * 1000)
+  d.setUTCDate(d.getUTCDate() - (back || 0))
+  return d.toISOString().slice(0, 10)
+}
 
 const call = async (method, p, body) => {
   const r = await fetch(BASE + p, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) })
@@ -157,6 +162,15 @@ const main = async () => {
   const ar = await call('GET', '/ar?kw=' + encodeURIComponent(tag + '好好甲'))
   const rows6 = Array.isArray(ar.d) ? ar.d : ((ar.d && (ar.d.list || ar.d.rows)) || [])
   eq('预览后库里没有这笔', rows6.length, 0)
+
+  // ===== 7. 没写日期的行：不挡，但要说「会记成今天」=====
+  // 补录上个月的纸质单，Excel 里日期列常常整列空着；以前系统一句话不说就全记到今天，
+  // 连「已结账的月份不许改」那道锁也判不出来（锁是按认到的日期判的）。
+  const r7 = await preview('支出', [[777, '水电', '没写日期'], [888, '水电', '写了', '', day(3)]])
+  eq('没写日期的行数', num0(r7.sheet.no_date_count), 1)
+  eq('写了的行不算「没写」', num0(r7.sheet.ok_count), 2)
+  const w7 = String(r7.sheet.warn || (r7.d && r7.d.warn) || '')
+  eq('预览要说「会记成今天」', /记成今天/.test(w7), true)
 
   console.log('')
   if (bad.length) { console.log('❌ ' + bad.length + ' 项失败：'); bad.forEach((x) => console.log('   · ' + x)); process.exit(1) }
