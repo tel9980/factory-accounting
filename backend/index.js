@@ -15308,6 +15308,8 @@ app.get('/export-all', async (c) => {
   const d = await dumpAll(db)
   const nm = await getTitle(db).catch(() => ({ title: '' }))
   d.book = (nm && nm.title) || ''
+  // 账本名可能两本重名，光靠名字分不出导出的是哪本 —— 账套号才是身份
+  d.book_id = String(c.env.BOOK || '1')
   return c.json(d)
 })
 
@@ -15323,7 +15325,9 @@ app.post('/book-reset', async (c) => {
   let snapId = 0
   try { const sn = await saveBackup(db, 'before-reset'); snapId = num(sn && sn.id) } catch (e) { noteFail(e, '清空前备份') }
   const keepStaff = b.keep_staff === true
-  const KEEP_SET = ['access_key', 'recover_code', 'sign_secret', 'staff_key', 'staff_salt', 'book_name', 'super_key', 'demo_key', 'demo_builtin_off']
+  // 「一键初始化」清的是账目，不是这台机器的身份：口令、账本名、模块开关、演示入口都留着。
+  // modules_off 以前漏了，于是「清空重来」会把你关掉的模块（比如计件工资）悄悄全打开。
+  const KEEP_SET = ['access_key', 'recover_code', 'sign_secret', 'staff_key', 'staff_salt', 'book_name', 'super_key', 'demo_key', 'demo_builtin_off', 'modules_off']
   const stmts = []
   const cleared = []
   for (const t of BACKUP_TABLES) {
@@ -16981,6 +16985,10 @@ const BACKUP_SKIP = [
 const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archive', 'recon_log', 'dunning_log', 'net_snapshots', 'recon_confirm', 'wage_records', 'wage_pays', 'wage_deduct', 'reworks', 'bank_flows']
 // 口令这类东西不进备份文件，免得备份发出去把口令也带出去
 const BACKUP_SETTINGS_SKIP = ['access_key', 'staff_key', 'sign_secret', 'sealed', 'sealed_at', 'sealed_note', 'backup_sig', 'backup_at']
+// 恢复时**这台机器自己的**设置：备份里即使有，也不许盖回来。
+// 以前只跳过 BACKUP_SETTINGS_SKIP 那 8 个，于是「把 A 账套的备份恢复到 B 账套」会把 B 的账本名
+// 改成 A 的名字、模块开关跟着 A、演示入口开关跟着 A —— 数据是 B 的，设置却是 A 的，很难察觉。
+const RESTORE_SETTINGS_SKIP = BACKUP_SETTINGS_SKIP.concat(['super_key', 'demo_key', 'demo_builtin_off', 'book_name', 'modules_off'])
 async function buildBackup(db) {
   const out = { exported_at: now(), version: 3 }
   // 读不出来的表要留痕：以前 catch 里只写空数组，于是「备份成功」但少了一整块数据，
@@ -17051,10 +17059,14 @@ async function buildMarkdown(db) {
   return L.join('\n')
 }
 
-async function pushToNotes(db, env) {
+async function pushToNotes(db, env, book) {
   const base = env.NOTES_BASE || 'https://md.1211.cc.cd'
   const pass = env.NOTES_PASS || ''
-  const slug = env.NOTES_SLUG || 'factory-ledger-backup'
+  const bid = num(book) || 1
+  // 每本账一篇笔记。以前 slug 写死一个，第 2 本同步一次就把第 1 本那篇盖掉了 ——
+  // 笔记站上看不出被换过，以为还在，其实只剩最后一本。
+  // 第 1 本沿用原来的 slug（老用户的笔记不搬家），第 2 本起加后缀。
+  const slug = (env.NOTES_SLUG || 'factory-ledger-backup') + (bid > 1 ? '-book' + bid : '')
   if (!pass) return { ok: false, error: '未配置笔记站口令 NOTES_PASS' }
   const md = await buildMarkdown(db)
   const loginRes = await fetch(`${base}/api/login`, {
@@ -17065,21 +17077,22 @@ async function pushToNotes(db, env) {
   if (!loginRes.ok) return { ok: false, error: `笔记站登录失败（${loginRes.status}）` }
   const cookie = (loginRes.headers.get('set-cookie') || '').split(';')[0]
   const headers = { 'Content-Type': 'application/json', Cookie: cookie }
+  const title = bid > 1 ? '小工厂记账自动备份（第 ' + bid + ' 本账）' : '小工厂记账自动备份'
   let r = await fetch(`${base}/api/docs/${slug}`, {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ title: '小工厂记账自动备份', content: md })
+    body: JSON.stringify({ title, content: md })
   })
   if (r.status === 404) {
     r = await fetch(`${base}/api/docs`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ title: '小工厂记账自动备份', slug, content: md })
+      body: JSON.stringify({ title, slug, content: md })
     })
   }
   if (!r.ok) return { ok: false, error: `笔记站写入失败（${r.status}）` }
   const d = await r.json().catch(() => ({}))
-  return { ok: true, slug: d.slug || slug, saved_at: now() }
+  return { ok: true, slug: d.slug || slug, book: bid, saved_at: now() }
 }
 
 
@@ -17263,14 +17276,17 @@ app.post('/cloud-backup', async (c) => {
 
 // 备份到笔记站（https://md.1211.cc.cd），先登录拿 cookie 再写固定 slug 的笔记
 app.post('/backup-to-notes', async (c) => {
-  const res = await pushToNotes(c.env.DB, c.env)
+  const res = await pushToNotes(c.env.DB, c.env, c.env.BOOK)
   return c.json(res, res.ok ? 200 : 500)
 })
 
 // 云端备份列表
 app.get('/backup-list', async (c) => {
   const { results } = await c.env.DB.prepare('SELECT id, created_at, COALESCE(NULLIF(length(content),0), size) AS size FROM backups ORDER BY id DESC LIMIT 30').all()
-  return c.json(results)
+  // 备份 id 是「每本账自己从 1 数」的：第 1 本的 #5 和第 2 本的 #5 是两份完全不同的账。
+  // 所以每一行都标上 account（= 账套号），前端拿去核对，别拿着上一本的 id 去恢复这一本。
+  const bk = String(c.env.BOOK || '1')
+  return c.json((results || []).map((x) => Object.assign({}, x, { book: bk })))
 })
 
 // 取某份云端备份内容
@@ -17278,7 +17294,7 @@ app.get('/backup-get', async (c) => {
   const id = c.req.query('id')
   const r = await readBackupContent(c.env.DB, id)
   if (!r) return c.json({ error: '备份不存在' }, 404)
-  return c.json({ text: r.content })
+  return c.json({ text: r.content, book: String(c.env.BOOK || '1'), at: r.created_at || '' })
 })
 
 // 一键恢复：用备份 JSON 覆盖当前账目（恢复前自动留一份快照）
@@ -17374,14 +17390,15 @@ async function restoreCore(db, data, opts) {
       // 模块开关、演示开关全清掉。现在 = 「这几个必须留着」+「这份备份里有的键」。
       let st
       if (t === 'settings') {
-        const keep = Array.from(new Set(['access_key', 'recover_code', 'recover_hash', 'recover_fail', 'recover_lock', 'sign_secret', 'staff_key', 'staff_salt', 'book_name', 'super_key', 'demo_key', 'demo_builtin_off', 'sealed', 'sealed_at', 'sealed_note', 'backup_sig', 'backup_at']
+        const keep = Array.from(new Set(['recover_code', 'recover_hash', 'recover_fail', 'recover_lock']
+          .concat(RESTORE_SETTINGS_SKIP)
           .concat(rows.map((r) => String((r && r.key) || '')).filter(Boolean))))
         st = [db.prepare('DELETE FROM settings WHERE key NOT IN (' + keep.map(() => '?').join(',') + ')').bind(...keep)]
       } else {
         st = [db.prepare('DELETE FROM ' + t)]
       }
       for (const r of rows) {
-        if (t === 'settings' && BACKUP_SETTINGS_SKIP.includes(String(r.key))) continue
+        if (t === 'settings' && RESTORE_SETTINGS_SKIP.includes(String(r.key))) continue
         const use = cols.filter((cn) => r[cn] !== undefined)
         if (!use.length) continue
         st.push(db.prepare('INSERT OR REPLACE INTO ' + t + ' (' + use.join(',') + ') VALUES (' + use.map(() => '?').join(',') + ')').bind(...use.map((cn) => r[cn])))
@@ -17498,6 +17515,7 @@ app.get('/backup-timeline', async (c) => {
   }
   return c.json({
     current: cur, count: items.length, items,
+    book: String(c.env.BOOK || '1'),
     latest: items[0] || null,
     note: items.length ? '恢复会用这份备份覆盖现在的应收、应付、流水（账户余额、发票、借支这些不动的）。动手前系统会先把现在的账本存一份快照，选错了还能再回来。' : '还没有备份。先在报表页点一次「立即备份」，以后就能回到那一天。'
   })
@@ -17577,6 +17595,11 @@ app.post('/backup-restore', async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const id = num(b.id)
   if (!id) return c.json({ error: '要指定回到哪一份备份' }, 400)
+  // 备份 id 按账套各自编号。如果调用方带着「这份备份是哪本账的」，和当前账套对不上就直接拒 ——
+  // 否则会拿第 1 本的 #5 去把第 2 本的 #5 完全不同的账恢复过来，界面上还显示「回来了」。
+  if (b.book !== undefined && b.book !== null && String(b.book) !== '' && String(b.book) !== String(c.env.BOOK || '1')) {
+    return c.json({ error: '这份备份是第 ' + String(b.book) + ' 本账的，现在打开的是第 ' + String(c.env.BOOK || '1') + ' 本。请切回那本账再恢复。', code: 'book_mismatch' }, 409)
+  }
   const r = await readBackupContent(db, id)
   if (!r || !r.content) return c.json({ error: '这份备份找不到了（可能已被新备份顶掉）' }, 404)
   let data

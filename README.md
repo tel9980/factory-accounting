@@ -1728,6 +1728,16 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+329. ✅ **账套之间会不会串：备份、恢复、导出、设置 逐条试了，一个会串账的坑**：前三轮都在查「单本账里算得对不对」，这一轮问的是另一件事——三本账各是独立数据库，但**备份 id 是每本账自己从 1 数的**，而界面上三本都叫「回到某一天」。于是有三种串法：①列表没跟着切账套一起刷，点上一本留下的那一行 → 恢复的是这一本**完全不同**的那份（还显示「回来了」）；②把 A 的整库包导进 B，B 的账本名 / 模块开关 / 演示开关被 A 的包带走；③`/restore` 里夹带 `settings` 行，可以改掉目标账套的 `book_name`、`modules_off`、`access_key`。
+   - **真 bug 1：`/backup-restore` 不认「这份备份是哪本账的」**。`/backup-list` 的行现在带 `book`，`/backup-restore` 收 `book` 参数，和当前账套对不上直接 `409 book_mismatch`（文案：「这份备份是第 1 本账的，现在打开的是第 2 本。请切回那本账再恢复。」）。不带 `book` 的老调用方式照旧能用，向后兼容。
+   - **真 bug 2：`/restore` 会把「这台机器自己的设置」盖成包里的**。`restoreCore` 原来只跳过 `BACKUP_SETTINGS_SKIP` 那 8 个键，`book_name`/`modules_off`/`super_key`/`demo_key`/`demo_builtin_off` 是「包里有什么就盖什么」——所以「把 A 的备份恢复到 B」之后，数据是 B 的、设置是 A 的，账本名都变成 A 的。现在 `RESTORE_SETTINGS_SKIP` = 那 8 个 + 这 5 个，包里的同名键一律不认（`/import-all` 上一轮已经这么做了，`/restore` 这条路径漏了）。
+   - **顺手修：笔记站备份按账套分开**。`pushToNotes` 以前 slug 写死 `factory-ledger-backup`，第 2 本同步一次就把第 1 本那篇盖掉（笔记站上看不出被换过，以为还在）。现在第 1 本沿用老 slug（老用户的笔记不搬家），第 2 本起是 `…-book2`、`…-book3`，标题也带账本号。
+   - **前端**：`switchBook` 清掉 `btl`（备份时间线）/`bv`（备份体检）/`cloud_backup_at`——切了账套还留着上一本的备份列表，就是上面那个「点错行」的入口；`restoreFromBackup` 带上 `book`。
+   - **新增 `scripts/test-bookiso.mjs`（38 项，已挂 CI，在 `test-numbers` 之后 `test-oldbackup` 之前）**：两本账各记各的客户 → 各自导出包的 `book_id` 与客户不互相出现 → 各自备份列表每行都标着自己的账套号 → 拿另一本的备份号恢复必须 409 且账没动 → 带对的就能恢复、不带也还能用 → 第 2 本口令进不了第 1 本（主口令进第 2 本仍可以，这是设计）→ 把第 1 本的整库包导进第 2 本：数据换成 1 的，但**名字 / 模块开关 / 口令还是 2 的** → `/restore` 夹带 `settings` 想改 `book_name`/`modules_off`/`access_key`/`super_key`/`demo_builtin_off` 一律不生效 → 演示口令带 `X-Book:1` 也还是进第 3 本、看不到真账客户 → 收尾关掉超级口令。
+   - **双向验证过**：把 `RESTORE_SETTINGS_SKIP` 改回旧值 → 红 2 项（`账本名没被包里的 settings 改掉 → "被篡改的名字"`、`模块开关没被包里的 settings 改掉 → []`）；把 `book_mismatch` 判断注释掉 → 红 2 项（`被拒 = 409 → got 200`、`拒的理由 = ""`）。改回来全绿。
+   - **验证**（干净库 `/tmp/d1iso` + dev 9301，三本账都灌 schema）：`test-bookiso` 38 项全过；`check.mjs` 全绿（429 路由 / 57 表 / 646 SQL / 263 调用 / 774 绑定，3 个动态路径 warn）。
+   - 动了前端（`switchBook`、`restoreFromBackup`）→ 小程序要重新上传发布。
+
 328. ✅ **半年前导出的老包还能不能恢复：查了，两个真 bug**：327 的逐列测试用的是「现在这个版本」导出的包。用户手里真正躺着的是几个月前导出的包——那时 `orders` 没有 `month`、没有 `ar_cat`、没有 `tax_*`，`ledger` 没有 `inv_state/inv_no/tax`。这类包恢复进去**不会报错**：接口 200、页面能看，只是分类报表全变「未分类」、税表归零、按月报表少几个月。所以专门造了三种老包（`buildBackup` 早年的顶层平铺、`/export-all` 的 v1 tables 包、连 `settings` 都没有的极简包）逐条恢复验证。
    - **真 bug 1：`/restore` 拒绝恢复时回的是 200 + `ok:true`**。`restoreCore()` 里「这份备份不能恢复」是 `return {error}`（不抛异常），而 `/restore`、`/backup-restore` 都写成 `Object.assign({ok:true}, r)` —— 于是「带 `failed` 的坏包被拒了」在调用方看来是成功，网页/小程序/脚本都会以为数据已经恢复。现在回 `400 {ok:false, code:'restore_rejected'}`。
    - **真 bug 2：整库导入会把超级口令、演示口令、账本名、模块开关全冲掉**。`/import-all` 覆盖模式以前只保 `access_key` / `staff_key`，别的 `settings` 行跟着包一起被替换——从别的机器导出的包里根本没有这些键，于是一次「导入整库包」之后：超级管理员口令没了、演示入口没了、账本名变回「主账套」、关掉的模块又全打开。现在保 14 个键（`KEEP_SET_IMPORT`），包里的同名键不覆盖本机的。

@@ -6747,7 +6747,9 @@ Page({
         if (!r.confirm) return
         this.req({
           url: API_BASE + '/backup-restore', method: 'POST', once: 'restore-bk',
-          data: { id: Number(id), confirm: true },
+          // 带上「这份备份属于哪本账」：备份 id 是每本账各自从 1 数的，
+          // 切了账套却点上一本留下的那一行，会把这一本的同号备份恢复过来（数据完全不是你想的那份）。
+          data: { id: Number(id), confirm: true, book: (this.data.btl || {}).book || this.data.book },
           success: (res) => {
             const d = res.data || {}
             const rs = d.restored || {}
@@ -7084,7 +7086,10 @@ Page({
           ar_list: [], ar_off: 0, ar_more: false, ar_kw: '',
           ap_list: [], ap_off: 0, ap_more: false, ap_kw: '',
           expense_list: [], ex_off: 0, ex_more: false,
-          ar_sum: null, ap_sum: null, dash_err: ''
+          ar_sum: null, ap_sum: null, dash_err: '',
+          // 「回到某一天」的列表也属于上一本账，必须清掉：备份 id 每本各自从 1 数，
+          // 留着上一本的 id 去点「恢复」，恢复的是这一本完全不同的那份。
+          btl: null, bv: null, cloud_backup_at: ''
         })
         wx.setStorageSync('book', id)
         if (nb.name) wx.setStorageSync('book_name', nb.name)
