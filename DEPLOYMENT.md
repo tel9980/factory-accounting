@@ -676,6 +676,51 @@ cd backend && ./node_modules/.bin/wrangler deploy
 > ⚠️ **写这类测试的坑**：假 `wx.getStorageSync` 如果直接返回数组引用，「补发途中新记了一笔」
 > 这个场景永远测不出来——真机 storage 是「序列化再读回来」的，假实现必须 `JSON.parse(JSON.stringify(...))`。
 
+### 4.23 几 MB 的 Excel 传不上去怎么办（切片上传）
+
+70 多家客户的对账表攒一个月就是几百 KB 到几 MB。手机端的导入一直是「整个文件转 base64，
+塞一个 `wx.request`」——3MB 的 xlsx 转出来是 4MB，弱网下超时是常态，而**超时之后用户不知道
+到底导进去没有**，再点一次就可能导两遍。
+
+现在超过 **900KB** 走切片：每片 70 万字符，客户端一片片传，服务端拼回来。
+
+| 端点 | 作用 | 关键返回 |
+|---|---|---|
+| `POST /upload-start` | 开会话 | `{ok, id, part:700000, ttl_min:120, max_parts:400}` |
+| `POST /upload-part` | 传第 `seq` 片（同一片重传=覆盖） | `{ok, seq, got:[0,1,2]}` |
+| `GET /upload-state?id=` | 看已收到哪几片（断点续传用） | `{ok, parts, done, got}` |
+| `POST /upload-finish` | 拼装并校验长度 | `{ok, size, parts}` |
+
+拿到 `id` 之后，`/import-pack` 和 `/import-xlsx` 都可以传 `{upload_id: id}` 代替 `{b64}`；
+**不传 `upload_id` 就还是老行为**（老版本小程序不用升级也能用）。
+
+三种以前会「静默坏掉」的情况现在都明确拒绝：
+
+| 情况 | 返回 | 为什么必须拒绝 |
+|---|---|---|
+| 片数不够 | 409 `upload_incomplete`（「已收 2/3」） | 拼出来是半个文件 |
+| 片数够但片号不连续（0 和 2） | 409 `upload_gap` | 数量对得上，拼出来是坏文件，只会报「读不了这个 Excel」 |
+| 长度和 `size` 不符 | 409 `upload_size` | 同上 |
+| `upload_id` 不存在/过期 | 410 `no_upload` | 不能混成「没有收到文件内容」 |
+
+其它约定：单个文件上限 14MB、会话 120 分钟有效、过期会话与孤儿分片由定时任务清理；
+`uploads` / `upload_parts` 不进备份、`/book-reset` 会清掉；演示口令调 `/upload-*` 一律 403。
+
+命令行自测（本机没有 curl 时用 node）：
+
+```bash
+node -e "
+const B='https://jz.qy663.de5.net', H={'X-Access-Key':'你的口令','content-type':'application/json'}
+const c=async(m,p,b)=>(await fetch(B+p,{method:m,headers:H,body:b&&JSON.stringify(b)})).json()
+c('POST','/upload-start',{name:'a.xlsx',size:100,parts:1}).then(r=>console.log(r))
+"
+```
+
+回归：`node scripts/test-upload.mjs`（42 项，含 3.4MB 分 5 片拼回来的实测，已挂 `deploy.yml`）。
+
+真正需要传几十 MB（比如三五年的流水）时，让用户在电脑上打开 `https://<你的域名>/pc`——
+浏览器直传、断了自己重试，比手机上稳得多。
+
 ### 5.0 最省事：什么都不用配（内置演示入口）
 
 登录页有一行 **「👀 先看看演示（不用口令，示例数据）」**——审核员点它就直接进演示账套

@@ -1650,6 +1650,47 @@ Page({
       fail: () => { wx.hideLoading(); wx.showToast({ title: '生成失败，看看网', icon: 'none' }) }
     })
   },
+  // 大文件切片上传：手机上选一个 3MB 的 Excel，转 base64 是 4MB，塞进一个 wx.request
+  // 发上去弱网下超时是常态；更糟的是超时后用户不知道到底导进去了没有，重发一次就可能导两遍。
+  // 超过 ~900KB 就切：每片约 500KB，断了重发只补没传完的片，最后由服务端拼起来。
+  // cb(err, payload)，payload 是 { b64 } 或 { upload_id }，两个导入接口都认。
+  _upChunk: 700000,
+  _upSmall: 900000,
+  filePayload(b64, name, cb) {
+    const s = String(b64 || '')
+    if (!s) return cb('这个文件是空的')
+    if (s.length <= this._upSmall) return cb(null, { b64: s })
+    const CH = this._upChunk
+    const total = Math.ceil(s.length / CH)
+    if (total > 400) return cb('这个文件太大了（' + Math.round(s.length / 1024) + 'KB），用电脑上的 /pc 页面导吧')
+    const ak = wx.getStorageSync('ak') || ''
+    const bk = String(wx.getStorageSync('book') || 1)
+    const post = (url, data, ok, bad) => wx.request({
+      url: API_BASE + url, method: 'POST', data, timeout: 60000,
+      header: { 'X-Access-Key': ak, 'X-Book': bk },
+      success: (r) => {
+        const d = r.data || {}
+        if (r.statusCode >= 200 && r.statusCode < 300 && d.ok !== false) return ok(d)
+        bad(d.error || ('上传失败（' + r.statusCode + '）'))
+      },
+      fail: () => bad('网络断了；再点一次会从没传完的那片接着传')
+    })
+    wx.showLoading({ title: '上传 0%', mask: true })
+    post('/upload-start', { name: name || '', size: s.length, parts: total }, (st) => {
+      const id = st.id
+      const send = (i) => {
+        if (i >= total) {
+          return post('/upload-finish', { id }, () => { wx.hideLoading(); cb(null, { upload_id: id }) }, (e) => { wx.hideLoading(); cb(e) })
+        }
+        const piece = s.slice(i * CH, (i + 1) * CH)
+        post('/upload-part', { id, seq: i, b64: piece }, () => {
+          wx.showLoading({ title: '上传 ' + Math.round(((i + 1) / total) * 100) + '%', mask: true })
+          send(i + 1)
+        }, (e) => { wx.hideLoading(); cb(e) })
+      }
+      send(0)
+    }, (e) => { wx.hideLoading(); cb(e) })
+  },
   // 选填好的整本表：先预览每一页要导什么，确认了才真导
   packPick(e) {
     const p = (e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.p : '') || 'daily'
@@ -1660,20 +1701,25 @@ Page({
       if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
       wx.showLoading({ title: '看一眼每页…' })
       wx.getFileSystemManager().readFile({ filePath: f.path, encoding: 'base64', success: (fr) => {
-        this._pkB64 = fr.data
         this._pkName = f.name || '模板包'
-        this.req({
-          url: API_BASE + '/import-pack', method: 'POST', data: { b64: fr.data, dry: true },
-          success: (res) => {
-            wx.hideLoading()
-            const d = res.data || {}
-            if (!d.ok) return wx.showToast({ title: d.error || '读不了这个表', icon: 'none' })
-            this.setData({
-              pk_open: true, pk_title: this._pkName, pk_text: d.text || '', pk_sheets: d.sheets || [], pk_force: false,
-              pk_dry: true, pk_total: d.total_amount || 0
-            })
-          },
-          fail: () => { wx.hideLoading(); wx.showToast({ title: '上传失败，看看网', icon: 'none' }) }
+        // 大文件先切片传上去：预览和「确认导入」用同一个 upload_id，不必再把几 MB 重发一遍
+        this.filePayload(fr.data, this._pkName, (e2, payload) => {
+          if (e2) { wx.hideLoading(); return wx.showToast({ title: e2, icon: 'none' }) }
+          this._pkPayload = payload
+          this._pkB64 = payload.b64 || ''
+          this.req({
+            url: API_BASE + '/import-pack', method: 'POST', data: Object.assign({ dry: true }, payload),
+            success: (res) => {
+              wx.hideLoading()
+              const d = res.data || {}
+              if (!d.ok) return wx.showToast({ title: d.error || '读不了这个表', icon: 'none' })
+              this.setData({
+                pk_open: true, pk_title: this._pkName, pk_text: d.text || '', pk_sheets: d.sheets || [], pk_force: false,
+                pk_dry: true, pk_total: d.total_amount || 0
+              })
+            },
+            fail: () => { wx.hideLoading(); wx.showToast({ title: '上传失败，看看网', icon: 'none' }) }
+          })
         })
       }, fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) } })
     } })
@@ -1683,7 +1729,8 @@ Page({
     if (this.data.pk_busy) return
     this.setData({ pk_busy: true })
     this.req({
-      url: API_BASE + '/import-pack', method: 'POST', data: { b64: this._pkB64 || '', name: this._pkName || '', force: !!this.data.pk_force },
+      url: API_BASE + '/import-pack', method: 'POST',
+      data: Object.assign({ name: this._pkName || '', force: !!this.data.pk_force }, this._pkPayload || { b64: this._pkB64 || '' }),
       success: (res) => {
         this.setData({ pk_busy: false })
         const d = res.data || {}
@@ -1697,6 +1744,7 @@ Page({
           })
         }
         if (!d.ok) return wx.showToast({ title: d.error || '导入失败', icon: 'none' })
+        this._pkPayload = null
         this.setData({ pk_open: false, pk_sheets: [], pk_text: '', pk_force: false })
         wx.showModal({ title: '导完了', content: d.text || '', showCancel: false })
         this.refresh({ lite: true })
@@ -1715,7 +1763,9 @@ Page({
       if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
       wx.showLoading({ title: '对比中…' })
       wx.getFileSystemManager().readFile({ filePath: f.path, encoding: 'base64', success: (fr) => {
-        this.req({ url: API_BASE + '/import-xlsx', method: 'POST', data: { type: t, b64: fr.data },
+        this.filePayload(fr.data, f.name || '', (e2, payload) => {
+        if (e2) { wx.hideLoading(); return wx.showToast({ title: e2, icon: 'none' }) }
+        this.req({ url: API_BASE + '/import-xlsx', method: 'POST', data: Object.assign({ type: t }, payload),
           success: (res) => {
             wx.hideLoading()
             const d = res.data || {}
@@ -1723,11 +1773,13 @@ Page({
             const rows = (d.changes || []).map((x) => Object.assign({}, x, { pick: x.state === 'ok' }))
             // 文件内容（base64，最大 3MB）放实例变量，不进 setData：
             // 小程序单次 setData 上限 1MB，塞进去会直接白屏，而且白屏时没有任何提示。
-            this._riB64 = fr.data
+            this._riB64 = payload.b64 || ''
+            this._riPayload = payload
             this.setData({ ri: Object.assign({}, d, { changes: rows }), ri_type: t, ri_b64: '' })
             if (!rows.length) wx.showToast({ title: '都和账上一样，不用改', icon: 'none' })
           },
           fail: () => wx.hideLoading() })
+        })
       } })
     } })
   },
@@ -1738,7 +1790,7 @@ Page({
     rows[i].pick = !rows[i].pick
     this.setData({ 'ri.changes': rows })
   },
-  closeRi() { this._riB64 = ''; this.setData({ ri: null, ri_b64: '' }) },
+  closeRi() { this._riB64 = ''; this._riPayload = null; this.setData({ ri: null, ri_b64: '' }) },
   applyRi() {
     const d = this.data.ri
     if (!d) return
@@ -1747,7 +1799,7 @@ Page({
     wx.showModal({ title: '确认改这 ' + pick.length + ' 行？', content: '只改勾上的，别的行一分不动；改完在「编辑留痕」里能看到改了哪几处。', success: (r) => {
       if (!r.confirm) return
       this.req({ url: API_BASE + '/import-xlsx', method: 'POST', once: 'applyRi',
-        data: { type: this.data.ri_type, b64: this._riB64 || '', apply: true, changes: pick.map((x) => ({ id: x.id, set: x.set })) },
+        data: Object.assign({ type: this.data.ri_type, apply: true, changes: pick.map((x) => ({ id: x.id, set: x.set })) }, this._riPayload || { b64: this._riB64 || '' }),
         success: (res) => {
           const x = res.data || {}
           if (!x.ok) return wx.showModal({ title: '没改成', content: x.error || '稍后再试', showCancel: false })
@@ -3771,9 +3823,14 @@ Page({
   previewXlsx(type, b64) {
     const names = { ar: '应收（客户欠我）', ap: '应付（我欠别人）', expense: '支出', loan: '员工借支', reimb: '报销', ar_init: '期初应收', ap_init: '期初应付' }
     this._xb64 = b64
+    // 大文件走切片上传，之后真导用同一个 upload_id（几 MB 不必再发一遍）
+    this.filePayload(b64, '', (e2, payload) => {
+    if (e2) { wx.hideLoading(); return wx.showToast({ title: e2, icon: 'none' }) }
+    this._xPayload = payload
+    this._xb64 = payload.b64 || ''
     this.req({
       url: API_BASE + '/import-xlsx', method: 'POST',
-      data: { type, b64, preview: true },
+      data: Object.assign({ type, preview: true }, payload),
       success: (res) => {
         wx.hideLoading()
         const d = res.data || {}
@@ -3791,6 +3848,7 @@ Page({
         if (!rows.length) wx.showToast({ title: '这个表里没认出数据行', icon: 'none' })
       },
       fail: () => wx.hideLoading()
+    })
     })
   },
   dropXpRow(e) {
@@ -3832,7 +3890,7 @@ Page({
   postXlsx(type, b64, force, skip) {
     this.req({
       url: API_BASE + '/import-xlsx', method: 'POST',
-      data: { type, b64, confirm_dup: !!force, skip: skip || [] },
+      data: Object.assign({ type, confirm_dup: !!force, skip: skip || [] }, this._xPayload || { b64 }),
       success: (res) => {
         wx.hideLoading()
         const d = res.data || {}
@@ -4279,8 +4337,10 @@ Page({
         wx.getFileSystemManager().readFile({
           filePath: f.path, encoding: 'base64',
           success: (fr) => {
+            this.filePayload(fr.data, f.name || '', (e2, payload) => {
+            if (e2) { wx.hideLoading(); return wx.showToast({ title: e2, icon: 'none' }) }
             this.req({
-              url: API_BASE + '/import-xlsx', method: 'POST', data: { type: t, b64: fr.data },
+              url: API_BASE + '/import-xlsx', method: 'POST', data: Object.assign({ type: t }, payload),
               success: (res) => {
                 wx.hideLoading()
                 const d = (res.data && res.data.recon) || null
@@ -4288,6 +4348,7 @@ Page({
                 this.setData({ recon: this.reconView(d), import_preview: null, import_file_name: f.name || '' })
               },
               fail: () => wx.hideLoading()
+            })
             })
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '读不到这个文件', icon: 'none' }) }
@@ -8429,8 +8490,10 @@ Page({
           filePath: f.path, encoding: 'base64',
           success: (fr) => {
             wx.showLoading({ title: '认出什么表…' })
+            this.filePayload(fr.data, f.name || '', (e2, payload) => {
+            if (e2) { wx.hideLoading(); return wx.showToast({ title: e2, icon: 'none' }) }
             this.req({
-              url: API_BASE + '/import-xlsx', method: 'POST', data: { type: 'bank', b64: fr.data, preview: true },
+              url: API_BASE + '/import-xlsx', method: 'POST', data: Object.assign({ type: 'bank', preview: true }, payload),
               success: (res) => {
                 wx.hideLoading()
                 const d = res.data || {}
@@ -8443,7 +8506,7 @@ Page({
                     if (!m.confirm) return
                     wx.showLoading({ title: '导入中…' })
                     this.req({
-                      url: API_BASE + '/import-xlsx', method: 'POST', data: { type: 'bank', b64: fr.data },
+                      url: API_BASE + '/import-xlsx', method: 'POST', data: Object.assign({ type: 'bank' }, payload),
                       success: (r2) => {
                         wx.hideLoading()
                         const d2 = r2.data || {}
@@ -8458,6 +8521,7 @@ Page({
                 })
               },
               fail: () => wx.hideLoading()
+            })
             })
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '读不了这个文件', icon: 'none' }) }

@@ -1304,7 +1304,7 @@ app.use('*', async (c, next) => {
     const dm = c.req.method
     // 危险动作谁都不给：导出/备份/改口令/改设置 —— 真账本才有的动作
     const denyDemo = dm !== 'OPTIONS' && (
-      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|archive-json|month-pack|month-pack-file|month-reports|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset|party-staff|audit-logs)/.test(path) ||
+      /^\/(backup|backup-list|backup-get|cloud-backup|backup-restore|backup-verify|backup-timeline|restore|backup-to-notes|export-all|export|export-csv|archive-pack|archive-json|month-pack|month-pack-file|month-reports|import-all|import-rows|import-xlsx|import-pack|db-clean|staff-users|staff-perms|staff-activity|schema-check|books-check|party-merge|seal|unseal|book-switch|book-name|book-reset|party-staff|audit-logs|upload-start|upload-part|upload-finish)/.test(path) ||
       // 系统内部状态：报错原文、慢接口、自检明细、账套清单 —— 演示身份不需要看这些，
       // 里面还会出现别本账的应收合计与内部表名。
       (/^\/(error-log|slow-log|selfcheck|books|books-check)$/.test(path) && dm !== 'OPTIONS') ||
@@ -1355,7 +1355,8 @@ app.use('*', async (c, next) => {
       // 导入（模块开关另外管一层）
       /^\/(import|import-rows|import-xlsx|import-pack|parse-import|detect-import)$/,
       // 对账与催款：员工对账、登记发出对账单、记催款，这些是日常活
-      /^\/(reconcile|recon-confirm|pipeline-summary)$/,
+      /^\/upload-(start|part|finish)$/,
+  /^\/(reconcile|recon-confirm|pipeline-summary)$/,
       /^\/statement-log$/, /^\/statement-log\/\d+\/(ack|resolve)$/,
       /^\/party-terms$/, /^\/party-terms\/apply$/, /^\/dunning-log$/, /^\/profiles$/,
       // 车间/家底类日常登记
@@ -7645,10 +7646,136 @@ kindChg()
 })
 
 // 整包导入：一个工作簿里几个页签，按页签名分别当成应收对账 / 支出 / …，一次全导
+// ===== 大文件切片上传 =====
+// 手机上选一个 3MB 的 Excel，转成 base64 是 4MB，塞进一个 wx.request 发上去：
+// 弱网下超时是常态，而超时之后用户根本不知道到底导进去了没有——重发一次就可能导两遍。
+// 这里切成约 500KB 一片，断了只补没传完的片，传完再交给导入逻辑。
+// 每片单独存一行（< 2MB），不撞 D1 单行上限；拼装时按 seq 顺序读出来。
+const UPLOAD_PART_MAX = 700000
+const UPLOAD_TTL_MIN = 120
+const UPLOAD_MAX_PARTS = 400
+const _upReady = new WeakSet()
+async function ensureUploadTables(db) {
+  if (_upReady.has(db)) return
+  await db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, name TEXT DEFAULT '', size INTEGER DEFAULT 0, parts INTEGER DEFAULT 0, data TEXT DEFAULT '', done INTEGER DEFAULT 0, created_at TEXT DEFAULT '')"),
+    db.prepare('CREATE TABLE IF NOT EXISTS upload_parts (id TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (id, seq))')
+  ])
+  _upReady.add(db)
+}
+// 过期的上传会话：没传完的留在库里就是垃圾，而且内容是原始 Excel 的 base64，别攒着
+async function uploadClean(db) {
+  try {
+    const cut = new Date(Date.now() + TZ_MS - UPLOAD_TTL_MIN * 60000).toISOString()
+    await db.prepare('DELETE FROM uploads WHERE created_at < ?').bind(cut).run()
+    await db.prepare('DELETE FROM upload_parts WHERE id NOT IN (SELECT id FROM uploads)').run()
+  } catch (e) { noteFail(e, '清理过期上传') }
+}
+const UPLOAD_ID_RE = /^[A-Za-z0-9_-]{6,40}$/
+// 导入接口统一走它：小文件照旧用 body.b64 直传，大文件用 body.upload_id 按片拼回来
+async function uploadPayload(db, body) {
+  const up = String((body && (body.upload_id || body.uploadId)) || '')
+  if (!up) return String((body && (body.b64 || body.file)) || '')
+  if (!UPLOAD_ID_RE.test(up)) return ''
+  await ensureUploadTables(db)
+  const row = await db.prepare('SELECT done, size FROM uploads WHERE id=?').bind(up).first().catch(() => null)
+  if (!row || num(row.done) !== 1) return ''
+  const rs = await db.prepare('SELECT data FROM upload_parts WHERE id=? ORDER BY seq').bind(up).all()
+  const out = (rs.results || []).map((x) => String(x.data || '')).join('')
+  if (row.size && out.length !== num(row.size)) return ''
+  return out
+}
+// 传完之后把这次上传的内容删掉（导入已经拿到内容了，没必要留着原始 Excel）
+async function uploadDrop(db, id) {
+  if (!id || !UPLOAD_ID_RE.test(String(id))) return
+  try {
+    await db.batch([
+      db.prepare('DELETE FROM upload_parts WHERE id=?').bind(String(id)),
+      db.prepare('DELETE FROM uploads WHERE id=?').bind(String(id))
+    ])
+  } catch (e) { noteFail(e, '清理上传内容') }
+}
+
+app.post('/upload-start', async (c) => {
+  const db = c.env.DB
+  await ensureUploadTables(db)
+  const body = await c.req.json().catch(() => ({}))
+  await uploadClean(db)
+  const parts = Math.max(0, Math.min(UPLOAD_MAX_PARTS, num(body.parts)))
+  const size = Math.max(0, num(body.size))
+  if (size > 14000000) return c.json({ error: '这个文件太大了（base64 后最多 14MB，约 10MB 的 Excel）。可以用电脑上的 /pc 页面导整本表。', code: 'too_big', max: 14000000 }, 400)
+  const id = 'up' + Date.now().toString(36) + randHex(4)
+  await db.prepare('INSERT INTO uploads (id, name, size, parts, done, created_at) VALUES (?,?,?,?,0,?)')
+    .bind(id, String(body.name || '').slice(0, 80), size, parts, now()).run()
+  return c.json({ ok: true, id, part: UPLOAD_PART_MAX, ttl_min: UPLOAD_TTL_MIN, max_parts: UPLOAD_MAX_PARTS })
+})
+
+app.post('/upload-part', async (c) => {
+  const db = c.env.DB
+  await ensureUploadTables(db)
+  const b = await c.req.json().catch(() => ({}))
+  const id = String(b.id || b.upload_id || '')
+  if (!UPLOAD_ID_RE.test(id)) return c.json({ error: '上传号不对', code: 'bad_upload' }, 400)
+  const data = String(b.b64 || b.data || '')
+  if (!data) return c.json({ error: '这一片是空的', code: 'bad_part' }, 400)
+  if (data.length > UPLOAD_PART_MAX) return c.json({ error: '这一片太大（最多 ' + UPLOAD_PART_MAX + ' 个字符）', code: 'part_too_big', max: UPLOAD_PART_MAX }, 400)
+  const seq = num(b.seq)
+  if (seq < 0 || seq >= UPLOAD_MAX_PARTS) return c.json({ error: '片号不对', code: 'bad_seq' }, 400)
+  const up = await db.prepare('SELECT id, done FROM uploads WHERE id=?').bind(id).first().catch(() => null)
+  if (!up) return c.json({ error: '这次上传过期了，重新选一次文件就好', code: 'no_upload' }, 410)
+  if (num(up.done) === 1) return c.json({ ok: true, id, seq, done: true, note: '已经传完了' })
+  // 同一片重传直接覆盖：断网重试是常态，不能因为「这片收过了」就报错
+  await db.prepare('INSERT INTO upload_parts (id, seq, data) VALUES (?,?,?) ON CONFLICT(id, seq) DO UPDATE SET data=excluded.data')
+    .bind(id, seq, data).run()
+  const got = await db.prepare('SELECT seq FROM upload_parts WHERE id=? ORDER BY seq').bind(id).all()
+  const list = (got.results || []).map((x) => num(x.seq))
+  return c.json({ ok: true, id, seq, got: list, got_count: list.length })
+})
+
+app.get('/upload-state', async (c) => {
+  const db = c.env.DB
+  await ensureUploadTables(db)
+  const id = String(c.req.query('id') || '')
+  if (!UPLOAD_ID_RE.test(id)) return c.json({ ok: false, error: '上传号不对', code: 'bad_upload' }, 400)
+  const up = await db.prepare('SELECT parts, size, done FROM uploads WHERE id=?').bind(id).first().catch(() => null)
+  if (!up) return c.json({ ok: false, error: '这次上传过期了', code: 'no_upload' }, 410)
+  const got = await db.prepare('SELECT seq FROM upload_parts WHERE id=? ORDER BY seq').bind(id).all()
+  return c.json({ ok: true, id, parts: num(up.parts), size: num(up.size), done: num(up.done) === 1, got: (got.results || []).map((x) => num(x.seq)) })
+})
+
+app.post('/upload-finish', async (c) => {
+  const db = c.env.DB
+  await ensureUploadTables(db)
+  const b = await c.req.json().catch(() => ({}))
+  const id = String(b.id || b.upload_id || '')
+  if (!UPLOAD_ID_RE.test(id)) return c.json({ error: '上传号不对', code: 'bad_upload' }, 400)
+  const up = await db.prepare('SELECT parts, size, done FROM uploads WHERE id=?').bind(id).first().catch(() => null)
+  if (!up) return c.json({ error: '这次上传过期了，重新选一次文件就好', code: 'no_upload' }, 410)
+  const rows = await db.prepare('SELECT seq, data FROM upload_parts WHERE id=? ORDER BY seq').bind(id).all()
+  const list = rows.results || []
+  const want = num(up.parts)
+  if (want && list.length !== want) {
+    return c.json({ error: '还差 ' + (want - list.length) + ' 片没传完（已收 ' + list.length + '/' + want + '），重发会接着传', code: 'upload_incomplete', got: list.length, parts: want }, 409)
+  }
+  // 片号必须从 0 开始连续：缺一片拼出来就是个坏文件，而那会表现为「读不了这个 Excel」，
+  // 用户根本猜不到是上传缺片。
+  for (let i = 0; i < list.length; i++) {
+    if (num(list[i].seq) !== i) return c.json({ error: '片号不连续（缺第 ' + (i + 1) + ' 片），重发会补上', code: 'upload_gap', missing: i }, 409)
+  }
+  const gotSize = list.reduce((a, x) => a + String(x.data || '').length, 0)
+  if (num(up.size) && gotSize !== num(up.size)) {
+    return c.json({ error: '文件长度对不上（应为 ' + num(up.size) + '，收到 ' + gotSize + '），重新选一次文件', code: 'upload_size', want: num(up.size), got: gotSize }, 409)
+  }
+  await db.prepare('UPDATE uploads SET done=1, size=? WHERE id=?').bind(gotSize, id).run()
+  return c.json({ ok: true, id, size: gotSize, parts: list.length })
+})
+
 app.post('/import-pack', async (c) => {
   const db = c.env.DB
   const body = await c.req.json().catch(() => ({}))
-  const b64 = String(body.b64 || body.file || '')
+  // 大文件走切片上传：body.upload_id → 服务端按片拼回来；小文件照旧 body.b64
+  const b64 = await uploadPayload(db, body)
+  if (!b64 && body.upload_id) return c.json({ error: '这次上传的内容取不到了（可能过期了），重新选一次文件就好', code: 'no_upload' }, 410)
   if (!b64) return c.json({ error: '没有收到文件内容' }, 400)
   const dry = body.dry === true || body.preview === true
   const force = body.force === true || body.confirm_dup === true
@@ -8056,7 +8183,9 @@ async function reimportApply(db, type, changes, by) {
 app.post('/import-xlsx', async (c) => {
   const body = await c.req.json()
   const type = String(body.type || 'ar')
-  const b64 = body.b64 || body.file || ''
+  // 大文件走切片上传（同 /import-pack）
+  const b64 = await uploadPayload(c.env.DB, body)
+  if (!b64 && body.upload_id) return c.json({ error: '这次上传的内容取不到了（可能过期了），重新选一次文件就好', code: 'no_upload' }, 410)
   if (!b64) return c.json({ error: '没有收到文件内容' }, 400)
   let rows
   try {
@@ -15479,7 +15608,7 @@ app.post('/book-reset', async (c) => {
     cleared.push(t)
   }
   // 照片、审计、日志这些不在 BACKUP_TABLES 里，换公司也不该带着上一家的东西
-  for (const t of ['attachments', 'audit_log', 'error_log', 'slow_log', 'op_dedupe', 'auth_fails', 'wx_users', 'month_report', 'staff_users']) {
+  for (const t of ['attachments', 'audit_log', 'error_log', 'slow_log', 'op_dedupe', 'auth_fails', 'wx_users', 'month_report', 'staff_users', 'uploads', 'upload_parts']) {
     if (t === 'staff_users' && keepStaff) continue
     stmts.push(db.prepare('DELETE FROM ' + t))
     cleared.push(t)
@@ -17121,7 +17250,9 @@ const BACKUP_SKIP = [
   ['slow_log', '慢接口日志'],
   ['op_dedupe', '重复提交的去重标记，自己会过期'],
   ['wx_users', '微信小程序试用额度，是外面的人用的，不算厂里的账'],
-  ['month_report', '月度报表存档是 xlsx 本体（base64），和照片一个道理，会把备份撑大']
+  ['month_report', '月度报表存档是 xlsx 本体（base64），和照片一个道理，会把备份撑大'],
+  ['uploads', '大文件切片上传的会话（原始 Excel 的 base64），传完就该没了，不进备份'],
+  ['upload_parts', '切片本体，同上']
 ]
 // 备份里的 month 列：orders/payables/ledger 有触发器自动补，别的表要恢复完手动补一遍，否则按月报表会缺这几块
 const MONTH_TABLES = ['orders', 'payables', 'ledger', 'month_lock', 'month_archive', 'recon_log', 'dunning_log', 'net_snapshots', 'recon_confirm', 'wage_records', 'wage_pays', 'wage_deduct', 'reworks', 'bank_flows']
@@ -19556,6 +19687,8 @@ export default {
         const lcut = new Date(Date.now() + TZ_MS - 90 * 86400000).toISOString()
         await db.prepare('DELETE FROM error_log WHERE created_at < ?').bind(lcut).run()
         await db.prepare('DELETE FROM slow_log WHERE created_at < ?').bind(lcut).run()
+        // 没传完的大文件上传会话：两小时就过期，别把原始 Excel 攒在库里
+        await uploadClean(db)
       } catch (e) {
         noteFailDb(db, e, '定时清理运行日志·' + bid, bid)
       }

@@ -54,7 +54,9 @@ const STAFF_WRITE_OK = [
   /^\/(reconcile|recon-confirm|pipeline-summary)$/,
   /^\/statement-log$/, /^\/statement-log\/\d+\/(ack|resolve)$/,
   /^\/party-terms$/, /^\/party-terms\/apply$/, /^\/dunning-log$/, /^\/profiles$/,
-  /^\/(materials|material-moves|frame-prices|outsource|rework|invoices)$/, /^\/outsource\/\d+\/back$/
+  /^\/(materials|material-moves|frame-prices|outsource|rework|invoices)$/, /^\/outsource\/\d+\/back$/,
+  // 大文件切片上传：员工能导入，所以也得能切片传（不然他打开就传不了几 MB 的表）
+  /^\/upload-(start|part|finish)$/
 ]
 const isStaffOk = (p) => STAFF_WRITE_OK.some((re) => re.test(p))
 

@@ -1728,6 +1728,19 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+332. ✅ **几 MB 的 Excel 传不上去，超时了还不知道导进去没有**：70 多家客户的对账表攒一个月就是几百 KB 到几 MB，而手机端的做法一直是「把整个文件转成 base64，塞进一个 `wx.request` 发上去」。3MB 的 xlsx 转 base64 是 4MB，弱网下超时是常态；更糟的是**超时之后用户不知道到底导进去没有**——再点一次，就可能导两遍。这一轮把上传改成分片：
+   - **后端**（`backend/index.js`，`/import-pack` 之前一整块）：新增 `uploads` / `upload_parts` 两张表（`backend/schema.sql` 同步）与四个端点 —— `POST /upload-start`（`size` 上限 14MB，返回每片 70 万字符、会话 120 分钟有效）、`POST /upload-part`（同一片重传是覆盖，不是追加）、`GET /upload-state`（已收到哪几片）、`POST /upload-finish`（拼装并校验）。`/import-pack` 与 `/import-xlsx` 开头都改成 `const b64 = await uploadPayload(db, body)`：没有 `upload_id` 就还用老的 `b64`（老版本小程序照样能用），有就把分片拼回来。
+   - **每片压到 70 万字符**是有原因的：D1 单行上限 2MB，而中文 xlsx 是 UTF-8、base64 里一个字 1 字节，但服务端存的是 base64 文本本身——70 万字符留足余量（实测 3.4MB 的文件分 5 片，一片一片全过）。
+   - **三种「静默失败」都变成明确拒绝**：少片 → 409 `upload_incomplete`（文案带「已收 2/3」「重发会接着传」）；**片数够但片号不连续**（0 和 2，最阴的一种）→ 409 `upload_gap`，否则拼出来是坏文件，只会报「读不了这个 Excel」，用户猜不到是缺片；长度对不上 → 409 `upload_size`。`upload_id` 不存在或过期 → **410 `no_upload`**，不再混成「没有收到文件内容」。
+   - **前端**（`frontend/pages/index/index.js`）：新增 `filePayload(b64, name, cb)` —— 900KB 以内直接 `{b64}`（跟以前一样，省一次往返），超过就 `upload-start` → 逐片上传（`上传 37%` 的进度提示）→ `upload-finish` → `{upload_id}`；每片 `timeout: 60000`，断了提示「再点一次会从没传完的那片接着传」；片数超过 400 才提示改用电脑上的 `/pc`。**预览与真导复用同一个 payload**（`_pkPayload` / `_riPayload` / `_xPayload`）：以前「先预览、再确认」要把几 MB 发两遍，现在只发一次。
+   - 顺手清掉三处「一个请求发完整文件」的重复实现：整本模板包、导出表改完导回来、对账/银行流水 xlsx。
+   - **权限与清理**：`/upload-*` 三个写接口进 `STAFF_WRITE_OK`（员工能导入，就得能切片传）；演示口令一律 403 `demo_readonly`；`uploads` / `upload_parts` 不进备份、`/book-reset` 会清、定时任务里 120 分钟过期的会话与孤儿分片会被删掉。
+   - **新增 `scripts/test-upload.mjs`（42 项，已挂 CI，在 `test-pack` 之前）**：乱序传 + 重传一片 + 状态 + 拼装长度一致 / 用 `upload_id` 预览认出 7 页 / 真导 200 / `/import-xlsx` 也认 / 少一片 409 `upload_incomplete` / 片号 0·2 → 409 `upload_gap` / 长度不符 409 / 单片 70 万零 1 字符 400 / 空片 400 / 幽灵 id 410 / 演示 403 / 无口令 401 / **3.4MB 分 5 片也能拼回来**（最后报的是「读不了这个 Excel」而不是「没有收到文件内容」）。
+   - `scripts/test-offline.mjs` 增两组到 **50 项**：`filePayload` 小文件不切片、大文件切 3 片且片号连续每片 ≤70 万、`size` 传原长度、拿到 `upload_id` 且不再带 b64；上传中途 500 必须回调错误且**不**返回 `upload_id`（不能拿半截文件去导）。
+   - **验证**（干净库 `/tmp/d1up2` + dev 9351，三本账都灌 schema，严格 CI 顺序）：`check.mjs` **433** 路由 / **59** 表 / **667** SQL / 263 调用 / 774 绑定；`smoke` **238** GET 无 5xx；`modules` / `smoke-write` / `crossmonth 16` / `apcat 31` / `import-xlsx 32` / `onboarding` / `safety 48` / `demo` / `archive 41` / `book 40` / `restore 65` / `super 36` / `staff 58` / `perm 108` / `pack 65` / **`upload 42`** / `tax 54` / `numbers 55` / `bookiso 38` / `concurrency 60` / `oldbackup 58` 全绿；离线 `test-batch` / `test-key-queue` / `test-firstscreen` / `test-list` / `test-offline 50` 全绿。
+   - 顺带被 `test-perm` 抓到一次：加了三个写接口但没同步测试里那份白名单副本，它立刻红「有 3 条写接口的权限不对」——这正是白名单该有的守卫作用。
+   - ⚠️ 动了前端（选文件的整条路）→ 小程序要重新上传发布。
+
 331. ✅ **弱网攒了十几笔账，网回来时会不会丢**：这一轮查的是「只有一台手机、但网不好」的情况。前端有个离线队列（`pending_ops`），断网时记的账先存在手机上，联网后按顺序补发。原来的补发逻辑有四处会**静默丢账**，用户看到的只是「补上了 N 笔」：
    - **补发途中又记的一笔被抹掉**：`finish()` 拿「进补发时的快照」覆盖存储，而网刚回来往往是「先补发、她手上还在记」——那一刻新入队的那笔直接消失。现在按「快照长度之后新追加的」合并回去（快照之后的部分就是补发期间新记的），并用 `uid` 标记每条，顺序不乱。
    - **中途 401 逐条试**：口令过期 / 换了手机 / 切了账套时，队列里每一条都会 401，旧代码把每一条都标上「口令错误」——看起来像账出了问题，其实只是要重新登录。现在**第一下就停**：当前这条及后面原样留着（不标错），直接弹登录卡，输完口令自动接着补（`submitKey` 成功后会再调一次 `flushPending`）。
@@ -1812,7 +1825,7 @@ node scripts/build-exe.mjs --out dist
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 429 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 433 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2203,7 +2216,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（226）
+**其它（单个接口）**（230）
 
 - `GET /`
 - `GET /access-guide`
@@ -2411,6 +2424,10 @@ node scripts/build-exe.mjs --out dist
 - `POST /transfer`
 - `GET /trend`
 - `POST /unseal`
+- `POST /upload-finish`
+- `POST /upload-part`
+- `POST /upload-start`
+- `GET /upload-state`
 - `GET /weekly-text`
 - `GET /wip`
 - `POST /wx-login`

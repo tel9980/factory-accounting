@@ -367,6 +367,24 @@ CREATE TABLE IF NOT EXISTS op_dedupe (
 );
 CREATE INDEX IF NOT EXISTS idx_op_client ON op_dedupe(client_id);
 
+-- 大文件切片上传（手机上选几 MB 的 Excel 时用）：一张表记会话，一张表存片。
+-- 片单独存一行是有意的——拼好的 base64 可能有 4MB，超过 D1 单行 2MB 上限。
+CREATE TABLE IF NOT EXISTS uploads (
+  id TEXT PRIMARY KEY,
+  name TEXT DEFAULT '',
+  size INTEGER DEFAULT 0,
+  parts INTEGER DEFAULT 0,
+  done INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS upload_parts (
+  id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_upload_created ON uploads(created_at);
+
 -- 家底存档：每个月末的现金/应收/应付/借款/净资产，存下来就不会被后来的改单带偏
 CREATE TABLE IF NOT EXISTS net_snapshots (
   month TEXT PRIMARY KEY,       -- YYYY-MM

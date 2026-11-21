@@ -239,6 +239,50 @@ const mkOp = (label) => ({ url: 'https://x/api/orders', method: 'POST', label, d
   eq('存储仍是空数组', (storage.pending_ops || []).length, 0)
 }
 
+// ---- 12. 大文件切片上传（filePayload）：小文件直传，大文件切片，断了提示「接着传」 ----
+{
+  const CH = 700000
+  const partSeqs = []
+  const partLens = []
+  let startBody = null
+  const { ctx } = boot({
+    replies: (o) => {
+      const u = String(o.url)
+      if (u.endsWith('/upload-start')) { startBody = o.data; return { code: 200, data: { ok: true, id: 'upTEST123456', part: CH } } }
+      if (u.endsWith('/upload-part')) { partSeqs.push(o.data.seq); partLens.push(String(o.data.b64 || '').length); return { code: 200, data: { ok: true, seq: o.data.seq } } }
+      if (u.endsWith('/upload-finish')) return { code: 200, data: { ok: true, id: o.data.id, size: startBody ? startBody.size : 0 } }
+      return { code: 200, data: { ok: true } }
+    }
+  })
+  const small = await new Promise((res) => ctx.filePayload('A'.repeat(5000), 'a.xlsx', (e, p) => res({ e, p })))
+  ok('小文件不切片，直接带 b64', !small.e && !!small.p.b64, JSON.stringify(small.e))
+  eq('小文件一条上传请求都不发', partSeqs.length, 0)
+
+  const big = 'B'.repeat(1500000)
+  const out = await new Promise((res) => ctx.filePayload(big, 'b.xlsx', (e, p) => res({ e, p })))
+  eq('大文件按 70 万字符切片 → 3 片', partSeqs.length, 3)
+  eq('片号从 0 开始连续', partSeqs.join(','), '0,1,2')
+  ok('每片都不超过 70 万字符', partLens.every((n) => n <= CH && n > 0), JSON.stringify(partLens))
+  eq('告给服务端的总长度是原长度', startBody && startBody.size, big.length)
+  eq('传完拿到 upload_id（后面两个导入接口都用它）', out.p && out.p.upload_id, 'upTEST123456')
+  ok('大文件不再带 b64（不然又变成 4MB 一个请求）', !(out.p && out.p.b64))
+}
+
+// ---- 13. 上传中途失败：要明确说「换个网络再点会接着传」，不能装作成功 ----
+{
+  const { ctx } = boot({
+    replies: (o) => {
+      const u = String(o.url)
+      if (u.endsWith('/upload-start')) return { code: 200, data: { ok: true, id: 'upFAIL123456' } }
+      if (u.endsWith('/upload-part')) return { code: 500, data: { error: '服务器开小差' } }
+      return { code: 200, data: { ok: true } }
+    }
+  })
+  const r = await new Promise((res) => ctx.filePayload('C'.repeat(1500000), 'c.xlsx', (e, p) => res({ e, p })))
+  ok('中途失败会回调错误', !!r.e, JSON.stringify(r))
+  ok('没有拿到 upload_id（不会拿半截文件去导）', !(r.p && r.p.upload_id))
+}
+
 console.log('')
 if (fails.length) {
   console.log('❌ 离线补发：' + fails.length + ' 项没过（通过 ' + passed + ' 项）')
