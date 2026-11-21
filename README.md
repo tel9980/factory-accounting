@@ -1728,6 +1728,14 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+328. ✅ **半年前导出的老包还能不能恢复：查了，两个真 bug**：327 的逐列测试用的是「现在这个版本」导出的包。用户手里真正躺着的是几个月前导出的包——那时 `orders` 没有 `month`、没有 `ar_cat`、没有 `tax_*`，`ledger` 没有 `inv_state/inv_no/tax`。这类包恢复进去**不会报错**：接口 200、页面能看，只是分类报表全变「未分类」、税表归零、按月报表少几个月。所以专门造了三种老包（`buildBackup` 早年的顶层平铺、`/export-all` 的 v1 tables 包、连 `settings` 都没有的极简包）逐条恢复验证。
+   - **真 bug 1：`/restore` 拒绝恢复时回的是 200 + `ok:true`**。`restoreCore()` 里「这份备份不能恢复」是 `return {error}`（不抛异常），而 `/restore`、`/backup-restore` 都写成 `Object.assign({ok:true}, r)` —— 于是「带 `failed` 的坏包被拒了」在调用方看来是成功，网页/小程序/脚本都会以为数据已经恢复。现在回 `400 {ok:false, code:'restore_rejected'}`。
+   - **真 bug 2：整库导入会把超级口令、演示口令、账本名、模块开关全冲掉**。`/import-all` 覆盖模式以前只保 `access_key` / `staff_key`，别的 `settings` 行跟着包一起被替换——从别的机器导出的包里根本没有这些键，于是一次「导入整库包」之后：超级管理员口令没了、演示入口没了、账本名变回「主账套」、关掉的模块又全打开。现在保 14 个键（`KEEP_SET_IMPORT`），包里的同名键不覆盖本机的。
+   - **顺手补的提示**：恢复一份「缺了跟着单据走的表」的包（只带 orders/payables/ledger，没有 `writeoffs`/`advances`/`debt_repays`/`transfers`）时，现在会回一句 `warn`：「这份备份里没有『核销记录、预收预付』这几张表……自检会指出来」。以前是闷着——三张主表整表替换了，留下的核销记录全挂到已删单据上，自检报「单据已核销 300，核销记录合计 0」，看着像恢复把账弄坏了。
+   - **新增 `scripts/test-oldbackup.mjs`（58 项，已挂 CI，放最后跑，会覆盖账本）**：老包恢复后数字必须对（应收 600 / 应付 500 / 现金 7900 = 期初 6000 + 收 2400 − 付 500）；`month` 必须按 `created_at` 补上（否则 9 月那张单在按月报表里消失）；分类报表要能出且落在「未分类」；税金汇总全 0 但不许崩；账龄、科目余额表、月报、流水页都要能出；自检不许报不一致；带 `failed` 的包必须 400 且账没被清；没有 `settings` 的包不许把超级口令冲掉；没有 `id` 的老行要让库自己给 id；恢复完还能照常收款。
+   - **验证**（干净库 `/tmp/d1ob3` + dev 9295，三本账都灌 schema，严格 CI 顺序 21 步）：`check.mjs` 429 路由 / 57 表 / 646 SQL / 263 调用 / 774 绑定；`smoke` 237 GET 无 5xx；`modules` / `smoke-write` / `crossmonth 16` / `apcat 31` / `import-xlsx 32` / `onboarding` / `safety 48` / `demo` / `archive 41` / `book 40` / `restore 65` / `super 36` / `staff 58` / `perm 108` / `arcat 36` / `pack 65` / `tax 54` / `numbers 55` / `oldbackup 58` 全绿；离线四件套全绿。
+   - 只改后端与测试，前端没动 → **小程序不用重传**。
+
 327. ✅ **备份恢复改成「逐列对账」：以前验的是「能恢复」，不是「恢复得一模一样」**：`restoreCore()` 恢复应收/应付/流水三张主表时，`INSERT` 的列清单是**手写**的——加一列就得记得回来补一次。这一年来丢过 `no_invoice`（「已开票」标记）、`delivered_at`（交货日，丢了交期提醒会把这批单重新当成没交付）、`tax_kind/tax_rate/tax_amt`（税表直接归零）、`created_by`（谁开的单）、`ar_cat`（应收分类，分类报表归零）。每一次的表现都一样：**接口回 `ok`、页面照常能看，只是那一列静默变默认值**，所以「备份 → 恢复 → 页面能打开」这种测试永远发现不了。
    - **改法：列清单不再手写**。恢复时 `PRAGMA table_info` 读出真表结构，和备份里有的字段取交集，动态拼 `INSERT`——跟下面家底那几十张表一直是同一个写法。以后再加列，不用再动恢复代码。
    - **新增 `scripts/test-restore.mjs`（65 项，已挂 CI，跟在 `test-book` 后面）**：造一份「每一列都有值」的账（带分类/含税口径/票号/税额/交期/工序/账期/联系人/地址/借款利率/资产残值率/待摊期数/材料最低库存），备份 → 一键初始化 → 恢复，然后把备份里**每一张表的每一行的每一列**逐一比对，差一个单元格就红；再单独点名几个最容易漏的列（`ar_cat`、`tax_*`、`inv_state`、`inv_no`、`tax`、`progress`、`created_by`、`deliver_date`）；最后验恢复完账还是活的（应收汇总能算、月报能出、自检不报「单据已核销 300，核销记录合计 0」）。

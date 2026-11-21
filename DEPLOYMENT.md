@@ -569,6 +569,26 @@ cd backend && ./node_modules/.bin/wrangler deploy
 （现在 65 项）。它已经抓到过一个真陷阱：**一键初始化会把之前的备份全删掉**——用户昨天特意备份的
 一份，今天点「一键初始化」就没了。现在一份都不删，只靠 `saveBackup` 之后保留最近 30 份。
 
+### 4.19 老备份（几个月前导出的包）还能恢复吗
+
+能，而且有回归测试钉着（`scripts/test-oldbackup.mjs`，58 项）。三种老包都验过：
+
+| 包的样子 | 谁导出的 | 结果 |
+| --- | --- | --- |
+| 顶层平铺 `orders/payables/ledger/...`，`version: 1` 或 `2` | 早期「云端备份」 | `POST /restore` 能恢复 |
+| `{kind:'factory-accounting-full', tables:{...}, v:1}` | 早期「导出整库」 | `POST /import-all` 能恢复 |
+| 只有 `orders/payables/ledger`，连 `settings` 都没有 | 手工裁过的包 | 能恢复，口令/账户沿用现在的 |
+
+恢复时按 `created_at` 把 `month` 补上（老包没这一列），新列（`ar_cat`/`tax_*`/`inv_state`）留空，
+所以**老账的分类会落在「未分类」、税表是 0** —— 这是数据本来就没有，不是恢复丢了。
+
+两条容易踩的：
+
+1. **`/restore` 拒绝坏包时回 400 `restore_rejected`**（以前误回 200 + `ok:true`，调用方会以为恢复成功）；
+2. **整库导入保 14 个本机设置键**（`KEEP_SET_IMPORT`）：`access_key`/`staff_key`/`super_key`/`demo_key`/
+   `book_name`/`modules_off`/封存状态等。从别的机器导出的包里没有这些键，以前导入一次就把超级口令、
+   演示入口、账本名全冲掉，而且一声不吭。
+
 ### 5.0 最省事：什么都不用配（内置演示入口）
 
 登录页有一行 **「👀 先看看演示（不用口令，示例数据）」**——审核员点它就直接进演示账套

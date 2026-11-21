@@ -15370,10 +15370,18 @@ app.post('/import-all', async (c) => {
   const mode = b.mode === 'merge' ? 'merge' : 'replace'
   if (mode === 'replace' && String(b.confirm || '') !== '覆盖') return c.json({ error: '整包覆盖会清空现在所有数据，确认请在 confirm 里写「覆盖」' }, 400)
   await saveBackup(db, 'restore-all')
-  // 口令不随包走：整包覆盖时先把当前口令留一份，灌完再放回去（否则会被清空、下次打不开）
+  // 口令和「这台机器自己的设置」不随包走：整包覆盖时先把它们留一份，灌完再放回去。
+  // 以前只保了 access_key / staff_key，于是「导入一份别人的整库包」之后超级口令、演示口令、
+  // 账本名、模块开关、封存状态全没了 —— 而且一声不吭（包是从别的机器导出的，本来就没有这些键）。
+  const KEEP_SET_IMPORT = ['access_key', 'staff_key', 'sign_secret', 'staff_salt', 'book_name',
+    'super_key', 'demo_key', 'demo_builtin_off', 'modules_off', 'sealed', 'sealed_at', 'sealed_note',
+    'backup_sig', 'backup_at']
   let keepKeys = []
   if (mode === 'replace') {
-    try { keepKeys = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('access_key','staff_key')").all()).results || [] } catch (e) { keepKeys = [] }
+    try {
+      keepKeys = (await db.prepare('SELECT key, value FROM settings WHERE key IN (' + KEEP_SET_IMPORT.map(() => '?').join(',') + ')')
+        .bind(...KEEP_SET_IMPORT).all()).results || []
+    } catch (e) { keepKeys = [] }
   }
   const have = new Set(await tableList(db))
   const done = {}
@@ -17398,7 +17406,15 @@ async function restoreCore(db, data, opts) {
   const staffNote = staffN === 0
     ? '员工口令不在备份里（安全起见），所以这本账现在是 0 个员工，要在「设置 → 员工账号」重新加一次。'
     : staffN > 0 ? '这本账现在有 ' + staffN + ' 个员工，员工口令沿用原来的，没被备份覆盖。' : ''
-  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, extra, skipped, staff_count: staffN, staff_note: staffNote }
+  // 备份里缺了「跟着单据走的表」时要说一句：这三张主表被整表替换了，可 writeoffs（核销记录）、
+  // advances（预收预付）、debt_repays（还款记录）如果没跟着替换，就会留下一批挂着已删单据的记录，
+  // 自检会报「单据已核销 X，核销记录合计 0」这种对不上的账 —— 不是恢复错了，是包里本来就没有。
+  const FOLLOW_TABLES = ['writeoffs', 'advances', 'debt_repays', 'transfers']
+  const missingFollow = FOLLOW_TABLES.filter((t) => !Array.isArray(data[t]))
+  const warn = missingFollow.length
+    ? '这份备份里没有「' + missingFollow.map((t) => ({ writeoffs: '核销记录', advances: '预收预付', debt_repays: '还款记录', transfers: '内部转账' }[t] || t)).join('、') + '」这几张表，现在账本里的这些记录没被替换，可能和刚恢复的单据对不上。自检（报表 → 数据自检）会指出来，按提示清一下就行。'
+    : ''
+  return { restored: { orders: orders.length - skipped.orders, payables: payables.length - skipped.payables, ledger: ledger.length - skipped.ledger }, extra, skipped, staff_count: staffN, staff_note: staffNote, warn }
 }
 
 // 恢复中途失败：用 restoreCore 存下的快照（错误对象上挂的 snapshotId）重放回去。
@@ -17433,6 +17449,10 @@ app.post('/restore', async (c) => {
   if (!orders.length && !payables.length && !ledger.length) return c.json({ error: '备份里没有账目数据' }, 400)
   const r = await restoreCore(db, data).catch((e) => restoreRollback(db, e))
   if (r.__rollbackError) return c.json(r.error, 500)
+  // restoreCore 里「这份备份不能恢复」是 return {error}（不抛异常）——
+  // 以前这里照样 Object.assign({ok:true}, r) 回 200，于是「带 failed 的包被拒了」看起来像成功，
+  // 调用方（网页 / 小程序 / 脚本）都会以为数据已经恢复。
+  if (r.error) return c.json({ ok: false, error: r.error, code: 'restore_rejected' }, 400)
   return c.json(Object.assign({ ok: true }, r))
 })
 
@@ -17568,6 +17588,7 @@ app.post('/backup-restore', async (c) => {
   if (!b.confirm) return c.json({ need_confirm: true, will: { orders: o.length, order_sum: round2(o.reduce((a, x) => a + num(x.price), 0)), payables: p.length, ledger: l.length }, error: '恢复会覆盖现在的账目，请确认' }, 409)
   const res = await restoreCore(db, data).catch((e) => restoreRollback(db, e))
   if (res.__rollbackError) return c.json(res.error, 500)
+  if (res.error) return c.json({ ok: false, from: id, error: res.error, code: 'restore_rejected' }, 400)
   return c.json(Object.assign({ ok: true, from: id }, res))
 })
 

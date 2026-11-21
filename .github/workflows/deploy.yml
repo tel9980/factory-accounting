@@ -198,6 +198,11 @@ jobs:
       # 然后谁都不信账。差一分钱就红。
       - name: 数字对账回归（首页 / 月报 / 科目余额表 / 流水页 对得上）
         run: node scripts/test-numbers.mjs --base http://127.0.0.1:8791 --key 8888
+      # 老备份兼容：用户手里可能躺着半年前导出的包（orders 没有 month/ar_cat/tax_*，
+      # ledger 没有 inv_state/inv_no/tax）。这类包恢复进去不会报错，只是分类报表变「未分类」、
+      # 税表归零、按月报表少几个月。这条把「老包恢复后数字对不对」钉住；会覆盖账本，放最后跑。
+      - name: 老备份兼容回归（半年前导出的包还能不能恢复）
+        run: node scripts/test-oldbackup.mjs --base http://127.0.0.1:8791 --key 8888
       # 免安装版（exe / Docker 镜像）跑的是同一份 backend/index.js，只是把 Cloudflare 的 D1
       # 换成了本机 SQLite（server/d1.mjs）。这层适配最容易悄悄坏：batch 不是事务、
       # run() 返回的形状不对（README 迭代 285 那个「库存已扣却回 409」），都会让账记歪但不报错。
