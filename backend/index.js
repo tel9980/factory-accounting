@@ -3842,6 +3842,10 @@ const monthSnapshot = async (db, mm) => {
   const arLeft = round2(arAt.t)
   const apLeft = round2(apAt.t)
   const debtB = await debtLeftAt(db, end)
+  // 预收/预付也进家底（客户先打来的钱是我们欠他的货，先付给供应商的是他欠我们的货）
+  const advEndQ = await advLeftAt(db, end).catch((e) => { noteFail(e, '月结归档·预收预付'); return { in: 0, out: 0 } })
+  const advInEnd = round2(num(advEndQ.in))
+  const advOutEnd = round2(num(advEndQ.out))
   const cash = round2(opening + cashFlow)
   return {
     month: mm, period_end: end,
@@ -3851,7 +3855,8 @@ const monthSnapshot = async (db, mm) => {
     cash_expense: cashExp, loan_exp: loanExp, mat_cost: matCost, writeoff_loss: woLoss, amort, dep, accrue_int: accrue, cost,
     profit, margin: orderAdd > 0 ? round2((profit / orderAdd) * 100) : 0,
     cash_balance: cash, ar_left: arLeft, ap_left: apLeft, debt_left: debtB,
-    net_worth: round2(cash + arLeft - apLeft - debtB)
+    adv_in_left: advInEnd, adv_out_left: advOutEnd,
+    net_worth: round2(cash + arLeft - apLeft - debtB - advInEnd + advOutEnd)
   }
 }
 
@@ -7027,7 +7032,14 @@ const IMPORT_TEMPLATES = {
   acc_open: { name: '账户期初模板', rows: [['账户', '期初余额', '备注(可空)'], ['现金', 3000, ''], ['银行卡', 20000, '']] },
   term: { name: '默认账期模板', rows: [['默认账期(天)'], [30]] },
   loan_open: { name: '期初借支模板（员工手上还没报销的）', rows: [['员工', '未还金额', '备注(可空)'], ['张三', 800, '上月买辅料'], ['李四', 500, '']] },
-  debt_open: { name: '期初借款模板（还没还的借款）', rows: [['出借方', '本金', '年利率%', '起始日(可空)', '期限(月,可空)'], ['某银行', 200000, 4.5, '2026-01-01', 36], ['老板朋友', 50000, 0, '', '']] }
+  debt_open: { name: '期初借款模板（还没还的借款）', rows: [['出借方', '本金', '年利率%', '起始日(可空)', '期限(月,可空)'], ['某银行', 200000, 4.5, '2026-01-01', 36], ['老板朋友', 50000, 0, '', '']] },
+  // 换系统第一天要一次性搬进来的「静态资料」：机器、材料库存、计件单价、信用额度、框架价。
+  // 以前这五样只能在界面上一条条敲（70 台机器就是 70 次），现在一个模板一次进去。
+  asset: { name: '固定资产期初模板（机器设备）', rows: [['名称', '原值(元)', '购入日(可空)', '年限(可空=5)', '残值率%(可空=5)', '备注(可空)'], ['数控车床', 86000, '2024-05-01', 10, 5, '一号车间'], ['空压机', 12000, '', 5, '', '']] },
+  material: { name: '材料期初模板（现在仓库里有多少）', rows: [['材料名', '单位(可空)', '数量', '单价', '日期(可空)', '备注(可空)'], ['45# 圆钢', '公斤', 800, 6.5, '', '期初盘点'], ['切削液', '桶', 12, 180, '', '']] },
+  wage_rate: { name: '计件单价模板（每道工序多少钱一件）', rows: [['工序', '单价(元/件)', '单位(可空)', '备注(可空)'], ['车外圆', 1.2, '件', ''], ['钻孔', 0.8, '件', '批量价']] },
+  credit: { name: '信用额度模板（每家能欠多少）', rows: [['客户', '额度(元)', '备注(可空)'], ['张老板', 50000, '老客户'], ['李老板', 20000, '']] },
+  frame: { name: '框架价模板（长期协议单价）', rows: [['客户', '产品', '单价(元)', '起始日(可空)', '备注(可空)'], ['张老板', '外壳加工', 12.5, '2026-01-01', '年度协议']] }
 }
 
 // ===== 模板包：一个工作簿多个页签，一次下载填完、一次上传全导进去 =====
@@ -7080,11 +7092,37 @@ const IMPORT_PACKS = {
       { sheet: '报销', type: 'reimb', rows: [['员工', '金额', '分类', '备注', '日期(可空)']] },
       { sheet: '付房东', type: 'prepaid', rows: [['名称', '金额', '月数(0=押金不摊)', '分类', '起始日(可空)', '备注(可空)']], dv: ['D2:D200', PREPAID_CATS] }
     ]
+  },
+  // 换系统第一天要搬的「静态资料」：机器、材料库存、计件工价、信用额度、框架价。
+  // 这五样跟当月收支无关，重复导不会翻倍（额度是覆盖），所以单独一包，随时能补。
+  base: {
+    name: '初始资料模板',
+    desc: '机器设备、材料库存、计件单价、信用额度、框架价 —— 换系统第一天搬一次，以后不用管',
+    sheets: [
+      { sheet: '说明', type: '', rows: [
+        ['初始资料模板 —— 怎么用'],
+        ['1. 这五页都是「资料」，不是当月流水：导进去不产生现金收支，也不影响本月利润。'],
+        ['2. 机器：一行一台。原值填买入价（含税也可以），年限不填按 5 年、残值率不填按 5%。'],
+        ['3. 材料期初：填「现在仓库里有多少」。库存结存就是这么累出来的，以后进货走「材料进库」。'],
+        ['4. 计件单价：一行一道工序。这里填的是「通用价」（谁做都按这个）；某个人单独议价去「计件工资」里设。'],
+        ['5. 信用额度：一行一家，重复导是「覆盖」，不会叠加；填 0 表示不给欠。'],
+        ['6. 框架价：长期协议单价，开单时会提示这个价。'],
+        ['7. 页签名别改、页签别删 —— 程序按页签名认这一页是什么资料。']
+      ] },
+      { sheet: '固定资产', type: 'asset', rows: [['名称', '原值(元)', '购入日(可空)', '年限(可空=5)', '残值率%(可空=5)', '备注(可空)']] },
+      { sheet: '材料期初', type: 'material', rows: [['材料名', '单位(可空)', '数量', '单价', '日期(可空)', '备注(可空)']] },
+      { sheet: '计件单价', type: 'wage_rate', rows: [['工序', '单价(元/件)', '单位(可空)', '备注(可空)']] },
+      { sheet: '信用额度', type: 'credit', rows: [['客户', '额度(元)', '备注(可空)']] },
+      { sheet: '框架价', type: 'frame', rows: [['客户', '产品', '单价(元)', '起始日(可空)', '备注(可空)']] }
+    ]
   }
 }
 
 // 页签名 → 导入类型。用户可能顺手改个名（「账户余额」「预付」），常见写法都认；
 // 也允许直接把类型名当页签名（ar_recon / expense …）。
+// 「静态资料」类导入：设备、材料期初、工序单价、额度、框架价、客户档案、账期、账户期初。
+// 它们不产生这个月的收支，所以不受月结锁限制 —— 锁的是这个月的账，不是这台机器的出厂日期。
+const STATIC_IMPORT_TYPES = ['parties', 'term', 'acc_open', 'asset', 'material', 'wage_rate', 'credit', 'frame']
 const PACK_SHEET_TYPE = {
   账户期初: 'acc_open', 账户余额: 'acc_open', 账户: 'acc_open', 期初账户: 'acc_open',
   默认账期: 'term', 账期: 'term',
@@ -7097,7 +7135,12 @@ const PACK_SHEET_TYPE = {
   支出: 'expense', 日常支出: 'expense', 报销: 'reimb',
   借支: 'loan', 员工借支: 'loan',
   付房东: 'prepaid', 房东: 'prepaid', 预付: 'prepaid',
-  应收: 'ar', 应付: 'ap'
+  应收: 'ar', 应付: 'ap',
+  固定资产: 'asset', 机器设备: 'asset', 设备期初: 'asset',
+  材料期初: 'material', 库存期初: 'material', 材料: 'material',
+  计件单价: 'wage_rate', 工价: 'wage_rate', 工序单价: 'wage_rate',
+  信用额度: 'credit', 额度: 'credit',
+  框架价: 'frame', 协议价: 'frame'
 }
 function packTypeOf(name) {
   const t = String(name || '').trim()
@@ -7137,7 +7180,7 @@ app.get('/import-template-xlsx', async (c) => {
 app.get('/import-template-pack', async (c) => {
   const p = String(c.req.query('tpl') || 'daily')
   const P = IMPORT_PACKS[p]
-  if (!P) return c.json({ error: '没有这个模板包（tpl 只能是 open 或 daily）' }, 400)
+  if (!P) return c.json({ error: '没有这个模板包（tpl 只能是 open / daily / base）' }, 400)
   // 分类下拉：省得每天手打，写错了也不影响金额
   let cats = []
   try {
@@ -8159,6 +8202,73 @@ async function previewImport(db, type, rawRows) {
         extra = [cellNumber(rt) ? '年息 ' + cellNumber(rt) + '%' : '', cellNumber(tm) ? cellNumber(tm) + ' 个月' : '', '不写现金流水'].filter(Boolean).join('，')
       }
     }
+    else if (type === 'asset') {
+      // 固定资产期初：名称, 原值, 购入日(可空), 年限(可空=5), 残值率%(可空=5), 备注(可空)
+      const [nm, v, bd, ly2, rr2, rk] = p
+      party = nm || ''
+      const amt = cellNumber(v)
+      const lifeN = cellNumber(ly2)
+      const resN = cellNumber(rr2)
+      if (!String(party).trim()) hardErr = '没写设备名'
+      else if (!(amt > 0)) hardErr = '原值不是数字'
+      else {
+        amount = round2(amt)
+        if (bd && looksLikeDate(bd)) { d = toIsoDate(bd); dateGiven = true }
+        const life = lifeN === null || lifeN <= 0 ? 5 : round2(lifeN)
+        const res = resN === null || resN < 0 ? 5 : round2(resN)
+        extra = '按 ' + life + ' 年折旧、残值 ' + res + '%，折旧从买入那天起算' + (rk ? '，' + String(rk) : '')
+      }
+    }
+    else if (type === 'material') {
+      // 材料期初：材料名, 单位(可空), 数量, 单价, 日期(可空), 备注(可空)
+      const [nm, ut, qv, pv, dt2, rk] = p
+      party = nm || ''
+      const qty = cellNumber(qv)
+      const price = cellNumber(pv)
+      category = String(ut || '').trim() || '个'
+      if (!String(party).trim()) hardErr = '没写材料名'
+      else if (!(qty > 0)) hardErr = '数量不是数字'
+      else {
+        amount = round2(qty)
+        cost = round2(price === null ? 0 : price)
+        if (dt2 && looksLikeDate(dt2)) { d = toIsoDate(dt2); dateGiven = true }
+        extra = '入库 ' + round2(qty) + ' ' + category + '，单价 ¥' + round2(price === null ? 0 : price) + '，合计 ¥' + round2(qty * (price === null ? 0 : price)) + '（只记库存，不动现金）'
+      }
+    }
+    else if (type === 'wage_rate') {
+      // 计件单价：工序, 单价, 单位(可空), 备注(可空)
+      const [pr, v, ut, rk] = p
+      party = pr || ''
+      const rate = cellNumber(v)
+      category = String(ut || '').trim() || '件'
+      if (!String(party).trim()) hardErr = '没写工序名'
+      else if (!(rate > 0)) hardErr = '单价不是数字'
+      else { amount = round2(rate); extra = '通用工序价 ' + round2(rate) + ' 元/' + category + (rk ? '，' + String(rk) : '') }
+    }
+    else if (type === 'credit') {
+      // 信用额度：客户, 额度, 备注(可空)
+      const [pt, v, rk] = p
+      party = pt || ''
+      const amt = cellNumber(v)
+      if (!String(party).trim()) hardErr = '没写客户名'
+      else if (!(amt >= 0)) hardErr = '额度不是数字'
+      else { amount = round2(amt); extra = '把这家额度设成 ¥' + round2(amt) + '（同一家重复导是覆盖，不会叠加）' + (rk ? '，' + String(rk) : '') }
+    }
+    else if (type === 'frame') {
+      // 框架价：客户, 产品, 单价, 起始日(可空), 备注(可空)
+      const [pt, it, v, sd, rk] = p
+      party = pt || ''
+      item = it || ''
+      const price = cellNumber(v)
+      if (!String(party).trim()) hardErr = '没写客户名'
+      else if (!String(item).trim()) hardErr = '没写产品名'
+      else if (!(price > 0)) hardErr = '单价不是数字'
+      else {
+        amount = round2(price)
+        if (sd && looksLikeDate(sd)) { d = toIsoDate(sd); dateGiven = true }
+        extra = '开单时单价默认 ¥' + round2(price) + (rk ? '，' + String(rk) : '')
+      }
+    }
     parsed.push({ party: String(party).trim(), item: String(item).trim(), amount: round2(amount), cost: round2(cost), category: String(category).trim(), months: num(months), date: (d || t).slice(0, 10), date_given: dateGiven, extra, hardErr: hardErr ? String(hardErr) : '' })
   }
   // 一次把 7 天窗口内的老单据捞出来，避免逐行查库
@@ -8188,9 +8298,14 @@ async function previewImport(db, type, rawRows) {
     else if (type === 'acc_open') { if (!(x.amount >= 0)) { r.ok = false; r.error = '期初余额不是数字' } }
     else if (type === 'term') { /* 上面已校验天数 */ }
     else if (type === 'parties') { /* 只建档案，没有金额 */ }
+    else if (type === 'credit') { if (!(x.amount >= 0)) { r.ok = false; r.error = '额度不是数字' } }
+    else if (type === 'asset') { if (!(x.amount > 0)) { r.ok = false; r.error = '原值不是数字' } }
+    else if (type === 'material') { if (!(x.amount > 0)) { r.ok = false; r.error = '数量不是数字' } }
     else if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' }
     const m = x.date.slice(0, 7)
-    if (lockSet.has(m)) { r.locked = true; r.error = m + ' 已结账锁定，这一行导不进去' }
+    // 静态资料（机器、库存、工价、额度、框架价、账户期初、默认账期、名单）不是当月收支，
+    // 结账锁不该拦它们——换个说法：锁的是「这个月的账」，不是「这台机器」。
+    if (STATIC_IMPORT_TYPES.indexOf(type) < 0 && lockSet.has(m)) { r.locked = true; r.error = m + ' 已结账锁定，这一行导不进去' }
     if (r.ok && !r.locked) {
       const k = norm(x.party) + '|' + x.amount
       const src = (type === 'ar' || type === 'ar_recon') ? iAr : (type === 'ap' || type === 'ap_recon') ? iAp : type === 'expense' ? iEx : null
@@ -8241,6 +8356,10 @@ async function packImpact(db, groups) {
   const loanRow = await db.prepare('SELECT COALESCE(SUM(MAX(amount - COALESCE(used,0) - COALESCE(returned,0),0)),0) AS t FROM loans').first().catch(() => ({ t: 0 }))
   const loanB = round2(num(loanRow && loanRow.t))
   const debtB = round2(await debtLeftAt(db, day).catch(() => 0))
+  // 预收/预付也要在这个「导完会变成多少」里出现，否则试算的家底和首页对不上（A6 之后家底含这两项）
+  const advB = await advLeftAt(db, day).catch(() => ({ in: 0, out: 0 }))
+  const advInB = round2(num(advB && advB.in))
+  const advOutB = round2(num(advB && advB.out))
   // 每个员工手上还挂着多少借支没报：报销先冲这里，冲完的才走现金
   const remainBy = new Map()
   const loanRows = (await db.prepare('SELECT staff, amount, used, returned FROM loans').all().catch(() => ({ results: [] }))).results || []
@@ -8298,12 +8417,12 @@ async function packImpact(db, groups) {
     for (const k of Object.keys(all)) all[k] = round2(all[k] + d[k])
     rows.push({ sheet: g.sheet || '', type, type_name: g.type_name || '', count: n, amount, cash: d.cash, ar: d.ar, ap: d.ap, loan: d.loan, debt: d.debt })
   }
-  const before = { cash: cashB, ar: arB, ap: apB, loan: loanB, debt: debtB }
-  before.net_worth = round2(cashB + arB - apB - debtB)
-  const after = { cash: round2(cashB + all.cash), ar: round2(arB + all.ar), ap: round2(apB + all.ap), loan: round2(loanB + all.loan), debt: round2(debtB + all.debt) }
-  after.net_worth = round2(after.cash + after.ar - after.ap - after.debt)
+  const before = { cash: cashB, ar: arB, ap: apB, loan: loanB, debt: debtB, adv_in: advInB, adv_out: advOutB }
+  before.net_worth = round2(cashB + arB - apB - debtB - advInB + advOutB)
+  const after = { cash: round2(cashB + all.cash), ar: round2(arB + all.ar), ap: round2(apB + all.ap), loan: round2(loanB + all.loan), debt: round2(debtB + all.debt), adv_in: advInB, adv_out: advOutB }
+  after.net_worth = round2(after.cash + after.ar - after.ap - after.debt - after.adv_in + after.adv_out)
   const delta = {}
-  for (const k of ['cash', 'ar', 'ap', 'loan', 'debt', 'net_worth']) delta[k] = round2(after[k] - before[k])
+  for (const k of ['cash', 'ar', 'ap', 'loan', 'debt', 'adv_in', 'adv_out', 'net_worth']) delta[k] = round2(after[k] - before[k])
   const f = (x) => (num(x) < 0 ? '-¥' + Math.abs(round2(x)) : '¥' + round2(x))
   const mv = (a, b) => `${f(a)} → ${f(b)}`
   if (delta.ar) notes.push(delta.ar > 0 ? `客户会多欠你 ${f(delta.ar)}（应收 ${mv(before.ar, after.ar)}）` : `应收会少 ${f(-delta.ar)}（${mv(before.ar, after.ar)}）`)
@@ -8703,7 +8822,7 @@ const GLOSSARY = [
   { k: 'accrue', t: '预提利息', s: '利息还没付，但已经欠着了', d: '借款每月产生利息，即使你还没付款，也先算进当月成本，付款时才动现金。', tip: '不预提的话，利润会虚高。', go: 'stat:asset' },
   { k: 'cash', t: '现金 / 手头现金', s: '账户里现在真有的钱', d: '现金、银行卡、微信、支付宝几个账户加起来。每笔收付款都挂到某个账户，账户余额才准。', tip: '老流水没挂账户的，系统归到第一个账户。', go: 'stat:flows' },
   { k: 'flow', t: '流水', s: '每一笔钱的进出', d: '流水页能看到日期、方向、金额、分类、账户和对应单据；删流水会把单据的已收已付调回去。', tip: '内部转账（银行卡转微信）也记流水，但不算收支。', go: 'stat:flows' },
-  { k: 'networth', t: '净资产 / 家底', s: '把欠的扣掉，你到底有多少', d: '算法：现金 + 应收 − 应付 − 借款。资产 = 负债 + 所有者权益，报表里会对平。押金、借支、预付款不计入（押金要退回、借支会报销冲掉、预付是还没花掉的成本），它们单独列出来。', tip: '每月底自动存一份存档，改老单据也不会带偏历史曲线。', go: 'stat:asset' },
+  { k: 'networth', t: '净资产 / 家底', s: '把欠的扣掉，你到底有多少', d: '算法：现金 + 应收 − 应付 − 借款 − 预收 + 预付。预收是客户先打来的钱（我们还欠他货，算负债），预付是我们先付给供应商的钱（算资产）。押金、员工借支不计入（押金要退回、借支会报销冲掉），它们单独列出来。', tip: '每月底自动存一份存档，改老单据也不会带偏历史曲线。', go: 'stat:asset' },
   { k: 'aging', t: '账龄', s: '这笔欠款欠了多久', d: '按 0–30 / 31–60 / 61–90 / 90 天以上分档，还会估一个「可能收不回来的比例」。', tip: '90 天以上的，建议先要一部分。', go: 'stat:asset' },
   { k: 'credit', t: '信用额度', s: '这家客户最多能欠多少', d: '在单位页设一个上限，开单超过时只提醒不拦（提示他超了多少）。', tip: '对老拖款的客户很有用。', go: 'stat:contact' },
   { k: 'lock', t: '月结锁定 / 结账', s: '这个月定了，别再改', d: '结账后这个月的单据不能新增、修改、删除，避免对完账又被改乱。', tip: '结错了可以「解锁（删归档）」，但归档快照会一起没了。', go: 'stat:report' },
@@ -9144,6 +9263,8 @@ app.get('/dashboard', async (c) => {
     if (pct >= 90) budgetOver.push({ category: b.category, limit, spent, pct, over: spent > limit, over_amt: spent > limit ? round2(spent - limit) : 0 })
   }
   const cashBal = round2((accList || []).reduce((s2, a) => s2 + num(a && a.balance), 0))
+  // 预收定金 / 预付货款：家底要减预收、加预付，否则「客户打了 2 万定金，家底一分不涨」
+  const advDash = await advLeftAt(db, todayIso()).catch((e) => { noteFail(e, '首页·预收预付'); return { in: 0, out: 0 } })
   const role = c.get('role') || 'owner'
   const hideProfit = role === 'staff'
   const scRow = { value: agg.sc_cnt }, scAt = { value: agg.sc_at }
@@ -9179,7 +9300,9 @@ app.get('/dashboard', async (c) => {
     due_soon_count: cntDue,
     due_soon: dueSoon.results.map((r) => ({ ...r, unpaid: round2(r.price - r.paid - num(r.written_off)), due_short: (r.due_date || '').slice(0, 10) })),
     debt_total: hideProfit ? null : debts.total_principal,
-    net_worth: hideProfit ? null : round2(cashBal + num(ar.total) - num(ap.total) - debts.total_principal),
+    net_worth: hideProfit ? null : round2(cashBal + num(ar.total) - num(ap.total) - debts.total_principal - advDash.in + advDash.out),
+    adv_in_left: hideProfit ? null : advDash.in,
+    adv_out_left: hideProfit ? null : advDash.out,
     debt_month_interest: hideProfit ? null : debts.month_interest,
     debt_overdue_count: hideProfit ? 0 : debts.overdue_count,
     debt_soon_count: hideProfit ? 0 : debts.soon.length,
@@ -9512,6 +9635,55 @@ app.get('/ar', async (c) => {
 
 // 应收 / 应付 页内汇总
 // 上次跟这个客户/供应商做过什么（录入时自动带出，少打字）
+// 客户/供应商名别再手打全称：打字的时候就给候选，点一下就填全。
+// 候选来源三处合并：①最近下过单的名字（最常用）②往来档案里的名字 ③模糊匹配（去掉「有限公司/厂/店」后包含）。
+// 只读、不动账；查不到就回空数组，前端照样能手打。
+app.get('/party-pick', async (c) => {
+  const db = c.env.DB
+  const u = new URL(c.req.url)
+  const kw = (u.searchParams.get('kw') || '').trim()
+  const type = u.searchParams.get('type') === 'ap' ? 'ap' : 'ar'
+  const lim = Math.min(Math.max(num(u.searchParams.get('limit')) || 12, 1), 40)
+  const out = []
+  const seen = new Set()
+  const push = (name, extra) => {
+    const n = String(name || '').trim()
+    if (!n || seen.has(n)) return
+    seen.add(n)
+    out.push(Object.assign({ name: n }, extra || {}))
+  }
+  const table = type === 'ap' ? 'payables' : 'orders'
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  const amtCol = type === 'ap' ? 'amount' : 'price'
+  try {
+    if (kw) {
+      // 模糊：先按「像这个名字」找，最近用过的排前面
+      const rows = await db.prepare(
+        'SELECT ' + col + ' AS n, COUNT(*) AS cnt, MAX(id) AS last_id, SUM(COALESCE(' + amtCol + ',0)) AS total FROM ' + table +
+        ' WHERE ' + col + ' LIKE ? GROUP BY ' + col + ' ORDER BY last_id DESC LIMIT ?'
+      ).bind('%' + kw + '%', lim).all()
+      for (const r of (rows.results || [])) push(r.n, { cnt: num(r.cnt), total: round2(num(r.total)), hit: 'like' })
+      // 再去掉后缀比一遍（「华兴」能找到「华兴五金有限公司」）
+      const base = kw.replace(/（.*?）|\(.*?\)|有限公司|公司|工厂|厂|店|门市部|经营部/g, '').trim()
+      if (base && base !== kw) {
+        const rows2 = await db.prepare(
+          'SELECT ' + col + ' AS n, COUNT(*) AS cnt, MAX(id) AS last_id FROM ' + table +
+          ' WHERE ' + col + ' LIKE ? GROUP BY ' + col + ' ORDER BY last_id DESC LIMIT ?'
+        ).bind('%' + base + '%', lim).all()
+        for (const r of (rows2.results || [])) push(r.n, { cnt: num(r.cnt), hit: 'near' })
+      }
+    } else {
+      const rows = await db.prepare(
+        'SELECT ' + col + ' AS n, COUNT(*) AS cnt, MAX(id) AS last_id FROM ' + table + ' GROUP BY ' + col + ' ORDER BY last_id DESC LIMIT ?'
+      ).bind(lim).all()
+      for (const r of (rows.results || [])) push(r.n, { cnt: num(r.cnt), hit: 'recent' })
+    }
+    const prof = await db.prepare("SELECT party FROM party_profiles WHERE party LIKE ? ORDER BY id DESC LIMIT ?").bind('%' + (kw || '') + '%', lim).all().catch(() => ({ results: [] }))
+    for (const r of (prof.results || [])) push(r.party, { cnt: 0, hit: 'profile' })
+  } catch (e) { noteFail(e, '客户名候选') }
+  return c.json({ ok: true, type, kw, list: out.slice(0, lim) })
+})
+
 app.get('/last-deal', async (c) => {
   const db = c.env.DB
   const u = new URL(c.req.url)
@@ -11893,6 +12065,13 @@ app.get('/statement', async (c) => {
       total += left
       lines.push(`${i + 1}. ${o.item_name || '加工'} 总${o.price} 已收${o.paid}${wo > 0 ? ' 已核销' + wo : ''} 欠${round2(left)}`)
     })
+    // 预收抵扣：客户先打过定金、这笔钱还没用掉的，对账单上要说清楚并抵掉，
+    // 否则客户看到「欠 8000」，其实他早打过 3000 定金，会以为我们多算。
+    const advRow = await db.prepare("SELECT COALESCE(SUM(MAX(amount - COALESCE(used,0),0)),0) t FROM advances WHERE type='in' AND party=?").bind(name).first().catch(() => null)
+    const advLeft = round2(num(advRow && advRow.t))
+    if (advLeft > 0.005) {
+      lines.push(`其中已预收定金 ${advLeft} 元（还没用掉），抵扣后实际欠：${round2(Math.max(total - advLeft, 0))} 元`)
+    }
     lines.push(`合计欠款：${round2(total)} 元`)
   } else {
     const { results } = await db.prepare('SELECT * FROM payables WHERE supplier=? AND paid + COALESCE(written_off,0) < amount ORDER BY id').bind(name).all()
@@ -11904,6 +12083,11 @@ app.get('/statement', async (c) => {
       const desc = [p.category, p.remark].filter(Boolean).join(' ')
       lines.push(`${i + 1}. ${desc || '货款'} 总${p.amount} 已付${p.paid} 欠${round2(left)}`)
     })
+    const advRow2 = await db.prepare("SELECT COALESCE(SUM(MAX(amount - COALESCE(used,0),0)),0) t FROM advances WHERE type='out' AND party=?").bind(name).first().catch(() => null)
+    const advLeft2 = round2(num(advRow2 && advRow2.t))
+    if (advLeft2 > 0.005) {
+      lines.push(`其中已预付 ${advLeft2} 元（还没用掉），抵扣后实际该付：${round2(Math.max(total - advLeft2, 0))} 元`)
+    }
     lines.push(`合计欠款：${round2(total)} 元`)
   }
   return c.json({ text: await stampWithProf(db, name, lines) })
@@ -12314,7 +12498,9 @@ async function importRows(db, type, rows, opts) {
       // 期初余额：不带日期就记到今年 1 月 1 日（表示“以前欠下的”）
       d = `${todayIso().slice(0, 4)}-01-01T00:00:00.000Z`
     }
-    if (locked(d)) { skippedLocked++; continue }
+    // 「静态资料」不看月结锁：设备、材料期初、工序单价、额度、框架价是「这东西从哪天开始存在」，
+    // 不是这个月的钱。锁的是账，不是机器的出厂日期 —— 以前这台机器就永远补不进来。
+    if (STATIC_IMPORT_TYPES.indexOf(type) < 0 && locked(d)) { skippedLocked++; continue }
     if (type === 'ar') {
       const [customer, item, price, cost, dueC, operC] = p
       if (customer && num(price) > 0) {
@@ -12508,6 +12694,89 @@ async function importRows(db, type, rows, opts) {
           .bind(String(lender).trim(), 'bank', round2(amt), round2(cellNumber(rate) || 0), sd, Math.max(0, Math.round(cellNumber(termIn) || 0)), 'interest', batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += round2(amt)
+        n++
+      }
+    } else if (type === 'asset') {
+      // 固定资产期初：名称, 原值, 购入日(可空), 年限(可空), 残值率%(可空), 备注(可空)
+      // 只记「这台机器值多少钱、什么时候买的」，不写现金流水（买它那天可能早记过账了）
+      const [nm, v, bd, ly3, rr3, rk] = p
+      const name = String(nm || '').trim()
+      const amt = cellNumber(v)
+      if (name && amt !== null && amt > 0) {
+        const buy = bd && looksLikeDate(bd) ? toIsoDate(bd).slice(0, 10) : (d || t).slice(0, 10)
+        const lifeN = cellNumber(ly3)
+        const resN = cellNumber(rr3)
+        const hitAs = await db.prepare('SELECT id FROM assets WHERE name=? AND cost=?').bind(name, round2(amt)).first()
+        if (hitAs && !o.confirmDup) { dups.push({ party: name, amount: round2(amt), date: buy, id: hitAs.id, kind: 'asset' }); continue }
+        const w = await db.prepare('INSERT INTO assets (name, cost, buy_date, life_years, residual_rate, created_at) VALUES (?,?,?,?,?,?)')
+          .bind(name, round2(amt), buy, lifeN === null || lifeN <= 0 ? 5 : round2(lifeN), resN === null || resN < 0 ? 5 : round2(resN), now()).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += round2(amt)
+        n++
+      }
+    } else if (type === 'material') {
+      // 材料期初：材料名, 单位(可空), 数量, 单价, 日期(可空), 备注(可空)
+      // 库存结存是靠 material_moves 加出来的，所以期初就是「某天入了一笔」
+      const [nm, ut, qv, pv, dt2, rk] = p
+      const name = String(nm || '').trim()
+      const qty = cellNumber(qv)
+      const price = cellNumber(pv)
+      if (name && qty !== null && qty > 0) {
+        const day = dt2 && looksLikeDate(dt2) ? toIsoDate(dt2).slice(0, 10) : (d || t).slice(0, 10)
+        const pr = price === null ? 0 : round2(price)
+        const hitM = await db.prepare("SELECT id FROM material_moves WHERE material=? AND kind='in' AND substr(date,1,10)=? AND qty=? AND price=?").bind(name, day, round2(qty), pr).first()
+        if (hitM && !o.confirmDup) { dups.push({ party: name, amount: round2(qty), date: day, id: hitM.id, kind: 'material' }); continue }
+        const unit = String(ut || '').trim() || '个'
+        const w = await db.batch([
+          db.prepare("INSERT INTO materials (name, unit, created_at) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET unit=COALESCE(NULLIF(excluded.unit,''), unit)").bind(name, unit, now()),
+          db.prepare("INSERT INTO material_moves (material, kind, date, month, qty, price, amount, note, created_at) VALUES (?, 'in', ?, ?, ?, ?, ?, ?, ?)")
+            .bind(name, day, day.slice(0, 7), round2(qty), pr, round2(qty * pr), String(rk || '') || '期初导入', now())
+        ])
+        const mid = w && w[1] && w[1].meta && w[1].meta.last_row_id
+        if (mid) ids.push(mid)
+        total += round2(qty * pr)
+        n++
+      }
+    } else if (type === 'wage_rate') {
+      // 计件单价：工序, 单价, 单位(可空), 备注(可空)。worker 留空 = 通用工序价（谁做都按这个）
+      const [pr2, v, ut, rk] = p
+      const proc = String(pr2 || '').trim()
+      const rate = cellNumber(v)
+      if (proc && rate !== null && rate > 0) {
+        const hitW = await db.prepare("SELECT id FROM wage_rates WHERE worker='' AND process=? AND rate=?").bind(proc, round2(rate)).first()
+        if (hitW && !o.confirmDup) { dups.push({ party: proc, amount: round2(rate), date: (d || t).slice(0, 10), id: hitW.id, kind: 'wage_rate' }); continue }
+        const w = await db.prepare("INSERT INTO wage_rates (worker, item, process, rate, unit, created_at) VALUES ('', '', ?, ?, ?, ?)")
+          .bind(proc, round2(rate), String(ut || '').trim() || '件', now()).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += round2(rate)
+        n++
+      }
+    } else if (type === 'credit') {
+      // 信用额度：客户, 额度, 备注(可空)。这是「设成」不是「加上」——同一家重复导是覆盖
+      const [pt, v, rk] = p
+      const party = String(pt || '').trim()
+      const amt = cellNumber(v)
+      if (party && amt !== null && amt >= 0) {
+        const w = await db.prepare('INSERT INTO credit_limits (party, limit_amount, note, created_at) VALUES (?,?,?,?) ON CONFLICT(party) DO UPDATE SET limit_amount=excluded.limit_amount, note=excluded.note')
+          .bind(party, round2(amt), String(rk || ''), now()).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += round2(amt)
+        n++
+      }
+    } else if (type === 'frame') {
+      // 框架价：客户, 产品, 单价, 起始日(可空), 备注(可空)
+      const [pt, it, v, sd, rk] = p
+      const party = String(pt || '').trim()
+      const item2 = String(it || '').trim()
+      const price = cellNumber(v)
+      if (party && item2 && price !== null && price > 0) {
+        const start = sd && looksLikeDate(sd) ? toIsoDate(sd).slice(0, 10) : (d || t).slice(0, 10)
+        const hitF = await db.prepare('SELECT id FROM frame_prices WHERE party=? AND item=? AND price=?').bind(party, item2, round2(price)).first()
+        if (hitF && !o.confirmDup) { dups.push({ party: party + ' ' + item2, amount: round2(price), date: start, id: hitF.id, kind: 'frame' }); continue }
+        const w = await db.prepare('INSERT INTO frame_prices (party, item, price, start_date, note, created_at) VALUES (?,?,?,?,?,?)')
+          .bind(party, item2, round2(price), start, String(rk || ''), now()).run()
+        if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        total += round2(price)
         n++
       }
     } else if (type === 'expense') {
@@ -14066,7 +14335,9 @@ async function monthSum(db, m) {
   const cash = round2(accs.reduce((a, x) => a + x.balance, 0))
   const gross = round2(orderAdd - orderCost)
   const net = round2(gross - expCash - dep - amort - accrual)
-  return { m, inc: round2(inc), out: round2(out), orderAdd: round2(orderAdd), orderCost: round2(orderCost), payableAdd: round2(payableAdd), expCash: round2(expCash), dep: round2(dep), amort: round2(amort), accrual: round2(accrual), gross, net, arLeft: round2(arLeft), apLeft: round2(apLeft), debtLeft, cash, accounts: accs, equity: round2(cash + arLeft - apLeft - debtLeft) }
+  const advRev = await advLeftAt(db, monthEndOf(String(m || '').slice(0, 7)) || (String(m || '').slice(0, 7) + '-28')).catch((e) => { noteFail(e, '经营体检·预收预付'); return { in: 0, out: 0 } })
+  const advInR = round2(num(advRev.in)), advOutR = round2(num(advRev.out))
+  return { m, inc: round2(inc), out: round2(out), orderAdd: round2(orderAdd), orderCost: round2(orderCost), payableAdd: round2(payableAdd), expCash: round2(expCash), dep: round2(dep), amort: round2(amort), accrual: round2(accrual), gross, net, arLeft: round2(arLeft), apLeft: round2(apLeft), debtLeft, cash, accounts: accs, adv_in: advInR, adv_out: advOutR, equity: round2(cash + arLeft - apLeft - debtLeft - advInR + advOutR) }
 }
 
 async function packSheets(db, m) {
@@ -14076,7 +14347,9 @@ async function packSheets(db, m) {
     ['账期', m], ['收款（经营，不含转账和税点）', s.inc], ['付款/支出（经营，不含转账和税点）', s.out], ['结余', round2(s.inc - s.out)],
     ['接单额', s.orderAdd], ['材料外协成本', s.orderCost], ['毛利', s.gross],
     ['现金支出', s.expCash], ['折旧', s.dep], ['摊销', s.amort], ['预提利息', s.accrual], ['净利（权责）', s.net],
-    [], ['应收未收', s.arLeft], ['应付未付', s.apLeft], ['借款余额', s.debtLeft], ['手头现金', s.cash], ['净资产', s.equity]
+    [], ['应收未收', s.arLeft], ['应付未付', s.apLeft], ['借款余额', s.debtLeft], ['手头现金', s.cash],
+    ...(num(s.adv_in) ? [['预收（客户先付的，从家底里减）', num(s.adv_in)]] : []), ...(num(s.adv_out) ? [['预付（先付供应商的，加到家里）', num(s.adv_out)]] : []),
+    ['净资产', s.equity]
   ] })
   sheets.push({ name: '利润表', rows: [
     ['项目', '本月', '说明'], ['接单额（加工费）', s.orderAdd, '本月开单金额'], ['材料·外协成本', s.orderCost, '单据上填的成本'], ['毛利', s.gross, '接单 − 成本'],
@@ -14085,9 +14358,13 @@ async function packSheets(db, m) {
   ] })
   const bsRows = [['资产', '金额'], ['货币资金', s.cash]]
   s.accounts.forEach((a) => bsRows.push(['　' + a.name, a.balance]))
-  bsRows.push(['应收未收', s.arLeft], ['资产合计', round2(s.cash + s.arLeft)], [])
-  bsRows.push(['负债', '金额'], ['应付未付', s.apLeft], ['借款余额', s.debtLeft], ['负债合计', round2(s.apLeft + s.debtLeft)], [])
-  bsRows.push(['所有者权益', s.equity], ['负债 + 权益', round2(s.apLeft + s.debtLeft + s.equity)])
+  bsRows.push(['应收未收', s.arLeft])
+  if (num(s.adv_out)) bsRows.push(['预付（先付供应商的）', num(s.adv_out)])
+  bsRows.push(['资产合计', round2(s.cash + s.arLeft + num(s.adv_out))], [])
+  bsRows.push(['负债', '金额'], ['应付未付', s.apLeft], ['借款余额', s.debtLeft])
+  if (num(s.adv_in)) bsRows.push(['预收（客户先付的）', num(s.adv_in)])
+  bsRows.push(['负债合计', round2(s.apLeft + s.debtLeft + num(s.adv_in))], [])
+  bsRows.push(['所有者权益', s.equity], ['负债 + 权益', round2(s.apLeft + s.debtLeft + num(s.adv_in) + s.equity)])
   sheets.push({ name: '资产负债表', rows: bsRows })
   // 只取「本月的单」+「以前开单还没结清的」：以前是整表 `SELECT *` 一把捞，
   // 三年的单都塞进一张 Excel，导出慢、页签大，而且大部分行跟这个月没关系。
@@ -14356,17 +14633,36 @@ const asOfEff = (ymd) => {
 }
 async function debtLeftAt(db, ymd) {
   const d = asOfEff(ymd)
+  // 已经结清/还清的借款不算：以前这条 SQL 不看 status，用「结清」按钮还完的借款
+  // 没有还款记录，于是家底里永远挂着它，跟首页（只算 open）差一笔。
   const rs = await db.prepare(
-    `SELECT COALESCE(d.principal,0) AS p,
+    `SELECT COALESCE(d.principal,0) AS p, COALESCE(d.status,'') AS st,
             COALESCE((SELECT SUM(r.amount) FROM debt_repays r
                        WHERE r.debt_id = d.id AND r.kind = 'principal'
                          AND substr(r.rdate,1,10) <= ?),0) AS paid
        FROM debts d
-      WHERE COALESCE(NULLIF(d.start_date,''), substr(d.created_at,1,10)) <= ?`)
+      WHERE COALESCE(NULLIF(d.start_date,''), substr(d.created_at,1,10)) <= ?
+        AND COALESCE(d.status,'') <> 'closed'`)
     .bind(d, d).all().catch((e) => { noteFail(e, '借款余额'); return { results: [] } })
   let left = 0
   for (const r of rs.results || []) left += Math.max(0, num(r.p) - num(r.paid))
   return round2(left)
+}
+
+// 到某一天为止，「客户先打来的钱（预收）」和「先付给供应商的钱（预付）」各还剩多少。
+// 家底要减预收、加预付：预收是我们还欠客户的货，预付是供应商还欠我们的货。
+// 以前这两样都不进家底，客户转来 2 万定金，家底一分不涨（对账单上也看不见，客户会以为我们吞了）。
+async function advLeftAt(db, ymd) {
+  const d = asOfEff(ymd)
+  const rs = await db.prepare(
+    "SELECT type, COALESCE(SUM(MAX(amount - COALESCE(used,0),0)),0) t, COUNT(*) n FROM advances WHERE substr(created_at,1,10) <= ? GROUP BY type"
+  ).bind(d).all().catch((e) => { noteFail(e, '预收预付余额'); return { results: [] } })
+  let inLeft = 0, outLeft = 0
+  for (const r of rs.results || []) {
+    if (String(r.type) === 'in') inLeft += num(r.t)
+    else outLeft += num(r.t)
+  }
+  return { in: round2(inLeft), out: round2(outLeft) }
 }
 
 // 截至某一天还欠多少应收（ar）/ 应付（ap），连带按单位拆开。
@@ -14506,11 +14802,14 @@ async function archiveSheets(db, kind, q) {
     ])
     const arTot = round2(arAt.t)
     const apTot = round2(apAt.t)
+    const advY = await advLeftAt(db, y + '-12-31').catch((e) => { noteFail(e, '年报·预收预付'); return { in: 0, out: 0 } })
+    advY.in = round2(num(advY.in)); advY.out = round2(num(advY.out))
     sheets.push({ name: '年末余额', rows: [
       [y + '-12-31 那天的余额', ''], ['应收未收合计', arTot], ['涉及客户数', arAt.rows.length],
       ['应付未付合计', apTot], ['涉及供应商数', apAt.rows.length],
       ['累计现金结余（含账户期初）', round2(num(cashRow && cashRow.t))], ['借款余额', round2(num(debtLeft))],
-      ['净资产（现金+应收−应付−借款）', round2(num(cashRow && cashRow.t) + arTot - apTot - num(debtLeft))]
+      ['客户先付的（预收，还欠他货）', advY.in], ['先付给供应商的（预付）', advY.out],
+      ['净资产（现金+应收−应付−借款−预收+预付）', round2(num(cashRow && cashRow.t) + arTot - apTot - num(debtLeft) - advY.in + advY.out)]
     ] })
     sheets.push({ name: '年末应收（按客户）', rows: [['客户', '笔数', '未收金额']].concat(arAt.rows.map((r) => [r.party, r.n, r.t])).concat([[], ['合计', '', arTot]]) })
     sheets.push({ name: '年末应付（按供应商）', rows: [['供应商', '笔数', '未付金额']].concat(apAt.rows.map((r) => [r.party, r.n, r.t])).concat([[], ['合计', '', apTot]]) })
@@ -14622,19 +14921,23 @@ async function archiveSheets(db, kind, q) {
   // 余额类科目一律按「截至 to 那天真发生过的收付/还款」算（见 arApLeftAt / debtLeftAt 的注释）。
   // 以前借款那条 SQL 写的 amount/repayed 两列在 debts 表里根本不存在，报错被吞成 0，
   // 于是这张表的「净资产」比年报大出一整笔借款。
-  const [arS, apS, accs, debtLeft] = await Promise.all([
+  const [arS, apS, accs, debtLeft, advB0] = await Promise.all([
     arApLeftAt(db, to, 'ar'),
     arApLeftAt(db, to, 'ap'),
     accountBalances(db).catch(() => []),
-    debtLeftAt(db, to)
+    debtLeftAt(db, to),
+    advLeftAt(db, to).catch((e) => { noteFail(e, '科目余额表·预收预付'); return { in: 0, out: 0 } })
   ])
+  const advB = { in: round2(num(advB0.in)), out: round2(num(advB0.out)) }
   sheets.push({ name: '余额类科目', rows: [
     ['科目', '余额', '笔数', '说明'],
     ['应收未收', round2(arS.t), arS.n, '截至 ' + to + ' 还没收回来的'],
     ['应付未付', round2(apS.t), apS.n, '截至 ' + to + ' 还没付出去的'],
     ...((accs || []).map((a) => ['账户·' + a.name, round2(num(a.balance)), '', '这个账户现在有多少钱（期初 + 收 − 付）'])),
     ['借款余额', round2(debtLeft), '', '还欠银行/私人的（本金 − 已还本金）'],
-    ['净资产', round2((accs || []).reduce((x, a) => x + num(a.balance), 0) + arS.t - apS.t - debtLeft), '', '现金 + 应收 − 应付 − 借款（不含押金、借支）']
+    ['预收（客户先付的，还欠他货）', advB.in, '', '还没用掉的那部分，算负债'],
+    ['预付（先付给供应商的）', advB.out, '', '还没花掉的那部分，算资产'],
+    ['净资产', round2((accs || []).reduce((x, a) => x + num(a.balance), 0) + arS.t - apS.t - debtLeft - advB.in + advB.out), '', '现金 + 应收 − 应付 − 借款 − 预收 + 预付（不含押金、借支）']
   ] })
   // 这一张原来把内部转账和代收代付的税点也算进「收款/付款」，跟上面的科目余额表能对上、
   // 却跟首页「本月收入」和年报表对不上（同一笔 500 转账，一边算收入、一边不算）。
@@ -14706,10 +15009,15 @@ app.get('/report-view', async (c) => {
     { label: '净利（权责）', value: s.net, strong: true, tone: s.net >= 0 ? 'ok' : 'bad' }
   ]
   const bs = {
-    assets: [{ label: '货币资金', value: s.cash }].concat(s.accounts.map((a) => ({ label: '　' + a.name, value: a.balance, sub: true }))).concat([{ label: '应收未收', value: s.arLeft }, { label: '资产合计', value: round2(s.cash + s.arLeft), strong: true }]),
-    liabilities: [{ label: '应付未付', value: s.apLeft }, { label: '借款余额', value: s.debtLeft }, { label: '负债合计', value: round2(s.apLeft + s.debtLeft), strong: true }],
+    assets: [{ label: '货币资金', value: s.cash }].concat(s.accounts.map((a) => ({ label: '　' + a.name, value: a.balance, sub: true })))
+      .concat([{ label: '应收未收', value: s.arLeft }])
+      .concat(num(s.adv_out) ? [{ label: '预付（先付供应商的）', value: num(s.adv_out) }] : [])
+      .concat([{ label: '资产合计', value: round2(s.cash + s.arLeft + num(s.adv_out)), strong: true }]),
+    liabilities: [{ label: '应付未付', value: s.apLeft }, { label: '借款余额', value: s.debtLeft }]
+      .concat(num(s.adv_in) ? [{ label: '预收（客户先付的）', value: num(s.adv_in) }] : [])
+      .concat([{ label: '负债合计', value: round2(s.apLeft + s.debtLeft + num(s.adv_in)), strong: true }]),
     equity: s.equity,
-    check: round2(s.apLeft + s.debtLeft + s.equity - (s.cash + s.arLeft))
+    check: round2(s.apLeft + s.debtLeft + num(s.adv_in) + s.equity - (s.cash + s.arLeft + num(s.adv_out)))
   }
   const tips = []
   if (s.net < 0) tips.push({ tone: 'bad', text: '这个月净利是负的（' + s.net + ' 元）：要么单少了，要么费用比赚的多。' })
@@ -14823,7 +15131,9 @@ async function yearBook(db, y) {
   const cashStart = round2(num(cash.opening) + num(cash.before_flow))
   const cashEnd = round2(num(cash.opening) + num(cash.upto_flow))
   const arEnd = round2(num(arR && arR.v)), apEnd = round2(num(apR && apR.v)), debtEnd = round2(num(debtR && debtR.v))
-  const netEnd = round2(cashEnd + arEnd - apEnd - debtEnd)
+  const advYr = await advLeftAt(db, y + '-12-31').catch((e) => { noteFail(e, '年报·预收预付'); return { in: 0, out: 0 } })
+  const advInEnd = round2(num(advYr.in)), advOutEnd = round2(num(advYr.out))
+  const netEnd = round2(cashEnd + arEnd - apEnd - debtEnd - advInEnd + advOutEnd)
   const prevIncome = round2(num(pOrdR && pOrdR.inc)), prevMat = round2(num(pOrdR && pOrdR.mat)), prevExp = round2(num(pExpR && pExpR.exp))
   const prevProfit = round2(prevIncome - prevMat - prevExp)
   const margin = income > 0 ? round2(profit / income * 100) : 0
@@ -14852,7 +15162,7 @@ async function yearBook(db, y) {
     best: { label: best.label, profit: best.profit }, worst: { label: worst.label, profit: worst.profit },
     active_months: active.length,
     cash: { start: cashStart, end: cashEnd, net: round2(cashEnd - cashStart) },
-    ar_end: arEnd, ap_end: apEnd, debt_end: debtEnd, net_worth: netEnd,
+    ar_end: arEnd, ap_end: apEnd, debt_end: debtEnd, adv_in_end: advInEnd, adv_out_end: advOutEnd, net_worth: netEnd,
     prev: { year: prevY, income: prevIncome, profit: prevProfit },
     tips, text
   }
@@ -15951,6 +16261,22 @@ app.get('/export-all', async (c) => {
     if (!tabs.includes(only)) return c.json({ error: '没有这张表', tables: tabs }, 400)
     const rs = (await db.prepare(`SELECT * FROM ${only} LIMIT 5000`).all()).results || []
     return c.json({ ok: true, only, rows: rs.length, sample: rs.slice(0, 3) })
+  }
+  // ?all=1：一次把手上所有账本都导出来，装进一个文件。
+  // 以前只导当前这一本，用户以为「导出=全部留档」，换电脑时第 2、第 3 本其实没带走。
+  if (String(c.req.query('all') || '') === '1') {
+    const out = []
+    for (const [bid, bdb] of bookDbs(c.env)) {
+      if (!bdb || bid < 1) continue
+      try {
+        const one = await dumpAll(bdb)
+        const nm2 = await getTitle(bdb).catch(() => ({ title: '' }))
+        one.book = (nm2 && nm2.title) || ''
+        one.book_id = String(bid)
+        out.push({ book_id: String(bid), book: one.book, pkg: one })
+      } catch (e) { noteFail(e, '导出全部账本·第' + bid + '本') }
+    }
+    return c.json({ ok: true, kind: 'factory-accounting-multi', exported_at: now(), books: out, count: out.length })
   }
   const d = await dumpAll(db)
   const nm = await getTitle(db).catch(() => ({ title: '' }))
@@ -17953,6 +18279,18 @@ app.post('/cloud-backup', async (c) => {
 
 // 备份到笔记站（https://md.1211.cc.cd），先登录拿 cookie 再写固定 slug 的笔记
 app.post('/backup-to-notes', async (c) => {
+  // 每本账在笔记站各占一个 slug（主账套不带后缀，第 N 本带 -bookN），互相不覆盖。
+  // all=1 一次把手上所有账本都推一遍 —— 这就是「本机 D1 丢了」时的异地副本。
+  const b = await c.req.json().catch(() => ({}))
+  if (b && b.all === true) {
+    const out = []
+    for (const [bid, db] of bookDbs(c.env)) {
+      if (!db) continue
+      try { out.push(Object.assign({ book: String(bid) }, await pushToNotes(db, c.env, bid))) } catch (e) { out.push({ book: String(bid), ok: false, error: String((e && e.message) || e) }) }
+    }
+    const okAll = out.length > 0 && out.every((x) => x.ok)
+    return c.json({ ok: okAll, books: out, count: out.length }, okAll ? 200 : 500)
+  }
   const res = await pushToNotes(c.env.DB, c.env, c.env.BOOK)
   return c.json(res, res.ok ? 200 : 500)
 })
@@ -18341,9 +18679,13 @@ async function netSeries(db, months) {
     db.prepare('SELECT month mk, COALESCE(SUM(price - COALESCE(written_off,0)),0) t FROM orders GROUP BY mk').all(),
     db.prepare('SELECT month mk, COALESCE(SUM(amount - COALESCE(written_off,0)),0) t FROM payables GROUP BY mk').all(),
     db.prepare('SELECT * FROM debts').all(),
-    db.prepare('SELECT * FROM debt_repays').all()
+    db.prepare('SELECT * FROM debt_repays').all(),
+    // 预收/预付：以前家底只看现金+应收−应付−借款，客户先打来的定金（预收）就这么凭空消失了，
+    // 结果是「收了 2 万定金，家底一分没涨」。预收是我们欠客户货（负债，要减），
+    // 预付是我们先付给供应商的钱（资产，要加）。
+    db.prepare("SELECT type, substr(created_at,1,7) mk, COALESCE(SUM(amount),0) a, COALESCE(SUM(COALESCE(used,0)),0) u FROM advances GROUP BY type, mk").all()
   ].map((x) => x.catch((e) => { noteFail(e); return null }))
-  const [openR, lR, oR, pR, dR, rR] = await Promise.all(jobs)
+  const [openR, lR, oR, pR, dR, rR, aR] = await Promise.all(jobs)
   const rowsOf = (r) => (r && r.results) || []
   const opening = num(openR && openR.t)
   const lMap = {}
@@ -18356,15 +18698,32 @@ async function netSeries(db, months) {
   const debtAtEnd = (m) => {
     // 当期（或更晚）取全部：写错年份的借款也要算在家底里
     const end = m >= now().slice(0, 7) ? '9999-12-31' : m + '-31'
-    const borrowed = debts.filter((d) => (d.start_date || d.created_at || '').slice(0, 10) <= end).reduce((a, d) => a + num(d.principal), 0)
-    const repaid = reps.filter((r) => r.kind === 'principal' && (r.rdate || r.created_at || '').slice(0, 10) <= end).reduce((a, r) => a + num(r.amount), 0)
-    return round2(Math.max(0, borrowed - repaid))
+    let left = 0
+    for (const d of debts) {
+      const start = (d.start_date || d.created_at || '').slice(0, 10)
+      if (start > end) continue
+      // 已经「还清/结清」的借款一律算 0：以前只按「本金 − 还款记录」算，
+      // 而结清的单子不一定有还款记录（用「结清」按钮、或记录被清理），于是
+      // 家底里永远挂着这笔早就还完的钱，跟首页（只算 open 的）差一笔，两边越用越远。
+      if (String(d.status || '') === 'closed') continue
+      const paid = reps.filter((r) => num(r.debt_id) === num(d.id) && r.kind === 'principal' && (r.rdate || r.created_at || '').slice(0, 10) <= end).reduce((a, r) => a + num(r.amount), 0)
+      left += Math.max(0, num(d.principal) - paid)
+    }
+    return round2(left)
   }
-  const keys = Array.from(new Set(Object.keys(lMap).concat(Object.keys(oMap), Object.keys(pMap))))
+  const advIn = {}, advOut = {}
+  for (const x of rowsOf(aR)) {
+    const k = x.mk
+    if (!k) continue
+    const left = Math.max(num(x.a) - num(x.u), 0)
+    if (x.type === 'in') advIn[k] = num(advIn[k]) + left
+    else advOut[k] = num(advOut[k]) + left
+  }
+  const keys = Array.from(new Set(Object.keys(lMap).concat(Object.keys(oMap), Object.keys(pMap), Object.keys(advIn), Object.keys(advOut))))
   const out = []
   const curM = now().slice(0, 7)
   for (const m of monthList(n)) {
-    let ci = 0, co = 0, arin = 0, apout = 0, ord = 0, pay = 0
+    let ci = 0, co = 0, arin = 0, apout = 0, ord = 0, pay = 0, ain = 0, aout = 0
     // 当月这个点要把「未来月份」的桶也算进来（写错年份的单据算在现在），跟首页家底保持一致
     const hi = m >= curM ? '9999-12' : m
     for (const k of keys) {
@@ -18372,20 +18731,23 @@ async function netSeries(db, months) {
       const l = lMap[k]
       if (l) { ci += l.ci; co += l.co; arin += l.arin; apout += l.apout }
       ord += num(oMap[k]); pay += num(pMap[k])
+      ain += num(advIn[k]); aout += num(advOut[k])
     }
     const cash = round2(opening + ci - co)
     const ar = round2(Math.max(ord - arin, 0))
     const ap = round2(Math.max(pay - apout, 0))
     const debt = debtAtEnd(m)
-    out.push({ m, cash, ar, ap, debt, net: round2(cash + ar - ap - debt) })
+    const advInL = round2(Math.max(ain, 0))
+    const advOutL = round2(Math.max(aout, 0))
+    out.push({ m, cash, ar, ap, debt, adv_in: advInL, adv_out: advOutL, net: round2(cash + ar - ap - debt - advInL + advOutL) })
   }
   return out
 }
 // 现在这一刻的家底（按当月算）
 async function netNow(db) {
   const arr = await netSeries(db, 1)
-  const r = arr[arr.length - 1] || { cash: 0, ar: 0, ap: 0, debt: 0, net: 0 }
-  return { month: now().slice(0, 7), cash: r.cash, ar: r.ar, ap: r.ap, debt: r.debt, net: r.net }
+  const r = arr[arr.length - 1] || { cash: 0, ar: 0, ap: 0, debt: 0, adv_in: 0, adv_out: 0, net: 0 }
+  return { month: now().slice(0, 7), cash: r.cash, ar: r.ar, ap: r.ap, debt: r.debt, adv_in: num(r.adv_in), adv_out: num(r.adv_out), net: r.net }
 }
 // 存一份家底快照：以后改了老单据，已存的历史数不会被带偏
 async function snapNet(db, m, note) {
@@ -18489,6 +18851,12 @@ app.get('/month-report', async (c) => {
   // 月底还欠多少借款。以前这份「月度归档」只减应收应付，没减借款，
   // 于是同一个月底，归档说家底 8 万、年报和「科目余额表」说 3 万。
   const debt = await debtLeftAt(db, monthEndOf(m) || (m + '-28'))
+  // 预收（客户先打来的钱，我们还欠他货）要减；预付（先付给供应商的钱）要加。
+  // 以前这里只有现金+应收−应付−借款，客户打来 2 万定金，家底一分没涨。
+  const advEnd = monthEndOf(m) || (m + '-28')
+  const advQ = await advLeftAt(db, advEnd).catch((e) => { noteFail(e, '月度归档·预收预付'); return { in: 0, out: 0 } })
+  const advIn = round2(num(advQ.in))
+  const advOut = round2(num(advQ.out))
   const head = await db.prepare("SELECT key, value FROM settings WHERE key='report_title'").first()
   const lines = []
   lines.push(`【${(head && head.value) || '加工费记账'}】${m} 月度归档`)
@@ -18517,12 +18885,15 @@ app.get('/month-report', async (c) => {
   lines.push(`别人欠我：¥${ar}`)
   lines.push(`我欠别人：¥${ap}`)
   if (debt > 0) lines.push(`还欠借款：¥${debt}`)
-  lines.push(`净资产：¥${round2(cash + ar - ap - debt)}`)
+  if (advIn > 0) lines.push(`客户先付的（预收，还欠他货）：¥${advIn}`)
+  if (advOut > 0) lines.push(`先付给供应商的（预付）：¥${advOut}`)
+  lines.push(`净资产：¥${round2(cash + ar - ap - debt - advIn + advOut)}`)
   return c.json({
     month: m, cash_in: round2(num(inc.t)), cash_out: round2(num(out.t)), net: round2(num(inc.t) - num(out.t)),
     order_add: round2(num(oAdd.t)), payable_add: round2(num(pAdd.t)), mat_cost: pl.mat, profit: pl.profit, cats: cats.map((r) => ({ c: r.c, t: round2(num(r.t)) })),
     recon: { total: rr.total, done: rr.done, rate: rr.rate, disputed: rr.disputed, none: rr.none },
-    cash, ar, ap, debt_left: debt, net_worth: round2(cash + ar - ap - debt), title: (head && head.value) || '', text: lines.join('\n')
+    cash, ar, ap, debt_left: debt, adv_in: advIn, adv_out: advOut,
+    net_worth: round2(cash + ar - ap - debt - advIn + advOut), title: (head && head.value) || '', text: lines.join('\n')
   })
 })
 
@@ -20145,14 +20516,18 @@ export default {
         await putSetting(db, 'cron_at', now())
       } catch (e) { noteFailDb(db, e, '定时任务心跳·' + bid, bid) }
     }
-    // 笔记站只同步主账套
-    try {
-      // 返回值以前直接丢掉：pushToNotes 失败是 return {ok:false}，不会抛，于是「每天同步笔记站」
-      // 实际上可能天天失败而没人知道。现在失败写进 error_log，数据体检里能看到。
-      const nr = await pushToNotes(env.DB, env)
-      if (!nr || !nr.ok) await noteFailDb(env.DB, new Error((nr && nr.error) || '笔记站同步失败'), 'push-to-notes', 1)
-    } catch (e) {
-      await noteFailDb(env.DB, e, 'push-to-notes', 1)
+    // 笔记站同步：以前只同步主账套，第 2、第 3 本账在本机 D1 挂了的时候一份异地副本都没有。
+    // 现在每本账各推一份（slug 带 -bookN，笔记标题也写明第几本），这才是「异地」。
+    for (const [bid, db] of books) {
+      if (!db) continue
+      try {
+        // 返回值以前直接丢掉：pushToNotes 失败是 return {ok:false}，不会抛，于是「每天同步笔记站」
+        // 实际上可能天天失败而没人知道。现在失败写进 error_log，数据体检里能看到。
+        const nr = await pushToNotes(db, env, bid)
+        if (!nr || !nr.ok) await noteFailDb(db, new Error((nr && nr.error) || '笔记站同步失败'), 'push-to-notes', num(bid))
+      } catch (e) {
+        await noteFailDb(db, e, 'push-to-notes', num(bid))
+      }
     }
   }
 }

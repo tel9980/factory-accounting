@@ -384,8 +384,22 @@
   </block>
 
   <block wx:if="{{tab=='ar'}}">
+    <!-- 常用客户放在最上面：先点名字再填金额，比「先打全称」快得多 -->
     <view class="form">
-      <input class="inp" placeholder="客户名" value="{{o_customer}}" bindinput="onOCustomer" bindblur="blurOCustomer"/>
+      <view class="chips" wx:if="{{contacts_ar.length}}">
+        <text class="chip-label">常用客户：</text>
+        <text class="chip" wx:for="{{contacts_ar}}" wx:key="name" wx:if="{{contacts_more || index < 12}}" bindtap="pickCustomer" data-n="{{item.name}}">{{item.name}}</text>
+        <text class="chip" wx:if="{{contacts_ar.length > 12 && !contacts_more}}" bindtap="toggleMoreCust">还有 {{contacts_ar.length - 12}} 个…</text>
+      </view>
+      <view class="tip" wx:if="{{!contacts_ar.length}}">第一次用：直接在下面打字就能记，记住以后这里会有你的常用客户</view>
+      <button class="btn btn-main" wx:if="{{!o_open}}" bindtap="toggleO">＋ 记一笔应收</button>
+    </view>
+    <view class="form" wx:if="{{o_open}}">
+      <input class="inp" placeholder="客户名（打两个字就出候选）" value="{{o_customer}}" bindinput="onOCustomer" bindblur="blurOCustomer"/>
+      <view class="chips" wx:if="{{csug.length}}">
+        <text class="chip-label">是这家吗：</text>
+        <text class="chip on" wx:for="{{csug}}" wx:key="name" bindtap="pickSugName" data-n="{{item.name}}">{{item.name}}</text>
+      </view>
       <view class="chips" wx:if="{{sug_ar.length}}">
         <text class="chip-label">常记：</text>
         <text class="chip" wx:for="{{sug_ar}}" wx:key="index" bindtap="fillSug" data-t="ar" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
@@ -429,11 +443,13 @@
         <text class="chip" data-f="o_date" data-n="3" bindtap="quickDate">3 天前</text>
       </view>
       <button class="btn btn-main" bindtap="addOrder">记一笔应收</button>
-      <view class="chips" wx:if="{{contacts_ar.length}}">
-        <text class="chip-label">常用客户：</text>
-        <text class="chip" wx:for="{{contacts_ar}}" wx:key="name" wx:if="{{index < 8}}" bindtap="pickCustomer" data-n="{{item.name}}">{{item.name}}</text>
-      </view>
+      <text class="dateClr" bindtap="toggleO">收起</text>
     </view>
+    <view class="form">
+      <view class="tip">预收款、批量核销、催款清单：平时不用展开，需要时点这里</view>
+      <button class="btn gray" bindtap="toggleArOther">{{ar_other ? '收起这些' : '其他记账方式（预收 / 批量核销 / 催款）'}}</button>
+    </view>
+    <block wx:if="{{ar_other}}">
     <view class="form">
       <view class="tip">客户先给钱、活还没做 → 记预收款，开单后可一键抵扣</view>
       <input class="inp" placeholder="客户名" value="{{a_party}}" bindinput="onAParty"/>
@@ -454,9 +470,10 @@
       <button class="btn gray" size="mini" bindtap="dunning">生成催款清单</button>
       <view class="chips" wx:if="{{contacts_ar.length}}">
         <text class="chip-label">点客户名填入：</text>
-        <text class="chip" wx:for="{{contacts_ar}}" wx:key="name" wx:if="{{index < 8}}" bindtap="pickRbCustomer" data-n="{{item.name}}">{{item.name}}</text>
+        <text class="chip" wx:for="{{contacts_ar}}" wx:key="name" wx:if="{{contacts_more || index < 12}}" bindtap="pickRbCustomer" data-n="{{item.name}}">{{item.name}}</text>
       </view>
     </view>
+    </block>
     <view class="sumstrip">
       <view class="su"><view class="sun">{{ar_sum.open_amount || 0}}</view><view class="sul">未收合计 {{ar_sum.open_count || 0}} 单</view></view>
       <view class="su"><view class="sun red">{{ar_sum.overdue_amount || 0}}</view><view class="sul">逾期30天+ {{ar_sum.overdue_count || 0}} 单</view></view>

@@ -95,6 +95,7 @@ const snap = async () => {
     inc: r2(D.month_income),
     out: r2(D.month_outcome),
     nw: r2(D.net_worth),
+    advIn: r2(D.adv_in_left), advOut: r2(D.adv_out_left),
     debt: r2(D.debt_total),
     arOpen: r2(arSum.d && arSum.d.open_amount),
     arOpenCount: n0(arSum.d && arSum.d.open_count),
@@ -103,7 +104,7 @@ const snap = async () => {
     apCatOpen: r2(apCat.d && apCat.d.total_open),
     agingTotal: r2(aging.d && aging.d.total),
     accTotal: r2(accounts.d && accounts.d.total_balance),
-    mr: { cash: r2(MR.cash), ar: r2(MR.ar), ap: r2(MR.ap), debt: r2(MR.debt_left), nw: r2(MR.net_worth), inc: r2(MR.cash_in), out: r2(MR.cash_out) },
+    mr: { cash: r2(MR.cash), ar: r2(MR.ar), ap: r2(MR.ap), debt: r2(MR.debt_left), nw: r2(MR.net_worth), advIn: r2(MR.adv_in), advOut: r2(MR.adv_out), inc: r2(MR.cash_in), out: r2(MR.cash_out) },
     rv: { cash: r2(cashRow.value), assets: bsFind(bs.assets, '资产合计'), liab: bsFind(bs.liabilities, '负债合计'), check: r2(bs.check) },
     fl: { totalIn: r2(F.total_in), totalOut: r2(F.total_out), opIn: r2(F.op_in), opOut: r2(F.op_out), trIn: r2(F.transfer_in), trOut: r2(F.transfer_out), taxIn: r2(F.tax_in), taxOut: r2(F.tax_out), ncIn: r2(F.no_cash_in), ncOut: r2(F.no_cash_out), opText: F.op_text || '', ncText: F.no_cash_text || '' },
     tax: {
@@ -112,8 +113,8 @@ const snap = async () => {
       byAccIn: r2(((T.by_account) || []).reduce((a, x) => a + n0(x.tax_in), 0)),
       byAccOut: r2(((T.by_account) || []).reduce((a, x) => a + n0(x.tax_out), 0))
     },
-    trial: { ar: bOf('应收未收'), ap: bOf('应付未付'), debt: bOf('借款余额'), nw: bOf('净资产'), accSum, monthIn: r2(my[1]), monthOut: r2(my[2]) },
-    mo: { inc: ovOf('收款（经营，不含转账和税点）'), out: ovOf('付款/支出（经营，不含转账和税点）'), cash: ovOf('手头现金'), ar: ovOf('应收未收'), ap: ovOf('应付未付'), debt: ovOf('借款余额'), nw: ovOf('净资产') },
+    trial: { ar: bOf('应收未收'), ap: bOf('应付未付'), debt: bOf('借款余额'), advIn: bOf('预收（客户先付的，还欠他货）'), advOut: bOf('预付（先付给供应商的）'), nw: bOf('净资产'), accSum, monthIn: r2(my[1]), monthOut: r2(my[2]) },
+    mo: { inc: ovOf('收款（经营，不含转账和税点）'), out: ovOf('付款/支出（经营，不含转账和税点）'), cash: ovOf('手头现金'), ar: ovOf('应收未收'), ap: ovOf('应付未付'), debt: ovOf('借款余额'), advIn: ovOf('预收（客户先付的，从家底里减）'), advOut: ovOf('预付（先付供应商的，加到家里）'), nw: ovOf('净资产') },
     yr: { inc: r2(yrMonth[5]), out: r2(yrMonth[6]) },
     arListSum: r2(list.reduce((a, x) => a + Math.max(0, n0(x.unpaid)), 0))
   }
@@ -186,6 +187,8 @@ const run = async () => {
   near('借款：首页 / 月度归档', after.debt, after.mr.debt)
 
   near('净资产：首页 / 月度归档', after.nw, after.mr.nw)
+  near('预收：首页 / 月度归档一致', after.advIn, after.mr.advIn)
+  near('预付：首页 / 月度归档一致', after.advOut, after.mr.advOut)
   near('净资产：首页 / 科目余额表', after.nw, after.trial.nw)
   near('净资产：首页 / 月报包', after.nw, after.mo.nw)
   near('净资产：首页 / 报表页（资产 − 负债）', after.nw, r2(after.rv.assets - after.rv.liab))
@@ -211,8 +214,8 @@ const run = async () => {
 
   console.log('\n【三】资产负债表自己得平')
   near('报表页 check = 资产 − 负债 − 权益', 0, after.rv.check)
-  near('科目余额表：净资产 = 账户合计 + 应收 − 应付 − 借款', after.trial.nw, r2(after.trial.accSum + after.trial.ar - after.trial.ap - after.trial.debt))
-  near('月报包：净资产 = 手头现金 + 应收 − 应付 − 借款', after.mo.nw, r2(after.mo.cash + after.mo.ar - after.mo.ap - after.mo.debt))
+  near('科目余额表：净资产 = 账户合计 + 应收 − 应付 − 借款 − 预收 + 预付', after.trial.nw, r2(after.trial.accSum + after.trial.ar - after.trial.ap - after.trial.debt - after.trial.advIn + after.trial.advOut))
+  near('月报包：净资产 = 手头现金 + 应收 − 应付 − 借款 − 预收 + 预付', after.mo.nw, r2(after.mo.cash + after.mo.ar - after.mo.ap - after.mo.debt - after.mo.advIn + after.mo.advOut))
 
   console.log('\n【四】历史月份不许随今天变、演示口令不许导存档')
   // 上个月的科目余额表：只到 28 号，与今天记的账无关

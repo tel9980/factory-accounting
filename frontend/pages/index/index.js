@@ -210,7 +210,7 @@ Page({
     q_text: '',
   q_busy: false,
     history_type: 'ar', history_ar_list: [], history_ap_list: [], st: null, st_month: '', st_kw: '',
-    contact_type: 'ar', contacts_ar: [], contacts_ap: [],
+    contact_type: 'ar', contacts_ar: [], contacts_ap: [], contacts_more: false, csug: [], o_open: false, ar_other: false,
     sug_ar: [], sug_ap: [], sug_ex: [], last_tip: '',
     contact_show: false, contact_title: '', contact_text: '',
     trash_list: [],
@@ -2697,7 +2697,34 @@ Page({
     if (cached.open_count !== undefined) return say(cached)
     this.req({ url: API_BASE + '/ar-summary?type=ar', silent: true, success: (res) => { const d = res.data || {}; this.setData({ ar_sum: d }); say(d) } })
   },
-  onOCustomer(e) { this.setData({ o_customer: e.detail.value }) },
+  // 打字就给候选：客户名别再靠记全称（「华兴」能带出「华兴五金有限公司」）
+  onOCustomer(e) {
+    const v = e.detail.value
+    this.setData({ o_customer: v })
+    if (this._csugT) clearTimeout(this._csugT)
+    const kw = String(v || '').trim()
+    if (kw.length < 1) return this.setData({ csug: [] })
+    this._csugT = setTimeout(() => {
+      this.req({
+        url: API_BASE + '/party-pick?type=ar&kw=' + encodeURIComponent(kw),
+        silent: true,
+        success: (res) => {
+          const list = ((res.data || {}).list || []).filter((x) => x.name !== kw).slice(0, 6)
+          // 已经打全了的名字不用再提示
+          this.setData({ csug: list })
+        }
+      })
+    }, 350)
+  },
+  pickSugName(e) {
+    const n = e.currentTarget.dataset.n
+    this.setData({ o_customer: n, csug: [], o_open: true })
+    this.applyLastDeal('ar', n)
+  },
+  // 开单表单收起/展开：默认收起，免得把下面的单子列表顶到屏幕外
+  toggleO() { this.setData({ o_open: !this.data.o_open, csug: [] }) },
+  toggleArOther() { this.setData({ ar_other: !this.data.ar_other }) },
+  toggleMoreCust() { this.setData({ contacts_more: !this.data.contacts_more }) },
   // 客户填完，自动带出上次给他记的产品和单价（省得重复打）
   blurOCustomer() {
     const n = (this.data.o_customer || '').trim()
@@ -2810,7 +2837,7 @@ Page({
   onODue(e) { this.setData({ o_due: e.detail.value }) },
   onODeliver(e) { this.setData({ o_deliver: e.detail.value }) },
   onOOperator(e) { this.setData({ o_operator: e.detail.value }) },
-  pickCustomer(e) { const n = e.currentTarget.dataset.n; this.setData({ o_customer: n }); this.applyLastDeal('ar', n) },
+  pickCustomer(e) { const n = e.currentTarget.dataset.n; this.setData({ o_customer: n, o_open: true, csug: [] }); this.applyLastDeal('ar', n) },
   // 应收分类：客户为什么给这笔钱。点一下选中，再点一下取消。
   pickArCat(e) {
     const k = String(e.currentTarget.dataset.k || '')
@@ -2895,7 +2922,8 @@ Page({
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         // 分类也要清：下一单可能是别的客户别的事，留着上一次的会把分类记错
         hidO()
-        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' })
+        // 记完把表单收起来：列表立刻回到视野里（记第二单再点一次「＋」）
+        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '', csug: [], o_open: false })
         this.refresh({ lite: true }); this.loadSuggest()
         wx.showToast({ title: '记上了', icon: 'success', duration: 700 })
         this.showChecks(res)

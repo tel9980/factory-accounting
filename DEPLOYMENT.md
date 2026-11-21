@@ -1127,3 +1127,65 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 ```
 
 反例（别再用）：`env -u http_proxy ... git push` 走直连，经常要重试十几次、每次卡两分钟。
+
+### 4.29 家底（净资产）的口径改过一次，迁移前后数字会不一样
+
+**公式（现在）**：
+
+```
+净资产 = 现金 + 应收 − 应付 − 借款 − 预收 + 预付
+```
+
+- **预收**（`advances.type='in'`，客户先打来的钱）= 我们还欠他货 → 负债 → 减。
+- **预付**（`advances.type='out'`，先付给供应商的钱）= 他还欠我们货 → 资产 → 加。
+- 剩余额一律按 `MAX(amount − used, 0)` 算，只认「还没用掉的那部分」；统一入口是 `advLeftAt(db, ymd)`。
+- **已结清（`status='closed'`）的借款算 0**：以前 `debtLeftAt` 和 `netSeries` 的 `debtAtEnd` 都不看 status，
+  用「结清」按钮还完的借款没有还款记录，于是这笔钱永远挂在家底里；而首页只算 `open`，
+  两边差一整笔，越用越远。现在两处都跳过 closed。
+
+**改口径的影响面（都同改过了，新增地方必须跟上）**：`netSeries`（`/networth`、首页家底、趋势）、
+`/dashboard`、`/month-report`、月结归档 `monthSnapshot`、年报 `yearly`（年末余额页）、
+`/archive-json?kind=trial` 的余额类科目、经营体检（`s.equity`）、`/cash-bridge` 的 `wo` 行、
+试用算 `packImpact`。判断口径对不对，跑 `node scripts/test-numbers.mjs`（57 项）——
+它会把首页、月度归档、科目余额表、月报包、报表页五处的净资产两两对比。
+
+**升级到这一版之后会看到什么**：只要账上有预收/预付、或有「结清但没还款记录」的借款，
+历史月份的家底曲线会整体平移一次（通常往上/往下几百到几万）。这不是数据被改了，
+是原来没算进去的项现在算了；想留证据就先 `POST /networth-snapshot` 存一份当时的快照再升级。
+
+### 4.30 「初始资料」整包：换系统第一天要搬的五类静态资料
+
+`GET /import-template-pack?tpl=base` 给一个 6 页签的工作簿：
+
+| 页签 | type | 列 | 说明 |
+|---|---|---|---|
+| 说明 | — | — | 怎么填 |
+| 固定资产 | `asset` | 名称, 原值, 购入日(可空), 年限(可空=5), 残值率%(可空=5), 备注 | 进 `assets`，之后 `/assets/run-depreciation` 按月折旧 |
+| 材料期初 | `material` | 材料名, 单位(可空), 数量, 单价, 日期(可空), 备注 | 写 `material_moves(kind='in')`，**只记库存不动现金** |
+| 计件单价 | `wage_rate` | 工序, 单价, 单位(可空), 备注 | 进 `wage_rates`（`worker=''`＝通用工序价） |
+| 信用额度 | `credit` | 客户, 额度, 备注(可空) | `ON CONFLICT(party) DO UPDATE`，**设成不是加上** |
+| 框架价 | `frame` | 客户, 产品, 单价, 起始日(可空), 备注(可空) | 进 `frame_prices`，开单时提示「框架价偏低」 |
+
+规矩：
+
+1. **这五类不受月结锁限制**（`STATIC_IMPORT_TYPES`）——锁的是这个月的账，不是机器的出厂日期。
+2. **重复导不会翻倍**：`asset` 按「名称+原值」、`material` 按「材料+日期+数量+单价」、
+   `wage_rate` 按「工序+单价」、`frame` 按「客户+产品+单价」判重；`credit` 是覆盖。
+3. 只动 `assets` / `materials` / `material_moves` / `wage_rates` / `credit_limits` / `frame_prices`，
+   **不写 `ledger`、不改现金、不进家底**（机器早就买了，钱当年就付过了）。
+4. 加新的初始资料类型，要同时改：`IMPORT_TEMPLATES`、`PACK_SHEET_TYPE`（页签名 → type）、
+   `previewImport` 的解析分支、`importRows` 的分支、`STATIC_IMPORT_TYPES`（如果它不该被锁），
+   最后 `node scripts/test-fixes4.mjs`（57 项）与 `node scripts/check.mjs`。
+
+### 4.31 客户名候选、表单收起、备份异地副本（C21/C22/B10）
+
+- `GET /party-pick?kw=&type=ar|ap&limit=`：客户/供应商名字候选，三段来源（精确 LIKE / 去掉
+  「有限公司·公司·厂·店·门市部·经营部·括号」后近似 / `party_profiles` 档案），返回
+  `{ok,type,kw,list:[{name,cnt,total,hit}]}`，`kw` 空时给「最近用过的」。前端开单输入 350ms 防抖调用。
+- 应收页：开单表单默认收起（`o_open`），顶部是「＋ 记一笔应收」+ 常用客户 chips；
+  预收 / 批量核销 / 催款清单收进 `ar_other`。改这块要注意：**记完一笔要把 `o_open` 收回 false**，
+  否则表单一直占着屏幕、列表看不见。
+- 备份：`scheduled` 现在每本账各推一份到笔记站（slug 带 `-bookN`，标题写明第几本）；
+  `POST /backup-to-notes {all:true}` 手动全推；`GET /export-all?all=1` 一次导出所有账本
+  （`kind:'factory-accounting-multi'`，`books:[{book_id, book, pkg}]`）。
+

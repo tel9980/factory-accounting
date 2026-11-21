@@ -1728,6 +1728,17 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+340. ✅ **「换系统第一天」要在界面敲 70 次、客户名要打全称、应收页三个表单压在列表上、家底漏掉定金**：这一轮按「一个人管账 + 以导入模板为前提」补最后五条。
+   - **五类初始资料能一次导进来**。以前固定资产、材料库存、计件单价、信用额度、框架价只能在界面一条条敲（70 台机器 = 70 次），换系统第一天就想放弃。现在 `IMPORT_TEMPLATES` 加 5 类（`asset`/`material`/`wage_rate`/`credit`/`frame`），并新增 **「初始资料」整包（`tpl=base`）**：说明 + 固定资产 + 材料期初 + 计件单价 + 信用额度 + 框架价 6 个页签，电脑端 `/pc` 一次下载填完一次传回。
+     - 材料期初只记「仓库里现在有多少」（写 `material_moves` 的 `kind='in'`），**不动现金**；信用额度是「设成这个数」不是「加上这个数」（`ON CONFLICT(party) DO UPDATE`），反复导不会叠加；固定资产按「原值 / 折旧年限 / 残值率」入账，重复导同名的会提示重复。
+     - **期初资料不受月结锁限制**：`STATIC_IMPORT_TYPES = ['parties','term','acc_open','asset','material','wage_rate','credit','frame']`，锁的是这个月的账，不是这台机器的出厂日期（以前本月一结账，设备就再也补不进来）。
+   - **客户名不用打全称**。新增 `GET /party-pick?kw=&type=ar|ap`：三段合并候选 —— ①`orders.customer` / `payables.supplier` 里精确 LIKE；②去掉「有限公司/公司/工厂/厂/店/门市部/经营部/括号」后再 LIKE 一遍（打「甲测试钟表行有限公司」也能认出来，标 `hit:'near'`）；③`party_profiles` 档案名。前端开单时输入 350ms 防抖就出「是这家吗」候选 chips，点一下就填好并带出上次单价。
+   - **应收页不再「三个表单压着列表」**。开单表单默认收起（`o_open`），顶部是「＋ 记一笔应收」按钮 + 常用客户 chips（前 12 个，其余走「还有 N 个…」`contacts_more`）；预收 / 批量核销 / 催款清单收进 `ar_other` 一张卡片里，平时不展开。
+   - **家底终于把定金算进去了（口径变更）**。以前净资产 = 现金 + 应收 − 应付 − 借款，客户先打来 2 万定金，家底一分不涨、对账单上也看不见。现在 `net = 现金 + 应收 − 应付 − 借款 − 预收 + 预付`（预收是我们还欠客户的货＝负债，预付是供应商还欠我们的货＝资产），新增 `advLeftAt(db, ymd)` 统一口径，`netSeries` 每行带 `adv_in`/`adv_out`，首页 `/dashboard`、`/networth`、`/month-report`、月结归档 `monthSnapshot`、年报 `yearly`、科目余额表、经营体检全部同改；客户/供应商对账单多一句「其中已预收定金 N 元（还没用掉），抵扣后实际欠 M 元」。同时修掉一个连带发现的真 bug：**已结清（`status='closed'`）的借款一直挂在家底里**（`debtLeftAt` 与 `netSeries` 的 `debtAtEnd` 都不看 status，用「结清」按钮还完的单子没有还款记录），于是首页只算 open、月报算全部，两边差一整笔钱。
+   - **备份异地副本 + 一次导出所有账本**。`scheduled` 原来只有主账套推笔记站，第 2、第 3 本在本机 D1 挂了时没有任何异地副本；现在每本账各推一份（`pushToNotes(db, env, bid)`，slug 带 `-bookN`），并新增 `POST /backup-to-notes {all:true}` 手动全推。`GET /export-all?all=1` 把手上所有账本装进一个文件（`kind:'factory-accounting-multi'`，每本带 `book_id`/`book`/`pkg`），不带 `all` 还是只导当前这本。
+   - **验证**：新增 `scripts/test-fixes4.mjs`（**57 项**，挂 CI），`test-numbers` 从 55 项加到 **57 项**（新增「预收/预付：首页与月度归档一致」两条公式断言，并把三条净资产公式改成含预收预付）。干净库三本账全套回归失败 0 项；`check.mjs` 434 路由 / 59 表 / 685 SQL / 265 调用 / 783 绑定；`gen-api-list` 434 接口 63 组。
+   - ⚠️ 动了前端（应收页收起、客户名候选、常用客户 chps 收口）→ 小程序要重传。
+
 339. ✅ **备份从来不提「照片和月报存档不在里面」、新加的列老库永远补不上、27 个写接口从没被跑过**：这一刀修的是**「看不见的窟窿」**——不是账算错，而是你以为有保障、其实没有。
    - **备份不含照片和月报存档，但界面从来没说**。`BACKUP_SKIP` 里 `attachments`（单据照片）与 `month_report`（月度报表存档）都写着「本体几百 KB，塞进每日快照会把备份撑爆」，理由是对的；错在 `/book-reset` 的清空文案写着「想反悔可以在备份列表恢复」——照片和存档压根不在备份里，点完恢复照片就永远没了。现在：`/backup` 与 `/backup-verify` 都返回 `notice`（`BACKUP_NOTICE = '照片（单据拍照）、月度报表存档、员工口令、审计/报错日志不在备份里'`），`/book-reset` 的返回文案末尾补一句「注意：单据照片和月度报表存档本来就不在备份里（怕把快照撑爆），清空后恢复不回来」，并多返回 `not_in_backup` 名单。
    - **schema.sql 新加的列，老库永远补不上**。线上 D1 全是老库，`schema.sql` 里 `CREATE TABLE IF NOT EXISTS` 表已存在就整句跳过，「后来加的列」只能靠 `EXTRA_COLS` 补；而以前没有任何检查保证「新列进了 EXTRA_COLS」。于是漏一个 = 老库一查 `no such column` = 整个接口 500（历史上 `orders.deliver_date`、`orders.created_by`、`error_log.ray` 都栽过）。现在 `check.mjs` 新增 **[4.7] 老库补列清单**：①`EXTRA_COLS` 里点名的表/列必须在 `schema.sql` 里存在（防手滑）；②拿 `scripts/schema-baseline.json`（发布过的列快照）对比，**这次新加的列如果没进 `EXTRA_COLS` 直接红**，并提示「跑 `node scripts/check.mjs --update-baseline` 更新基线」。双向验证过：往 `schema.sql` 的 `orders` 塞一列 `zzz_probe` → 立刻红「表 orders 新加的列没进 EXTRA_COLS：zzz_probe」。
@@ -1896,7 +1907,7 @@ node scripts/build-exe.mjs --out dist
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 433 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 434 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2287,7 +2298,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（230）
+**其它（单个接口）**（231）
 
 - `GET /`
 - `GET /access-guide`
@@ -2421,6 +2432,7 @@ node scripts/build-exe.mjs --out dist
 - `GET /party-groups`
 - `GET /party-items`
 - `POST /party-merge`
+- `GET /party-pick`
 - `POST /pay-batch`
 - `GET /pay-speed`
 - `GET /payroll-link`
