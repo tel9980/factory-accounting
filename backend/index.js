@@ -6445,6 +6445,9 @@ async function reimburseStaff(db, staff, amount, category, remark, date, acc) {
   const list = (await db.prepare('SELECT * FROM loans WHERE staff=? AND used + returned < amount ORDER BY created_at, id').bind(staff).all()).results
   let left = round2(amount)
   let used = 0
+  // 这次报销写出去的每一笔流水 id 都记下来：整批撤回时要知道删哪几行。
+  // 冲的是哪笔借支，流水行自己带（ref_id），不用另存。
+  const ledgers = []
   for (const l of list) {
     if (left <= 0) break
     const remain = round2(num(l.amount) - num(l.used) - num(l.returned))
@@ -6460,16 +6463,18 @@ async function reimburseStaff(db, staff, amount, category, remark, date, acc) {
       e.code = 'stale'
       throw e
     }
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',?,?,?,?,?,0,?)")
+    const wl = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',?,?,?,?,?,0,?)")
       .bind(l.id, use, category || '', `报销冲借支 ${staff}${remark ? ' ' + remark : ''}`, num(l.account_id) || acc, date).run()
+    if (wl.meta && wl.meta.last_row_id) ledgers.push(num(wl.meta.last_row_id))
     used = round2(used + use)
     left = round2(left - use)
   }
   if (left > 0) {
-    await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
+    const wc = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES ('out','expense',0,?,?,?,?,1,?)")
       .bind(left, category || '', `报销现付 ${staff}${remark ? ' ' + remark : ''}`, acc, date).run()
+    if (wc.meta && wc.meta.last_row_id) ledgers.push(num(wc.meta.last_row_id))
   }
-  return { used, cash: left }
+  return { used, cash: left, ledgers }
 }
 
 app.get('/loans', async (c) => {
@@ -6832,6 +6837,22 @@ async function zipMake(entries) {
   return out
 }
 
+// Excel 的下拉候选值写在 formula1 里，整串不能超过 255 个字符（超了 Excel 直接报文件损坏）。
+// 分类和员工名都是用户自己一点点攒出来的，攒多了就会超 —— 截断比打不开强，剩下的照旧能手打。
+function fitDvList(list, max = 250) {
+  const out = []
+  let len = 0
+  for (const x of list || []) {
+    const s = String(x == null ? '' : x).trim()
+    if (!s || s.indexOf(',') >= 0) continue
+    const add = s.length + (out.length ? 1 : 0)
+    if (len + add > max) break
+    out.push(s)
+    len += add
+  }
+  return out
+}
+
 function sheetXml(rows, dv) {
   const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   const colName = (i) => {
@@ -7065,25 +7086,58 @@ app.get('/import-template-pack', async (c) => {
   const doFill = String(c.req.query('fill') || '') === '1'
   let custs = []
   let sups = []
+  let staffs = []
   if (doFill) {
+    // 每个来源单独 try：以前三条查询套在一个 try 里，第二条（客户档案）一旦出错，
+    // 第三条（供应商名）就根本没跑 —— 结果「应付对账」页永远是空表，还没人报错。
+    const addName = async (sql, into) => {
+      try {
+        const rs = (await c.env.DB.prepare(sql).all()).results || []
+        for (const x of rs) {
+          const n = String(x.n || '').trim()
+          if (n && into.indexOf(n) < 0) into.push(n)
+        }
+      } catch (e) { /* 某一张表不在（老库）就当没有，别把别的也带崩 */ }
+    }
+    await addName("SELECT DISTINCT customer AS n FROM orders WHERE TRIM(COALESCE(customer,''))<>'' ORDER BY n LIMIT 300", custs)
+    await addName("SELECT DISTINCT party AS n FROM party_profiles WHERE TRIM(COALESCE(party,''))<>'' ORDER BY n LIMIT 300", custs)
+    await addName("SELECT DISTINCT supplier AS n FROM payables WHERE TRIM(COALESCE(supplier,''))<>'' ORDER BY n LIMIT 300", sups)
+    custs = custs.slice(0, 300)
+    sups = sups.slice(0, 300)
+    // 员工名：借支 / 报销的「员工」列、支出的「经手人」列做成下拉。
+    // 名字打错一个字，这一笔就对不上人 —— 员工的借支余额、「只看自己录的单」全靠这个字串对。
     try {
-      const r1 = await c.env.DB.prepare("SELECT DISTINCT customer AS n FROM orders WHERE TRIM(COALESCE(customer,''))<>'' ORDER BY n LIMIT 300").all()
-      custs = (r1.results || []).map((x) => String(x.n || '').trim()).filter(Boolean)
-      const r2 = await c.env.DB.prepare("SELECT DISTINCT name AS n FROM party_profiles WHERE TRIM(COALESCE(name,''))<>'' ORDER BY n LIMIT 300").all()
-      for (const x of r2.results || []) {
-        const n = String(x.n || '').trim()
-        if (n && custs.indexOf(n) < 0) custs.push(n)
+      const addStaff = async (sql) => {
+        try {
+          const rs = (await c.env.DB.prepare(sql).all()).results || []
+          for (const x of rs) {
+            const n = String(x.n || '').trim()
+            if (n && n.length <= 12 && staffs.indexOf(n) < 0) staffs.push(n)
+          }
+        } catch (e) { /* 老库没这张表就当没有，不影响出模板 */ }
       }
-      const r3 = await c.env.DB.prepare("SELECT DISTINCT supplier AS n FROM payables WHERE TRIM(COALESCE(supplier,''))<>'' ORDER BY n LIMIT 300").all()
-      sups = (r3.results || []).map((x) => String(x.n || '').trim()).filter(Boolean)
-    } catch (e) { noteFail(e, '模板预填客户名') }
+      await addStaff("SELECT DISTINCT staff AS n FROM loans WHERE TRIM(COALESCE(staff,''))<>'' ORDER BY n LIMIT 200")
+      await addStaff("SELECT DISTINCT name AS n FROM staff_users WHERE active=1 ORDER BY n LIMIT 200")
+      await addStaff("SELECT DISTINCT worker AS n FROM wage_rates WHERE TRIM(COALESCE(worker,''))<>'' ORDER BY n LIMIT 200")
+      staffs = staffs.slice(0, 200).sort()
+    } catch (e) { noteFail(e, '模板预填员工名') }
   }
   const sheets = P.sheets.map((s) => {
-    let dv = []
-    if (s.dv) dv = [{ sq: s.dv[0], list: s.dv[1] }]
-    else if (s.type === 'expense') dv = [{ sq: 'B2:B200', list: cats }]
-    else if (s.type === 'reimb') dv = [{ sq: 'C2:C200', list: cats }]
-    else if (s.type === 'ap') dv = [{ sq: 'B2:B200', list: AP_CATS }]
+    const dv = []
+    // Excel 下拉整串有 255 字符上限，统一过一遍 fitDvList（列表为空就不挂下拉，别生成空 formula1）
+    const addDv = (sq, list) => {
+      const l = fitDvList(list)
+      if (l.length) dv.push({ sq, list: l })
+    }
+    if (s.dv) addDv(s.dv[0], s.dv[1])
+    else if (s.type === 'expense') addDv('B2:B200', cats)
+    else if (s.type === 'reimb') addDv('C2:C200', cats)
+    else if (s.type === 'ap') addDv('B2:B200', AP_CATS)
+    // 员工名下拉：借支 / 报销的第 1 列（员工）、支出的第 4 列（经手人）
+    if (staffs.length) {
+      if (s.type === 'loan' || s.type === 'reimb') addDv('A2:A200', staffs)
+      else if (s.type === 'expense') addDv('D2:D200', staffs)
+    }
     let rows = s.rows
     if (doFill && (s.type === 'ar_recon' || s.type === 'ar_init') && custs.length) {
       rows = [s.rows[0]].concat(custs.map((n) => (s.type === 'ar_recon' ? [n, '', '', '', ''] : [n, '', ''])))
@@ -7094,7 +7148,7 @@ app.get('/import-template-pack', async (c) => {
     return { name: s.sheet, rows, dv }
   })
   const xlsx = await makeXlsxSheets(sheets)
-  return c.json({ ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc, sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })), b64: toB64(xlsx) })
+  return c.json({ ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc, sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })), fills: { customers: custs.length, suppliers: sups.length, staffs: staffs.length }, b64: toB64(xlsx) })
 })
 
 // 使用教程（网页版）：内容来自 docs/新手教程.md，由 scripts/gen-guide.mjs 编译成 backend/guide.js。
@@ -7485,7 +7539,11 @@ function dl(tpl){
       var bin = atob(d.b64), n = bin.length, u = new Uint8Array(n)
       for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i)
       saveBlob(new Blob([u], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name || (tpl + '.xlsx'))
-      msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill ? '（已把客户/供应商名字填好）' : ''), true)
+      var f = d.fills || {}, bits = []
+      if (f.customers) bits.push('客户 ' + f.customers + ' 个')
+      if (f.suppliers) bits.push('供应商 ' + f.suppliers + ' 个')
+      if (f.staffs) bits.push('员工 ' + f.staffs + ' 个')
+      msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill && bits.length ? '（已填好：' + bits.join('、') + '，名字都是下拉可选）' : ''), true)
     }).catch(function(e){ msg('下载失败：' + e, false) })
 }
 var ARC_TIP = {
@@ -7605,6 +7663,28 @@ function show(d){
       ((s.errors || []).length ? '<div class="bad" style="font-size:12px">' + s.errors.join('<br/>') + '</div>' : '') + '</td></tr>'
   })
   h += '</table>'
+  // 逐行明细：哪一行、原值多少、为什么导不进去。以前每页只给前 3 条，
+  // 一张 20 行写错的表，改到第 4 行就不知道错在哪了。
+  var det = '', detN = 0, moreN = 0, dupN = 0, dupRows = []
+  rows.forEach(function(s){
+    (s.error_rows || []).forEach(function(x){
+      detN++
+      var raw = [x.party, x.amount ? '¥' + x.amount : '', x.date].filter(Boolean).join(' · ')
+      det += '<tr><td>' + s.sheet + '</td><td>' + x.row + '</td><td>' + raw + '</td><td class="bad">' + x.error + '</td></tr>'
+    })
+    moreN += (s.error_more || 0)
+    var dr = s.dup_rows || []
+    for (var i = 0; i < dr.length; i++) { dupN++; dupRows.push(s.sheet + ' 第 ' + dr[i].row + ' 行：' + dr[i].text) }
+  })
+  if (detN) {
+    h += '<div style="margin-top:14px"><b>这 ' + detN + ' 行导不进去</b>（按「第几行」去表里改这几行，改完再传）：</div>' +
+      '<table><tr><th>页签</th><th>第几行</th><th>表里填的</th><th>为什么</th></tr>' + det + '</table>'
+    if (moreN) h += '<div class="bad" style="font-size:12px">还有 ' + moreN + ' 行也有问题没列出来，这份表错得比较多，建议先整张检查一遍。</div>'
+  }
+  if (dupN) {
+    h += '<div style="margin-top:14px"><b>这 ' + dupN + ' 行像重复</b>（默认不导；确实要再记一遍就勾下面那个框）：</div>' +
+      '<div class="tip" style="font-size:12px">' + dupRows.slice(0, 20).join('<br/>') + (dupRows.length > 20 ? '<br/>……还有 ' + (dupRows.length - 20) + ' 行' : '') + '</div>'
+  }
   if (d.total_imported != null) h += '<div class="tip ok">这次一共导进 ' + d.total_imported + ' 行，合计 ¥' + (d.total_amount || 0) + '</div>'
   document.getElementById('res').innerHTML = h
 }
@@ -7811,10 +7891,19 @@ app.post('/import-pack', async (c) => {
     try {
       if (dry) {
         const pv = await previewImport(db, type, bodyRows)
+        const pvRows = pv.rows || []
+        // 有问题的行全量给出（上限 200 条，防超大表把响应撑爆）。
+        // 以前只给前 3 条：一张 20 行写错的表，用户改到第 4 行就不知道错在哪了，只能整张重来。
+        const badRows = pvRows.filter((x) => !x.ok || x.locked)
+        const dupRows = pvRows.filter((x) => x.ok && !x.locked && x.dup)
         out.push({
           sheet: sh.name, type, type_name: tName,
           count: pv.count, ok_count: pv.ok_count, dup_count: pv.dup_count, bad_count: pv.bad_count, locked_count: pv.locked_count, total: pv.total,
-          errors: (pv.rows || []).filter((x) => !x.ok || x.locked).slice(0, 3).map((x) => `第 ${x.i} 行：${x.error || '导不进去'}`),
+          error_rows: badRows.slice(0, 200).map((x) => ({ row: x.i, error: x.error || (x.locked ? '这个月已结账，导不进去' : '导不进去'), party: x.party || '', amount: num(x.amount), date: x.date || '' })),
+          error_more: Math.max(0, badRows.length - 200),
+          dup_rows: dupRows.slice(0, 200).map((x) => ({ row: x.i, text: x.dup_text || '像重复', party: x.party || '', amount: num(x.amount), date: x.date || '' })),
+          dup_more: Math.max(0, dupRows.length - 200),
+          errors: badRows.slice(0, 3).map((x) => `第 ${x.i} 行：${x.error || '导不进去'}`),
           text: pv.text
         })
       } else {
@@ -12218,7 +12307,9 @@ async function importRows(db, type, rows, opts) {
       if (staff && num(amount) > 0) {
         const accI = await accountId()
         try {
-          await reimburseStaff(db, staff, num(amount), category || '', remark || '', d, accI)
+          const rb = await reimburseStaff(db, staff, num(amount), category || '', remark || '', d, accI)
+          // 记下这次报销写出去的流水 id：整批撤回顾时要按它删（不然报销导错了没法整批退）
+          for (const lid of (rb && rb.ledgers) || []) ids.push(lid)
           total += num(amount)
           n++
         } catch (e) {
@@ -15334,13 +15425,16 @@ async function logImport(db, type, r, src) {
   } catch (e) { /* 记录失败不影响导入本身 */ }
 }
 
+// 能整批撤回的类型：跟 /import-undo 里的分支一一对应，加一类记得两边都改
+const IMPORT_UNDO_TYPES = ['ar', 'ar_init', 'ap', 'ap_init', 'expense', 'loan', 'reimb', 'prepaid']
+
 app.get('/import-log', async (c) => {
   const db = c.env.DB
   const rows = (await db.prepare('SELECT * FROM import_log ORDER BY id DESC LIMIT 50').all()).results || []
   const out = rows.map((r) => {
     let n = 0
     try { n = (JSON.parse(r.ids || '[]') || []).length } catch (e) { n = 0 }
-    return { id: r.id, type: r.type, cnt: num(r.cnt), total: round2(num(r.total)), dup_count: num(r.dup_count), skipped_locked: num(r.skipped_locked), ids_count: n, src: r.src, undone: num(r.undone), created_at: r.created_at, batch: r.batch || '' }
+    return { id: r.id, type: r.type, cnt: num(r.cnt), total: round2(num(r.total)), dup_count: num(r.dup_count), skipped_locked: num(r.skipped_locked), ids_count: n, src: r.src, undone: num(r.undone), created_at: r.created_at, batch: r.batch || '', can_undo: !num(r.undone) && n > 0 && IMPORT_UNDO_TYPES.indexOf(String(r.type || '')) >= 0 }
   })
   return c.json({ ok: true, rows: out, count: out.length })
 })
@@ -15380,16 +15474,22 @@ app.get('/import-log/:id', async (c) => {
       await pick((ph) => `SELECT * FROM payables WHERE id IN (${ph}) ORDER BY id`, (x) => push(x, 'ap', x.supplier, x.amount, x.paid, x.written_off, x.created_at, x.remark))
     } else if (t === 'expense') {
       await pick((ph) => `SELECT * FROM ledger WHERE id IN (${ph}) AND ref_type='expense' ORDER BY id`, (x) => push(x, 'expense', x.category, x.amount, 0, 0, x.created_at, x.remark))
+    } else if (t === 'reimb') {
+      // ids 是报销写出去的流水（冲借支那几笔 cash=0、以及可能的现付那笔 cash=1）
+      await pick((ph) => `SELECT * FROM ledger WHERE id IN (${ph}) AND ref_type='expense' ORDER BY id`, (x) => push(x, 'reimb', x.category || '报销', x.amount, 0, 0, x.created_at, x.remark))
+    } else if (t === 'prepaid') {
+      await pick((ph) => `SELECT * FROM prepaids WHERE id IN (${ph}) ORDER BY id`, (x) => push(x, 'prepaid', x.name, x.total, 0, 0, x.created_at, x.category))
     } else {
       await pick((ph) => `SELECT * FROM loans WHERE id IN (${ph}) ORDER BY id`, (x) => push(x, 'loan', x.staff, x.amount, num(x.used) + num(x.returned), 0, x.created_at, x.remark))
     }
   }
-  const leftTotal = round2(rows.reduce((a, x) => a + (x.kind === 'expense' ? 0 : x.left), 0))
+  const leftTotal = round2(rows.reduce((a, x) => a + (x.kind === 'expense' || x.kind === 'reimb' || x.kind === 'prepaid' ? 0 : x.left), 0))
   return c.json({
     ok: true, id: lg.id, type: lg.type, batch: lg.batch || '', src: lg.src || '', undone: num(lg.undone),
     created_at: lg.created_at, cnt: num(lg.cnt), total: round2(num(lg.total)),
     ids_count: ids.length, found: rows.length, missing: Math.max(0, ids.length - rows.length),
-    paid_count: rows.filter((x) => x.done && x.kind !== 'expense').length, left_total: leftTotal,
+    paid_count: rows.filter((x) => x.done && x.kind !== 'expense' && x.kind !== 'reimb' && x.kind !== 'prepaid').length, left_total: leftTotal,
+    can_undo: !num(lg.undone) && ids.length > 0 && IMPORT_UNDO_TYPES.indexOf(t) >= 0,
     rows
   })
 })
@@ -15403,7 +15503,7 @@ app.post('/import-undo/:id', async (c) => {
   if (num(log.undone)) return c.json({ error: '这一批已经撤回过' }, 400)
   let ids = []
   try { ids = JSON.parse(log.ids || '[]') || [] } catch (e) { ids = [] }
-  if (!ids.length) return c.json({ error: '这一批没有可撤回的单据（报销类请到借支里处理）' }, 400)
+  if (!ids.length) return c.json({ error: '这一批没有可撤回的单据' }, 400)
   const type = String(log.type || '')
   let del = 0
   let skipped = 0
@@ -15444,12 +15544,46 @@ app.post('/import-undo/:id', async (c) => {
       await db.prepare('DELETE FROM loans WHERE id=?').bind(lid).run()
       del++
     }
+  } else if (type === 'reimb') {
+    // 报销 = 冲借支 + 记支出。撤回要两头一起退：删流水，同时把借支的 used 退回去
+    // （ids 里记的是这次报销写出去的流水 id，见 importRows 的 reimb 分支）。
+    for (const lid of ids) {
+      const l = await db.prepare("SELECT * FROM ledger WHERE id=? AND ref_type='expense'").bind(lid).first()
+      if (!l) { skipped++; continue }
+      if (await isMonthLocked(db, (l.created_at || '').slice(0, 7))) { skipped++; reason = '有流水在已结账月份'; continue }
+      const loanId = num(l.ref_id)
+      const stmts = [db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='expense'").bind(lid)]
+      if (loanId > 0) stmts.push(db.prepare('UPDATE loans SET used = MAX(0, COALESCE(used,0) - ?) WHERE id=?').bind(num(l.amount), loanId))
+      const doneR = await db.batch(stmts)
+      if (!changesOf(doneR[0])) { skipped++; continue }
+      del++
+    }
+  } else if (type === 'prepaid') {
+    // 付房东：预付单 + 它摊出来的摊销流水（ref_type='amort'）一起删。
+    // 已经摊进已结账月份的不能撤 —— 那个月的账已经封了，删了跟月报对不上。
+    for (const pid of ids) {
+      const pp = await db.prepare('SELECT * FROM prepaids WHERE id=?').bind(pid).first()
+      if (!pp) { skipped++; continue }
+      const am = (await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type IN ('prepaid','amort') AND ref_id=?").bind(pid).all()).results || []
+      let lockHit = ''
+      for (const x of am) {
+        const mm = String(x.created_at || '').slice(0, 7)
+        if (mm && (await isMonthLocked(db, mm))) { lockHit = mm; break }
+      }
+      if (lockHit) { skipped++; reason = lockHit + ' 已结账，摊销已经进账了'; continue }
+      const doneP = await db.batch([
+        db.prepare("DELETE FROM ledger WHERE ref_type IN ('prepaid','amort') AND ref_id=?").bind(pid),
+        db.prepare('DELETE FROM prepaids WHERE id=?').bind(pid)
+      ])
+      if (!changesOf(doneP[1])) { skipped++; continue }
+      del++
+    }
   } else {
-    return c.json({ error: '这一类不支持整批撤回' }, 400)
+    return c.json({ error: '这一类不支持整批撤回（能撤的有：应收、应付、支出、借支、报销、付房东）' }, 400)
   }
   await db.prepare('UPDATE import_log SET undone=1 WHERE id=?').bind(id).run()
   await logAudit(db, '撤回导入', type, `撤回 ${del} 条${skipped ? `，跳过 ${skipped} 条` : ''}`)
-  return c.json({ ok: true, deleted: del, skipped, reason })
+  return c.json({ ok: true, deleted: del, undone_rows: del, skipped, reason })
 })
 
 app.delete('/import-log/:id', async (c) => {

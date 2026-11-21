@@ -144,7 +144,7 @@ Page({
       { p: 'open', n: '开账全套（新建账套一次装好）', d: '账户余额 · 默认账期 · 期初应收 · 期初应付 · 期初借支 · 期初借款' },
       { p: 'daily', n: '日常台账（多页一次传）', d: '应收对账 · 应付对账 · 支出 · 报销 · 借支 · 付房东' }
     ],
-    pk_open: false, pk_title: '', pk_text: '', pk_sheets: [], pk_busy: false, pk_force: false,
+    pk_open: false, pk_title: '', pk_text: '', pk_sheets: [], pk_busy: false, pk_force: false, pk_bad: 0,
     tpls: [
       { t: 'ar_recon', n: '应收对账（按客户对账金额）', d: '客户, 对账金额, 月份 —— 一个月一家一条' },
       { t: 'ap_recon', n: '应付对账（按供应商/外发）', d: '供应商, 对账金额, 分类, 月份 —— 外发选「外发加工费」' },
@@ -1698,7 +1698,7 @@ Page({
     wx.chooseMessageFile({ count: 1, type: 'file', extension: ['xlsx', 'XLSX'], success: (r) => {
       const f = (r.tempFiles || [])[0]
       if (!f) return
-      if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+      if (f.size > 9 * 1024 * 1024) return wx.showToast({ title: '文件太大（9MB 以内），再大的用电脑上的手填页面', icon: 'none' })
       wx.showLoading({ title: '看一眼每页…' })
       wx.getFileSystemManager().readFile({ filePath: f.path, encoding: 'base64', success: (fr) => {
         this._pkName = f.name || '模板包'
@@ -1713,9 +1713,27 @@ Page({
               wx.hideLoading()
               const d = res.data || {}
               if (!d.ok) return wx.showToast({ title: d.error || '读不了这个表', icon: 'none' })
+              // 每页把「哪一行错了、错在哪」列出来（最多 20 行，再多的只报个数）：
+              // 后端现在会把出错的行全给出来，以前只给 3 条，20 行错的表改不动。
+              const sheets = (d.sheets || []).map((s) => {
+                const er = s.error_rows || []
+                const dl = s.dup_rows || []
+                const lines = er.length
+                  ? er.slice(0, 20).map((x) => {
+                    const raw = [x.party, x.amount ? '¥' + x.amount : ''].filter(Boolean).join(' · ')
+                    return '第 ' + x.row + ' 行：' + x.error + (raw ? '（' + raw + '）' : '')
+                  })
+                  : (s.errors || [])
+                return Object.assign({}, s, {
+                  err_lines: lines,
+                  err_more: er.length ? (num0(s.error_more) + Math.max(0, er.length - 20)) : 0,
+                  dup_lines: dl.slice(0, 10).map((x) => '第 ' + x.row + ' 行：' + x.text)
+                })
+              })
+              const badTotal = sheets.reduce((a, s) => a + (s.bad_count || 0) + (s.locked_count || 0), 0)
               this.setData({
-                pk_open: true, pk_title: this._pkName, pk_text: d.text || '', pk_sheets: d.sheets || [], pk_force: false,
-                pk_dry: true, pk_total: d.total_amount || 0
+                pk_open: true, pk_title: this._pkName, pk_text: d.text || '', pk_sheets: sheets, pk_force: false,
+                pk_dry: true, pk_total: d.total_amount || 0, pk_bad: badTotal
               })
             },
             fail: () => { wx.hideLoading(); wx.showToast({ title: '上传失败，看看网', icon: 'none' }) }
@@ -1745,7 +1763,7 @@ Page({
         }
         if (!d.ok) return wx.showToast({ title: d.error || '导入失败', icon: 'none' })
         this._pkPayload = null
-        this.setData({ pk_open: false, pk_sheets: [], pk_text: '', pk_force: false })
+        this.setData({ pk_open: false, pk_sheets: [], pk_text: '', pk_force: false, pk_bad: 0 })
         wx.showModal({ title: '导完了', content: d.text || '', showCancel: false })
         this.refresh({ lite: true })
       },
@@ -1760,7 +1778,7 @@ Page({
     wx.chooseMessageFile({ count: 1, type: 'file', extension: ['xlsx', 'XLSX'], success: (r) => {
       const f = (r.tempFiles || [])[0]
       if (!f) return
-      if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+      if (f.size > 9 * 1024 * 1024) return wx.showToast({ title: '文件太大（9MB 以内），再大的用电脑上的手填页面', icon: 'none' })
       wx.showLoading({ title: '对比中…' })
       wx.getFileSystemManager().readFile({ filePath: f.path, encoding: 'base64', success: (fr) => {
         this.filePayload(fr.data, f.name || '', (e2, payload) => {
@@ -1825,7 +1843,7 @@ Page({
       success: (r) => {
         const f = (r.tempFiles || [])[0]
         if (!f) return
-        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        if (f.size > 9 * 1024 * 1024) return wx.showToast({ title: '文件太大（9MB 以内），再大的用电脑上的手填页面', icon: 'none' })
         wx.showLoading({ title: '读取中…' })
         wx.getFileSystemManager().readFile({
           filePath: f.path, encoding: 'base64',
@@ -4168,7 +4186,7 @@ Page({
   },
   // 导入记录（每批留痕，导错了整批撤回）
   loadImportLog() {
-    const kinds = { ar: '应收', ap: '应付', expense: '支出', loan: '借支', reimb: '报销', ar_init: '期初应收', ap_init: '期初应付' }
+    const kinds = { ar: '应收', ap: '应付', expense: '支出', loan: '借支', reimb: '报销', prepaid: '付房东', ar_init: '期初应收', ap_init: '期初应付' }
     this.req({
       url: API_BASE + '/import-log',
       success: (res) => {
@@ -4185,7 +4203,7 @@ Page({
   loadImportBatch(e) {
     const r = ((this.data.import_log || {}).rows || [])[e.currentTarget.dataset.i]
     if (!r) return
-    const kinds = { ar: '应收', ap: '应付', expense: '支出', loan: '借支', reimb: '报销' }
+    const kinds = { ar: '应收', ap: '应付', expense: '支出', loan: '借支', reimb: '报销', prepaid: '付房东' }
     this.req({
       url: API_BASE + '/import-log/' + r.id,
       success: (res) => {
@@ -4332,7 +4350,7 @@ Page({
       success: (r) => {
         const f = (r.tempFiles || [])[0]
         if (!f) return
-        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        if (f.size > 9 * 1024 * 1024) return wx.showToast({ title: '文件太大（9MB 以内），再大的用电脑上的手填页面', icon: 'none' })
         wx.showLoading({ title: '核对中…' })
         wx.getFileSystemManager().readFile({
           filePath: f.path, encoding: 'base64',
@@ -5592,7 +5610,7 @@ Page({
       success: (r) => {
         const f = (r.tempFiles || [])[0]
         if (!f) return
-        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        if (f.size > 9 * 1024 * 1024) return wx.showToast({ title: '文件太大（9MB 以内），再大的用电脑上的手填页面', icon: 'none' })
         wx.getFileSystemManager().readFile({
           filePath: f.path, encoding: 'utf8',
           success: (fr) => {
@@ -8484,7 +8502,7 @@ Page({
       success: (r) => {
         const f = (r.tempFiles || [])[0]
         if (!f) return
-        if (f.size > 3 * 1024 * 1024) return wx.showToast({ title: '文件太大（3MB 以内）', icon: 'none' })
+        if (f.size > 9 * 1024 * 1024) return wx.showToast({ title: '文件太大（9MB 以内），再大的用电脑上的手填页面', icon: 'none' })
         wx.showLoading({ title: '读取中…' })
         wx.getFileSystemManager().readFile({
           filePath: f.path, encoding: 'base64',

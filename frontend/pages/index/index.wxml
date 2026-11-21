@@ -1037,12 +1037,20 @@
     <view class="form" wx:if="{{pk_open}}">
       <view class="prev-h">📦 {{pk_title}}</view>
       <view class="tip">{{pk_text}}</view>
+      <view wx:if="{{pk_bad}}" class="red">有 {{pk_bad}} 行导不进去，下面列了是哪几行</view>
       <view class="row2" wx:for="{{pk_sheets}}" wx:key="sheet">
         <text class="tpl-n">{{item.sheet}}</text>
         <text wx:if="{{item.empty}}" class="tip"> 没填，跳过</text>
         <text wx:elif="{{item.error}}" class="red"> 出错：{{item.error}}</text>
         <text wx:else> {{item.type_name || ''}}：{{item.text || item.note || ''}}</text>
-        <view class="tip" wx:for="{{item.errors}}" wx:for-item="er" wx:key="*this">{{er}}</view>
+        <view wx:if="{{item.err_lines.length}}" class="red" style="font-size:12px">
+          <view wx:for="{{item.err_lines}}" wx:for-item="er" wx:key="*this">{{er}}</view>
+          <view wx:if="{{item.err_more}}" class="tip">……还有 {{item.err_more}} 行也有问题，这份表建议整张检查一遍</view>
+        </view>
+        <view wx:if="{{item.dup_lines.length}}" class="tip" style="font-size:12px">
+          <view>这几行像重复（默认不导）：</view>
+          <view wx:for="{{item.dup_lines}}" wx:for-item="dp" wx:key="*this">{{dp}}</view>
+        </view>
       </view>
       <view class="btns">
         <button class="btn ghost" size="mini" bindtap="packClose">先不导</button>
@@ -1247,8 +1255,11 @@
           <view class="frow">
             <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="loadImportBatch">看这几笔</button>
           </view>
-          <view class="frow" wx:if="{{!item.undone}}">
+          <view class="frow" wx:if="{{item.can_undo}}">
             <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="undoImport">撤回这批</button>
+            <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="delImportLog">删记录</button>
+          </view>
+          <view class="frow" wx:elif="{{!item.undone}}">
             <button class="btn ghost" size="mini" data-i="{{index}}" bindtap="delImportLog">删记录</button>
           </view>
           <text class="tip" wx:else>这批已撤回</text>
