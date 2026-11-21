@@ -1526,6 +1526,16 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+311. ✅ **「客户名单」模板：70 多个客户一次进来，只建档不建单**：用户问「初始化 70 多客户也是在手机里录入吗」。答案是电脑上填 Excel，但原来**没有「只导名字」的口子**——`期初应收` 要求金额 > 0，欠款为 0 的客户建不出来；`party_profiles` 里只有档案的客户也**不出现在「客户档案」列表里**（那个列表是从 `orders`/`payables` GROUP BY 出来的），用户会以为没导进去。三处一起补：
+   - 新导入类型 `parties`（`IMPORT_TEMPLATES.parties`）：列 `名称 / 类型(客户/供应商，可空) / 联系人 / 电话 / 地址 / 备注`，只 `INSERT/UPDATE party_profiles`，**不建单、不动钱**（`kind` 认「供/付/外发」为 `ap`，否则 `ar`）。`importRows` 与 `previewImport` 各加一个分支（预览里 `parties` 不要求金额 > 0）。
+   - **表头关键词扩充** `名称|电话|联系人|地址` 加进 `stripHeader` 的 `KW`：不然「名称,类型,联系人,电话」这种表头认不出来，会被当成一行数据导进去（实测第一条数据变成了 `名称/类型/...` 这种客户）。
+   - **`/profiles` 列表补上「只有档案、还没建过单」的单位**：`seenParty` 去重后把 `party_profiles` 里多出来的补进 `list`（`cnt/left/total` 记 0），否则那 70 家导进去了在界面上找不到。
+   - 同时把这页塞进 **「开账全套」模板包**（`open` 包第 4 页，`默认账期` 之后），开账时一次配好：账户余额 + 账期 + **客户名单** + 期初应收应付 + 期初借支借款。`PACK_SHEET_TYPE` 加 `客户名单/名单/客户档案/供应商名单/单位档案/档案 → parties` 别名。
+   - 小程序「每天要用的模板」多一行 `客户名单（只建档案）`（`tpls` 加第 12 行），`import_types` 与 5 处 `const types = […]` 同步加 `parties`。
+   - 上下游串起来：导完名单后，下次下「应收对账 / 应付对账」模板时 `fill=1` 会**把这些名字预填进去**（`party_profiles` 已经参与预填），只填金额。
+   - **验证**：`scripts/test-pack.mjs` 扩到 **65 项**（客户名单能导 2 行、`/profiles` 里看得到（不用先建单）、电话记下来、供应商 kind 是 `ap`、**没有生成应收单**、预填后预览不报错；开账包页签名多一页、导入行数 8→9）；全新库按 CI 顺序全套：`check.mjs` 418 路由 / 57 表 / 634 SQL / 261 调用 / 781 绑定、`smoke` 231 GET 无 5xx、`test-modules`、`smoke-write`、`crossmonth` 16、`apcat` 31、`import-xlsx` 32、`onboarding`、`safety` 48、`pack` 65、`tax` 52、`demo` 60 全绿。
+   - ⚠️ 动了前端（模板中心多一行）→ 小程序要重新上传；后端要重新部署。
+
 310. ✅ **`docs/新手教程.md` 重写成「从零开始」**：用户要「从账套初始化开始的小白使用教程」。原来那份是从「第一次打开」写起，跳过了「账套是什么、三本账怎么分、封存是什么」这些新人最先卡住的地方。新版七章 + 四附录：
    - 第 0 章 打开它（三种进入方式：设口令 / 输已有口令 / 👀 演示；恢复码必须抄下来；四个页签 + 🔎 找功能）
    - 第 1 章 账套（三本互相看不见、怎么切怎么改名、什么时候封存）

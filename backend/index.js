@@ -6505,6 +6505,8 @@ const IMPORT_TEMPLATES = {
   // 按供应商 / 外发对账金额导入：同样一个月一行，外发就在分类里写「外发加工费」。
   ap_recon: { name: '应付对账导入模板（按供应商/外发对账金额）', rows: [['供应商', '对账金额', '分类(可空)', '月份(可空)', '备注(可空)'], ['某某化工', 8600, '硫酸', '2026-11', ''], ['某某外协厂', 12000, '外发加工费', '', '这批外发']] },
   ap_init: { name: '期初应付模板', rows: [['供应商', '金额', '日期(可空)'], ['王五金', 2000, ''], ['李钢材', 5000, '']] },
+  // 只建档案不建单：70 多个客户一次进来，欠款以后按对账慢慢补
+  parties: { name: '客户/供应商名单模板（只建档案）', rows: [['名称', '类型(客户/供应商，可空)', '联系人(可空)', '电话(可空)', '地址(可空)', '备注(可空)'], ['张老板', '客户', '张', '13800000000', '', ''], ['某某化工', '供应商', '李', '', '工业区 3 号', '硫酸']] },
   expense: { name: '支出导入模板', rows: [['金额', '分类', '备注', '经手人(可空)', '日期(可空)'], [1200, '房租', '8月房租', '', '11-01'], [300, '水电', '电费', '', '']] },
   loan: { name: '员工借支模板', rows: [['员工', '金额', '备注', '日期(可空)'], ['张三', 1000, '买辅料', '11-05'], ['李四', 500, '加油', '']] },
   recon: { name: '对账模板（客户/供应商对账单）', rows: [['单位', '金额'], ['张老板', 5000], ['李老板', 4000], ['王老板', 35000]] },
@@ -6538,6 +6540,8 @@ const IMPORT_PACKS = {
       ] },
       { sheet: '账户期初', type: 'acc_open', rows: [['账户', '期初余额', '备注(可空)']] },
       { sheet: '默认账期', type: 'term', rows: [['默认账期(天)'], [30]] },
+      // 客户/供应商名单：只建档案，不建单、不动钱。70 多家一次进来，欠款以后按对账补。
+      { sheet: '客户名单', type: 'parties', rows: [['名称', '类型(客户/供应商，可空)', '联系人(可空)', '电话(可空)', '地址(可空)', '备注(可空)']] },
       { sheet: '期初应收', type: 'ar_init', rows: [['客户', '金额', '日期(可空)']] },
       { sheet: '期初应付', type: 'ap_init', rows: [['供应商', '金额', '日期(可空)']] },
       { sheet: '期初借支', type: 'loan_open', rows: [['员工', '未还金额', '备注(可空)']] },
@@ -6579,6 +6583,7 @@ const PACK_SHEET_TYPE = {
   期初借支: 'loan_open', 借支期初: 'loan_open',
   期初借款: 'debt_open', 借款期初: 'debt_open', 借款: 'debt_open',
   应收对账: 'ar_recon', 应付对账: 'ap_recon',
+  客户名单: 'parties', 名单: 'parties', 客户档案: 'parties', 供应商名单: 'parties', 单位档案: 'parties', 档案: 'parties',
   支出: 'expense', 日常支出: 'expense', 报销: 'reimb',
   借支: 'loan', 员工借支: 'loan',
   付房东: 'prepaid', 房东: 'prepaid', 预付: 'prepaid',
@@ -6907,7 +6912,7 @@ function stripHeader(rows) {
   if (rows.length && rows[0] && rows[0].length) {
     // 关键词也认「账户 / 余额 / 本金 / 出借方 / 账期」：开账模板是空表下载的，
     // 只有表头没有数据，认不出表头就会把表头当成一条「金额不是数字」的记录报错。
-    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要|账户|余额|本金|出借方|账期/
+    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要|账户|余额|本金|出借方|账期|名称|电话|联系人|地址/
     const first = rows[0]
     const numish = first.filter((x) => /^[\d.,%\-\s]*$/.test(String(x === null || x === undefined ? '' : x).trim()) && String(x === null || x === undefined ? '' : x).trim() !== '').length
     const wordy = first.filter((x) => KW.test(String(x === null || x === undefined ? '' : x))).length
@@ -6962,6 +6967,15 @@ async function previewImport(db, type, rawRows) {
       party = sp3 || ''; amount = num(am); category = apCatOf(ct) || String(ct || '').trim(); item = rm || '月度对账'
       const me = monthEndOf(mon, todayIso())
       if (me) { d = me; dateGiven = true; extra = '记到 ' + me + '（' + me.slice(0, 7) + ' 月底）' }
+    }
+    else if (type === 'parties') {
+      // 只建档案：名称, 类型(客户/供应商), 联系人(可空), 电话(可空), 地址(可空), 备注(可空)
+      const [nm, kd, ct, ph] = p
+      party = nm || ''
+      const kk = String(kd || '').trim()
+      category = /供|付|外发/.test(kk) ? 'ap' : 'ar'
+      if (!String(party).trim()) hardErr = '没写名称'
+      else extra = (category === 'ap' ? '供应商' : '客户') + [ct ? ' · ' + String(ct) : '', ph ? ' · ' + String(ph) : '', '（只建档案，不建单、不动钱）'].join('')
     }
     else if (type === 'prepaid') {
       // 付房东：名称, 金额, 月数(0=押金不摊), 分类, 起始日(可空), 备注(可空)
@@ -7035,6 +7049,8 @@ async function previewImport(db, type, rawRows) {
     else if (type === 'expense') { if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' } }
     else if (!x.party) { r.ok = false; r.error = '没写单位名' }
     else if (type === 'acc_open') { if (!(x.amount >= 0)) { r.ok = false; r.error = '期初余额不是数字' } }
+    else if (type === 'term') { /* 上面已校验天数 */ }
+    else if (type === 'parties') { /* 只建档案，没有金额 */ }
     else if (!(x.amount > 0)) { r.ok = false; r.error = '金额不是数字' }
     const m = x.date.slice(0, 7)
     if (lockSet.has(m)) { r.locked = true; r.error = m + ' 已结账锁定，这一行导不进去' }
@@ -10706,7 +10722,7 @@ async function importRows(db, type, rows, opts) {
   if (rows.length && rows[0] && rows[0].length) {
     // 关键词也认「账户 / 余额 / 本金 / 出借方 / 账期」：开账模板是空表下载的，
     // 只有表头没有数据，认不出表头就会把表头当成一条「金额不是数字」的记录报错。
-    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要|账户|余额|本金|出借方|账期/
+    const KW = /客户|供应商|金额|分类|姓名|员工|产品|项目|日期|备注|摘要|账户|余额|本金|出借方|账期|名称|电话|联系人|地址/
     const first = rows[0]
     const numish = first.filter((x) => /^[\d.,%\-\s]*$/.test(String(x === null || x === undefined ? '' : x).trim()) && String(x === null || x === undefined ? '' : x).trim() !== '').length
     const wordy = first.filter((x) => KW.test(String(x === null || x === undefined ? '' : x))).length
@@ -10797,6 +10813,28 @@ async function importRows(db, type, rows, opts) {
           .bind(supplier, num(amount), category, String(remark || '').trim() || '月度对账', dueIso || null, d, batch).run()
         if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
         total += num(amount)
+        n++
+      }
+    } else if (type === 'parties') {
+      // 只建档案：名称, 类型(客户/供应商), 联系人, 电话, 地址, 备注 —— 不建单、不动钱。
+      // 为的是「70 多个客户先一次进来」，欠款以后按对账慢慢补。
+      const [nm, kd, ct, ph, ad, rm] = p
+      const name = String(nm || '').trim()
+      if (name) {
+        const kind = /供|付|外发/.test(String(kd || '').trim()) ? 'ap' : 'ar'
+        const contact = String(ct || '').trim().slice(0, 30)
+        const phone = String(ph || '').trim().slice(0, 30)
+        const addr = String(ad || '').trim().slice(0, 100)
+        const note = String(rm || '').trim().slice(0, 200)
+        const old = await db.prepare('SELECT id FROM party_profiles WHERE party=?').bind(name).first()
+        if (old) {
+          await db.prepare('UPDATE party_profiles SET kind=?, contact=?, phone=?, addr=?, note=? WHERE id=?')
+            .bind(kind, contact, phone, addr, note, old.id).run()
+        } else {
+          const w = await db.prepare('INSERT INTO party_profiles (party,kind,contact,phone,addr,note,created_at) VALUES (?,?,?,?,?,?,?)')
+            .bind(name, kind, contact, phone, addr, note, now()).run()
+          if (w.meta && w.meta.last_row_id) ids.push(w.meta.last_row_id)
+        }
         n++
       }
     } else if (type === 'prepaid') {
@@ -15276,6 +15314,17 @@ app.get('/profiles', async (c) => {
     return { kind: k, party: r.party || '', cnt: num(r.cnt), left: round2(num(r.left_amt)), total: round2(num(r.total)), contact: p.contact || '', phone: p.phone || '', addr: p.addr || '', note: p.note || '', has_profile: !!p.id, id: p.id || 0, sent_times: num(sg.times), sent_last: sg.last || '', sent_days: sg.days === undefined ? null : sg.days }
   })
   let list = mk(arRows, 'ar').concat(mk(apRows, 'ap'))
+  // 只有档案、还没建过单的客户/供应商也要列出来（比如刚用「客户名单」模板一次导了 70 家），
+  // 否则那些名字在界面上哪儿都看不到，用户会以为没导进去。
+  const seenParty = new Set(list.map((x) => norm(x.party)))
+  for (const p of prof) {
+    const nm = String(p.party || '').trim()
+    if (!nm || seenParty.has(norm(nm))) continue
+    list.push({ kind: p.kind === 'ap' ? 'ap' : (kind === 'ap' ? 'ap' : 'ar'), party: nm, cnt: 0, left: 0, total: 0,
+      contact: p.contact || '', phone: p.phone || '', addr: p.addr || '', note: p.note || '',
+      has_profile: true, id: p.id || 0, sent_times: 0, sent_last: '', sent_days: null })
+    seenParty.add(norm(nm))
+  }
   if (kind) list = list.filter((x) => x.kind === kind)
   list.sort((a, b2) => (b2.left - a.left) || (b2.total - a.total))
   return c.json({ ok: true, kind, count: list.length, with_phone: list.filter((x) => x.phone).length, list })

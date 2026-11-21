@@ -107,7 +107,7 @@ const main = async () => {
   await ensureKey()
 
   // 1. 两个包都能下载，页签名对
-  const wantOpen = ['说明', '账户期初', '默认账期', '期初应收', '期初应付', '期初借支', '期初借款']
+  const wantOpen = ['说明', '账户期初', '默认账期', '客户名单', '期初应收', '期初应付', '期初借支', '期初借款']
   const wantDaily = ['说明', '应收对账', '应付对账', '支出', '借支', '报销', '付房东']
   let openSheets = []
   let dailySheets = []
@@ -128,7 +128,7 @@ const main = async () => {
     const r = await call('GET', '/import-template-pack?tpl=open')
     const rt = await call('POST', '/import-pack', { b64: (r.d || {}).b64 || '', dry: true })
     eq('包能自己读回来（预览状态）', rt.status, 200)
-    eq('包自己读回来认出的页数', ((rt.d && rt.d.sheets) || []).filter((x) => x.type).length, 6)
+    eq('包自己读回来认出的页数', ((rt.d && rt.d.sheets) || []).filter((x) => x.type).length, 7)
     eq('空页不报错（默认账期有 30 天）', ((rt.d && rt.d.sheets) || []).filter((x) => x.type && !x.empty && !x.error).length, 1)
   }
 
@@ -150,6 +150,7 @@ const main = async () => {
     { name: '说明', rows: [['开账全套模板 —— 测试']] },
     { name: '账户期初', rows: [['账户', '期初余额', '备注(可空)'], ['现金', 3000, ''], ['银行卡', 20000, '']] },
     { name: '默认账期', rows: [['默认账期(天)'], [45]] },
+    { name: '客户名单', rows: [['名称', '类型', '联系人', '电话'], [TAG + '名单丙', '客户', '王', '13700000000']] },
     { name: '期初应收', rows: [['客户', '金额', '日期(可空)'], [TAG + '期初客户甲', 5000, ''], [TAG + '期初客户乙', 3000, '']] },
     { name: '期初应付', rows: [['供应商', '金额', '日期(可空)'], [TAG + '期初供应商', 2000, '']] },
     { name: '期初借支', rows: [['员工', '未还金额', '备注(可空)'], [TAG + '员工甲', 800, '上月买辅料']] },
@@ -159,7 +160,7 @@ const main = async () => {
   // 2.1 先预览：不写库
   const dry = await call('POST', '/import-pack', { b64: openB64, dry: true })
   eq('开账预览状态', dry.status, 200)
-  eq('开账预览认出的页数', ((dry.d && dry.d.sheets) || []).filter((x) => x.type).length, 6)
+  eq('开账预览认出的页数', ((dry.d && dry.d.sheets) || []).filter((x) => x.type).length, 7)
   const accDry = ((((await call('GET', '/accounts')).d || {}).accounts) || []).find((x) => x.name === '现金') || {}
   eq('预览没写库（现金期初没变）', num0(accDry.opening), before.cashOpen)
   const ordDry = ((await call('GET', '/ar')).d || []).length
@@ -169,7 +170,7 @@ const main = async () => {
   const imp = await call('POST', '/import-pack', { b64: openB64 })
   eq('开账整包导入状态', imp.status, 200)
   // 账户 2 + 账期 1 + 期初应收 2 + 期初应付 1 + 期初借支 1 + 期初借款 1 = 8
-  eq('开账整包导入行数', num0(imp.d && imp.d.total_imported), 8)
+  eq('开账整包导入行数', num0(imp.d && imp.d.total_imported), 9)
 
   const accs = ((((await call('GET', '/accounts')).d || {}).accounts) || [])
   eq('现金期初 = 3000', num0((accs.find((x) => x.name === '现金') || {}).opening), 3000)
@@ -279,6 +280,36 @@ const main = async () => {
     const imp = (((dry.d || {}).sheets) || []).reduce((a, x) => a + num0(x.ok_count), 0)
     eq('…也不会被当成要导入的数据', imp, 0)
   }
+  // 5.5 客户名单：只建档案、不建单、不动钱（70 多家一次进来）
+  {
+    const n1 = TAG + '名单甲'
+    const n2 = TAG + '名单乙'
+    const b64 = mkPack([{ name: '客户名单', rows: [
+      ['名称', '类型', '联系人', '电话'],
+      [n1, '客户', '张', '13800000000'],
+      [n2, '供应商', '李', '13900000000']
+    ] }])
+    const r = await call('POST', '/import-pack', { b64, force: true })
+    eq('客户名单能导', r.status, 200)
+    const sheet0 = (((r.d || {}).sheets) || [])[0] || {}
+    eq('…导进 2 行', num0(sheet0.imported), 2)
+    const pf = await call('GET', '/profiles')
+    const list = ((pf.d || {}).list) || []
+    const a1 = list.find((x) => x.party === n1) || {}
+    const a2 = list.find((x) => x.party === n2) || {}
+    ok(a1.party ? '…客户档案里能看到（不用先建单）' : '…客户档案里看不到名单里的客户')
+    eq('…电话记下来了', a1.phone, '13800000000')
+    eq('…供应商的 kind 是 ap', a2.kind, 'ap')
+    // 只建档案，不许连带产生单据和现金
+    const ar = await call('GET', '/ar?status=all')
+    const arr = ((ar.d || {}).list) || (Array.isArray(ar.d) ? ar.d : [])
+    eq('…没有生成应收单', arr.filter((x) => x.customer === n1).length, 0)
+    // 下个月的对账模板会把这些名字预填进去
+    const f = await call('GET', '/import-template-pack?tpl=daily&fill=1')
+    const dry = await call('POST', '/import-pack', { b64: (f.d || {}).b64, dry: true })
+    eq('…预填后预览不报错', (((dry.d || {}).sheets) || []).reduce((a, x) => a + num0(x.bad_count), 0), 0)
+  }
+
   {
     // /pc 是给电脑浏览器用的：不需要口令就能打开（页面里的动作才要口令）
     const r = await fetch(BASE + '/pc', { headers: { 'user-agent': 'test-pack' } })

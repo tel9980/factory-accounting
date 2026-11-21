@@ -131,7 +131,7 @@ Page({
     wf_rows: [], wf_bad: 0, wf_waived: 0,
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
-    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日'],
+    import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日', '客户名单：名称,类型,联系人,电话'],
     role: 'owner', staff_enabled: false, demo: false, demo_enabled: false, demo_builtin: true,
     key_open: false, key_input: '', key_mode: 'enter', key_err: '', cf: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
@@ -154,7 +154,8 @@ Page({
       { t: 'expense', n: '支出（水电房租）', d: '金额, 分类, 备注' },
       { t: 'loan', n: '员工借支', d: '员工, 金额, 备注' },
       { t: 'ar_init', n: '期初应收（按对账金额）', d: '客户, 金额 —— 接手前的旧账' },
-      { t: 'ap_init', n: '期初应付（按对账金额）', d: '供应商, 金额 —— 接手前欠别人的' }
+      { t: 'ap_init', n: '期初应付（按对账金额）', d: '供应商, 金额 —— 接手前欠别人的' },
+      { t: 'parties', n: '客户名单（只建档案）', d: '名称, 类型, 联系人, 电话 —— 不建单、不动钱' }
     ],
     prepaids: [], prepaid_sum: {}, pp_name: '', pp_total: '', pp_months: '1', pp_cat: '厂房租金', pp_start: '',
     pp_cats: ['厂房租金', '宿舍租金', '水费', '电费', '押金', '其他'],
@@ -1462,7 +1463,7 @@ Page({
   },
   // 导出导入模板（CSV，微信发到电脑用 Excel 填）
   exportTemplate() {
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid', 'parties']
     const t = types[this.data.import_type] || 'ar'
     const url = API_BASE + '/import-template?type=' + t
     wx.showLoading({ title: '生成模板…' })
@@ -1487,7 +1488,7 @@ Page({
   },
   // 下载 Excel（.xlsx）模板：真 Excel 文件，WPS/Excel 直接打开填
   excelTemplate(e) {
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid', 'parties']
     const ov = e && e.currentTarget && e.currentTarget.dataset ? e.currentTarget.dataset.t : ''
     const t = ov || types[this.data.import_type] || 'ar'
     wx.showLoading({ title: '生成中…' })
@@ -1676,7 +1677,7 @@ Page({
     this.chooseXlsxFile()
   },
   chooseXlsxFile() {
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid', 'parties']
     const t = types[this.data.import_type] || 'ar'
     if (!wx.chooseMessageFile) return wx.showToast({ title: '微信版本过低，请用粘贴方式', icon: 'none' })
     wx.chooseMessageFile({
@@ -3620,7 +3621,7 @@ Page({
   },
   doImport() {
     const { import_type, import_text } = this.data
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid', 'parties']
     if (!import_text.trim()) return wx.showToast({ title: '请先粘贴内容', icon: 'none' })
     this._impText = import_text
     wx.showLoading({ title: '看一遍…' })
@@ -3736,7 +3737,7 @@ Page({
   // 入账；dup 不空时先问一句「好像记过了」，再决定是否强制导入
   postImportRows(good, force) {
     const { import_type } = this.data
-    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid']
+    const types = ['ar', 'ap', 'expense', 'loan', 'reimb', 'ar_init', 'ap_init', 'ar_recon', 'ap_recon', 'prepaid', 'parties']
     this.req({
       url: API_BASE + '/import-rows', method: 'POST',
       data: { type: types[import_type], rows: good, text: this._impText || '', confirm_dup: !!force },
