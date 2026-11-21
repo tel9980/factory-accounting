@@ -101,7 +101,28 @@ const run = async () => {
   yes('演示口令清空被拒', dm.s === 403 || dm.s === 503, dm.s + ' ' + (dm.d && (dm.d.code || dm.d.error)))
   if (dm.s === 403) eq('拒绝原因是只读', dm.d.code, 'demo_readonly')
 
-  // 6. 首页要有两个入口
+  // 6. 账套管理（电脑上改名 / 看每本有多少账）
+  const all = await get('/books-all')
+  yes('/books-all 能列出账套', all.s === 200 && Array.isArray(all.d.books) && all.d.books.length >= 1, all.s + ' ' + JSON.stringify(all.d).slice(0, 120))
+  yes('  说了最多能开几本', num0(all.d.max) >= 3, all.d.max)
+  yes('  标出了当前账套', (all.d.books || []).some((b) => b.current === true), all.d.books)
+  if ((all.d.books || []).some((b) => b.id === 2)) {
+    const nm2 = TAG + '二厂'
+    const ren = await post('/book-admin', { book: 2, name: nm2 })
+    yes('给第 2 本改名 → 200', ren.s === 200 && ren.d.ok === true, ren.s)
+    const after = await get('/books-all')
+    yes('  改名生效', (after.d.books || []).some((b) => b.id === 2 && b.name === nm2), (after.d.books || []).map((b) => b.name))
+    await post('/book-admin', { book: 2, name: '账套二' })
+    ok('  名字改回去了')
+  } else { ok('这台机器只开了一本账，跳过改名测试') }
+  const noBook = await post('/book-admin', { book: 9, name: '不存在的' })
+  yes('改不存在的账套 → 404', noBook.s === 404 && noBook.d.code === 'no_book', noBook.s + ' ' + (noBook.d && noBook.d.code))
+  const emptyName = await post('/book-admin', { book: 1, name: '  ' })
+  yes('名字空着 → 400', emptyName.s === 400, emptyName.s)
+  const demoAll = await get('/books-all', DEMO)
+  yes('演示口令看不到账套列表', demoAll.s === 403, demoAll.s)
+
+  // 7. 首页要有两个入口
   const home = await fetch(BASE + '/')
   const html = await home.text()
   yes('首页有 /pc 链接', /href="\/pc"/.test(html))

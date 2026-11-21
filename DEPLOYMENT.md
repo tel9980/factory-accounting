@@ -328,6 +328,21 @@ macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签
 填一次口令 → 下载模板（客户/供应商名字已经预填好）→ 用 Excel 填 → 选文件「先看看要导什么」→ 确认导入。
 这条路径不经过小程序，70 多个客户的月度对账在电脑上做最省事。
 
+### 4.12 多账套（一本账 = 一个数据库，最多 9 本）
+
+默认开 3 本（`DB` / `DB2` / `DB3`），小程序顶上「当前账套」和电脑 `/pc` 第 6 块都能切。想多开一本：
+
+```bash
+npx wrangler d1 create factory-db4          # 记下回来的 database_id
+# 在 backend/wrangler.toml 里复制一段 [[d1_databases]]，改 binding = "DB4"、database_name = "factory-db4"、database_id = 新的
+npx wrangler d1 execute factory-db4 --remote --file=schema.sql
+cd backend && ./node_modules/.bin/wrangler deploy
+```
+
+部署完 `/pc` 第 6 块「看我的账套」里就会多出第 4 本；`DB5`…`DB9` 同理（代码不用改，`BOOK_MAX = 9`）。
+
+**在电脑上管理账套**：`/pc` → 第 6 块「看我的账套」→ 每行有「改名」「用这本」。改名只需要当前账套的老板口令；**切到某一本后如果要导出/导入/初始化/看报表，得填那一本自己的口令**（每本账的口令是独立的，这是故意的：一本给别人看，一本自己用）。
+
 ### 4.11 报表存档（日报 / 月报 / 年报 / 应收 / 应付 / 明细账 / 科目余额表）
 
 电脑打开 `/pc`，第 5 块选类型 → 填日期/月份/年份/区间 → 「下载 Excel」：

@@ -6814,17 +6814,60 @@ app.get('/pc', async (c) => {
     <button class="p" onclick="arcDown()">下载 Excel</button>
   </div>
   <div class="tip" id="a_tip">月报：总览 / 利润表 / 资产负债表 / 应收明细 / 应付明细 / 收付流水 / 账龄 / 应收到期表。</div>
+</div>
+
+<div class="card">
+  <h2>6. 账套（可以开几本 / 改名字）</h2>
+  <div class="row">
+    <button onclick="booksAll()">看我的账套</button>
+    <span class="tip" style="margin:0">一本账 = 一个数据库，默认开 3 本，最多 9 本。</span>
+  </div>
+  <div id="bk_list"></div>
+  <div class="tip">改名不用切账套：看到哪本改哪本。要操作某一本（导出 / 导入 / 初始化 / 看报表）先点「用这本」，如果那本有自己的口令，重新填一下再点「记住」。</div>
   <div class="tip">存档建议：每个月结完账下一份月报，年底下一份年报，跟整账套 JSON 一起放文件夹；这些表是给人看和打印的，恢复数据还是用上面的整账套。</div>
 </div>
 
 <script>
-var K = localStorage.getItem('fa_key') || ''
-document.getElementById('key').value = K
+var K = ''
+function bookCur(){ var el = document.getElementById('bk'); return (el && el.value) || '1' }
+function keyLoad(){ K = localStorage.getItem('fa_key_' + bookCur()) || localStorage.getItem('fa_key') || ''; document.getElementById('key').value = K }
 function saveKey(){
   K = document.getElementById('key').value.trim()
   localStorage.setItem('fa_key', K)
-  msg(K.length >= 4 ? '口令记住了（只在这台电脑）' : '口令太短，至少 4 位', K.length >= 4)
+  localStorage.setItem('fa_key_' + bookCur(), K)
+  msg(K.length >= 4 ? '口令记住了（只在这台电脑，跟着当前账套）' : '口令太短，至少 4 位', K.length >= 4)
 }
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] }) }
+function booksAll(){
+  if (needKey()) return
+  fetch('/books-all', { headers: { 'x-access-key': K, 'X-Book': bookCur() } })
+    .then(function (r) { return r.json() })
+    .then(function (d) {
+      if (!d.ok) { msg(d.error || '看不了账套列表', false); return }
+      var h = '<table><tr><th>#</th><th>名称</th><th>单数</th><th>应收</th><th>状态</th><th></th></tr>'
+      d.books.forEach(function (b) {
+        h += '<tr><td>' + (b.current ? '▶ ' : '') + b.id + '</td><td>' + esc(b.name) + '</td><td>' + b.orders + '</td><td>' + b.ar + '</td><td>' + (b.has_key ? '有口令' : '还没设口令') + (b.sealed ? ' · 已封存' : '') + '</td>'
+          + '<td><button onclick="renBook(' + b.id + ')">改名</button> <button onclick="useBook(' + b.id + ')">用这本</button></td></tr>'
+      })
+      h += '</table><div class="tip">' + esc(d.text || '') + '</div>'
+      document.getElementById('bk_list').innerHTML = h
+    })
+    .catch(function () { msg('网断了，稍后再试', false) })
+}
+function renBook(id){
+  var nm = window.prompt('第 ' + id + ' 本改叫什么名字？（最多 20 个字）')
+  if (!nm) return
+  fetch('/book-admin', { method: 'POST', headers: { 'x-access-key': K, 'X-Book': bookCur(), 'content-type': 'application/json' }, body: JSON.stringify({ book: id, name: nm }) })
+    .then(function (r) { return r.json() })
+    .then(function (d) { if (d.ok) { msg('改好了：第 ' + id + ' 本叫「' + d.name + '」', true); booksAll() } else msg(d.error || '改不了', false) })
+}
+function useBook(id){
+  document.getElementById('bk').value = String(id)
+  keyLoad()
+  msg('已经切到第 ' + id + ' 本' + (K ? '' : '（这本还没在这台电脑上记过口令，填一下再点「记住」）'), !!K)
+}
+keyLoad()
+document.getElementById('bk').addEventListener('change', function () { keyLoad() })
 function msg(t, good){ var m = document.getElementById('msg'); m.textContent = t; m.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '') }
 function needKey(){ if (!K) { msg('先在上面填口令，点「记住」', false); return true } return false }
 function b64(buf){ var b = new Uint8Array(buf), s = '', i; for (i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s) }
@@ -7778,12 +7821,29 @@ app.get('/books-check', async (c) => {
     empty: empty, rows, advice, warn, schema_bad: schemaBad })
 })
 
+// ===== 账套（多本账）=====
+// 一本账 = 一个 D1 绑定：DB、DB2、DB3…DB9。以前这里写死三本，想多开一本得改代码；
+// 现在只要在 wrangler.toml 里多加一个 DB4 绑定（并建好库），代码自动认。
+const BOOK_MAX = 9
+const BOOK_DEF_NAMES = ['主账套', '账套二', '账套三', '账套四', '账套五', '账套六', '账套七', '账套八', '账套九']
+const bookBindingName = (id) => (id === 1 ? 'DB' : 'DB' + id)
+function bookDbs(env) {
+  const out = []
+  for (let i = 1; i <= BOOK_MAX; i++) {
+    const db = env && env[bookBindingName(i)]
+    if (db) out.push([i, db])
+  }
+  return out
+}
+const bookNameOf = (db, id) => {
+  try { return db.prepare("SELECT value FROM settings WHERE key='book_name'").first().then((r) => (r && r.value ? String(r.value) : BOOK_DEF_NAMES[id - 1] || ('账套' + id))).catch(() => BOOK_DEF_NAMES[id - 1] || ('账套' + id)) } catch (e) { return Promise.resolve(BOOK_DEF_NAMES[id - 1] || ('账套' + id)) }
+}
+
 app.get('/books', async (c) => {
   const all = c.env.ENV_ALL || c.env
   const list = []
-  const defs = [[1, all.DB, '主账套'], [2, all.DB2, '账套二'], [3, all.DB3, '账套三']]
-  for (const [id, db, def] of defs) {
-    if (!db) continue
+  for (const [id, db] of bookDbs(all)) {
+    const def = BOOK_DEF_NAMES[id - 1] || ('账套' + id)
     let name = def, orders = 0, ar = 0
     try {
       const n = await db.prepare("SELECT value FROM settings WHERE key='book_name'").first()
@@ -7806,6 +7866,50 @@ app.post('/book-name', async (c) => {
   const db = c.env.DB
   await db.prepare("INSERT INTO settings (key, value) VALUES ('book_name', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(nm).run()
   return c.json({ ok: true })
+})
+
+// 电脑上管理账套：一次看到所有账套的名称/单数/应收/有没有设口令（老板口令即可，不用逐本切）
+app.get('/books-all', async (c) => {
+  if ((c.get('role') || '') !== 'owner') return c.json({ error: '只有老板口令能管理账套', code: 'owner_only' }, 403)
+  const all = c.env.ENV_ALL || c.env
+  const list = []
+  for (const [id, db] of bookDbs(all)) {
+    const name = await bookNameOf(db, id)
+    let orders = 0
+    let ar = 0
+    let hasKey = false
+    let sealed = false
+    try {
+      const o = await db.prepare('SELECT COUNT(*) AS c FROM orders').first()
+      orders = num(o && o.c)
+      const a = await db.prepare('SELECT COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) AS t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()
+      ar = round2(num(a && a.t))
+      const k = await db.prepare("SELECT value FROM settings WHERE key='access_key'").first()
+      hasKey = !!(k && String(k.value).trim())
+      const sl = await db.prepare("SELECT value FROM settings WHERE key='sealed'").first()
+      sealed = !!(sl && String(sl.value) === '1')
+    } catch (e) { noteFail(e, '账套列表 ' + id) }
+    list.push({ id, name, orders, ar, has_key: hasKey, sealed, binding: bookBindingName(id), current: num(c.env.BOOK) === id })
+  }
+  return c.json({ ok: true, current: num(c.env.BOOK) || 1, max: BOOK_MAX, books: list, text: '现在一共 ' + list.length + ' 本账，最多可以开到 ' + BOOK_MAX + ' 本（每本要一个 D1 库）' })
+})
+
+// 给指定的那本账改名（老板口令 + 当前账套已登录即可，不用切过去）
+app.post('/book-admin', async (c) => {
+  if ((c.get('role') || '') !== 'owner') return c.json({ error: '只有老板口令能管理账套', code: 'owner_only' }, 403)
+  const b = await c.req.json().catch(() => ({}))
+  const id = num(b.book)
+  const nm = String(b.name || '').trim()
+  if (!nm) return c.json({ error: '账套名称不能为空' }, 400)
+  if (nm.length > 20) return c.json({ error: '名称最多 20 个字' }, 400)
+  const all = c.env.ENV_ALL || c.env
+  const hit = bookDbs(all).find(([x]) => x === id)
+  if (!hit) return c.json({ error: '没有第 ' + id + ' 本账（现在开了 ' + bookDbs(all).length + ' 本）', code: 'no_book' }, 404)
+  const db = hit[1]
+  try { await ensureBaseTables(db) } catch (e) { noteFail(e, '账套改名建表') }
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('book_name', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(nm).run()
+  await logAudit(c.env.DB, '账套改名', '设置', '第 ' + id + ' 本 → ' + nm, '', act(c))
+  return c.json({ ok: true, book: id, name: nm })
 })
 
 // 权责调整：把「按月摊的费用 + 预提利息」补进当月成本（现金口径本身不含它们）
@@ -18054,19 +18158,20 @@ ensureExtraCols = _memoDdl(ensureExtraCols, 'cols')
 export default {
   fetch: async (req, env, ctx) => {
     // 多账套：根据请求头 X-Book（1/2/3）选择对应的 D1 库
+    const avail = bookDbs(env)
     let book = 1
     try {
       const hb = Number(req.headers.get('X-Book') || 1)
-      if (hb === 2 || hb === 3) book = hb
-      else {
-        const u = new URL(req.url)
-        const qb = Number(u.searchParams.get('book') || 0)
-        if (qb === 2 || qb === 3) book = qb
-      }
+      const u = new URL(req.url)
+      const qb = Number(u.searchParams.get('book') || 0)
+      const want = hb > 1 ? hb : qb
+      // 只认真的存在的绑定；没开第 4 本却传 X-Book:4 时退回第 1 本，不会把请求打空
+      if (want && avail.some(([i]) => i === want)) book = want
     } catch (e) { book = 1 }
     // 内置演示：只看第 3 本账（示例数据），碰不到真账本。放在选库之前，所以连 X-Book 都盖掉。
     try { if (String(req.headers.get('x-access-key') || '').trim() === DEMO_KEY) book = 3 } catch (e) { /* 头解析失败就按原样 */ }
-    const db = book === 3 ? env.DB3 : book === 2 ? env.DB2 : env.DB
+    const picked = avail.find(([i]) => i === book)
+    const db = picked ? picked[1] : (avail[0] && avail[0][1])
     // 老账本上缺的 7 张基础表在这里兜一次底（_memoDdl 记忆，一个 isolate 只跑一次，之后 0 开销）
     try { await ensureBaseTables(db) } catch (e) { noteFail(e, '建表兜底') }
     try { await ensureExtraCols(db) } catch (e) { noteFail(e, '补列兜底') }
@@ -18076,19 +18181,21 @@ export default {
   scheduled: async (event, env, ctx) => {
   // 首页提速的前置：给 orders/ledger/payables 补 month 列并回填（幂等，列齐了就只剩 PRAGMA）
   try { await ensureMonthCols(env.DB) } catch (e) { noteFailDb(env.DB, e, '定时建表兜底', 1) }
-  try { await ensureMonthCols(env.DB2) } catch (e) { noteFailDb(env.DB2, e, '定时建表兜底', 2) }
-  try { await ensureMonthCols(env.DB3) } catch (e) { noteFailDb(env.DB3, e, '定时建表兜底', 3) }
+  for (const [bid, db] of bookDbs(env).filter(([i]) => i > 1)) {
+    try { await ensureMonthCols(db) } catch (e) { noteFailDb(db, e, '定时建表兜底', bid) }
+  }
   try { await ensureStaffTable(env.DB) } catch (e) { noteFailDb(env.DB, e, '定时建表兜底', 1) }
-  try { await ensureStaffTable(env.DB2) } catch (e) { noteFailDb(env.DB2, e, '定时建表兜底', 2) }
-  try { await ensureStaffTable(env.DB3) } catch (e) { noteFailDb(env.DB3, e, '定时建表兜底', 3) }
   // 老账本缺的那 7 张基础表（借款/发票/转账/核销/目标/信用额度）也在这补齐
   try { await ensureBaseTables(env.DB) } catch (e) { noteFailDb(env.DB, e, '定时建表兜底', 1) }
-  try { await ensureBaseTables(env.DB2) } catch (e) { noteFailDb(env.DB2, e, '定时建表兜底', 2) }
-  try { await ensureBaseTables(env.DB3) } catch (e) { noteFailDb(env.DB3, e, '定时建表兜底', 3) }
   try { await ensureExtraCols(env.DB) } catch (e) { noteFailDb(env.DB, e, '定时建表兜底', 1) }
-  try { await ensureExtraCols(env.DB2) } catch (e) { noteFailDb(env.DB2, e, '定时建表兜底', 2) }
-  try { await ensureExtraCols(env.DB3) } catch (e) { noteFailDb(env.DB3, e, '定时建表兜底', 3) }
-    const books = [['1', env.DB], ['2', env.DB2], ['3', env.DB3]]
+    const books = bookDbs(env).map(([i, db]) => [String(i), db])
+    // 每本账开跑前把表结构补齐（老账本缺表缺列在这里兜底，幂等）
+    for (const [bid, db] of books) {
+      try { await ensureMonthCols(db) } catch (e) { noteFailDb(db, e, '定时建表兜底', num(bid)) }
+      try { await ensureStaffTable(db) } catch (e) { noteFailDb(db, e, '定时建表兜底', num(bid)) }
+      try { await ensureBaseTables(db) } catch (e) { noteFailDb(db, e, '定时建表兜底', num(bid)) }
+      try { await ensureExtraCols(db) } catch (e) { noteFailDb(db, e, '定时建表兜底', num(bid)) }
+    }
     for (const [bid, db] of books) {
       if (!db) continue
       // 封存的账本是只读的：自动记账不再往里写（备份、体检照做）

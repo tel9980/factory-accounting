@@ -1526,6 +1526,16 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+315. ✅ **账套（多本账）能开到 9 本，并且能在电脑网页上管理**：用户问「最多可以开几个账套，账套设置可以在网页上完成吗？手机上不方便设置」。
+   - 原来写死三本：`export default fetch` 里 `book === 3 ? env.DB3 : book === 2 ? env.DB2 : env.DB`，`scheduled` 里逐条 `ensureXxx(env.DB2) / (env.DB3)`，`/books` 也是 `[[1, all.DB], [2, all.DB2], [3, all.DB3]]`。
+   - 改成**绑定驱动**：`const BOOK_MAX = 9`、`bookBindingName(id) = id === 1 ? 'DB' : 'DB' + id`、`bookDbs(env)` 扫描 `DB / DB2 … DB9` 里存在的绑定；`fetch` 选库改成从 `bookDbs` 里挑（传了没开的 `X-Book: 4` 会退回第 1 本，不会打空）；`scheduled` 的建表兜底与备份循环也改成遍历 `bookDbs`。**加一本账 = 在 `wrangler.toml` 里多一个 `DB4` 绑定 + 建库灌 schema，代码不用改。**
+   - 新增 `GET /books-all`（老板口令）：一次列出所有账套的 `{id, name, orders, ar, has_key, sealed, current, binding}` + `max` + 一句「现在一共 N 本账，最多可以开到 9 本」；`POST /book-admin {book, name}`（老板口令）给**任意一本**改名，不用先切过去（内部 `ensureBaseTables` 兜底 + `logAudit`）。
+   - `/pc` 加第 6 块「账套（可以开几本 / 改名字）」：「看我的账套」出表格（#/名称/单数/应收/有没有口令/是否封存），每行「改名」「用这本」；口令改成**按账套分别记**（`localStorage.fa_key_<账套号>`，切账套自动换口令）；改名字用 `window.prompt`。
+   - 演示口令看不到账套列表（`/books-all` 403，跟其它管理类接口一致）。
+   - `scripts/test-book.mjs` 从 26 项扩到 **35 项**：`/books-all` 能列、`max >= 3`、标出当前账套、给第 2 本改名生效再改回、改不存在的账套 404 `no_book`、名字空着 400、演示口令 403。
+   - 实测：本地三本账时 `/books-all` 返回 3 本；临时加 `DB4` 绑定后返回 4 本、`X-Book: 4` 能进第 4 本、改名生效（验证完把 `wrangler.toml` 里那段删掉，只在注释里留下「怎么加第 4 本」的说明）。
+   - `wrangler.toml` 补注释：`npx wrangler d1 create factory-db4` → `d1 execute --remote --file=schema.sql` → `wrangler deploy`，DB5…DB9 同理。
+
 314. ✅ **报表存档：日报 / 月报 / 年报 / 应收 / 应付 / 明细账 / 科目余额表，一键出 Excel**：用户问「这些可以导出存档吗」。查下来原来只有月报（`/month-pack`，8 张表）和几个打印页，日报、年报、应收/应付台账、明细账、科目余额表都没有「能存成文件」的入口。
    - 新接口 `GET /archive-kinds`（列出七种）与 `GET /archive-pack?kind=…`，返回 `{ok,kind,title,name,b64,sheets,size,ms}`，内部 `archiveSheets(db, kind, q)`：
      - **daily**（`&date=`）：日报摘要（收/付/结余/笔数）、当天明细（时间/收付/金额/科目/对方/摘要/账户/票据）、按科目小计、按账户小计。
