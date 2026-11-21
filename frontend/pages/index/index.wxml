@@ -1037,6 +1037,20 @@
     <view class="form" wx:if="{{pk_open}}">
       <view class="prev-h">📦 {{pk_title}}</view>
       <view class="tip">{{pk_text}}</view>
+      <view wx:if="{{pk_imp}}" class="form" style="margin-top:8px">
+        <view class="prev-h">🧮 这批进去之后（只是试算，还没写库）</view>
+        <view class="row2" wx:for="{{pk_imp.lines}}" wx:key="k">
+          <text class="tpl-n">{{item.k}}</text>
+          <text> {{item.now}} → {{item.then}}</text>
+          <text class="{{item.bad ? 'red' : 'tip'}}"> {{item.d}}</text>
+        </view>
+        <view wx:if="{{pk_imp.notes.length}}" class="tip" style="font-size:12px">
+          <view wx:for="{{pk_imp.notes}}" wx:for-item="nt" wx:key="*this">{{nt}}</view>
+        </view>
+        <view wx:if="{{pk_imp.warn.length}}" class="red" style="font-size:12px">
+          <view wx:for="{{pk_imp.warn}}" wx:for-item="wn" wx:key="*this">{{wn}}</view>
+        </view>
+      </view>
       <view wx:if="{{pk_bad}}" class="red">有 {{pk_bad}} 行导不进去，下面列了是哪几行</view>
       <view class="row2" wx:for="{{pk_sheets}}" wx:key="sheet">
         <text class="tpl-n">{{item.sheet}}</text>

@@ -6365,17 +6365,24 @@ app.post('/orders/:id/apply-advance', async (c) => {
   stmts.push(db.prepare(`INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) SELECT 'in','order',?,?,?,?,0,? WHERE ${GATE_O}`)
     .bind(id, total, `预收款抵扣 ${o.customer} ${o.item_name}`, 0, now(), after, id, id))
   const done = await db.batch(stmts)
-  if (!changesOf(done[0])) return c.json({ error: '单据金额已变化，请刷新后重试', code: 'stale' }, 409)
-  // 万一预收那几条没扣上（并发下理论上已被上面的闸门挡住），把单据金额退回去，不留半截
+  // 整个 batch 一起跑完，所以「没赢」的那几个请求后面的语句也可能真的执行了：
+  // 流水那条的闸门只看「单据已收 == 老值 + 本次抵扣额」，两个人同时点、都读到 paid=0 时，
+  // 输的那一方 paid 也已经变成 500，闸门成立 → 它照样会插一条 500 的流水。
+  // 以前这里第一句就 return 409，根本走不到下面的回滚，于是流水越堆越多（实测四路并发 → 4 条 2000，
+  // 单据只收了 500）。现在：不管哪一句没成，都按「这一批到底哪几句生效了」逐条退回去，
+  // 而且删流水用 batch 返回的 last_row_id 当指针（只删自己插的那一条，不误删别人的）。
+  const won = changesOf(done[0]) > 0
   const badAdv = plan.filter((q, i) => !changesOf(done[i + 1]))
-  if (badAdv.length) {
-    try {
-      await db.batch([
-        db.prepare('UPDATE orders SET paid = MAX(0, COALESCE(paid,0) - ?) WHERE id=?').bind(total, id),
-        db.prepare("DELETE FROM ledger WHERE id = (SELECT id FROM ledger WHERE ref_type='order' AND ref_id=? AND amount=? AND COALESCE(cash,1)=0 ORDER BY id DESC LIMIT 1)").bind(id, total)
-      ])
-    } catch (e) { noteFail(e, '预收抵扣·回滚') }
-    return c.json({ error: '预收款刚被别人用掉了，这次没抵扣成功，请刷新后重试', code: 'stale' }, 409)
+  if (!won || badAdv.length) {
+    const lid = num((done[stmts.length - 1] && done[stmts.length - 1].meta && done[stmts.length - 1].meta.last_row_id))
+    const fix = []
+    if (lid > 0) fix.push(db.prepare('DELETE FROM ledger WHERE id=? AND ref_type=? AND ref_id=? AND COALESCE(cash,1)=0').bind(lid, 'order', id))
+    if (won) fix.push(db.prepare('UPDATE orders SET paid = MAX(0, COALESCE(paid,0) - ?) WHERE id=?').bind(total, id))
+    plan.forEach((q, i) => {
+      if (changesOf(done[i + 1])) fix.push(db.prepare('UPDATE advances SET used = MAX(0, COALESCE(used,0) - ?) WHERE id=?').bind(q.use, q.id))
+    })
+    try { if (fix.length) await db.batch(fix) } catch (e) { noteFail(e, '预收抵扣·回滚') }
+    return c.json({ error: won ? '预收款刚被别人用掉了，这次没抵扣成功，请刷新后重试' : '单据金额已变化，请刷新后重试', code: 'stale' }, 409)
   }
   await logAudit(db, '预收抵扣', o.customer, `${o.customer} 用预收抵扣 ¥${total}`)
   return c.json({ ok: true, applied: total })
@@ -6424,16 +6431,20 @@ app.post('/payables/:id/apply-advance', async (c) => {
   stmts.push(db.prepare(`INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) SELECT 'out','payable',?,?,?,?,0,? WHERE ${GATE_P}`)
     .bind(id, total, `预付款抵扣 ${p.supplier}`, 0, now(), after, id, id))
   const done = await db.batch(stmts)
-  if (!changesOf(done[0])) return c.json({ error: '单据金额已变化，请刷新后重试', code: 'stale' }, 409)
+  // 同预收抵扣：输的那一方后面的语句也可能真的生效了，所以逐条按「哪几句改了」退回去，
+  // 删流水用 batch 返回的 last_row_id 当指针，只删自己插的那一条。
+  const wonP = changesOf(done[0]) > 0
   const badAdvP = plan.filter((q, i) => !changesOf(done[i + 1]))
-  if (badAdvP.length) {
-    try {
-      await db.batch([
-        db.prepare('UPDATE payables SET paid = MAX(0, COALESCE(paid,0) - ?) WHERE id=?').bind(total, id),
-        db.prepare("DELETE FROM ledger WHERE id = (SELECT id FROM ledger WHERE ref_type='payable' AND ref_id=? AND amount=? AND COALESCE(cash,1)=0 ORDER BY id DESC LIMIT 1)").bind(id, total)
-      ])
-    } catch (e) { noteFail(e, '预付抵扣·回滚') }
-    return c.json({ error: '预付款刚被别人用掉了，这次没抵扣成功，请刷新后重试', code: 'stale' }, 409)
+  if (!wonP || badAdvP.length) {
+    const lidP = num((done[stmts.length - 1] && done[stmts.length - 1].meta && done[stmts.length - 1].meta.last_row_id))
+    const fixP = []
+    if (lidP > 0) fixP.push(db.prepare('DELETE FROM ledger WHERE id=? AND ref_type=? AND ref_id=? AND COALESCE(cash,1)=0').bind(lidP, 'payable', id))
+    if (wonP) fixP.push(db.prepare('UPDATE payables SET paid = MAX(0, COALESCE(paid,0) - ?) WHERE id=?').bind(total, id))
+    plan.forEach((q, i) => {
+      if (changesOf(done[i + 1])) fixP.push(db.prepare('UPDATE advances SET used = MAX(0, COALESCE(used,0) - ?) WHERE id=?').bind(q.use, q.id))
+    })
+    try { if (fixP.length) await db.batch(fixP) } catch (e) { noteFail(e, '预付抵扣·回滚') }
+    return c.json({ error: wonP ? '预付款刚被别人用掉了，这次没抵扣成功，请刷新后重试' : '单据金额已变化，请刷新后重试', code: 'stale' }, 409)
   }
   await logAudit(db, '预付抵扣', p.supplier, `${p.supplier} 用预付抵扣 ¥${total}`)
   return c.json({ ok: true, applied: total })
@@ -6584,7 +6595,22 @@ app.post('/loans/:id/return', async (c) => {
     db.prepare(`INSERT INTO ledger (direction, ref_type, ref_id, amount, remark, account_id, cash, created_at) SELECT 'in','loan_return',?,?,?,?,1,? WHERE ${GATE_L}`)
       .bind(id, a, `退回借支余款 ${l.staff}`, acc, dd, after, id, id)
   ])
-  if (!changesOf(doneL[0])) return c.json({ error: '这笔借支刚被改过（可能刚报过销/刚还过钱），刷新再看一眼', code: 'stale' }, 409)
+  // 跟预收抵扣同一个坑：batch 是一起跑的，输的那一方「改 loans」更新 0 行，
+  // 但流水那条的闸门（退回额 == 老值 + 本次）在看的时候可能已经成立 → 照样插一条流水，
+  // 钱就被记了两次（实测两人同时退 500：returned 只加 500，流水却有 1000）。
+  // 所以按「这一批到底哪几句真的生效了」逐条退，删流水用 batch 返回的 last_row_id 精确删自己那条。
+  const wonL = changesOf(doneL[0]) > 0
+  const insL = changesOf(doneL[1]) > 0
+  if (!wonL || !insL) {
+    const fixL = []
+    if (!wonL && insL) {
+      const lidL = num(doneL[1] && doneL[1].meta && doneL[1].meta.last_row_id)
+      if (lidL > 0) fixL.push(db.prepare("DELETE FROM ledger WHERE id=? AND ref_type='loan_return' AND ref_id=?").bind(lidL, id))
+    }
+    if (wonL && !insL) fixL.push(db.prepare('UPDATE loans SET returned = MAX(0, COALESCE(returned,0) - ?) WHERE id=?').bind(a, id))
+    if (fixL.length) { try { await db.batch(fixL) } catch (e) { noteFail(e, '退回借支·回滚') } }
+    return c.json({ error: '这笔借支刚被改过（可能刚报过销/刚还过钱），刷新再看一眼', code: 'stale' }, 409)
+  }
   await logAudit(db, '退回借支', l.staff, `${l.staff} 退回 ¥${a}`)
   return c.json({ ok: true, amount: a, remain: round2(remain - a) })
 })
@@ -7663,6 +7689,22 @@ function show(d){
       ((s.errors || []).length ? '<div class="bad" style="font-size:12px">' + s.errors.join('<br/>') + '</div>' : '') + '</td></tr>'
   })
   h += '</table>'
+  // 试算：这批真进去之后，首页那几个数字会变成多少（以前只能导完再去看，发现不对已经晚了）
+  var im = d.impact
+  if (im) {
+    var m2 = function(x){ x = Math.round(Number(x || 0) * 100) / 100; return (x < 0 ? '-' : '') + Math.abs(x).toFixed(2).replace(/\.00$/, '') }
+    var chg = function(x){ x = Math.round(Number(x || 0) * 100) / 100; if (!x) return '—'; return (x > 0 ? '+' : '') + m2(x) }
+    var ITEMS = [['cash', '现金（手头 + 银行卡）'], ['ar', '应收（客户欠你）'], ['ap', '应付（你欠别人）'], ['loan', '员工借支还挂着'], ['debt', '借款没还的'], ['net_worth', '净资产']]
+    h += '<div style="margin-top:14px"><b>这批进去之后</b>（只是试算，还没写库）</div>' +
+      '<table><tr><th>项目</th><th>现在</th><th>导完</th><th>变化</th></tr>'
+    for (var ii = 0; ii < ITEMS.length; ii++) {
+      var kk = ITEMS[ii][0], dv = (im.delta || {})[kk] || 0
+      h += '<tr><td>' + ITEMS[ii][1] + '</td><td class="n">' + m2((im.before || {})[kk]) + '</td><td class="n">' + m2((im.after || {})[kk]) + '</td><td class="n' + (dv ? (kk === 'cash' && dv < 0 ? ' bad' : '') : '') + '">' + chg(dv) + '</td></tr>'
+    }
+    h += '</table>'
+    if ((im.notes || []).length) h += '<div class="tip" style="font-size:12px">' + im.notes.join('<br/>') + '</div>'
+    if ((im.warn || []).length) h += '<div class="bad" style="font-size:12px">' + im.warn.join('<br/>') + '</div>'
+  }
   // 逐行明细：哪一行、原值多少、为什么导不进去。以前每页只给前 3 条，
   // 一张 20 行写错的表，改到第 4 行就不知道错在哪了。
   var det = '', detN = 0, moreN = 0, dupN = 0, dupRows = []
@@ -7868,13 +7910,20 @@ app.post('/import-pack', async (c) => {
   if (!sheets.length) return c.json({ error: '这个文件里没有工作表' }, 400)
   // 同一份文件重传一遍：整包跳过（内容一模一样，再导只会重复记账）。改过内容就是新文件，照常导。
   const fpKey = 'packf_' + fnv1a(b64).toString(36) + '-' + String(b64.length).toString(36)
+  // 「同一个文件不重复入账」以前是先查后写：两个人同时点「确认导入」（或同一个人连点两下），
+  // 两个请求都读到「没导过」，于是同一份表导两遍 —— 而界面上还都显示成功。
+  // 现在改成先占坑：settings.key 是主键，INSERT OR IGNORE 抢不到（changes=0）就说明别人正在导/已经导过。
+  let fpClaimed = false
   if (!dry && !force) {
-    const seen = await db.prepare('SELECT value FROM settings WHERE key=?').bind(fpKey).first().catch(() => null)
-    if (seen && seen.value) {
+    const claimFp = await db.prepare('INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)').bind(fpKey, 'claim ' + now()).run().catch(() => null)
+    if (claimFp && changesOf(claimFp) <= 0) {
       return c.json({ ok: true, imported: 0, dup_file: true, sheets: [], total_imported: 0, total_amount: 0, error: '这份表已经导过了（同一个文件不会重复入账）。改过内容再传，或点「再导一次」。' })
     }
+    fpClaimed = !!claimFp
   }
   const out = []
+  // 预览时顺手算「这批进去之后数字变成多少」要用的行（只算真能导进去的）
+  const impGroups = []
   let totalImported = 0
   let totalAmount = 0
   for (const sh of sheets) {
@@ -7896,6 +7945,7 @@ app.post('/import-pack', async (c) => {
         // 以前只给前 3 条：一张 20 行写错的表，用户改到第 4 行就不知道错在哪了，只能整张重来。
         const badRows = pvRows.filter((x) => !x.ok || x.locked)
         const dupRows = pvRows.filter((x) => x.ok && !x.locked && x.dup)
+        impGroups.push({ sheet: sh.name, type, type_name: tName, rows: pvRows.filter((x) => x.ok && !x.locked && (!x.dup || force)) })
         out.push({
           sheet: sh.name, type, type_name: tName,
           count: pv.count, ok_count: pv.ok_count, dup_count: pv.dup_count, bad_count: pv.bad_count, locked_count: pv.locked_count, total: pv.total,
@@ -7923,13 +7973,22 @@ app.post('/import-pack', async (c) => {
       out.push({ sheet: sh.name, type, type_name: tName, error: String(e.message || e), text: '这页出错了，其它页照常导' })
     }
   }
-  if (!dry && !force && totalImported > 0) {
-    try { await db.prepare('INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)').bind(fpKey, now()).run() } catch (e) { noteFail(e, '整包导入·记指纹') }
+  if (fpClaimed) {
+    try {
+      if (totalImported > 0) await db.prepare('UPDATE settings SET value=? WHERE key=?').bind('done ' + now(), fpKey).run()
+      // 一页都没导进去（全写错了）：把坑放开，用户改完表想再传这份也不会被自己挡住
+      else await db.prepare('DELETE FROM settings WHERE key=?').bind(fpKey).run()
+    } catch (e) { noteFail(e, '整包导入·记指纹') }
   }
   if (!dry) await logAudit(db, '整包导入', String(body.name || 'Excel'), `共 ${totalImported} 行，合计 ¥${totalAmount}`, '', act(c))
+  // 试算：这批真导进去之后，现金/应收/应付会变成多少（只算不写）
+  let impact = null
+  if (dry && impGroups.length) {
+    try { impact = await packImpact(db, impGroups) } catch (e) { noteFail(e, '导入前试算') }
+  }
   const lines = out.map((x) => `${x.sheet}：${x.text || x.note || x.error || ''}`).filter((x) => x.indexOf('：') < x.length - 1)
   return c.json({
-    ok: true, dry, sheets: out, total_imported: totalImported, total_amount: totalAmount,
+    ok: true, dry, sheets: out, total_imported: totalImported, total_amount: totalAmount, impact,
     text: dry
       ? '看一遍对不对，没问题点「确认导入」：' + lines.join('；')
       : (totalImported
@@ -8116,6 +8175,101 @@ async function previewImport(db, type, rawRows) {
   if (lockCnt) parts.push(`${lockCnt} 行在已结账月份`)
   return { header_skipped: st.skipped, rows: out, count: out.length, ok_count: okCnt, dup_count: dupCnt, bad_count: badCnt, locked_count: lockCnt, total,
     text: parts.join('，') + '。确认没问题再点「确认导入」。' }
+}
+
+// 导入前试算：这批表真导进去之后，首页那几个数字会变成多少
+// 口径跟首页一致：应收/应付按「还欠多少」、现金按账户余额合计、净资产 = 现金 + 应收 − 应付 − 借款。
+// 只做加法、不写库。报销按 reimburseStaff 的规则模拟：先冲员工手上挂着的借支，冲完的才走现金。
+async function packImpact(db, groups) {
+  const day = todayIso()
+  const accs = (await accountBalances(db).catch(() => [])) || []
+  const arB = round2((await arApLeftAt(db, day, 'ar').catch(() => ({ t: 0 }))).t)
+  const apB = round2((await arApLeftAt(db, day, 'ap').catch(() => ({ t: 0 }))).t)
+  const cashB = round2(accs.reduce((a, x) => a + num(x.balance), 0))
+  const loanRow = await db.prepare('SELECT COALESCE(SUM(MAX(amount - COALESCE(used,0) - COALESCE(returned,0),0)),0) AS t FROM loans').first().catch(() => ({ t: 0 }))
+  const loanB = round2(num(loanRow && loanRow.t))
+  const debtB = round2(await debtLeftAt(db, day).catch(() => 0))
+  // 每个员工手上还挂着多少借支没报：报销先冲这里，冲完的才走现金
+  const remainBy = new Map()
+  const loanRows = (await db.prepare('SELECT staff, amount, used, returned FROM loans').all().catch(() => ({ results: [] }))).results || []
+  for (const l of loanRows) {
+    const k = String(l.staff || '')
+    const r = round2(num(l.amount) - num(l.used) - num(l.returned))
+    if (r > 0) remainBy.set(k, round2((remainBy.get(k) || 0) + r))
+  }
+  // 账户期初是「设成」不是「加」：得知道现在是多少才能算差
+  const openBy = new Map()
+  for (const a of accs) openBy.set(String(a.name || ''), round2(num(a.opening)))
+  const all = { cash: 0, ar: 0, ap: 0, loan: 0, debt: 0 }
+  const rows = []
+  const notes = []
+  const warn = []
+  let reimbOff = 0 // 报销里冲借支（不动现金）的部分，单独交代一句
+  for (const g of groups) {
+    const d = { cash: 0, ar: 0, ap: 0, loan: 0, debt: 0 }
+    let amount = 0
+    let n = 0
+    const type = g.type
+    for (const r of g.rows || []) {
+      const amt = round2(num(r.amount))
+      if (type === 'parties' || type === 'term') continue
+      n++
+      amount = round2(amount + amt)
+      if (type === 'ar' || type === 'ar_init' || type === 'ar_recon') d.ar = round2(d.ar + amt)
+      else if (type === 'ap' || type === 'ap_init' || type === 'ap_recon') d.ap = round2(d.ap + amt)
+      else if (type === 'expense') d.cash = round2(d.cash - amt)
+      else if (type === 'prepaid') d.cash = round2(d.cash - amt)
+      else if (type === 'debt_open') d.debt = round2(d.debt + amt)
+      else if (type === 'loan' || type === 'loan_open') {
+        d.loan = round2(d.loan + amt)
+        if (type === 'loan') d.cash = round2(d.cash - amt)
+        const k = String(r.party || '')
+        remainBy.set(k, round2((remainBy.get(k) || 0) + amt))
+      } else if (type === 'reimb') {
+        const k = String(r.party || '')
+        const have = round2(remainBy.get(k) || 0)
+        const use = round2(Math.min(have, amt))
+        if (use > 0) {
+          remainBy.set(k, round2(have - use))
+          d.loan = round2(d.loan - use)
+          reimbOff = round2(reimbOff + use)
+        }
+        const cashPart = round2(amt - use)
+        if (cashPart > 0) d.cash = round2(d.cash - cashPart)
+      } else if (type === 'acc_open') {
+        const k = String(r.party || '')
+        const old = round2(openBy.get(k) || 0)
+        d.cash = round2(d.cash + round2(amt - old))
+        openBy.set(k, amt)
+      }
+    }
+    for (const k of Object.keys(all)) all[k] = round2(all[k] + d[k])
+    rows.push({ sheet: g.sheet || '', type, type_name: g.type_name || '', count: n, amount, cash: d.cash, ar: d.ar, ap: d.ap, loan: d.loan, debt: d.debt })
+  }
+  const before = { cash: cashB, ar: arB, ap: apB, loan: loanB, debt: debtB }
+  before.net_worth = round2(cashB + arB - apB - debtB)
+  const after = { cash: round2(cashB + all.cash), ar: round2(arB + all.ar), ap: round2(apB + all.ap), loan: round2(loanB + all.loan), debt: round2(debtB + all.debt) }
+  after.net_worth = round2(after.cash + after.ar - after.ap - after.debt)
+  const delta = {}
+  for (const k of ['cash', 'ar', 'ap', 'loan', 'debt', 'net_worth']) delta[k] = round2(after[k] - before[k])
+  const f = (x) => (num(x) < 0 ? '-¥' + Math.abs(round2(x)) : '¥' + round2(x))
+  const mv = (a, b) => `${f(a)} → ${f(b)}`
+  if (delta.ar) notes.push(delta.ar > 0 ? `客户会多欠你 ${f(delta.ar)}（应收 ${mv(before.ar, after.ar)}）` : `应收会少 ${f(-delta.ar)}（${mv(before.ar, after.ar)}）`)
+  if (delta.ap) notes.push(delta.ap > 0 ? `你会多欠供应商/外发 ${f(delta.ap)}（应付 ${mv(before.ap, after.ap)}）` : `应付会少 ${f(-delta.ap)}（${mv(before.ap, after.ap)}）`)
+  if (delta.cash) notes.push(delta.cash < 0 ? `现金要出去 ${f(-delta.cash)}（${mv(before.cash, after.cash)}）` : `现金会进来 ${f(delta.cash)}（${mv(before.cash, after.cash)}）`)
+  if (delta.loan) notes.push(delta.loan > 0 ? `员工借支多挂 ${f(delta.loan)}（${mv(before.loan, after.loan)}）` : `员工借支少 ${f(-delta.loan)}（${mv(before.loan, after.loan)}）`)
+  if (delta.debt) notes.push(delta.debt > 0 ? `借款多 ${f(delta.debt)}（${mv(before.debt, after.debt)}）` : `借款少 ${f(-delta.debt)}（${mv(before.debt, after.debt)}）`)
+  if (reimbOff > 0) notes.push(`其中 ${f(reimbOff)} 的报销冲的是以前借出去的钱，不发现金`)
+  if (groups.some((g) => g.type === 'prepaid')) notes.push('付房东的钱先全额扣现金，之后按月摊进成本（押金不摊）')
+  if (groups.some((g) => g.type === 'acc_open')) notes.push('账户期初是「设成这个数」，不是「加上这个数」，反复导不会翻倍')
+  if (after.cash < -0.005) warn.push(`按这批算完，现金是 ${f(after.cash)}（负数）：要么金额打错了，要么这笔钱其实早就付过了`)
+  if (after.ar < -0.005) warn.push(`应收会变成 ${f(after.ar)}（负数）：是不是重复导了收款`)
+  if (after.ap < -0.005) warn.push(`应付会变成 ${f(after.ap)}（负数）：是不是重复导了付款`)
+  if (after.loan < -0.005) warn.push(`员工借支会变成 ${f(after.loan)}（负数）：这个人的借支不够冲，先看看是不是名字打错了`)
+  return {
+    before, after, delta, rows, notes, warn,
+    text: ['现金 ' + mv(before.cash, after.cash), '应收 ' + mv(before.ar, after.ar), '应付 ' + mv(before.ap, after.ap)].join('；')
+  }
 }
 
 // ===== Excel 改完再导回来：先逐行对比，你勾选要改的，才写库 =====
@@ -8329,7 +8483,14 @@ app.post('/import-xlsx', async (c) => {
     return c.json({ ok: true, imported: parsed.rows.length, layout: parsed.layout, layout_text: LAYOUT_CN[parsed.layout] || parsed.layout, skipped: parsed.skipped })
   }
   if (body.preview === true) {
-    return c.json({ ok: true, preview: true, type, ...(await previewImport(c.env.DB, type, rows)) })
+    const pv = await previewImport(c.env.DB, type, rows)
+    let impact = null
+    if (pv.rows && pv.rows.length) {
+      try {
+        impact = await packImpact(c.env.DB, [{ sheet: '这一批', type, type_name: (IMPORT_TEMPLATES[type] && IMPORT_TEMPLATES[type].name) || type, rows: pv.rows.filter((x) => x.ok && !x.locked && (!x.dup || body.confirm_dup === true)) }])
+      } catch (e) { noteFail(e, '导入前试算') }
+    }
+    return c.json({ ok: true, preview: true, type, ...pv, impact })
   }
   // 预览里删掉的行：按「表头之后的第几行」传 skip
   const skipSet = new Set((Array.isArray(body.skip) ? body.skip : []).map((x) => Math.round(Number(x)) || 0))
@@ -18934,16 +19095,24 @@ app.post('/bank-import', async (c) => {
   // 同一份账单文件重复导入会变成两倍流水、认领两次就是两倍收款。按文件内容记一笔指纹拦住。
   // （只拦「同一个文件」，不同文件里金额相同的两笔照常入账。）
   const fpKey = 'bankf_' + fnv1a(String(text || '')).toString(36) + '-' + String(String(text || '').length).toString(36)
-  const fpPrev = await db.prepare('SELECT value FROM settings WHERE key=?').bind(fpKey).first().catch(() => null)
-  if (fpPrev) {
+  // 同一份账单两个窗口同时点「导入」：以前是先查后写，两个请求都读到「没导过」→ 流水翻倍，
+  // 认领两次就是两倍收款。改成先占坑（settings.key 是主键，INSERT OR IGNORE 抢不到就是有人正在导）。
+  const claimBk = await db.prepare('INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)').bind(fpKey, 'claim ' + now()).run().catch(() => null)
+  if (claimBk && changesOf(claimBk) <= 0) {
     return c.json({ ok: true, imported: 0, dup_file: true, rows: [], layout: parsed.layout, skipped: parsed.skipped,
       error: '这份账单已经导入过了（同一份文件不会重复入账）' })
   }
-  for (const r of rows) {
-    await db.prepare('INSERT INTO bank_flows (date, direction, amount, memo, matched_type, matched_id, created_at) VALUES (?,?,?,?,?,0,?)')
-      .bind(r.date, r.direction, r.amount, `${r.memo}${acc ? ' [账户' + acc + ']' : ''}`, null, now()).run()
+  try {
+    for (const r of rows) {
+      await db.prepare('INSERT INTO bank_flows (date, direction, amount, memo, matched_type, matched_id, created_at) VALUES (?,?,?,?,?,0,?)')
+        .bind(r.date, r.direction, r.amount, `${r.memo}${acc ? ' [账户' + acc + ']' : ''}`, null, now()).run()
+    }
+  } catch (e) {
+    // 插到一半炸了：把坑放开，别让用户永远被自己挡住
+    if (claimBk) await db.prepare('DELETE FROM settings WHERE key=?').bind(fpKey).run().catch(() => {})
+    throw e
   }
-  try { await db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind(fpKey, `${rows.length} 笔 @ ${now()}`).run() } catch (e) { noteFail(e, '银行流水·导入指纹') }
+  try { await db.prepare('UPDATE settings SET value=? WHERE key=?').bind(`${rows.length} 笔 @ ${now()}`, fpKey).run() } catch (e) { noteFail(e, '银行流水·导入指纹') }
   await logAudit(db, '导入银行流水', '银行流水', `导入 ${rows.length} 笔`)
   const LAYOUT_CN = { wallet: '微信/支付宝账单', bank: '银行流水（借方/贷方）', simple: '通用表格（日期/收付/金额）', plain: '简单格式（日期,收付,金额,摘要）' }
   return c.json({ ok: true, imported: rows.length, rows, layout: parsed.layout, layout_text: LAYOUT_CN[parsed.layout] || parsed.layout, skipped: parsed.skipped })

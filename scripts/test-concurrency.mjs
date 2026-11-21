@@ -100,7 +100,12 @@ const main = async () => {
     const after = (await get('/ar?status=all&kw=' + encodeURIComponent(TAG + '乙'))).d.find((x) => num0(x.id) === num0(id)) || {}
     const sum = await ledgerSum('order', id, 'in')
     yes('已收没超过单子金额', r2(after.paid) <= 1000, after.paid)
-    yes('成功次数 = 已收 / 300', succ === Math.round(r2(after.paid) / 300), { 成功: succ, 已收: r2(after.paid) })
+    // 收款是「能收多少收多少」：最后一笔常常只收走剩下的那点（6×300 收 1000 时，
+    // 可能是 300+300+300+100 四次成功，也可能是三次 300 成功、剩下 100 让用户再点一次）。
+    // 所以不能断言「成功次数 = 已收/300」，也不能断言「一定收满」——
+    // 真正的不变量是：每次成功都不超过 300（成功次数 × 300 一定 ≥ 已收），且已收不超过单子金额。
+    yes('每次成功都不超过 300', succ * 300 >= r2(after.paid) - 0.005, { 成功: succ, 已收: r2(after.paid) })
+    yes('至少收进去一笔（并发下不该全军覆没）', succ >= 1 && r2(after.paid) > 0, { 成功: succ, 已收: r2(after.paid) })
     yes('流水合计 = 单据已收', sum === r2(after.paid), { 流水: sum, 已收: r2(after.paid) })
   }
 
@@ -391,14 +396,24 @@ const main = async () => {
     has('预收抵扣：改单带「预收还够」子查询', "FROM advances WHERE type='in' AND party=?) >= ? - 0.005")
     has('预付抵扣：改单带「预付还够」子查询', "FROM advances WHERE type='out' AND party=?) >= ? - 0.005")
     has('预收抵扣：没扣上要回滚', 'badAdv')
+    // 输的那一方后面的语句也可能真的执行了（流水那条的闸门只看单据已收），所以「没赢」
+    // 也必须走回滚，而且删流水要按 batch 返回的 last_row_id 精确删自己那一条。
+    has('预收抵扣：没赢也回滚（不只「预收没扣上」才回滚）', 'const won = changesOf(done[0]) > 0')
+    has('预付抵扣：没赢也回滚', 'const wonP = changesOf(done[0]) > 0')
+    has('回滚删流水：只删自己插的那条', 'DELETE FROM ledger WHERE id=? AND ref_type=? AND ref_id=? AND COALESCE(cash,1)=0')
     has('核销：写核销记录带「不超剩余」', 'COALESCE(written_off,0) + ? <= price - COALESCE(paid,0) + 0.005')
     has('借支退回：带「不超借出」条件', 'COALESCE(used,0) + COALESCE(returned,0) + ? <= amount + 0.005')
+    has('借支退回：没赢也回滚（否则流水会被记两次）', 'const wonL = changesOf(doneL[0]) > 0')
     has('还本金：带「不超剩余本金」条件', "? <= (COALESCE(?,0) - COALESCE((SELECT SUM(amount) FROM debt_repays WHERE debt_id=? AND kind='principal'),0)) + 0.005")
     has('撤销认领：先占位再退钱', "COALESCE(matched_type,'')<>''")
     has('支出防重：写的时候才判重', 'WHERE NOT EXISTS (SELECT 1 FROM ledger WHERE direction=\'out\' AND cash=1 AND ref_type=\'expense\'')
     has('应收防连点：写的时候才判重', 'WHERE NOT EXISTS (SELECT 1 FROM orders WHERE customer=? AND price=? AND created_at >= ?)')
     has('应付防重：写的时候才判重', 'WHERE NOT EXISTS (SELECT 1 FROM payables WHERE supplier=? AND amount=? AND created_at >= ?)')
     has('导入/备份：写前先占指纹（整包）', "settings")
+    // 「同一个文件不重复入账」必须是「先占坑」而不是「先查后写」：先查后写两个并发请求都读到
+    // 「没导过」，同一份表/账单就导两遍（流水翻倍、认领两次就是两倍收款）。
+    has('整包导入：指纹是先占坑', "const claimFp = await db.prepare('INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)')")
+    has('银行账单：指纹是先占坑', "const claimBk = await db.prepare('INSERT OR IGNORE INTO settings (key,value) VALUES (?,?)')")
   }
 
   console.log('\n通过 ' + pass + ' 项，失败 ' + bad.length + ' 项')

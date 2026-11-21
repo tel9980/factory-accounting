@@ -144,7 +144,7 @@ Page({
       { p: 'open', n: '开账全套（新建账套一次装好）', d: '账户余额 · 默认账期 · 期初应收 · 期初应付 · 期初借支 · 期初借款' },
       { p: 'daily', n: '日常台账（多页一次传）', d: '应收对账 · 应付对账 · 支出 · 报销 · 借支 · 付房东' }
     ],
-    pk_open: false, pk_title: '', pk_text: '', pk_sheets: [], pk_busy: false, pk_force: false, pk_bad: 0,
+    pk_open: false, pk_title: '', pk_text: '', pk_sheets: [], pk_busy: false, pk_force: false, pk_bad: 0, pk_imp: null,
     tpls: [
       { t: 'ar_recon', n: '应收对账（按客户对账金额）', d: '客户, 对账金额, 月份 —— 一个月一家一条' },
       { t: 'ap_recon', n: '应付对账（按供应商/外发）', d: '供应商, 对账金额, 分类, 月份 —— 外发选「外发加工费」' },
@@ -1731,9 +1731,26 @@ Page({
                 })
               })
               const badTotal = sheets.reduce((a, s) => a + (s.bad_count || 0) + (s.locked_count || 0), 0)
+              // 试算：这批真导进去之后首页那几个数字会变成多少（以前只能导完再去看，发现不对已经晚了）
+              const im = d.impact || null
+              let imp = null
+              if (im) {
+                const money = (x) => { const v = Math.round(num0(x) * 100) / 100; return (v < 0 ? '-' : '') + Math.abs(v) }
+                const chg = (x) => { const v = Math.round(num0(x) * 100) / 100; return v ? (v > 0 ? '+' : '') + money(v) : '—' }
+                imp = {
+                  lines: [
+                    { k: '现金', now: money((im.before || {}).cash), then: money((im.after || {}).cash), d: chg((im.delta || {}).cash), bad: num0((im.delta || {}).cash) < 0 },
+                    { k: '应收', now: money((im.before || {}).ar), then: money((im.after || {}).ar), d: chg((im.delta || {}).ar), bad: false },
+                    { k: '应付', now: money((im.before || {}).ap), then: money((im.after || {}).ap), d: chg((im.delta || {}).ap), bad: false },
+                    { k: '净资产', now: money((im.before || {}).net_worth), then: money((im.after || {}).net_worth), d: chg((im.delta || {}).net_worth), bad: false }
+                  ],
+                  notes: (im.notes || []).slice(0, 6),
+                  warn: (im.warn || []).slice(0, 3)
+                }
+              }
               this.setData({
                 pk_open: true, pk_title: this._pkName, pk_text: d.text || '', pk_sheets: sheets, pk_force: false,
-                pk_dry: true, pk_total: d.total_amount || 0, pk_bad: badTotal
+                pk_dry: true, pk_total: d.total_amount || 0, pk_bad: badTotal, pk_imp: imp
               })
             },
             fail: () => { wx.hideLoading(); wx.showToast({ title: '上传失败，看看网', icon: 'none' }) }
@@ -1763,7 +1780,7 @@ Page({
         }
         if (!d.ok) return wx.showToast({ title: d.error || '导入失败', icon: 'none' })
         this._pkPayload = null
-        this.setData({ pk_open: false, pk_sheets: [], pk_text: '', pk_force: false, pk_bad: 0 })
+        this.setData({ pk_open: false, pk_sheets: [], pk_text: '', pk_force: false, pk_bad: 0, pk_imp: null })
         wx.showModal({ title: '导完了', content: d.text || '', showCancel: false })
         this.refresh({ lite: true })
       },

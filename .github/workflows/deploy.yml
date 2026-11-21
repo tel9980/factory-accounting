@@ -202,6 +202,11 @@ jobs:
           node scripts/test-template-fill.mjs --base http://127.0.0.1:8791 --key 8888
           node scripts/test-preview.mjs --base http://127.0.0.1:8791 --key 8888
           node scripts/test-undo.mjs --base http://127.0.0.1:8791 --key 8888
+      # 导入前试算：预览只说「能不能导」，用户真正怕的是「导了会怎样」——现金会不会莫名少两万、
+      # 应收会不会翻倍。试算和真导必须是同一个模型，否则试算就是个骗人的数字：
+      # 所以这里每组都拿「试算的变化」跟「真导之后数字的实际变化」对比，对不上就红。
+      - name: 导入前试算回归（这批进去之后现金 / 应收 / 应付 / 借支 会变成多少）
+        run: node scripts/test-impact.mjs --base http://127.0.0.1:8791 --key 8888
       # 大文件切片上传：手机上选几 MB 的 Excel 时走的路。以前是一个请求塞 4MB base64，
       # 弱网超时后用户不知道导进去没有，重发一次就导两遍。切片后新的失败方式全是静默的：
       # 少一片、片号不连续、长度对不上 —— 拼出来是坏文件，只会报「读不了这个 Excel」。
