@@ -191,7 +191,8 @@ const main = async () => {
   else no('[7] 「记上了」少于 3 处', (feJs.match(/title: '记上了'/g) || []).length)
   // C18：补记快键
   must('quickDate 处理器在', feJs, /quickDate\(e\) \{[\s\S]{0,300}setUTCDate/)
-  eq('[7] 三个表单都有「昨天/前天/3 天前」', (feWx.match(/bindtap="quickDate"/g) || []).length, 9)
+  // 应收/应付/支出/收款面板/记工 五个地方各 3 个日期快键
+  eq('[7] 五个表单都有日期快键', (feWx.match(/bindtap="quickDate"/g) || []).length, 15)
   // C19：报表页进去就有数 + 月份快键
   must('进报表页就拉本月', feJs, /t === 'report'\) \{\s*this\.loadReportView\(\)/)
   must('报表月份有快键', feWx, /bindtap="pickRvMonth"/)

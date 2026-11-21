@@ -8,7 +8,7 @@ const dayOf = (d) => { const x = d || new Date(); return x.getFullYear() + '-' +
 // 转数字：空串/非数字一律当 0（页面上到处是输入框，直接 Number() 会得到 NaN）
 const num0 = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0 }
 
-// 功能索引：170 多项功能太多，用「找功能」搜索直接跳过去（纯前端，不发请求）
+// 功能索引：60 多项功能太多，用「找功能」搜索直接跳过去（纯前端，不发请求）
 const FEATS = [
   { n: "预收款（客户先给的钱）", go: "me:contact", desc: "客户没干活先给的钱，记成预收款；以后发货/加工完成抵扣，不重复算收入", kw: "预收 预付款 定金 先给 打款 客户先给 抵扣" },
   { n: "员工借支（借钱给伙计）", go: "me:contact", desc: "借出去、报销冲抵、退回余款，一笔一笔挂着", kw: "借支 借钱 伙计 员工 报销 预支 备用金" },
@@ -125,6 +125,7 @@ Page({
     // 收付款面板：金额 / 日期 / 账户 / 有票没票 / 税额 / 只记税金
     pay_open: false, pay_kind: 'ar', pay_id: 0, pay_title: '', pay_remain: 0,
     pay_amt: '', pay_date: '', pay_inv: '', pay_tax: '', pay_taxonly: false, pay_busy: false,
+    ar_err: false, ap_err: false, ex_err: false,
     pay_taxmode: false, pay_tax_extra: '', pay_extra_sug: 0,
     pay_invs: [{ k: 'yes', n: '有票' }, { k: 'no', n: '没票' }, { k: 'part', n: '部分开票' }],
     tax: null, tax_open: false, o_tax_kind: '', o_tax_rate: '', o_tax_hint: '', p_tax_kind: '', p_tax_rate: '', p_tax_hint: '',
@@ -332,6 +333,10 @@ Page({
     const step = (i) => {
       if (i >= snap.length) return finish()
       const it = snap[i]
+      // 参数错、单子已经删了这种，怎么重发都不会成。以前每次打开小程序都从头再发一遍
+      // （永远是同一个错，还白占网络和转圈）。试满 3 次就留在「待补」里不再自动重发，
+      // 人在「待补 N 笔」里还能手动重发或丢掉。
+      if ((Number(it._try) || 0) >= 3) { slot[i] = it; step(i + 1); return }
       const body = it.data || {}
       wx.request({
         url: it.url, method: it.method || 'POST', data: body,
@@ -342,7 +347,7 @@ Page({
             const d = res.data || {}
             if (d && d.ok === false) {
               // 200 但明确说没成（日期不对、参数不合规这类）
-              slot[i] = Object.assign({}, it, { _err: String(d.error || '服务端说没记上').slice(0, 90) })
+              slot[i] = Object.assign({}, it, { _err: String(d.error || '服务端说没记上').slice(0, 90), _try: (Number(it._try) || 0) + 1 })
               step(i + 1)
               return
             }
@@ -359,7 +364,7 @@ Page({
           if (code >= 400 && code < 500) {
             const d = res.data || {}
             const msg = d.error || d.msg || ('被拒绝（' + code + '）')
-            slot[i] = Object.assign({}, it, { _err: String(msg).slice(0, 90) })
+            slot[i] = Object.assign({}, it, { _err: String(msg).slice(0, 90), _try: (Number(it._try) || 0) + 1 })
             step(i + 1)
             return
           }
@@ -380,10 +385,16 @@ Page({
     if (!q.length) return wx.showToast({ title: '没有待补的记录', icon: 'none' })
     wx.showModal({
       title: '还有 ' + q.length + ' 笔没发出去',
-      content: q.slice(0, 8).map((x) => '· ' + (x.label || '记账') + ' ' + ((x.data && (x.data.customer || x.data.supplier || x.data.remark || x.data.amount)) || '') + (x._err ? '（上次没补上：' + x._err + '）' : '')).join('\n') + '\n\n现在重发吗？',
+      content: q.slice(0, 8).map((x) => '· ' + (x.label || '记账') + ' ' + ((x.data && (x.data.customer || x.data.supplier || x.data.remark || x.data.amount)) || '') + (x._err ? '（' + (Number(x._try) >= 3 ? '重试 3 次都没成，已停止自动重发' : '上次没补上') + '：' + x._err + '）' : '')).join('\n') + '\n\n现在重发吗？',
       confirmText: '重发', cancelText: '先不发',
       success: (r) => {
-        if (r.confirm) { this.flushPending(false); return }
+        if (r.confirm) {
+          // 手动重发：把「试满 3 次」的标记清掉，否则点了重发也一条都不会再发
+          const fresh = (wx.getStorageSync('pending_ops') || []).map((x) => { const o = Object.assign({}, x); delete o._try; return o })
+          wx.setStorageSync('pending_ops', fresh)
+          this.flushPending(false)
+          return
+        }
         // 有些条永远补不上（参数错了、单子已经删了），得给个「丢掉」的口子，
         // 否则「待补」会一直挂着，用户每次点都看到同一句错。
         const one = q[0] || {}
@@ -2211,8 +2222,8 @@ Page({
       // data 里的东西每次 setData 都要序列化过桥发给视图层，而 wxml 从来没用过 ar_all。
       const all = this._appendPage(this._arAll, page, more)
       this._arAll = all
-      this.setData({ ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw) })
-    }, fail: () => this._loading('ar', false), complete: () => this._loading('ar', false) })
+      this.setData({ ar_off: all.length, ar_more: page.length >= this.PAGE, ar_list: this.filterAr(all, this.data.ar_kw), ar_err: false })
+    }, fail: () => { this.setData({ ar_err: true }); this._loading('ar', false) }, complete: () => this._loading('ar', false) })
   },
   loadAp(more) {
     if (more && this._pagBusy && this._pagBusy.ap) return
@@ -2224,8 +2235,8 @@ Page({
       const page = res.data || []
       const all = this._appendPage(this._apAll, page, more)
       this._apAll = all
-      this.setData({ ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw) })
-    }, fail: () => this._loading('ap', false), complete: () => this._loading('ap', false) })
+      this.setData({ ap_off: all.length, ap_more: page.length >= this.PAGE, ap_list: this.filterAp(all, this.data.ap_kw), ap_err: false })
+    }, fail: () => { this.setData({ ap_err: true }); this._loading('ap', false) }, complete: () => this._loading('ap', false) })
   },
   loadExpenses(more) {
     if (more && this._pagBusy && this._pagBusy.ex) return
@@ -2237,8 +2248,8 @@ Page({
       const page = res.data || []
       const all = this._appendPage(this._expAll, page, more)
       this._expAll = all
-      this.setData({ ex_off: all.length, ex_more: page.length >= this.PAGE, expense_list: this.filterEx(all, this.data.ex_kw) })
-    }, fail: () => this._loading('ex', false), complete: () => this._loading('ex', false) })
+      this.setData({ ex_off: all.length, ex_more: page.length >= this.PAGE, expense_list: this.filterEx(all, this.data.ex_kw), ex_err: false })
+    }, fail: () => { this.setData({ ex_err: true }); this._loading('ex', false) }, complete: () => this._loading('ex', false) })
   },
   // 上拉到底自动加载更多
   onReachBottom() {
@@ -2677,9 +2688,11 @@ Page({
   },
   explainProfit() {
     const d = this.data
+    // 首页这个数以前是「权责口径」（按开单算），报表页和月结页是另一套，同一笔账能差一倍。
+    // 现在首页、报表页、月结页、KPI 全部认「收 − 付」，权责数在这里当对照讲清楚。
     wx.showModal({
-      title: '这个「本月净利」怎么算的',
-      content: `本月接单 ¥${d.month_order_add || 0}\n− 材料·外协成本 ¥${d.month_mat_cost || 0}\n− 现金支出（工资水电房租等）¥${d.month_expense_cash || 0}\n− 摊销 ¥${d.month_amort || 0} − 折旧 ¥${d.month_dep || 0} − 预提利息 ¥${d.month_accrue_int || 0}${d.month_writeoff ? `\n− 坏账核销 ¥${d.month_writeoff}（确认收不回来的钱，是损失但没动现金）` : ''}\n= 净利 ¥${d.profit_biz || 0}\n\n赊购（欠供应商的货款）只算到「我欠别人」里，不重复扣一次成本。想按付钱算，看报表页「两口径」。`,
+      title: '这个「本月赚的」怎么算的',
+      content: `本月收到手 ¥${d.month_income || 0}\n− 本月付出去 ¥${d.month_outcome || 0}\n= 本月赚的 ¥${d.month_profit || 0}（只看到账的钱，这就是收付实现制）\n\n对照：按单子算（权责口径，含还没收回来的）\n接单 ¥${d.month_order_add || 0} − 材料外协 ¥${d.month_mat_cost || 0} − 现金支出 ¥${d.month_expense_cash || 0} − 摊销 ¥${d.month_amort || 0} − 折旧 ¥${d.month_dep || 0} − 预提利息 ¥${d.month_accrue_int || 0}${d.month_writeoff ? ` − 坏账核销 ¥${d.month_writeoff}` : ''}\n= ¥${d.profit_biz || 0}\n\n两者差多少 = 这个月赊出去还没收回来的钱。报表页「利润表」把两个数并排列着。`,
       showCancel: false,
       confirmText: '知道了'
     })
@@ -2890,6 +2903,8 @@ Page({
   clearDate(e) { this.setData({ [e.currentTarget.dataset.f]: '' }) },
   // 补记昨天的单：以前只能点日期选择器一层层往回翻（默认还老是今天），
   // 补录两三张纸质单要点十几次。这里给「昨天/前天/3 天前」三个快键。
+  // 记工：点名单上的名字直接填进去
+  pickPwWorker(e) { this.setData({ pw_worker: String(e.currentTarget.dataset.w || '') }) },
   quickDate(e) {
     const f = e.currentTarget.dataset.f
     const back = Number(e.currentTarget.dataset.n) || 0
@@ -2948,14 +2963,15 @@ Page({
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
       complete: hidO,
-      queued: () => { hidO(); this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' }) },
+      queued: () => { hidO(); this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }) },
       data: { customer: o_customer, item_name: o_item, price: priceN, cost: costN, due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, ar_cat: this.data.o_ar_cat || '', client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
         // 分类也要清：下一单可能是别的客户别的事，留着上一次的会把分类记错
         hidO()
         // 记完把表单收起来：列表立刻回到视野里（记第二单再点一次「＋」）
-        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '', csug: [], o_open: false })
+        // 分类不清空：连着记同一类（今天全是「加工费」）不用每次重选。支出那边的分类一直是记住的。
+        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', csug: [], o_open: false })
         this.refresh({ lite: true }); this.loadSuggest()
         wx.showToast({ title: '记上了', icon: 'success', duration: 700 })
         this.showChecks(res)
@@ -3630,7 +3646,12 @@ Page({
   topCustTap(e) {
     const p = e.currentTarget.dataset.p
     if (!p) return
+    // 「一句话对账」那张卡画在「单位」页（tab=='contact'）里，首页点这一行以前只 setData 不切页，
+    // 表现就是「点了没反应」。现在先切到单位页再拉这一家的欠款，卡就在页首。
+    this.setData({ tab: 'contact', group: 'me' })
+    this.enterTab('contact')
     this.oneLiner({ currentTarget: { dataset: { n: p, type: 'ar' } } })
+    setTimeout(() => { try { wx.pageScrollTo({ scrollTop: 0, duration: 200 }) } catch (e) {} }, 60)
   },
   // 一键初始化：以前只有电脑上的 /pc 才有（还要开电脑、连同一个 WiFi），手机上翻遍找不到；
   // 多账套的老板想清空第 2 本，得记得去电脑上切到那本再清。
@@ -6390,6 +6411,10 @@ Page({
     try { wx.hideLoading() } catch (e) { /* 没有遮罩就忽略 */ }
     if (c) c.done()
     this.setData({ key_open: false, key_input: '', key_err: '', no_key: true })
+  },
+  // 点了「先不看」之后整页是空账（不是真没钱），给一条能点回来的横条
+  reopenKey() {
+    this.setData({ key_open: true, key_input: '', key_err: '', no_key: true })
   },
   // 输口令进（或者第一次用：设口令）
   submitKey() {

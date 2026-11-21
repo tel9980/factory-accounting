@@ -1220,3 +1220,30 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
   顺序跟 `.github/workflows/deploy.yml` 一致（离线五件套 + smoke + 29 个 test 脚本），失败不中断、
   最后列清单 exit 1。CI 里加新 test 脚本时，别忘在这里的 ONLINE 数组里也加一行，否则本地一把跑不全。
 
+
+### 4.33 「本月赚了多少」只有一个答案（收付实现制）——改利润相关代码前必读
+
+上一版里同一个问题有五个实现、两个口径：首页 `profit_biz`（权责，按开单算）、`/report-view` 的
+`monthSum().net`（权责）、`/month-end` 的 `numbers.profit`（`monthPL().profit`，权责）、`/kpi` 的
+`profit`（另一份 aggSql，权责）、首页 `month_profit`（现金，收 − 付）。实测同一月
+**144,138.50 对 277,197.09，差 92%**，而且分别印在首页和报表/月结页——用户只能挑一个信。
+
+**现在的硬规矩：**
+
+- **「本月赚了多少」= 收付实现制 = 本月实际收到的钱 − 本月实际付出去的钱**，一句 SQL 口径：
+  `SELECT SUM(amount) FROM ledger WHERE direction='in'|'out' AND cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap') AND month=?`。
+  转账、代收代付的税点不算收入也不算支出。
+- **唯一入口是 `monthPL()` 的 `cash_in` / `cash_out` / `profit_cash`**（`backend/index.js` 顶部）。
+  新代码要这个数就取它，别再自己写一份 aggSql——这一轮之所以要收敛，就是因为「各写一份」。
+- **权责口径的 `monthPL().profit` 一个字都不许动**：月报、月度归档、年报、现金流量表桥接那几处
+  的标签本来写着「净利（权责）」，动了才是制造新错。要展示两套数时，两行并排、各自把标签写全
+  （「净利（权责口径·含没收回来的）」vs「净利（收付实现制·收 − 付）」）。
+- **`/cash-bridge` 的第一行必须留权责数**：那张表靠「权责净利 + 各项调整 = 现金变化」配平，
+  换成现金口径残差永远对不上。同理 `packSheets` 的「利润表」页签保留两行。
+- **`/month-brief` 的趋势柱必须和文案同源**：过去 5 个月用按月聚合的 `cash_in − cash_out`，
+  当月直接复用 `cur.profit_cash`，别再单独跑一次 `monthPL`（上一版就是这样白跑 5 次 10 子查询）。
+- **核销（`writeoffs`）不动现金口径的数**。它只减权责利润和家底。`test-fixes2` 已经钉住
+  「核销前后现金口径利润不变、权责口径 −X」两条断言，改利润公式时这两条会先红。
+- **写接口 / 列表接口里这两组字段不能删**：`delivered_at`（交付时间要显示）、`tax_net`/`gross_net`
+  （含税/不含税要核对）、`rev`（乐观锁）、`month`（老备份补月要验）。`SLIM_DROP` 只允许放
+  `created_by` / `import_batch` 这种确实没人读的列。

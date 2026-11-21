@@ -6,6 +6,7 @@
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
   <view class="offbar" wx:if="{{net_bad}}" bindtap="retryAll">⚠️ 有些数据没拉出来（网不太好）· 点这里重试</view>
+  <view class="offbar" wx:if="{{no_key && !key_open}}" bindtap="reopenKey">🔒 还没输口令，现在这页是空的（不是真没钱）· 点这里输口令</view>
   <view class="sealbar" wx:if="{{sealed}}" bindtap="goSeal">🔒 这本账已封存（只读），{{sealed_at}}起 · 点这里去解封</view>
   <view class="mask" wx:if="{{key_open}}" catchtap="closeKey">
     <view class="keycard" catchtap="noop">
@@ -199,13 +200,13 @@
       <!-- catchtap 而不是 bindtap：以前点「本月净利」的 ⓘ 会先弹解释框、再冒泡到外面的
            setTab 把整页跳到报表页，看起来像点了两个东西。 -->
       <view class="g4" wx:if="{{role!='staff'}}" bindtap="setTab" data-t="report">
-        <view class="g4n {{profit_biz < 0 ? 'red' : 'green'}}" catchtap="explainProfit">{{profit_biz}}</view>
-        <view class="g4l" catchtap="explainProfit">本月赚的（含没收到的）ⓘ</view>
+        <view class="g4n {{month_profit < 0 ? 'red' : 'green'}}" catchtap="explainProfit">{{month_profit}}</view>
+        <view class="g4l" catchtap="explainProfit">本月赚的（收 − 付）ⓘ</view>
       </view>
     </view>
     <view class="aline bad" wx:if="{{dash_err}}" bindtap="loadDashboard">{{dash_err}}（点这里重试）</view>
     <view class="aline bad" wx:if="{{degraded}}" bindtap="loadDashboard">首页有 {{degraded}} 块没算出来（{{degraded_text}}），这几个数字可能偏小，点这里重试；一直这样就看「错误日志」</view>
-    <view class="monthline">手上现金：本月收 {{month_income}} · 付 {{month_outcome}} · 剩 {{month_profit}}</view>
+    <view class="monthline">本月收 {{month_income}} · 付 {{month_outcome}}<text wx:if="{{role!='staff'}}">　|　单子算（含没收回来的）赚 {{profit_biz}}</text></view>
     <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="card" wx:if="{{ns || (mw && mw.count>0)}}">
       <view class="card-h">今天的活<text class="card-n" wx:if="{{ns.rest>0}}" bindtap="toggleNextAll">{{ns_open ? '收起' : '还有 ' + ns.rest + ' 件 ›'}}</text></view>
@@ -298,7 +299,7 @@
       </view>
     </view>
     <view class="card" bindtap="openHelp"><view class="card-h">❓ 怎么用（一页纸）<text class="tip">新接手的人看这个 ›</text></view></view>
-    <view class="card" bindtap="openFeatSearch"><view class="card-h">🔎 找功能<text class="tip">170 多项，不知道在哪点？输个词 ›</text></view></view>
+    <view class="card" bindtap="openFeatSearch"><view class="card-h">🔎 找功能<text class="tip">60 多项，不知道在哪点？输个词 ›</text></view></view>
     <view class="card" wx:if="{{feat_open}}">
       <view class="card-h">🔎 找功能<text class="card-n" bindtap="closeFeatSearch">收起</text></view>
       <input class="inp" placeholder="输个词：催款 / 对账 / 折旧 / 预算 / 备份" value="{{feat_kw}}" bindinput="onFeatKw" confirm-type="search" focus="{{feat_open}}"/>
@@ -738,7 +739,8 @@
           <button size="mini" class="gray" bindtap="moreOrder" data-id="{{item.id}}" data-type="ar" data-name="{{item.customer}}" data-unpaid="{{item.unpaid}}" data-due="{{item.due_short}}" data-settled="{{item.settled}}">更多 ▾</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ar_list.length}}">{{ar_cat ? '这一类没有' + (ar_filter=='closed'?'已结清的':'未结的') + '单（上面再点一下分类就取消筛选）' : (ar_kw ? '没搜到「' + ar_kw + '」（换个词，或点上面的搜索框清掉）' : (ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'))}}</view>
+      <view class="empty" wx:if="{{ar_err}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadAr">　重试</text></view>
+      <view class="empty" wx:elif="{{!ar_list.length}}">{{ar_cat ? '这一类没有' + (ar_filter=='closed'?'已结清的':'未结的') + '单（上面再点一下分类就取消筛选）' : (ar_kw ? '没搜到「' + ar_kw + '」（换个词，或点上面的搜索框清掉）' : (ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'))}}</view>
       <view class="loadmore" wx:if="{{ar_more}}"><button class="btn" size="mini" disabled="{{ar_busy}}" bindtap="loadMoreTap">{{ar_busy ? '正在加载…' : '加载更早的'}}</button></view>
       <view class="tip" wx:if="{{ar_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
@@ -939,7 +941,8 @@
           <button size="mini" class="gray" bindtap="moreOrder" data-id="{{item.id}}" data-type="ap" data-name="{{item.supplier}}" data-unpaid="{{item.unpaid}}" data-due="{{item.due_short}}" data-settled="{{item.settled}}">更多 ▾</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ap_list.length}}">{{ap_filter=='closed'?'没有已结清的应付':'没有未结清的应付'}}</view>
+      <view class="empty" wx:if="{{ap_err}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadAp">　重试</text></view>
+      <view class="empty" wx:elif="{{!ap_list.length}}">{{ap_filter=='closed'?'没有已结清的应付':'没有未结清的应付'}}</view>
       <view class="loadmore" wx:if="{{ap_more}}"><button class="btn" size="mini" disabled="{{ap_busy}}" bindtap="loadMoreTap">{{ap_busy ? '正在加载…' : '加载更早的'}}</button></view>
       <view class="tip" wx:if="{{ap_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
@@ -1020,7 +1023,8 @@
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="delExpense" data-id="{{item.id}}">删</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!expense_list.length}}">暂无支出记录</view>
+      <view class="empty" wx:if="{{ex_err}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadExpenses">　重试</text></view>
+      <view class="empty" wx:elif="{{!expense_list.length}}">暂无支出记录</view>
       <view class="loadmore" wx:if="{{ex_more}}"><button class="btn" size="mini" disabled="{{ex_busy}}" bindtap="loadMoreTap">{{ex_busy ? '正在加载…' : '加载更早的'}}</button></view>
       <view class="tip" wx:if="{{ex_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
@@ -2128,7 +2132,7 @@
         <view class="prev-h">{{me.month}} · {{me.total}} 件事办了 {{me.done_count}}/{{me.total}}</view>
         <view class="tip" wx:if="{{me.locked}}">🔒 这个月已经结账锁定了，不能再增删改；要改就在下面归档区点「解锁」，改完重新结一次。</view>
         <view class="aline {{me.ready?'ok':'warn'}}">{{me.advice}}</view>
-        <view class="tip">本月：接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销折旧 {{me.numbers.cost_other}} · 净利 {{me.numbers.profit}}（净利率 {{me.numbers.margin}}%）· 手头现金 {{me.numbers.cash}}</view>
+        <view class="tip">本月赚的（收 − 付）{{me.numbers.profit}} · 接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销折旧 {{me.numbers.cost_other}} → 按单子算（权责，含没收回来的）{{me.numbers.profit_accrual}} · 手头现金 {{me.numbers.cash}}</view>
         <view class="hk-row" wx:for="{{me.steps}}" wx:key="k" bindtap="meGo" data-tab="{{item.tab}}">
           <view class="hk-main">
             <view class="hk-t {{item.done?'ok':''}}">{{item.done?'✓':'○'}} {{item.no}}. {{item.title}}</view>
@@ -2315,7 +2319,8 @@
 
     <view class="form" wx:if="{{kpi}}">
       <view class="tip">财务指标（{{kpi.month}}）</view>
-      <view class="kpi-row"><text>本月净利率</text><text class="kpi-n {{kpi.margin>=0?'ok':'bad'}}">{{kpi.margin}}%（净利 {{kpi.profit}}）</text></view>
+      <view class="kpi-row"><text>本月赚的（收 − 付）</text><text class="kpi-n {{kpi.profit>=0?'ok':'bad'}}">{{kpi.profit}}（收 {{kpi.cash_in}} − 付 {{kpi.cash_out}}）</text></view>
+      <view class="kpi-row"><text>净利率（净利 ÷ 本月收款）</text><text class="kpi-n {{kpi.margin>=0?'ok':'bad'}}">{{kpi.margin}}%（按单子算的权责净利 {{kpi.profit_accrual}}）</text></view>
       <view class="kpi-row"><text>平均回款天数</text><text class="kpi-n">{{kpi.avg_days}} 天</text></view>
       <view class="kpi-row"><text>应收周转天数</text><text class="kpi-n">{{kpi.turn_days}} 天</text></view>
       <view class="kpi-row"><text>现金能撑几个月</text><text class="kpi-n {{kpi.cushion_months>=1?'ok':'bad'}}">{{kpi.cushion_months}} 个月</text></view>
@@ -2332,7 +2337,7 @@
           <text class="bar-num">{{item.profit}}（{{item.margin}}%）</text>
         </view>
       </view>
-      <view class="tip">净利率 =（本月接单 − 材料·外协成本 − 现金费用 − 摊销 − 折旧 − 预提息）/ 接单。赊购只算欠款、不重复算成本。现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
+      <view class="tip">本月赚的 = 本月实际收到的钱 − 实际付出去的钱（收付实现制，和首页、报表页同一个数）。净利率 = 本月赚的 ÷ 本月收款。另一套「按单子算」的权责净利 = 接单 − 材料·外协 − 现金费用 − 摊销 − 折旧 − 预提息，两者差多少就是赊出去还没收回来的钱。现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
     </view>
 
     <view class="form">
@@ -2615,7 +2620,7 @@
         </view>
       </block>
       <!-- 计件工资：默认关着（工资一般按实发数记在「支出 → 工资」里就够）。
-           要按件算钱时，去设置 → 功能模块 打开「计件工资」，这一块才会出来。 -->
+           要按件算钱时，去报表页 → 🧩 功能模块 打开「计件工资」，这一块才会出来。 -->
       <block wx:if="{{mod.wage!==false}}">
       <view class="tip">🧮 计件工资（记工 → 月底算钱 → 发工资 → 打工资单）</view>
       <view class="frow">
@@ -2667,9 +2672,18 @@
         </view>
         <view class="box">
           <view class="row1"><text class="nm">记一笔工</text><text class="amt">{{pw.month}}</text></view>
+          <!-- 工人姓名以前只能在手机上一个个字打（上面就有名单，点一下就行） -->
+          <view class="frow" wx:if="{{pw.rows.length}}">
+            <text class="chip" wx:for="{{pw.rows}}" wx:key="worker" wx:if="{{index < 8}}" data-w="{{item.worker}}" bindtap="pickPwWorker">{{item.worker}}</text>
+          </view>
           <view class="frow">
             <input class="inp half" placeholder="工人姓名" value="{{pw_worker}}" bindinput="onPwField" data-k="pw_worker"/>
             <input class="inp half" placeholder="日期（留空今天）" value="{{pw_date}}" bindinput="onPwField" data-k="pw_date"/>
+          </view>
+          <view class="frow">
+            <text class="chip" data-f="pw_date" data-n="0" bindtap="quickDate">今天</text>
+            <text class="chip" data-f="pw_date" data-n="1" bindtap="quickDate">昨天</text>
+            <text class="chip" data-f="pw_date" data-n="2" bindtap="quickDate">前天</text>
           </view>
           <view class="frow">
             <input class="inp half" placeholder="产品 / 什么活（可空）" value="{{pw_item}}" bindinput="onPwField" data-k="pw_item"/>
@@ -3662,6 +3676,13 @@
       <view class="tip" wx:if="{{pay_remain > 0}}">这张单还剩 ¥{{pay_remain}}</view>
       <input class="inp full" type="digit" value="{{pay_amt}}" data-f="pay_amt" bindinput="onPayField"
         placeholder="{{pay_taxonly ? '不用填（税金看下面）' : '这次收/付多少（整笔点「收清 ' + pay_remain + '」）'}}" disabled="{{pay_taxonly}}" />
+      <view class="tip">哪天收/付的？（补录以前的就用这一天，默认今天）</view>
+      <input class="inp full" value="{{pay_date}}" data-f="pay_date" bindinput="onPayField" placeholder="2026-11-22（默认今天）" />
+      <view class="chips">
+        <text class="chip" data-f="pay_date" data-n="0" bindtap="quickDate">今天</text>
+        <text class="chip" data-f="pay_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="pay_date" data-n="7" bindtap="quickDate">一周前</text>
+      </view>
       <picker range="{{acc_names}}" bindchange="onPayAcc"><view class="picker">账户：{{acc_names[acc_idx] || '现金'}} ▾</view></picker>
       <view class="tip">这笔有票吗？（选了账户会带出这户平时的习惯，可以改）</view>
       <view class="chips">

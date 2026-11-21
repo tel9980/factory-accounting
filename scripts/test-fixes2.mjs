@@ -108,6 +108,7 @@ const profits = async () => {
   const trend = ((brief.d && brief.d.trend) || []).find((x) => x.m === m) || {}
   return {
     brief: r2((brief.d || {}).profit),
+    briefAccrual: r2((brief.d || {}).profit_accrual),
     dash: r2((dash.d || {}).profit_biz),
     trend: r2(trend.profit),
     wo: r2((dash.d || {}).month_writeoff),
@@ -146,8 +147,11 @@ const main = async () => {
   eq('[1] 核销成功', w.status, 200)
   const p2 = await profits()
   near('[1] 核销让首页利润 -' + woAmt, p2.dash - p1.dash, -woAmt)
-  near('[1] 核销让月报利润也 -' + woAmt, p2.brief - p1.brief, -woAmt)
-  near('[1] 核销让六个月趋势也 -' + woAmt, p2.trend - p1.trend, -woAmt)
+  // 第三刀之后：月报/趋势的主数字是收付实现制（只认到账的钱），核销不动现金，所以不动。
+  // 核销影响的是权责口径那个数，两条都要钉住 —— 否则以后谁又并回去就没人发现。
+  eq('[1] 核销不动现金口径的月报利润', p2.brief - p1.brief, 0)
+  near('[1] 核销让月报的「权责口径」利润 -' + woAmt, p2.briefAccrual - p1.briefAccrual, -woAmt)
+  eq('[1] 核销不动现金口径的六个月趋势', p2.trend - p1.trend, 0)
   near('[1] 首页「本月核销」跟着涨 ' + woAmt, p2.wo - p1.wo, woAmt)
   near('[1] 月报里也有核销这一项（跟着涨）', p2.briefWo - p1.briefWo, woAmt)
   eq('[1] 现金一条没动（核销不动钱）', p2.bridgeResidual === p1.bridgeResidual, true)
