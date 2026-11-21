@@ -349,14 +349,23 @@ async function monthPL(db, mm) {
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='dep' AND month=?) AS dep,
     (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='debt_int' AND month=?) AS accrue,
     (SELECT COALESCE(SUM(amount),0) FROM payables WHERE month=?) AS payable_add,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type='payable' AND month=?) AS paid_payable`
-  const r = ((await db.prepare(sql).bind(mm, mm, mm, mm, mm, mm, mm, mm).first()) || {})
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE direction='out' AND cash=1 AND ref_type='payable' AND month=?) AS paid_payable,
+    (SELECT COALESCE(SUM(amount),0) FROM writeoffs WHERE substr(created_at,1,7)=?) AS wo,
+    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${COST_EXP_WHERE} AND month=? AND (category LIKE '%材料%' OR category LIKE '%辅料%' OR category LIKE '%原料%' OR category LIKE '%采购%')) AS mat_buy`
+  const r = ((await db.prepare(sql).bind(mm, mm, mm, mm, mm, mm, mm, mm, mm, mm).first()) || {})
   const income = round2(num(r.income)), mat = round2(num(r.mat)), cashExp = round2(num(r.cash_exp))
   const amort = round2(num(r.amort)), dep = round2(num(r.dep)), accrue = round2(num(r.accrue))
   const adj = round2(amort + dep + accrue)
-  const cost = round2(mat + cashExp + adj)
+  // 坏账核销：确认收不回来的钱，是损失但不是现金支出。利润里必须减掉它，
+  // 否则「这个月赚了 3 万」和「家底少了 5 千」会长期对不上（家底那边早就把它划掉了）。
+  const wo = round2(num(r.wo))
+  const matBuy = round2(num(r.mat_buy))
+  const cost = round2(mat + cashExp + adj + wo)
   return {
-    month: mm, income, mat, cash_exp: cashExp, amort, dep, accrue, adj, cost,
+    month: mm, income, mat, cash_exp: cashExp, amort, dep, accrue, adj, cost, writeoff: wo, mat_buy: matBuy,
+    // 料算两遍的提示：单子上填了材料成本，同时又拿现金买了料记为「材料」支出 —— 两边都进成本就重了。
+    // 系统不会自动替你减（谁该算哪边只有你知道），但必须说出来，否则成本永远偏高还查不到。
+    cost_hint: (mat > 0 && matBuy > 0) ? `本月单子上填的材料成本 ¥${mat}，另外还记了「材料/采购」类现金支出 ¥${matBuy}。如果这些料已经算在单子的材料成本里，成本就重复了 —— 单子上填的料如果是现钱买的，这里那笔支出应该只记「没进单子的料」或者干脆不记。` : '',
     profit: round2(income - cost), margin: income > 0 ? round2(((income - cost) / income) * 100) : 0,
     payable_add: round2(num(r.payable_add)), paid_payable: round2(num(r.paid_payable))
   }
@@ -3819,7 +3828,10 @@ const monthSnapshot = async (db, mm) => {
   // 报销冲借支：不再动现金，但属于成本
   const loanExp = await one("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=0 AND ref_type='expense' AND month=?", mm)
   const matCost = await one('SELECT COALESCE(SUM(COALESCE(cost,0)),0) t FROM orders WHERE month=?', mm)
-  const cost = round2(matCost + cashExp + loanExp + amort + dep + accrue)
+  // 坏账核销：确认收不回来的钱。它不进现金、也不进流水，只让「家底（应收）」变少；
+  // 以前利润里不算它，于是「这个月赚了 3 万、家底却少了 5 千」这种对不上的情况查不出来。
+  const woLoss = await one("SELECT COALESCE(SUM(amount),0) t FROM writeoffs WHERE substr(created_at,1,7)=?", mm)
+  const cost = round2(matCost + cashExp + loanExp + amort + dep + accrue + woLoss)
   const profit = round2(orderAdd - cost)
   // 期末余额（截至该月最后一天）
   const opening = await one('SELECT COALESCE(SUM(opening),0) t FROM accounts')
@@ -3836,7 +3848,7 @@ const monthSnapshot = async (db, mm) => {
     income: cashIn, outcome: cashOut, net_cash: round2(cashIn - cashOut),
     order_add: orderAdd, order_count: orderCnt, payable_add: payableAdd, payable_count: payableCnt, ledger_count: ledgerCnt,
     tax_in: taxIn, tax_out: taxOut,
-    cash_expense: cashExp, loan_exp: loanExp, mat_cost: matCost, amort, dep, accrue_int: accrue, cost,
+    cash_expense: cashExp, loan_exp: loanExp, mat_cost: matCost, writeoff_loss: woLoss, amort, dep, accrue_int: accrue, cost,
     profit, margin: orderAdd > 0 ? round2((profit / orderAdd) * 100) : 0,
     cash_balance: cash, ar_left: arLeft, ap_left: apLeft, debt_left: debtB,
     net_worth: round2(cash + arLeft - apLeft - debtB)
@@ -8183,7 +8195,9 @@ async function previewImport(db, type, rawRows) {
       const k = norm(x.party) + '|' + x.amount
       const src = (type === 'ar' || type === 'ar_recon') ? iAr : (type === 'ap' || type === 'ap_recon') ? iAp : type === 'expense' ? iEx : null
       if (src) {
-        const hit = (src[type === 'expense' ? norm(x.category) + '|' + x.amount : k] || []).find((d) => d >= addDaysIso(x.date, -7) && d <= x.date)
+        // 跟真导（importRows）用同一条规则：只看「同一天」。以前预览是 ±7 天、真导也是 ±7 天，
+        // 两处各写一份但都是这个错；现在两边都收成「同一天」，预览说什么真导就做什么。
+        const hit = (src[type === 'expense' ? norm(x.category) + '|' + x.amount : k] || []).find((d) => d === x.date)
         if (hit) { r.dup = true; r.dup_text = `系统里 ${hit} 已经有一笔一样的（¥${x.amount}）` }
       }
       // 这一批自己里面重了（同一个表里抄了两遍）
@@ -8673,14 +8687,14 @@ app.get('/schema-check', async (c) => {
 
 // ===== 名词小词典（设置页「不懂就问」用；只解释、不改数）=====
 const GLOSSARY = [
-  { k: 'profit', t: '净利（权责口径）', s: '这个月真正赚的钱', d: '算法：本月接单额 − 单子上填的材料·外协成本 − 现金支出（工资、水电、房租等）− 摊销 − 折旧 − 预提利息。毛利率 = 净利 ÷ 接单额。', tip: '赊购（先欠着供应商）不算成本，那时你还没掏现金；等你付款那天才进现金流。所以「净利」和「手头多了多少钱」经常不一样，两者都对。', go: 'home' },
+  { k: 'profit', t: '净利（权责口径）', s: '这个月真正赚的钱', d: '算法：本月接单额 − 单子上填的材料·外协成本 − 现金支出（工资、水电、房租等）− 摊销 − 折旧 − 预提利息 − 坏账核销。毛利率 = 净利 ÷ 接单额。', tip: '赊购（先欠着供应商）不算成本，那时你还没掏现金；等你付款那天才进现金流。所以「净利」和「手头多了多少钱」经常不一样，两者都对。', go: 'home' },
   { k: 'accrual', t: '权责发生制 / 收付实现制', s: '两种记账口径', d: '权责制：活干完、单开出来就记收入（不管钱收到没有）。收付制：只认现金进出。', tip: '本小程序利润按权责制算，现金流按收付制算，两套数不矛盾。', go: 'stat:report' },
   { k: 'ar', t: '应收（别人欠我）', s: '加工费该收还没收的钱', d: '每开一张单就产生应收，收一笔减一笔。列表里「未收」= 金额 − 已收 − 已核销。', tip: '顶部「客户欠我」四宫格就是这个总数。', go: 'bill:ar' },
   { k: 'ap', t: '应付（我欠别人）', s: '该付给供应商还没付的钱', d: '赊购材料、外协加工记应付，付一笔减一笔。', tip: '应付不影响净利，只影响「我欠别人」和现金流。', go: 'bill:ap' },
   { k: 'due', t: '到期日 / 约定收款日', s: '说好哪天给钱', d: '开单时可以填，也可以留空——留空就按这家单位设的「账期」自动算（做单后 N 天）。', tip: '有到期日才会在 7 天内提醒你、进「今天的活」。', go: 'bill:ar' },
   { k: 'term', t: '账期', s: '这家单位习惯多久结一次', d: '在单位页给每家设「做单后 N 天到期」和「每月几号发对账单」，之后开单自动算到期日、到点自动提醒。', tip: '设一次，后面所有单都省事。', go: 'stat:contact' },
   { k: 'recon', t: '对账 / 对账单', s: '和客户把两边的数对一遍', d: '把对方的金额和你记的比一比，一样就打勾，不一样就补记或标「不用补」。对账单可以存图片、发微信、生成打印链接。', tip: '月底前一定要对一次，不然差异越积越多。', go: 'bill:import' },
-  { k: 'writeoff', t: '核销 / 坏账核销', s: '这笔钱不要了', d: '把收不回来的应收（或不用付的应付）抹掉，只动往来、不动现金，会记进「损失台账」。', tip: '抹掉前先确认真的收不回来，核销能撤销。', go: 'stat:asset' },
+  { k: 'writeoff', t: '核销 / 坏账核销', s: '这笔钱不要了', d: '把收不回来的应收（或不用付的应付）抹掉，只动往来、不动现金，会记进「损失台账」。核销应收会算进当月净利（它是损失），所以「赚了多少」和「手头多了多少」会因为它而不一样。', tip: '抹掉前先确认真的收不回来，核销能撤销。', go: 'stat:asset' },
   { k: 'advance', t: '预收款 / 预付款', s: '还没干活就先收（付）的钱', d: '预收：客户先给钱；预付：你先给供应商钱。都不算赚到/花掉，等抵到具体单子上才算。', tip: '挂太久会提醒你——预收超 30 天、预付超 15 天。', go: 'home' },
   { k: 'loan', t: '员工借支', s: '员工先借走、回头报销或退回', d: '借出时记一笔现金支出（钱确实出去了），报销时冲借支，退回余款再记回来。', tip: '「钱的三条线」里能看到还没清多少。', go: 'stat:asset' },
   { k: 'debt', t: '借款（银行贷款 / 个人）', s: '你借进来的钱', d: '记本金、年利率、期限、还款方式，系统算每月利息、下次该还多少、有没有逾期。', tip: '利息按月预提进成本，还本只是现金变动。', go: 'stat:asset' },
@@ -9074,9 +9088,10 @@ app.get('/dashboard', async (c) => {
     (SELECT value FROM settings WHERE key='selfcheck_at') AS sc_at,
     (SELECT receive FROM targets WHERE month=?) AS tgt_receive,
     (SELECT order_add FROM targets WHERE month=?) AS tgt_order,
-    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE month=?) AS order_cost`
+    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE month=?) AS order_cost,
+    (SELECT COALESCE(SUM(amount),0) FROM writeoffs WHERE substr(created_at,1,7)=?) AS wo`
   const [aggR, recentR, overdueR, dueSoonR, paySoonR, cntOverdueR, cntDueR, cntPayR, topCustR, budsR, spendR, debtRowsR, debtRepsR, accList] = await Promise.all([
-    db.prepare(aggSql).bind(m, m, m, m, m, todayS, m, m, m, m, m, m).first().catch((e) => { noteFail(e, '首页汇总'); return null }),
+    db.prepare(aggSql).bind(m, m, m, m, m, todayS, m, m, m, m, m, m, m).first().catch((e) => { noteFail(e, '首页汇总'); return null }),
     db.prepare('SELECT * FROM ledger ORDER BY id DESC LIMIT 10').all().catch((e) => { noteFail(e, '首页明细'); return null }),
     db.prepare('SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND created_at < ? ORDER BY created_at LIMIT 5').bind(cutoff).all().catch((e) => { noteFail(e, '首页明细'); return null }),
     db.prepare("SELECT * FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ? ORDER BY due_date LIMIT 8").bind(soonS, todayS).all().catch((e) => { noteFail(e, '首页明细'); return null }),
@@ -9097,6 +9112,9 @@ app.get('/dashboard', async (c) => {
   const pending = { n: agg.pending }, orderAdd = { t: agg.order_add }, payableAdd = { t: agg.payable_add }
   const matCost = { t: agg.order_cost }
   const expCash = { t: agg.exp_cash }, todayIn = { t: agg.today_in }
+  // 坏账核销：客户那笔钱确认收不回来了，从「应收」里划掉。它不是现金支出，所以以前既不在成本里、
+  // 也不在现金流里 —— 结果家底少了、利润一点没少，两个数字越走越远。
+  const woLoss = round2(num(agg.wo))
   const accAdj = { amort: round2(num(agg.amort)), accrue_int: round2(num(agg.acr)), dep: round2(num(agg.dep)) }
   accAdj.net = round2(accAdj.amort + accAdj.accrue_int + accAdj.dep)
   const expTotal = round2(num(expCash.t) + accAdj.net)
@@ -9150,7 +9168,8 @@ app.get('/dashboard', async (c) => {
     month_accrue_int: accAdj.accrue_int,
     month_dep: accAdj.dep,
     month_mat_cost: round2(num(matCost.t)),
-    profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(matCost.t) - expTotal),
+    month_writeoff: hideProfit ? null : woLoss,
+    profit_biz: hideProfit ? null : round2(num(orderAdd.t) - num(matCost.t) - expTotal - woLoss),
     pending_count: pending.n,
     today_income: round2(num(todayIn.t)),
     top_customer: topCust ? topCust.nm : '',
@@ -11373,7 +11392,9 @@ app.get('/month-brief', async (c) => {
   const sa = []
   if (cur.income === 0 && cur.profit === 0) sa.push({ tone: 'warn', text: '这个月还没记单子，先把接的单、收的钱记上，一页纸才有内容。' })
   else {
-    sa.push({ tone: cur.profit >= 0 ? 'ok' : 'bad', text: `这个月赚了 ¥${cur.profit}（接单 ¥${cur.income}，料和现金费用花了 ¥${round2(cur.mat + cur.cash_exp)}）${pre.income > 0 && Math.abs(dProfit) >= 1 ? `，比上月${dProfit > 0 ? '多' : '少'} ¥${Math.abs(dProfit)}` : ''}。` })
+    sa.push({ tone: cur.profit >= 0 ? 'ok' : 'bad', text: `这个月赚了 ¥${cur.profit}（接单 ¥${cur.income}，料和现金费用花了 ¥${round2(cur.mat + cur.cash_exp)}${cur.writeoff > 0 ? `，坏账核销 ¥${cur.writeoff}` : ''}）${pre.income > 0 && Math.abs(dProfit) >= 1 ? `，比上月${dProfit > 0 ? '多' : '少'} ¥${Math.abs(dProfit)}` : ''}。` })
+    // 材料成本可能算两遍：单子上填了料，另又记了「材料」现金支出。说清让人自己判断，别默默改数。
+    if (cur.cost_hint) sa.push({ tone: 'warn', text: cur.cost_hint })
     if (cash.in === 0 && cash.out === 0) sa.push({ tone: 'warn', text: `这个月没有进出的现金记录，手头账户里一共 ¥${cash.balance}。` })
     else sa.push({ tone: dCash >= 0 ? 'ok' : 'warn', text: `手头的钱${dCash >= 0 ? '多了' : '少了'} ¥${Math.abs(dCash)}（进 ¥${cash.in}、出 ¥${cash.out}），现在账户里一共 ¥${cash.balance}。` })
     const bills = []
@@ -11396,6 +11417,7 @@ app.get('/month-brief', async (c) => {
   const out = {
     ok: true, month: m, title,
     profit: cur.profit, income: cur.income, mat: cur.mat, cash_exp: cur.cash_exp, margin: cur.margin,
+    writeoff: cur.writeoff, mat_buy: cur.mat_buy, cost_hint: cur.cost_hint || '',
     cash_in: cash.in, cash_out: cash.out, cash_delta: dCash, cash_balance: cash.balance,
     prev_profit: pre.profit, d_profit: dProfit,
     sentences: sa, events, trend,
@@ -11594,7 +11616,7 @@ app.get('/cash-bridge', async (c) => {
   const netDebt = round2(debtIn - debtRepay)
   const actual = round2(cashIn - cashOut)
   const rows = [
-    { k: 'profit', label: '本月净利（权责口径）', amount: pl.profit, note: '收入减材料、现金费用、折旧摊销' },
+    { k: 'profit', label: '本月净利（权责口径）', amount: pl.profit, note: '收入减材料、现金费用、折旧摊销、坏账核销' },
     { k: 'adj', label: '加回 折旧 / 摊销 / 预提利息', amount: adj, note: '这些进了利润表，但没花现金' },
     { k: 'ar', label: '应收变动（变多=钱压在客户那，记账为负）', amount: round2(-dAR), note: `月初别人欠 ¥${arBegin} → 月底 ¥${arEnd}` },
     { k: 'ap', label: '应付变动（变多=赊来的钱）', amount: dAP, note: `月初我欠 ¥${apBegin} → 月底 ¥${apEnd}` },
@@ -11605,7 +11627,10 @@ app.get('/cash-bridge', async (c) => {
     { k: 'adv_used', label: '预收抵扣（不动现金）', amount: round2(-advUsed), note: advUsed > 0 ? `本月用预收抵掉 ¥${advUsed}，账上欠款少了但钱没进来` : '' },
     { k: 'tax', label: '代收/代付的税点', amount: round2(taxIn - taxOut), note: taxIn || taxOut ? `代收 ¥${taxIn}、代付 ¥${taxOut}，都不是自己的收入支出` : '' },
     { k: 'loan', label: '员工借支净变化（借出记负）', amount: round2(loanBack - loanOut), note: `借出 ¥${loanOut}、退回 ¥${loanBack}` },
-    { k: 'wo', label: '核销（不走现金）', amount: round2(-(woAr - woAp)), note: `核销应收 ¥${woAr}、豁免应付 ¥${woAp}` }
+    // 核销不再是这一行扣：坏账核销已经是「净利」里的一笔损失（见 monthSnapshot 的 writeoff_loss），
+    // 而应收变动那一行（-dAR）又会把它加回来 —— 两下相抵正好是「核销不动现金」。
+    // 以前 profit 不算核销、这里扣一行，看着也对；但家底和利润会越走越远，所以改成上面那样。
+    { k: 'wo', label: '核销（不走现金，已算进上面的净利）', amount: 0, note: `本月核销应收 ¥${woAr}、豁免应付 ¥${woAp}；它是损失，不进现金流` }
   ]
   const explained = round2(rows.reduce((a, x) => a + num(x.amount), 0))
   const residual = round2(actual - explained)
@@ -12294,8 +12319,10 @@ async function importRows(db, type, rows, opts) {
       const [customer, item, price, cost, dueC, operC] = p
       if (customer && num(price) > 0) {
         const dk = (d || t).slice(0, 10)
-        const from = addDaysIso(dk, -7)
-        const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(customer, num(price), from, dk).first()
+        // 判重只看「同一天」：以前是「同客户同价 ±7 天」，于是老张一周里天天来一单 500 的加工费，
+        // 第二单开始就被当成重复**静默吞掉**（不报错、不提示，只在返回里多一个 dup 计数）。
+        // 同一个文件重复传有文件指纹挡；改完再传有「同一天」挡；跨天真的重复记两笔就该是两笔。
+        const hit = await db.prepare("SELECT id, created_at FROM orders WHERE customer=? AND price=? AND substr(created_at,1,10)=?").bind(customer, num(price), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: customer, amount: num(price), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ar' }); continue }
         const dueIso = dueC && looksLikeDate(dueC) ? toIsoDate(dueC) : await due(customer, d, 'ar')
         const w = await db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, cost, due_date, operator, created_at, import_batch) VALUES (?,?,?,0,0,?,?,?,?,?)')
@@ -12322,7 +12349,7 @@ async function importRows(db, type, rows, opts) {
       const category = apCatOf(catIn) || String(catIn || '').trim()
       if (supplier && num(amount) > 0) {
         const dk = (d || t).slice(0, 10)
-        const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(supplier, num(amount), addDaysIso(dk, -7), dk).first()
+        const hit = await db.prepare("SELECT id, created_at FROM payables WHERE supplier=? AND amount=? AND substr(created_at,1,10)=?").bind(supplier, num(amount), dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: supplier, amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'ap' }); continue }
         const dueIso = dueP && looksLikeDate(dueP) ? toIsoDate(dueP) : await due(supplier, d, 'ap')
         const w = await db.prepare('INSERT INTO payables (supplier, amount, paid, category, remark, due_date, operator, created_at, import_batch) VALUES (?,?,0,?,?,?,?,?,?)')
@@ -12487,7 +12514,7 @@ async function importRows(db, type, rows, opts) {
       const [amount, category, remark, operE] = p
       if (num(amount) > 0) {
         const dk = (d || t).slice(0, 10)
-        const hit = await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type='expense' AND amount=? AND category=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(num(amount), category || '', addDaysIso(dk, -7), dk).first()
+        const hit = await db.prepare("SELECT id, created_at FROM ledger WHERE ref_type='expense' AND amount=? AND category=? AND substr(created_at,1,10)=?").bind(num(amount), category || '', dk).first()
         if (hit && !o.confirmDup) { dups.push({ party: category || '支出', amount: num(amount), date: (hit.created_at || '').slice(0, 10), id: hit.id, kind: 'expense' }); continue }
         const accI = await accountId()
         const w = await db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, operator, account_id, cash, created_at, import_batch) VALUES ('out','expense',0,?,?,?,?,?,1,?,?)")
@@ -12501,7 +12528,7 @@ async function importRows(db, type, rows, opts) {
       if (locked(d)) { skippedLocked++; continue }
       if (staff && num(amount) > 0) {
         const dk = (d || t).slice(0, 10)
-        const hitL = await db.prepare("SELECT id FROM loans WHERE staff=? AND amount=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?").bind(String(staff), num(amount), addDaysIso(dk, -7), dk).first()
+        const hitL = await db.prepare("SELECT id FROM loans WHERE staff=? AND amount=? AND substr(created_at,1,10)=?").bind(String(staff), num(amount), dk).first()
         if (hitL && !o.confirmDup) { dups.push({ party: String(staff), amount: num(amount), date: dk, id: hitL.id, kind: 'loan' }); continue }
         const accI = await accountId()
         // 借支单和那笔支出必须一起成：以前先插 loans 再插流水，第二步失败就剩一条
