@@ -1526,6 +1526,14 @@ node scripts/build-exe.mjs --out dist
    - **v1.1.0 三平台单文件 + 多架构镜像**：`git tag v1.1.0` 推上去触发 `release.yml`，出 `factory-accounting-windows-x64.exe`、`factory-accounting-linux-x64`、`factory-accounting-macos-arm64` 与 `SHA256SUMS.txt`，同时 `linux/amd64 + linux/arm64` 推到 GHCR。
    - **没做的事**：仍然只支持「自己用」，没有多租户；镜像不内置 TLS，要放公网请套 cloudflared / tailscale。
 
+312. ✅ **教程也上了网：`/guide` 一页，跟 `/pc` 互相有链接**：用户说「把使用教程也放在一起吧，方便随时点开查看」。做法不是运行时读文件（Worker 没有文件系统、exe 里也没打包 docs/），而是**编译期生成**：
+   - `scripts/gen-guide.mjs` 把 `docs/新手教程.md` 转成一张自包含的 HTML（标题/表格/列表/引用/代码块/内联代码与加粗都转，表格外面套 `.tw` 横向滚动，打印时隐藏顶栏），写进 `backend/guide.js`（`export const GUIDE_HTML = "..."`，18 KB）。
+   - `backend/index.js` 顶部 `import { GUIDE_HTML } from './guide.js'`，新增 `app.get('/guide')`，中间件白名单加 `path === '/guide'`（教程里没有账目数据，不用口令）。
+   - `/pc` 页面标题旁边加「📖 使用教程（从建账套开始）」；教程页顶栏有「← 回电脑填表」和「🖨 打印」（`window.print()`）。
+   - **防止文档改了网页不更新**：`gen-guide.mjs --check` 比对生成物，CI 的 check job 加了一步「使用教程网页是最新的」（在 `node scripts/check.mjs` 之前跑，不依赖 npm 包）。
+   - 实测：本地 `/guide` 200 / 18402 字节 / 10 张表 / 顶栏与打印按钮都在；`/pc` 里有 `/guide` 链接。
+   - ⚠️ 纯后端改动，小程序不用重传。
+
 311. ✅ **「客户名单」模板：70 多个客户一次进来，只建档不建单**：用户问「初始化 70 多客户也是在手机里录入吗」。答案是电脑上填 Excel，但原来**没有「只导名字」的口子**——`期初应收` 要求金额 > 0，欠款为 0 的客户建不出来；`party_profiles` 里只有档案的客户也**不出现在「客户档案」列表里**（那个列表是从 `orders`/`payables` GROUP BY 出来的），用户会以为没导进去。三处一起补：
    - 新导入类型 `parties`（`IMPORT_TEMPLATES.parties`）：列 `名称 / 类型(客户/供应商，可空) / 联系人 / 电话 / 地址 / 备注`，只 `INSERT/UPDATE party_profiles`，**不建单、不动钱**（`kind` 认「供/付/外发」为 `ap`，否则 `ar`）。`importRows` 与 `previewImport` 各加一个分支（预览里 `parties` 不要求金额 > 0）。
    - **表头关键词扩充** `名称|电话|联系人|地址` 加进 `stripHeader` 的 `KW`：不然「名称,类型,联系人,电话」这种表头认不出来，会被当成一行数据导进去（实测第一条数据变成了 `名称/类型/...` 这种客户）。

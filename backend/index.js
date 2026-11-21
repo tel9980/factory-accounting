@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { GUIDE_HTML } from './guide.js'
 
 const app = new Hono()
 
@@ -1105,7 +1106,7 @@ app.use('*', async (c, next) => {
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
   // /version 放在口令外面：部署完不用口令就能确认线上跑的是哪一版（它不返回任何账目数据）
   if (path === '/version') return c.json({ ok: true, version: String((c.env && c.env.APP_VERSION) || 'dev'), built: String((c.env && c.env.APP_BUILT) || ''), commit: String((c.env && c.env.APP_COMMIT) || ''), ray: c.req.header('cf-ray') || '' })
-  if (path === '/' || path === '/pc' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c, true); return }
+  if (path === '/' || path === '/pc' || path === '/guide' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') { await next(); await applyEtag(c, true); return }
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -6671,6 +6672,10 @@ app.get('/import-template-pack', async (c) => {
   return c.json({ ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc, sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })), b64: toB64(xlsx) })
 })
 
+// 使用教程（网页版）：内容来自 docs/新手教程.md，由 scripts/gen-guide.mjs 编译成 backend/guide.js。
+// 免口令就能看 —— 教程里没有账目数据，用不着口令；/pc 页面和它互相有链接。
+app.get('/guide', (c) => c.html(GUIDE_HTML))
+
 // 电脑上填表 / 上传：手机上一个个敲 70 多个客户不现实，这个页面就干两件事 ——
 // 下载带客户名的模板、把填好的 Excel 传回来（同一个口令，不经过小程序）
 app.get('/pc', async (c) => {
@@ -6698,7 +6703,8 @@ app.get('/pc', async (c) => {
  code{background:#f0f2f5;padding:1px 5px;border-radius:4px}
 </style></head><body><div class="wrap">
 <h1>电脑上填表，填完传回来</h1>
-<div class="sub">下载 → 用 Excel / WPS 在电脑上填 → 保存成 xlsx → 在这里上传。手机上不用一个个敲。</div>
+<div class="sub">下载 → 用 Excel / WPS 在电脑上填 → 保存成 xlsx → 在这里上传。手机上不用一个个敲。
+  <a href="/guide" style="margin-left:6px">📖 使用教程（从建账套开始）</a></div>
 
 <div class="card">
   <h2>1. 口令</h2>
