@@ -166,6 +166,12 @@ jobs:
         run: node scripts/test-archive.mjs --base http://127.0.0.1:8791 --key 8888
       - name: 整账套回归（导出 / 导入 / 一键初始化；会清空再导回，放最后跑）
         run: node scripts/test-book.mjs --base http://127.0.0.1:8791 --key 8888
+      # 备份 / 恢复逐列：以前验的是「能恢复」，而恢复时三张主表的列清单是手写的 ——
+      # 加一列忘了同步，恢复完接口照样回 ok、页面照样能看，只是那一列静默变默认值
+      # （ar_cat 丢过、tax_* 丢过、inv_state 丢过、no_invoice 丢过）。这条把备份、清空、恢复
+      # 之后每一行的每一列逐一比一遍，差一个单元格就红。会清空账本，所以跟在 test-book 后面。
+      - name: 备份恢复逐列回归（恢复后每一列都得和备份里一样）
+        run: node scripts/test-restore.mjs --base http://127.0.0.1:8791 --key 8888
       # 超级管理员：一个口令管所有账套 + 每本账自己的管理员口令（互相不能串）
       - name: 超级管理员回归
         run: node scripts/test-super.mjs --base http://127.0.0.1:8791 --key 8888

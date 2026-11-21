@@ -1728,6 +1728,15 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+327. ✅ **备份恢复改成「逐列对账」：以前验的是「能恢复」，不是「恢复得一模一样」**：`restoreCore()` 恢复应收/应付/流水三张主表时，`INSERT` 的列清单是**手写**的——加一列就得记得回来补一次。这一年来丢过 `no_invoice`（「已开票」标记）、`delivered_at`（交货日，丢了交期提醒会把这批单重新当成没交付）、`tax_kind/tax_rate/tax_amt`（税表直接归零）、`created_by`（谁开的单）、`ar_cat`（应收分类，分类报表归零）。每一次的表现都一样：**接口回 `ok`、页面照常能看，只是那一列静默变默认值**，所以「备份 → 恢复 → 页面能打开」这种测试永远发现不了。
+   - **改法：列清单不再手写**。恢复时 `PRAGMA table_info` 读出真表结构，和备份里有的字段取交集，动态拼 `INSERT`——跟下面家底那几十张表一直是同一个写法。以后再加列，不用再动恢复代码。
+   - **新增 `scripts/test-restore.mjs`（65 项，已挂 CI，跟在 `test-book` 后面）**：造一份「每一列都有值」的账（带分类/含税口径/票号/税额/交期/工序/账期/联系人/地址/借款利率/资产残值率/待摊期数/材料最低库存），备份 → 一键初始化 → 恢复，然后把备份里**每一张表的每一行的每一列**逐一比对，差一个单元格就红；再单独点名几个最容易漏的列（`ar_cat`、`tax_*`、`inv_state`、`inv_no`、`tax`、`progress`、`created_by`、`deliver_date`）；最后验恢复完账还是活的（应收汇总能算、月报能出、自检不报「单据已核销 300，核销记录合计 0」）。
+   - **双向验过**：故意把 `ar_cat` 和 `inv_state` 从恢复里去掉，测试立刻红 3 项（`恢复后每一行的每一列都和备份里一样 = 10 处`、`应收分类还在 → null`、`票据状态还在 → 空`）；改回来 65 项全绿。
+   - **顺手修掉一个真陷阱：一键初始化会把之前的备份全删掉**。上一轮已经修过一次（把 `backups` 整表删改成「只留刚做的那份」），但「只留刚做的那份」还是错的——用户昨天特意备份了一份、今天一键初始化想退回去，那份没了。现在**一份都不删**（`saveBackup` 之后本来只留最近 30 份，不会无限长；旧公司的账在自动快照里本来就有一份，多留几份不多泄露什么）。
+   - **写测试踩到的三个「字段名不是想当然」**：票据状态是 `inv`（`'yes'`/`'no'`）不是 `inv_state`；账期是 `term_days` 不是 `days`；改工序进度是 `PATCH /orders/:id/progress` 不是 `POST`。另外 `POST /orders` 只回 `{ok:true}` 不给 id，要 `/ar?kw=` 回查。
+   - **验证**（干净库 `/tmp/d1rf` + dev 9292，三本账都灌 schema，严格 CI 顺序）：`check.mjs` 全绿（429 路由 / 57 表 / **646** 条 SQL——比上轮少 5 条，就是手写列清单换成动态拼之后省掉的 / 263 调用 / 774 绑定）→ `smoke` 237 GET 无 5xx → `test-modules` → `smoke-write` → `crossmonth 16` / `apcat 31` / `import-xlsx 32` / `onboarding` / `safety 48` / `demo` / `archive 41` / `book 40` / `restore 65` / `super 36` / `staff 58` / `perm 108` / `arcat 36` / `pack 65` / `tax 54` / `numbers 55` 全绿；离线 `test-batch` / `test-key-queue` / `test-firstscreen` / `test-list` 全绿。
+   - 只改后端与测试，前端没动 → **小程序不用重传**。
+
 326. ✅ **权限改成白名单：员工那 4 位 PIN 以前能改掉全厂的口径**：这一轮把员工（4 位 PIN）与演示（谁都能点）两个身份能碰的东西逐条走了一遍。结论不太好：越权的口子一直是**黑名单**（一长串「不许……」），每加一个接口都要记得补一条，于是每轮都能漏。
    - **员工 4 位 PIN 就能做的事（都实测过）**：`POST /transfer`（内部转账——当时只拦了复数 `/transfers`，单数是另一条路由）、`POST /collect-config`（改催款口径）、`/target`（改目标）、`/networth-snapshot`（写家底存档）、`/term-default` `/term-auto`（批量改全厂客户账期）、`/run-fixed`（手动跑月度自动记账）、`/onboarding/apply`、`/wx-test`；`GET /export`（CSV 全量含成本，当时只拦了 `/export-all`）、`/trash`（回收站里都是别人的单据）、`/tax-summary`、`/audit-logs`、`/month-archives`（家底月月快照）、`/report-link`（直接生成含毛利的报表链接）、`/party-staff`（客户归属）、`/bank-flows/:id/unmatch`（撤销银行流水认领）。
    - **演示口令能看到系统内部**：`/error-log`（报错原文 + 内部表名）、`/slow-log`、`/selfcheck`、`/books`（别本账的应收合计）、`/books-check`、`/audit-logs`、`/party-staff`。演示是给审核员/试用的人看的，这些既没用也危险。

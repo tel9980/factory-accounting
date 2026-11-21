@@ -15338,14 +15338,11 @@ app.post('/book-reset', async (c) => {
     stmts.push(db.prepare('DELETE FROM ' + t))
     cleared.push(t)
   }
-  // 备份表要小心：刚做完的那份是「反悔用的」，绝不能跟着一起删。
-  // 以前把 backups/backup_parts 整表删掉，返回文案却写「想反悔可以在备份列表恢复」——
-  // 点了会发现列表空了，那份快照早就没了。现在只清掉旧的，留着刚做的那份。
-  if (snapId) {
-    stmts.push(db.prepare('DELETE FROM backups WHERE id <> ?').bind(snapId))
-    stmts.push(db.prepare('DELETE FROM backup_parts WHERE bid <> ?').bind(snapId))
-    cleared.push('backups(旧的)')
-  }
+  // 备份表**一份都不删**。
+  // 两轮都栽在这里：第一版把 backups/backup_parts 整表删掉，返回文案却写「想反悔可以在备份列表恢复」；
+  // 第二版改成「只留刚做的那份」，于是「我昨天特意备份了一份，今天一键初始化想退回去」也退不了——
+  // 用户自己点名做的备份，比自动快照更该留着。备份本身有上限（saveBackup 之后只留最近 30 份），
+  // 不会无限长；旧公司的账在快照里本来就有一份，多留几份不多泄露什么。
   stmts.push(db.prepare('DELETE FROM settings WHERE key NOT IN (' + KEEP_SET.map(() => '?').join(',') + ')').bind(...KEEP_SET))
   try {
     // 分批跑：一次塞 60 条以内（D1 单批上限 100 条语句）
@@ -15360,7 +15357,7 @@ app.post('/book-reset', async (c) => {
   try { await logAudit(db, '一键初始化', String(c.env.BOOK || '1'), `清空 ${cleared.length} 张表${snapId ? `，清空前备份 #${snapId}` : ''}`) } catch (e) {}
   return c.json({
     ok: true, cleared: cleared.length, tables: cleared, snapshot: snapId,
-    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}，旧的备份已清掉），想反悔可以在「报表 → 备份列表」里恢复。` : '清空前那次自动备份没成功（看错误日志），这次的旧备份都还留着。')
+    text: `当前账套已清空（${cleared.length} 张表），账户和分类回到默认。口令、账本名没动。` + (snapId ? `清空前自动备份了一份（#${snapId}），以前的备份也都还在——想反悔可以在「报表 → 备份列表」里恢复。` : '清空前那次自动备份没成功（看错误日志），以前的备份都还在。')
   })
 })
 
@@ -17311,24 +17308,48 @@ async function restoreCore(db, data, opts) {
     db.prepare('DELETE FROM orders')
   ]
   const skipped = { orders: 0, payables: 0, ledger: 0 }
+  // 三张主表的恢复以前是**手写列清单**：每加一列都要记得同步。
+  // no_invoice / delivered_at / tax_* / created_by / ar_cat 全是这么丢过的——恢复后静默变默认值，
+  // 税表、分类报表、交期提醒跟着一起归零，而接口还回 ok。现在改成「真表结构的列 ∩ 备份里有的字段」
+  // 动态拼，跟下面家底那圈一个写法：以后加列不用再动这里。
+  const mainCols = {}
+  for (const t of ['orders', 'payables', 'ledger']) {
+    mainCols[t] = ((await db.prepare('PRAGMA table_info(' + t + ')').all()).results || []).map((x) => x.name)
+  }
+  // 这些列在库里是数字，备份 JSON 里可能是字符串（老的备份给的就是字符串）
+  const NUMCOL = new Set(['id', 'price', 'status', 'paid', 'written_off', 'cost', 'rev', 'no_invoice', 'tax_rate', 'tax_amt', 'amount', 'ref_id', 'account_id', 'cash', 'tax'])
+  const fillRow = (t, row) => {
+    const out = {}
+    for (const cn of mainCols[t]) {
+      let v = row[cn]
+      // 老备份没有 month 列（以前靠触发器补）：这里按 created_at 补上，不然按月查会缺这几笔
+      if (cn === 'month' && (v === undefined || v === null || v === '')) v = String(row.created_at || now()).slice(0, 7)
+      if (v === undefined) continue
+      if (v !== null && NUMCOL.has(cn)) v = num(v)
+      if ((cn === 'id' || cn === 'ref_id') && v !== null && !num(v)) v = null
+      if (cn === 'created_at' && !v) v = now()
+      out[cn] = v
+    }
+    return out
+  }
+  const pushInsert = (t, row) => {
+    const fill = fillRow(t, row)
+    const use = Object.keys(fill)
+    if (!use.length) return false
+    stmts.push(db.prepare('INSERT INTO ' + t + ' (' + use.join(',') + ') VALUES (' + use.map(() => '?').join(',') + ')').bind(...use.map((cn) => fill[cn])))
+    return true
+  }
   for (const o of orders) {
     if (!o.customer || num(o.price) <= 0) { skipped.orders++; continue }
-    // no_invoice / delivered_at / import_batch 以前漏了：恢复后「已开票」标记和交货日全丢，
-    // 交期提醒会把这批单重新当成没交付
-    // tax_* / created_by 以前漏了：恢复后含税口径和税额全丢，报表里税金那一块直接归零
-    // ar_cat 以前也漏了：恢复后「这笔钱是货款还是加工费」全没了，应收分类报表归零
-    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at, cost, written_off, progress, rev, no_invoice, delivered_at, import_batch, tax_kind, tax_rate, tax_amt, created_by, month, ar_cat) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now(), num(o.cost), num(o.written_off), o.progress || '', num(o.rev), num(o.no_invoice), o.delivered_at || null, o.import_batch || null, o.tax_kind || '', num(o.tax_rate), num(o.tax_amt), o.created_by || null, o.month || String(o.created_at || now()).slice(0, 7), o.ar_cat || null))
+    if (!pushInsert('orders', o)) skipped.orders++
   }
   for (const p of payables) {
     if (!p.supplier || num(p.amount) <= 0) { skipped.payables++; continue }
-    stmts.push(db.prepare('INSERT INTO payables (id, supplier, amount, paid, category, remark, operator, due_date, created_at, written_off, rev, import_batch, tax_kind, tax_rate, tax_amt, created_by, month) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(p.id) || null, p.supplier, num(p.amount), num(p.paid) || 0, p.category || '', p.remark || '', p.operator || null, p.due_date || null, p.created_at || now(), num(p.written_off), num(p.rev), p.import_batch || null, p.tax_kind || '', num(p.tax_rate), num(p.tax_amt), p.created_by || null, p.month || String(p.created_at || now()).slice(0, 7)))
+    if (!pushInsert('payables', p)) skipped.payables++
   }
   for (const l of ledger) {
     if (num(l.amount) <= 0 || !l.direction) { skipped.ledger++; continue }
-    stmts.push(db.prepare('INSERT INTO ledger (id, direction, ref_type, ref_id, amount, category, remark, operator, created_at, account_id, cash, import_batch, inv_state, inv_no, tax, month) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(l.id) || null, l.direction, l.ref_type || '', num(l.ref_id) || 0, num(l.amount), l.category || '', l.remark || '', l.operator || null, l.created_at || now(), num(l.account_id), l.cash === undefined ? 1 : num(l.cash), l.import_batch || null, l.inv_state || '', l.inv_no || '', num(l.tax), l.month || String(l.created_at || now()).slice(0, 7)))
+    if (!pushInsert('ledger', l)) skipped.ledger++
   }
   try { await runBatch(db, stmts) } catch (e) { throw fail(e) }
   // 账目以外的家底也一起还原（老备份没有这些字段就跳过，不算错）
