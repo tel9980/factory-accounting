@@ -127,6 +127,15 @@ const main = async () => {
   eq('汇总带标准名单', Array.isArray(sum.d && sum.d.cats) && (sum.d.cats || []).includes('打样费'), true)
   console.log('  汇总文案：' + ((sum.d && sum.d.text) || ''))
 
+  // 10. 备份恢复别把分类弄丢（restoreCore 的 INSERT 列清单里少一列就静默丢）
+  const bk = await call('POST', '/cloud-backup', {})
+  eq('备份一份', bk.status, 200)
+  const bid = (bk.d && bk.d.id) || 0
+  const rs = await call('POST', '/backup-restore', { id: bid, confirm: 1 })
+  eq('恢复备份', rs.status, 200)
+  const r4 = await arRows('&kw=' + encodeURIComponent(TAG + '手工客户'))
+  eq('恢复后分类还在', (r4[0] && r4[0].ar_cat) || '', '加工费')
+
   console.log('')
   if (bad.length) {
     console.log(`❌ 应收分类：${pass} 项通过，${bad.length} 项失败`)

@@ -2697,11 +2697,12 @@ Page({
     if (costN === null) return wx.showToast({ title: '成本只能填数字，不填就留空', icon: 'none' })
     this.req({
       url: API_BASE + '/orders', method: 'POST', once: 'add-order', dupRetry: true, queue: '记应收',
-      queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' }),
+      queued: () => this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' }),
       data: { customer: o_customer, item_name: o_item, price: priceN, cost: costN, due_date: o_due, deliver_date: o_deliver, operator: o_operator, date: o_date, ar_cat: this.data.o_ar_cat || '', client_id: this.newCid(), tax_kind: this.data.o_tax_kind || '', tax_rate: Number(this.data.o_tax_rate || 0) },
       success: (res) => {
         // 交货日要清（每单不同），经手人不清（一天里基本是同一个人，清了反而要重打）
-        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '' })
+        // 分类也要清：下一单可能是别的客户别的事，留着上一次的会把分类记错
+        this.setData({ o_customer: '', o_item: '', o_price: '', o_cost: '', o_due: '', o_deliver: '', o_date: '', last_tip: '', o_ar_cat: '' })
         this.refresh({ lite: true }); this.loadSuggest()
         this.showChecks(res)
         const w = res.data && res.data.warn

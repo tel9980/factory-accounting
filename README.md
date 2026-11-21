@@ -1728,6 +1728,18 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+324. ✅ **查漏补缺（六处）：恢复备份别把分类弄丢、员工看到的总数比列表大、录完单别把上一单的分类带下去**：接上一轮加完应收分类之后，把「新东西和旧东西接缝」逐个摸了一遍。
+   - **恢复备份会丢应收分类**：`restoreCore()` 里 orders 的 `INSERT` 列清单是一列一列写死的，加 `ar_cat` 时漏了它 → 备份/恢复、换电脑、`/import-all` 整包覆盖之后，所有单的「这笔钱是货款还是加工费」全没了，分类报表归零、还不报错。已补列与绑定，`test-arcat` 加一条「备份 → 恢复 → 分类还在」（33 → 36 项）。这类「加了一列但恢复清单没跟上」的坑，以前在 `tax_*`、`inv_state`、`created_by` 上各犯过一次。
+   - **报表存档的应收/应付台账没有分类列**：`archiveSheets` 的 `ar`/`ap` 两张表加了第 4 列「分类」（应收取 `ar_cat`、应付取 `category`，空着显示「未分类」），合计行跟着挪一格。
+   - **月报的应收/应付明细也没有**：`packSheets` 两张明细表各插一列「分类」。月报是老板每月存档给会计看的东西，分类缺了等于白存。
+   - **员工「只看自己的」以前只管列表，不管顶部数字**：`staff_scope='own'`（只看自己负责的客户）与 `staff_self_only`（只看自己录的单）原来只作用在 `/ar`、`/ap` 列表上，于是员工看到的顶部汇总、分类汇总、账龄全是全厂的数 —— 列表只有 3 单、顶上写着 30 万，「对不上账」的投诉就是这么来的。现在 `/ar-summary`（含大客户榜）、`/ar-by-category`、`/ap-by-category`、`/aging` 全部按这两个开关过滤；实测「走付/只看自己录的单」两种模式下，顶部数字与列表笔数一致（`test-staff` 49 → 58 项，新增一组专门盯这个）。
+   - **员工归属表不存在时，上面这些汇总直接 500**：`party_staff` 表是懒建的（只有用到「客户分给员工」时才建），新库上员工一带 scope 就 `no such table: party_staff`。现在这几处查询前先 `await partyStaffTable(db)`（失败 `noteFail` 记一笔，不阻断）。
+   - **D1 的 `.bind()` 不能再 `.bind()`**：第一版用 `const b2 = (st) => sc.on ? st.bind(sc.name) : st` 往已 bind 过的语句上追加参数，本地 miniflare 直接 `TypeError: st.bind is not a function`（真 D1 上也许能过，但不能赌）。改成 `const q = (sql, ...ps) => db.prepare(sql).bind(...(sc.on ? ps.concat([sc.name]) : ps))`，一次 bind 到底。
+   - **录完一单要把分类清掉**：`o_ar_cat` 原来提交后不清，下一单（换了客户、换了事）会**静默沿用**上一单的分类，分类报表就被污染了。现在与客户名一起清。
+   - **应收列表空态分三种说法**：按分类筛出来是空 → 「这一类没有未结的单（上面再点一下分类就取消筛选）」；搜不到 → 「没搜到「xxx」（换个词，或点上面的搜索框清掉）」；真没有 → 原来的「没有未结清的应收」。以前一律说「没有未结清的应收」，用户以为自己记漏了。
+   - **验证**（干净库 `/tmp/d1h3` + dev 9231，三本账都灌 schema，按 CI 顺序）：`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）→ `smoke` 236 GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 写路由 + 备份恢复闭环 + 恢复模块默认 + 自检 10 类全 0）→ `test-crossmonth` 16 / `test-apcat` 31 / `test-import-xlsx` 32 / `test-onboarding` / `test-safety` 48 / `test-demo` 60 / `test-archive` 41 / `test-book` 40 / `test-super` 36 / `test-staff` **58** / `test-arcat` **36** / `test-pack` 65 / `test-tax` 52，离线 `test-batch` / `test-key-queue` / `test-firstscreen` / `test-list` 全绿。
+   - ⚠️ 动了前端（录单分类清空、应收空态文案）→ 小程序要重新上传发布。
+
 <!-- API-LIST:BEGIN -->
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）

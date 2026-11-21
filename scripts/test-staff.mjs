@@ -18,6 +18,7 @@ async function req(method, path, opts = {}) {
 }
 
 const PB = String(1000 + (Date.now() % 9000))
+const TODAY = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
 const TAG = 'staff' + Date.now().toString(36).replace(/[0-9]/g, (d) => 'abcdefghij'[Number(d)]).slice(-4)
 
 async function waitUp() {
@@ -162,7 +163,42 @@ async function main() {
   r = await req('GET', '/me', { key: PB, book: 2 })
   eq('删掉第 2 本那个后，同一口令在第 2 本进不来', r.s, 401)
 
-  console.log('\n[7] 删除')
+  console.log('\n[7] 员工只看自己的：顶部数字、分类汇总跟列表对得上')
+
+  await req('POST', '/orders', { body: { customer: TAG + '甲', price: 1100, date: TODAY } })
+  await req('POST', '/orders', { body: { customer: TAG + '乙', price: 2200, date: TODAY } })
+  const mk = await req('POST', '/staff-users', { body: { name: TAG + '小员', pin: PB, mods: ['ar'] } })
+  eq('加一个只管应收的员工', mk.s, 200)
+  const sid7 = (mk.d || {}).id
+  // 先打开「只看自己负责的客户」再量，否则默认是看全部，0 就不成立了
+  await req('POST', '/staff-perms', { body: { modules: ['ar', 'ap'], self_only: false, scope: 'own' } })
+  const ownSum = await req('GET', '/ar-summary?type=ar', { key: PB })
+  eq('  还没给他分客户时，顶部「还欠」是 0', Number((ownSum.d || {}).open_amount || 0), 0)
+  await req('POST', '/party-staff', { body: { party: TAG + '甲', staff: TAG + '小员' } })
+
+  r = await req('GET', '/ar?status=all&kw=' + encodeURIComponent(TAG), { key: PB })
+  const mine = (r.d && Array.isArray(r.d) ? r.d : (r.d.list || []))
+  eq('  他只看得到自己负责的那家', mine.filter((x) => x.customer === TAG + '甲').length, 1)
+  eq('  别人家的单看不到', mine.filter((x) => x.customer === TAG + '乙').length, 0)
+
+  const sum1 = await req('GET', '/ar-summary?type=ar', { key: PB })
+  eq('  顶部「还欠」只算他那一家的 1100（不是 3300）', Number((sum1.d || {}).open_amount || 0), 1100)
+  const cat1 = await req('GET', '/ar-by-category', { key: PB })
+  const open0 = await req('GET', '/ar-by-category')
+  yes('  分类汇总也只算他的（≤ 老板看到的）', Number((cat1.d || {}).total_open || 0) <= Number((open0.d || {}).total_open || 0), Number((cat1.d || {}).total_open || 0) + ' / ' + Number((open0.d || {}).total_open || 0))
+
+  await req('POST', '/staff-perms', { body: { modules: ['ar', 'ap'], self_only: true, scope: 'own' } })
+  const sum2 = await req('GET', '/ar-summary?type=ar', { key: PB })
+  eq('  改成「只看自己录的单」后，顶部数字归零（那些单是老板录的）', Number((sum2.d || {}).open_amount || 0), 0)
+  r = await req('GET', '/ar?status=all&kw=' + encodeURIComponent(TAG), { key: PB })
+  eq('  列表同时也空了，两边一致', ((r.d && Array.isArray(r.d) ? r.d : (r.d.list || []))).length, 0)
+
+  await req('POST', '/staff-perms', { body: { modules: ['ar', 'ap'], self_only: false, scope: 'all' } })
+  await req('DELETE', '/staff-users/' + sid7)
+  const sum3 = await req('GET', '/ar-summary?type=ar', { key: PB })
+  eq('  恢复默认权限后，这个口令就进不来了', sum3.s, 401)
+
+  console.log('\n[8] 删除')
 
   r = await req('DELETE', '/staff-users/' + sid)
   eq('删掉这个员工', r.s, 200)

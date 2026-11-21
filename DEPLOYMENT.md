@@ -482,6 +482,26 @@ cd backend && ./node_modules/.bin/wrangler deploy
   `/ar-by-category`、应收对账模板第 5 列、整包导入、粘贴解析都读它。
 - **口径**：`/ar-by-category` 的「本月开单」按 `orders.month`，「本月已收」按 `ledger.month + ref_type='order'`，
   「还欠」是**当前**未结（不分月份，跟单据列表一致）。
+- **备份恢复别漏列**：`restoreCore()` 的 orders `INSERT` 是一列一列写死的，加新列（`ar_cat`、`tax_*`、
+  `inv_state`、`created_by`…）时必须同时加进那份清单，否则备份/恢复、`/import-all` 覆盖之后这一列全丢、且不报错。
+  `scripts/test-arcat.mjs` 里有一条「备份 → 恢复 → 分类还在」专门盯这个。
+
+### 4.16 员工「只看自己的」到底管哪几处
+
+两个开关（`/staff-perms` 的 `scope` 与 `self_only`）现在覆盖：
+
+| 位置 | `scope='own'`（只看自己负责的客户） | `self_only`（只看自己录的单） |
+| --- | --- | --- |
+| `/ar`、`/ap` 列表 | ✅ | ✅ |
+| `/ar-summary`（顶部汇总 + 大客户榜） | ✅ | ✅ |
+| `/ar-by-category`、`/ap-by-category` | ✅ | ✅ |
+| `/aging` 账龄 | ✅ | —（员工本来就没这个入口） |
+| `/report`、`/dashboard` 这些老板报表 | 员工进不去（`denyStaff`） | — |
+
+口径要求：**顶部数字必须等于列表能看到的那些单之和**。改这几处时先 `await partyStaffTable(db)`
+（那张表是懒建的，新库上不建就 `no such table: party_staff`，查询直接 500），并且 D1 的 `.bind()`
+返回对象**不能再 `.bind()`**（本地 miniflare 会报 `st.bind is not a function`）——要追加参数就一次拼齐再 bind。
+`scripts/test-staff.mjs` 第 [7] 组专门验「两种模式下顶部数字与列表笔数一致」。
 
 ### 5.0 最省事：什么都不用配（内置演示入口）
 

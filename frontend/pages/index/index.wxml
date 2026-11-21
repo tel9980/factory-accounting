@@ -713,7 +713,7 @@
           <button size="mini" class="gray" bindtap="moreOrder" data-id="{{item.id}}" data-type="ar" data-name="{{item.customer}}" data-unpaid="{{item.unpaid}}" data-due="{{item.due_short}}" data-settled="{{item.settled}}">更多 ▾</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ar_list.length}}">{{ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'}}</view>
+      <view class="empty" wx:if="{{!ar_list.length}}">{{ar_cat ? '这一类没有' + (ar_filter=='closed'?'已结清的':'未结的') + '单（上面再点一下分类就取消筛选）' : (ar_kw ? '没搜到「' + ar_kw + '」（换个词，或点上面的搜索框清掉）' : (ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'))}}</view>
       <view class="loadmore" wx:if="{{ar_more}}"><button class="btn" size="mini" disabled="{{ar_busy}}" bindtap="loadMoreTap">{{ar_busy ? '正在加载…' : '加载更早的'}}</button></view>
       <view class="tip" wx:if="{{ar_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>

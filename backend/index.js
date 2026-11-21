@@ -9114,9 +9114,14 @@ app.post('/onboarding/apply', async (c) => {
 app.get('/aging', async (c) => {
   const db = c.env.DB
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
+  const sc = await scopeOwn(c)
+  if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '顶部汇总·客户归属表') } }
+  const oAr = sc.on ? ' AND customer IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const oAp = sc.on ? ' AND supplier IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const q = (sql, ...ps) => db.prepare(sql).bind(...(sc.on ? ps.concat([sc.name]) : ps))
   const rows = type === 'ar'
-    ? (await db.prepare('SELECT id,customer AS party,item_name AS item,price AS total,paid,written_off,created_at,due_date FROM orders WHERE paid + COALESCE(written_off,0) < price ORDER BY id').all()).results
-    : (await db.prepare('SELECT id,supplier AS party,COALESCE(remark,\'\') AS item,amount AS total,paid,written_off,created_at,due_date FROM payables WHERE paid + COALESCE(written_off,0) < amount ORDER BY id').all()).results
+    ? (await q('SELECT id,customer AS party,item_name AS item,price AS total,paid,written_off,created_at,due_date FROM orders WHERE paid + COALESCE(written_off,0) < price' + oAr + ' ORDER BY id').all()).results
+    : (await q('SELECT id,supplier AS party,COALESCE(remark,\'\') AS item,amount AS total,paid,written_off,created_at,due_date FROM payables WHERE paid + COALESCE(written_off,0) < amount' + oAp + ' ORDER BY id').all()).results
   // 账龄一律按「到期日」算（没填到期日就按开单日），跟导出的《应收/应付台账》同一套档位。
   // 以前这里按开单日分四档、导出按到期日分五档，同一个客户在两个地方落在不同档里。
   const BK = [
@@ -9188,13 +9193,24 @@ app.get('/ar-summary', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const m = now().slice(0, 7)
   const today = now().slice(0, 10)
+  // 员工「只看自己负责的客户」时，顶部那几个数和大客户榜也只算自己的
+  const sc = await scopeOwn(c)
+  const oAr = sc.on ? ' AND customer IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const oAp = sc.on ? ' AND supplier IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const q = (sql, ...ps) => db.prepare(sql).bind(...(sc.on ? ps.concat([sc.name]) : ps))
+  // 「只看自己录的单」也要算进来，否则员工看到的顶部数字比列表大，会对不上账
+  const sf = await selfOnly(c)
+  const sAr = sf.on ? ' AND created_by = ?' : ''
+  const sAp = sf.on ? ' AND created_by = ?' : ''
+  const sArL = sf.on ? ' AND ref_id IN (SELECT id FROM orders WHERE created_by = ?)' : ''
+  const sApL = sf.on ? ' AND ref_id IN (SELECT id FROM payables WHERE created_by = ?)' : ''
   if (type === 'ar') {
-    const open = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price').first()
-    const over = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= ?").bind(dayAgo(30)).first()
-    const due = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?").bind(today, dayAfter(7)).first()
-    const add = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?').bind(m).first()
-    const got = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND month=?").bind(m).first()
-    const top = (await db.prepare('SELECT customer name, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 3').all()).results
+    const open = await q('SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price' + sAr + oAr, ...(sf.on ? [sf.who] : [])).first()
+    const over = await q("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= ?" + sAr + oAr, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first()
+    const due = await q("SELECT COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAr + oAr, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first()
+    const add = await q('SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?' + sAr + oAr, ...(sf.on ? [m, sf.who] : [m])).first()
+    const got = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND month=?" + sArL + (sc.on ? ' AND ref_id IN (SELECT id FROM orders WHERE customer IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first()
+    const top = (await q('SELECT customer name, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price' + sAr + oAr + ' GROUP BY customer ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()).results
     return c.json({
       type, open_amount: round2(num(open.t)), open_count: num(open.n),
       overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
@@ -9203,12 +9219,12 @@ app.get('/ar-summary', async (c) => {
       top: top.map((x) => ({ name: x.name, amount: round2(num(x.t)) }))
     })
   }
-  const open = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount').first()
-  const over = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND substr(created_at,1,10) <= ?").bind(dayAgo(30)).first()
-  const due = await db.prepare("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?").bind(today, dayAfter(7)).first()
-  const add = await db.prepare('SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=?').bind(m).first()
-  const paid = await db.prepare("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND month=?").bind(m).first()
-  const top = (await db.prepare('SELECT supplier name, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount GROUP BY supplier ORDER BY t DESC LIMIT 3').all()).results
+  const open = await q('SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount' + sAp + oAp, ...(sf.on ? [sf.who] : [])).first()
+  const over = await q("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND substr(created_at,1,10) <= ?" + sAp + oAp, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first()
+  const due = await q("SELECT COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAp + oAp, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first()
+  const add = await q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=?' + sAp + oAp, ...(sf.on ? [m, sf.who] : [m])).first()
+  const paid = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND month=?" + sApL + (sc.on ? ' AND ref_id IN (SELECT id FROM payables WHERE supplier IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first()
+  const top = (await q('SELECT supplier name, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount' + sAp + oAp + ' GROUP BY supplier ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()).results
   return c.json({
     type, open_amount: round2(num(open.t)), open_count: num(open.n),
     overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
@@ -9224,10 +9240,20 @@ app.get('/ap-by-category', async (c) => {
   const db = c.env.DB
   const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
   const CAT = "COALESCE(NULLIF(TRIM(category),''),'未分类')"
+  const sc = await scopeOwn(c)
+  if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '按分类汇总·客户归属表') } }
+  const sf = await selfOnly(c)
+  const ownF = sc.on ? ' AND supplier IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const ownP = sc.on ? ' AND p.supplier IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const sfF = sf.on ? ' AND created_by = ?' : ''
+  const sfP = sf.on ? ' AND p.created_by = ?' : ''
+  // 注意：D1 的 .bind() 返回对象不能再 .bind()（本地 miniflare 实测报 st.bind is not a function），
+  // 所以这里用「追加参数再一次性 bind」的写法。
+  const q = (sql, ...ps) => db.prepare(sql).bind(...(sc.on ? ps.concat([sc.name]) : ps))
   const [addR, paidR, openR] = await Promise.all([
-    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=? GROUP BY c ORDER BY t DESC`).bind(month).all(),
-    db.prepare(`SELECT ${CAT} c, COALESCE(SUM(l.amount),0) t FROM ledger l JOIN payables p ON p.id=l.ref_id WHERE l.ref_type='payable' AND l.direction='out' AND l.month=? GROUP BY c`).bind(month).all().catch(() => ({ results: [] })),
-    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount GROUP BY c ORDER BY t DESC`).all().catch(() => ({ results: [] }))
+    q(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=?${sfF}${ownF} GROUP BY c ORDER BY t DESC`, ...(sf.on ? [month, sf.who] : [month])).all(),
+    q(`SELECT ${CAT} c, COALESCE(SUM(l.amount),0) t FROM ledger l JOIN payables p ON p.id=l.ref_id WHERE l.ref_type='payable' AND l.direction='out' AND l.month=?${sfP}${ownP} GROUP BY c`, ...(sf.on ? [month, sf.who] : [month])).all().catch(() => ({ results: [] })),
+    q(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(amount - paid - COALESCE(written_off,0)),0) t FROM payables WHERE paid + COALESCE(written_off,0) < amount${sfF}${ownF} GROUP BY c ORDER BY t DESC`, ...(sf.on ? [sf.who] : [])).all().catch(() => ({ results: [] }))
   ])
   const paidMap = new Map((paidR.results || []).map((x) => [x.c, round2(num(x.t))]))
   const openMap = new Map((openR.results || []).map((x) => [x.c, { n: num(x.n), t: round2(num(x.t)) }]))
@@ -9254,10 +9280,23 @@ app.get('/ar-by-category', async (c) => {
   const db = c.env.DB
   const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
   const CAT = "COALESCE(NULLIF(TRIM(ar_cat),''),'未分类')"
+  // 员工「只看自己负责的客户」时，分类汇总也只算自己的；否则员工能把全厂的业务结构看光
+  const sc = await scopeOwn(c)
+  if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '按分类汇总·客户归属表') } }
+  const sf = await selfOnly(c)
+  const ownF = sc.on ? ' AND customer IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  const ownO = sc.on ? ' AND o.customer IN (SELECT party FROM party_staff WHERE staff=?)' : ''
+  // 「只看自己录的单」也要算进来，否则员工看到的汇总比列表大，会对不上账
+  const sfF = sf.on ? ' AND created_by = ?' : ''
+  const sfO = sf.on ? ' AND o.created_by = ?' : ''
+  const sfL = sf.on ? " AND ref_id IN (SELECT id FROM orders WHERE created_by = ?)" : ''
+  // 注意：D1 的 .bind() 返回对象不能再 .bind()（本地 miniflare 实测报 st.bind is not a function），
+  // 所以这里用「追加参数再一次性 bind」的写法。
+  const q = (sql, ...ps) => db.prepare(sql).bind(...(sc.on ? ps.concat([sc.name]) : ps))
   const [addR, paidR, openR] = await Promise.all([
-    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=? GROUP BY c ORDER BY t DESC`).bind(month).all(),
-    db.prepare(`SELECT ${CAT} c, COALESCE(SUM(l.amount),0) t FROM ledger l JOIN orders o ON o.id=l.ref_id WHERE l.ref_type='order' AND l.direction='in' AND l.month=? GROUP BY c`).bind(month).all().catch(() => ({ results: [] })),
-    db.prepare(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price GROUP BY c ORDER BY t DESC`).all().catch(() => ({ results: [] }))
+    q(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?${sfF}${ownF} GROUP BY c ORDER BY t DESC`, ...(sf.on ? [month, sf.who] : [month])).all(),
+    q(`SELECT ${CAT} c, COALESCE(SUM(l.amount),0) t FROM ledger l JOIN orders o ON o.id=l.ref_id WHERE l.ref_type='order' AND l.direction='in' AND l.month=?${sfO}${ownO} GROUP BY c`, ...(sf.on ? [month, sf.who] : [month])).all().catch(() => ({ results: [] })),
+    q(`SELECT ${CAT} c, COUNT(*) n, COALESCE(SUM(price - paid - COALESCE(written_off,0)),0) t FROM orders WHERE paid + COALESCE(written_off,0) < price${sfF}${ownF} GROUP BY c ORDER BY t DESC`, ...(sf.on ? [sf.who] : [])).all().catch(() => ({ results: [] }))
   ])
   const paidMap = new Map((paidR.results || []).map((x) => [x.c, round2(num(x.t))]))
   const openMap = new Map((openR.results || []).map((x) => [x.c, { n: num(x.n), t: round2(num(x.t)) }]))
@@ -13411,12 +13450,13 @@ async function packSheets(db, m) {
   // 只取「本月的单」+「以前开单还没结清的」：以前是整表 `SELECT *` 一把捞，
   // 三年的单都塞进一张 Excel，导出慢、页签大，而且大部分行跟这个月没关系。
   const ars = (await db.prepare("SELECT * FROM orders WHERE month=? OR (price - COALESCE(paid,0) - COALESCE(written_off,0)) > 0.005 ORDER BY id").bind(m).all()).results || []
-  sheets.push({ name: '应收明细', rows: [['单号', '客户', '产品', '金额', '成本', '已收', '核销', '未收', '开单日', '到期日', '状态']].concat(
-    ars.map((o) => [o.id, o.customer, o.item_name, num(o.price), num(o.cost), num(o.paid), num(o.written_off), round2(num(o.price) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || '', num(o.paid) + num(o.written_off) >= num(o.price) ? '已结清' : (num(o.paid) > 0 ? '部分收' : '未收')])
+  // 分类一起进月报：应收看「货款/加工费」，应付看「硫酸/染料/外发加工费」
+  sheets.push({ name: '应收明细', rows: [['单号', '客户', '产品', '分类', '金额', '成本', '已收', '核销', '未收', '开单日', '到期日', '状态']].concat(
+    ars.map((o) => [o.id, o.customer, o.item_name, o.ar_cat || '未分类', num(o.price), num(o.cost), num(o.paid), num(o.written_off), round2(num(o.price) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || '', num(o.paid) + num(o.written_off) >= num(o.price) ? '已结清' : (num(o.paid) > 0 ? '部分收' : '未收')])
   ) })
   const aps = (await db.prepare("SELECT * FROM payables WHERE month=? OR (amount - COALESCE(paid,0) - COALESCE(written_off,0)) > 0.005 ORDER BY id").bind(m).all()).results || []
-  sheets.push({ name: '应付明细', rows: [['单号', '供应商', '说明', '金额', '已付', '核销', '未付', '开单日', '到期日']].concat(
-    aps.map((o) => [o.id, o.supplier, o.remark || '', num(o.amount), num(o.paid), num(o.written_off), round2(num(o.amount) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || ''])
+  sheets.push({ name: '应付明细', rows: [['单号', '供应商', '说明', '分类', '金额', '已付', '核销', '未付', '开单日', '到期日']].concat(
+    aps.map((o) => [o.id, o.supplier, o.remark || '', o.category || '未分类', num(o.amount), num(o.paid), num(o.written_off), round2(num(o.amount) - num(o.paid) - num(o.written_off)), String(o.created_at).slice(0, 10), o.due_date || ''])
   ) })
   const led = (await db.prepare("SELECT * FROM ledger WHERE month=? ORDER BY id").bind(m).all()).results || []
   sheets.push({ name: '收付流水', rows: [['日期', '方向', '金额', '分类', '账户', '摘要', '是否动现金']].concat(
@@ -13834,20 +13874,23 @@ async function archiveSheets(db, kind, q) {
     const tb = isAr ? 'orders' : 'payables'
     const partyCol = isAr ? 'customer' : 'supplier'
     const amtCol = isAr ? 'price' : 'amount'
+    // 分类一起带出来：应收看「货款 / 加工费」，应付看「硫酸 / 染料 / 外发加工费」
+    const catCol = isAr ? "COALESCE(NULLIF(TRIM(ar_cat),''),'')" : "COALESCE(NULLIF(TRIM(category),''),'')"
     const rows = await db.prepare(
       `SELECT id, ${partyCol} party, ${isAr ? 'item_name' : 'COALESCE(remark, category, \'\')'} item, ${amtCol} amt,
+              ${catCol} cat,
               COALESCE(paid,0) paid, COALESCE(written_off,0) wo, ${amtCol} - COALESCE(paid,0) - COALESCE(written_off,0) leftover,
               substr(created_at,1,10) d, COALESCE(due_date,'') due
          FROM ${tb} WHERE ${amtCol} - COALESCE(paid,0) - COALESCE(written_off,0) > 0.005 ORDER BY ${partyCol}, id`).all().catch(() => ({ results: [] }))
     const list = rows.results || []
-    const det = [['单号', isAr ? '客户' : '供应商', isAr ? '产品' : '说明', '金额', '已收付', '已核销', '未结', '开单日', '到期日', '逾期天数', '账龄档']]
+    const det = [['单号', isAr ? '客户' : '供应商', isAr ? '产品' : '说明', '分类', '金额', '已收付', '已核销', '未结', '开单日', '到期日', '逾期天数', '账龄档']]
     let tot = 0
     for (const r of list) {
       const left = round2(num(r.leftover))
       tot = round2(tot + left)
       const days = daysSince(r.due ? ymd(r.due) : ymd(r.d))
       const age = days <= 30 ? '未超 30 天' : days <= 60 ? '31-60 天' : days <= 90 ? '61-90 天' : days <= 180 ? '91-180 天' : '超 180 天'
-      det.push([r.id, r.party, r.item || '', round2(num(r.amt)), round2(num(r.paid)), round2(num(r.wo)), left, ymd(r.d), ymd(r.due), days, age])
+      det.push([r.id, r.party, r.item || '', r.cat || '未分类', round2(num(r.amt)), round2(num(r.paid)), round2(num(r.wo)), left, ymd(r.d), ymd(r.due), days, age])
     }
     det.push([], ['合计', '', '', '', '', '', tot])
     const by = new Map()
@@ -17161,8 +17204,9 @@ async function restoreCore(db, data, opts) {
     // no_invoice / delivered_at / import_batch 以前漏了：恢复后「已开票」标记和交货日全丢，
     // 交期提醒会把这批单重新当成没交付
     // tax_* / created_by 以前漏了：恢复后含税口径和税额全丢，报表里税金那一块直接归零
-    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at, cost, written_off, progress, rev, no_invoice, delivered_at, import_batch, tax_kind, tax_rate, tax_amt, created_by, month) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now(), num(o.cost), num(o.written_off), o.progress || '', num(o.rev), num(o.no_invoice), o.delivered_at || null, o.import_batch || null, o.tax_kind || '', num(o.tax_rate), num(o.tax_amt), o.created_by || null, o.month || String(o.created_at || now()).slice(0, 7)))
+    // ar_cat 以前也漏了：恢复后「这笔钱是货款还是加工费」全没了，应收分类报表归零
+    stmts.push(db.prepare('INSERT INTO orders (id, customer, item_name, price, status, paid, due_date, operator, created_at, cost, written_off, progress, rev, no_invoice, delivered_at, import_batch, tax_kind, tax_rate, tax_amt, created_by, month, ar_cat) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .bind(num(o.id) || null, o.customer, o.item_name || '', num(o.price), num(o.status) || 0, num(o.paid) || 0, o.due_date || null, o.operator || null, o.created_at || now(), num(o.cost), num(o.written_off), o.progress || '', num(o.rev), num(o.no_invoice), o.delivered_at || null, o.import_batch || null, o.tax_kind || '', num(o.tax_rate), num(o.tax_amt), o.created_by || null, o.month || String(o.created_at || now()).slice(0, 7), o.ar_cat || null))
   }
   for (const p of payables) {
     if (!p.supplier || num(p.amount) <= 0) { skipped.payables++; continue }
