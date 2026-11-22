@@ -1258,3 +1258,9 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 改完的验证顺序：`node scripts/run-all.mjs --base <wrangler dev> --key ...`（线上语义）
 **加上** `node server/main.mjs --port 8792 --data /tmp/fa-local --no-open --no-cron` +
 `smoke.mjs` + `smoke-write.mjs`（本机语义），两边都绿再推。
+
+### 4.34 电脑网页 `/pc` 的快捷面板（只动内嵌网页，不动账本）
+
+`/pc` 第一块「口令」下面加了「★ 快捷面板」：填了口令就自动加载，一屏看本月收/付/剩、应收应付、逾期单数，并列出「该催谁」前 6 家（点「看话术」复制催款话术）；四个按钮分别是刷新、一键出本月月报 Excel、下应收到期表、下应付到期表。
+
+它全部复用现成接口（`/dashboard`、`/collect-list`、`/archive-pack?kind=monthly`、`/due-schedule-xlsx`），**没加路由、没改后端账务逻辑**，所以：改这块不用碰小程序、不用灌库、不用改 `wrangler.toml`。要在电脑上更快干活，打开 `https://<你的域名>/pc` 直接用即可；小程序仍是随手记账的主入口。

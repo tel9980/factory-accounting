@@ -7348,6 +7348,19 @@ app.get('/pc', async (c) => {
   <div class="tip">只存在这台电脑的浏览器里。忘记可以去小程序「用恢复码重设」。</div>
 </div>
 
+<div class="card" id="quickCard">
+  <h2>★ 快捷面板（今天要盯的数，一屏看完）</h2>
+  <div class="row">
+    <button class="p" onclick="quickLoad()">刷新数据</button>
+    <button onclick="quickMonth()">一键出本月月报 Excel</button>
+    <button onclick="quickDue('ar')">下应收到期表</button>
+    <button onclick="quickDue('ap')">下应付到期表</button>
+  </div>
+  <div id="quick_msg" class="tip"></div>
+  <div id="quick_nums" class="tip">填好上面的口令点「刷新数据」：本月收 / 付 / 剩、应收应付、逾期单数一屏看完。</div>
+  <div id="quick_top"></div>
+</div>
+
 <div class="card">
   <h2>2. 下载模板</h2>
   <div class="row">
@@ -7678,7 +7691,7 @@ function useBook(id){
 }
 keyLoad()
 document.getElementById('bk').addEventListener('change', function () { keyLoad() })
-if (K) booksAll()
+if (K) { booksAll(); quickLoad() }
 function msg(t, good){ var m = document.getElementById('msg'); m.textContent = t; m.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '') }
 function needKey(){ if (!K) { msg('先在上面填口令，点「记住」', false); return true } return false }
 function b64(buf){ var b = new Uint8Array(buf), s = '', i; for (i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s) }
@@ -7700,6 +7713,76 @@ function dl(tpl){
       msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill && bits.length ? '（已填好：' + bits.join('、') + '，名字都是下拉可选）' : ''), true)
     }).catch(function(e){ msg('下载失败：' + e, false) })
 }
+function qmsg(t, good){
+  var el = document.getElementById('quick_msg')
+  el.textContent = t || ''
+  el.className = 'tip ' + (good === false ? 'bad' : good ? 'ok' : '')
+}
+function qmoney(n){ n = Number(n) || 0; return '¥' + n.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) }
+function qneed(){ if (!K) { qmsg('先在上面第 1 块填口令，点「记住」', false); document.getElementById('key').focus(); return true } return false }
+function quickLoad(){
+  if (qneed()) return
+  qmsg('正在读……')
+  document.getElementById('quick_nums').textContent = '正在读……'
+  var hd = { 'x-access-key': K, 'X-Book': bk() }
+  Promise.all([
+    fetch('/dashboard', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } }),
+    fetch('/collect-list', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } })
+  ]).then(function(a){
+    var d = a[0] || {}, c = a[1] || {}
+    if (d.error) { qmsg('总览没读出来：' + (d.error || '口令对吗？'), false); return }
+    var prof = (d.month_profit == null) ? '—' : qmoney(d.month_profit)
+    var bits = []
+    bits.push('本月收 <b class="ok">' + qmoney(d.month_income) + '</b>')
+    bits.push('付 <b class="bad">' + qmoney(d.month_outcome) + '</b>')
+    bits.push('剩 <b>' + prof + '</b>')
+    bits.push('应收 ' + qmoney(d.ar_total) + ' · 应付 ' + qmoney(d.ap_total))
+    bits.push('逾期 ' + (d.overdue_count || 0) + ' 单')
+    document.getElementById('quick_nums').innerHTML = bits.join(' &nbsp;·&nbsp; ')
+    var list = (c.ok && c.list) ? c.list : []
+    window._quickList = list.slice(0, 6)
+    var h = ''
+    if (list.length) {
+      h = '<table style="margin-top:12px"><tr><th>该催谁</th><th>还欠</th><th>什么情况</th><th>话术</th></tr>'
+      window._quickList.forEach(function(x, i){
+        h += '<tr><td>' + esc(x.party) + '</td><td>' + qmoney(x.left) + '</td><td>' + esc(x.why || '') + '</td>'
+          + '<td><button onclick="quickSay(' + i + ')">看话术</button></td></tr>'
+      })
+      h += '</table><div class="tip">这是按欠款 × 拖了多久 × 守约程度排的前 ' + window._quickList.length + ' 家，共 ' + qmoney(c.total) + '。点「看话术」直接复制去发微信。</div>'
+    } else {
+      h = '<div class="tip">没有需要催的（或者催款清单没读出来，点刷新再试）。</div>'
+    }
+    document.getElementById('quick_top').innerHTML = h
+    qmsg('读好了', true)
+  }).catch(function(e){ qmsg('读不出来：' + e, false) })
+}
+function quickSay(i){
+  var x = (window._quickList || [])[i]
+  if (!x) return
+  var t = String(x.text || '')
+  var done = function(){ qmsg('话术复制好了，发给「' + x.party + '」就行', true) }
+  var fallback = function(){ window.prompt('复制这段发给「' + x.party + '」：', t) }
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, fallback)
+  else fallback()
+}
+function quickXlsx(url, tip){
+  if (qneed()) return
+  qmsg(tip || '正在生成…')
+  fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'book=' + bk(), { headers: { 'x-access-key': K, 'X-Book': bk() } })
+    .then(function(r){ return r.json() }).then(function(d){
+      if (!d.ok) { qmsg(d.error || '出表失败', false); return }
+      var bin = atob(d.b64), arr = new Uint8Array(bin.length), i
+      for (i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+      saveBlob(new Blob([arr], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name)
+      qmsg('下好了：' + d.name + '（' + (d.sheets || []).length + ' 张表）', true)
+    }).catch(function(e){ qmsg('出表失败：' + e, false) })
+}
+function quickMonth(){
+  var m = document.getElementById('a_m').value || todayStr().slice(0, 7)
+  quickXlsx('/archive-pack?kind=monthly&month=' + encodeURIComponent(m), '正在出 ' + m + ' 的月报…')
+}
+function quickDue(t){ quickXlsx('/due-schedule-xlsx?type=' + t, '正在出' + (t === 'ap' ? '应付' : '应收') + '到期表…') }
+
 var ARC_TIP = {
   daily: '日报：当天收付合计、当天每笔明细、按科目小计、按账户小计。',
   monthly: '月报：总览 / 利润表 / 资产负债表 / 应收明细 / 应付明细 / 收付流水 / 账龄 / 应收到期表。',
