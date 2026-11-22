@@ -35,6 +35,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
       # 光跑静态自检不够：以前 release 只验「代码能解析」，打包出来的东西能不能跑完全没验。
       # 这几个是纯离线的（不需要起服务、不连库），出错说明前端首屏/401 重放/分批这些真坏了。
       - run: node scripts/check.mjs
@@ -44,6 +46,10 @@ jobs:
       - run: node scripts/test-firstscreen.mjs
       - run: node scripts/test-list.mjs
       - run: node scripts/test-offline.mjs
+      # 第 4 本账演练要自己起 server/main.mjs（依赖 hono），必须先装后端依赖。
+      - name: 装后端依赖（第 4 本账演练要起本机服务）
+        run: npm ci
+        working-directory: backend
       - run: node scripts/test-book4.mjs
       # 文档和代码对不上就别发版：接口清单、网页版教程都是从源文件生成的产物，
       # 忘了重新生成的话，发出去的 exe 里带的是旧教程。

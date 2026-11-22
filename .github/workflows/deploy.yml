@@ -76,10 +76,6 @@ jobs:
       # 补发途中又记的一笔不能丢，口令过期要停下来等登录而不是把每条都标成「口令错误」。
       - name: 离线补发回归（没补上的留在「待补」里，补上的不许重复、补发途中新记的不许丢）
         run: node scripts/test-offline.mjs
-      # 第 4 本账演练：自己起本机版（9 本账），验证代码不写死三本——
-      # /books-all 列 9 本、X-Book:4 能写进第 4 本、/books-check 与 /merge-summary 都扫 9 本。
-      - name: 第 4 本账演练（多账套不写死三本）
-        run: node scripts/test-book4.mjs
 
   smoke:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍
@@ -284,6 +280,11 @@ jobs:
           curl -sf http://127.0.0.1:8792/version > /dev/null || { echo "::error::本机版 60 秒没起来"; tail -60 /tmp/fa-local.log; exit 1; }
           node scripts/smoke.mjs --base http://127.0.0.1:8792 --key 8888
           node scripts/smoke-write.mjs --base http://127.0.0.1:8792 --key 8888
+      # 第 4 本账演练：自己起本机版（9 本账），验证代码不写死三本——
+      # /books-all 列 9 本、X-Book:4 能写进第 4 本、/books-check 与 /merge-summary 都扫 9 本。
+      # 放在 smoke job 是因为它要起 server/main.mjs（依赖 hono），check job 不装依赖。
+      - name: 第 4 本账演练（多账套不写死三本）
+        run: node scripts/test-book4.mjs
       - name: 挂了就打印 server 日志
         if: failure()
         run: tail -80 /tmp/wd.log; echo ---; tail -40 /tmp/fa-local.log || true
