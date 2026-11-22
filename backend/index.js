@@ -944,6 +944,29 @@ async function demoKeyOn(db) {
   return !!(r && String(r.value).trim())
 }
 
+// 演示账套（内置示例账）里不许设权限。
+// 为什么：微信审核 3.2「用户生成内容/权限设置」这类驳回，常见理由是「演示账号下还能建员工、
+// 还能分客户、还能改权限，看起来像多角色系统，没经过必要审核」。
+// 演示账只是给审核员看的样板数据，不需要任何权限体系，所以整类入口直接关掉。
+// 判定：靠库里的 demo_seeded 标记（只有 seedDemoBook 种过示例数据的账才有），
+// 加上账名以「演示账套」开头 —— 不用写死「第 3 本」，万一第 3 本被老板当二厂在用（里面有真数据），
+// 那本账不会被误伤。
+const DEMO_PERM_PATHS = /^\/(staff-users|staff-perms|party-staff|book-admin-key)/
+async function isDemoDb(db, bookId) {
+  if (!db) return false
+  const seeded = await db.prepare("SELECT value FROM settings WHERE key='demo_seeded'").first().catch(() => null)
+  if (seeded && String(seeded.value) === '1') return true
+  const bn = await db.prepare("SELECT value FROM settings WHERE key='book_name'").first().catch(() => null)
+  if (bn && String(bn.value || '').indexOf('演示账套') === 0 && (num(bookId) || 1) === 3) return true
+  return false
+}
+const isDemoBook = (c) => isDemoDb(c.env.DB || ((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB), c.env.BOOK)
+// 演示账里设权限 → 一律 403（谁都设不了：演示身份本来就被 denyDemo 拦了，
+// 这里是补上「老板自己切到第 3 本账」这条路）。
+function denyDemoPerm(c) {
+  return c.json({ code: 'demo_no_perm', error: '演示账套不能设权限（它是给审核看的示例数据，不建员工、不分客户、不改权限）' }, 403)
+}
+
 // 内置演示口令：不用老板设、不用记，前端登录页有「先看看演示」的按钮直接用它。
 // 它只进第 3 本账（演示账套，全是示例数据），碰不到真账本。
 // 第 10 轮 A10：源码里不再出现完整明文口令（grep 一搜就能看到、能被拿去撞库）。
@@ -1260,6 +1283,8 @@ const getStaffKey = async (db) => {
 
 // 员工口令（老板设一个给员工用，权限受限：能记账收款，看不到毛利、不能删改单）
 app.post('/auth/staff', async (c) => {
+  // 演示账套里不设权限（这个路由在公开分支里，走不到鉴权中间件的闸门，得自己判一次）
+  try { if (await isDemoBook(c)) return denyDemoPerm(c) } catch (e) { /* 判断不出来就不拦 */ }
   const { key, password } = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const db = c.env.DB || mainDb
@@ -1282,6 +1307,7 @@ app.post('/auth/staff', async (c) => {
 
 // 一键停用员工口令（离职/换人时立刻止损，不用先「改成空」）
 app.post('/auth/staff-off', async (c) => {
+  try { if (await isDemoBook(c)) return denyDemoPerm(c) } catch (e) { /* 判断不出来就不拦 */ }
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const db = c.env.DB || mainDb
@@ -1712,6 +1738,13 @@ app.use('*', async (c, next) => {
     }
   }
   c.set('role', role)
+  // 演示账套里不许设权限：员工账号 / 员工权限 / 客户分给员工 / 设员工口令，全关。
+  // 「功能模块开关」不算权限设置，保留（那是功能裁剪，审核一般不查）。
+  try {
+    if (DEMO_PERM_PATHS.test(path) || /^\/auth\/staff(-off)?$/.test(path)) {
+      if (await isDemoBook(c)) return denyDemoPerm(c)
+    }
+  } catch (e) { /* 判断不出来就不拦 */ }
   // 功能模块开关：关掉的模块，接口直接 403（前端入口也会藏起来，这里再兜一层）
   try {
     const off = await modulesOff(c.env.DB || mainDb)
@@ -6107,9 +6140,12 @@ app.get('/me', async (c) => {
   const superEnabled = role === 'owner' ? await superKeyOn(mainDb) : false
   // 这本账自己有没有独立管理员口令（有的话，主账套口令照样能用）
   const bookKey = c.env.DB && c.env.DB !== mainDb ? await getKey(c.env.DB) : null
+  // 演示账套（示例数据那本）：前端据此把「员工账号/员工权限/客户分给员工」这些入口全藏掉
+  const demoBook = await isDemoBook(c).catch(() => false)
   return c.json({
     role,
     book: String(c.env.BOOK || '1'),
+    demo_book: demoBook,
     staff_name: myName,
     staff_enabled: !!staff,
     demo_enabled: demoEnabled,
@@ -9792,6 +9828,8 @@ app.post('/book-admin-key', async (c) => {
   const all = c.env.ENV_ALL || c.env
   const hit = bookDbs(all).find(([x]) => x === id)
   if (!hit) return c.json({ error: '没有第 ' + id + ' 本账', code: 'no_book' }, 404)
+  // 演示账套（示例数据那本）不给设管理员口令，理由同员工账号：它只是给审核看的样板数据
+  if (await isDemoDb(hit[1], id).catch(() => false)) return denyDemoPerm(c)
   const db = hit[1]
   const mainDb = all.DB || c.env.DB
   if (await verifySetting(mainDb, 'super_key', pw)) return c.json({ error: '这本账的管理员口令不能和超级口令一样' }, 400)

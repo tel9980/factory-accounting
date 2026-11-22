@@ -1288,6 +1288,21 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.39 演示账套为什么不能设权限（要过微信审核就得读这条）
+
+审核员拿内置演示口令进的是**第 3 本账**（示例数据那本）。那本账以前照样能建员工账号、改员工权限、把客户分给员工、设员工口令、设账套管理员口令 —— 审核视角看起来就是「一个没经过审核的多角色权限系统」，是要驳回的。现在整类入口在演示账里关掉。
+
+- **判定别写死「第 3 本」**。`isDemoDb(db, bookId)` 先看 `settings.demo_seeded === '1'`（只有 `seedDemoBook` 种过示例数据的账才有这个标记），再看账名以「演示账套」开头**且**确实是第 3 本。**老板把第 3 本当二厂在用（里面是真数据）时，那本账不会被误伤** —— 这点以后别改回去。
+- **拦的路径**：`/staff-users`、`/staff-perms`、`/party-staff`、`/auth/staff`、`/auth/staff-off`、`/book-admin-key`。统一 403 `{code:'demo_no_perm'}`。
+- **三个地方容易漏**，加新入口时对照检查：
+  1. **`/auth/*` 走不到鉴权中间件**（它们在「公开页早退」分支里，首次设口令时还没有口令），必须各自在路由里判一次；
+  2. **`/book-admin-key` 是按目标库操作**（超级管理员在第 1 本账里给第 3 本设口令），要用 `isDemoDb(hit[1], id)` 按目标库判，不能只判「当前账」；
+  3. **前端**：`GET /me` 返回 `demo_book`，wxml 里 5 个入口全部带 `!demo_book`。**藏按钮不够**，后端闸门才是真拦。
+- **功能模块开关（`/modules`）故意不拦**：那是功能裁剪（关掉计件工资之类），不是给谁分配权限；拦了反而让演示账看着残废。
+- **回归**：`scripts/test-demo.mjs` 第 10 段同时断言「演示账全 403」和「真账套照常 200」——**只加前者会让老板自己被拦掉**。
+
+---
+
 ### 4.38 第十轮的几处硬规矩（改权限名单 / 改恢复 / 改幂等 / 改迁移前先读）
 
 这一轮 100 多条改动里有几个「不改就会出事」的点：

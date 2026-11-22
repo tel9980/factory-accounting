@@ -1864,9 +1864,10 @@
       <view class="tip" wx:if="{{role!='owner'}}">导出、备份、改口令这些只有老板能点（现在用的是{{role=='demo'?'演示':'员工'}}身份）。</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="copyWeekText">📋 复制上周经营速览</button>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
-      <view class="tip" wx:if="{{role!='staff'}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
-      <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
-      <button class="btn warn" size="mini" wx:if="{{role!='staff' && staff_enabled}}" bindtap="staffOff">🚫 一键停用员工口令</button>
+      <view class="tip" wx:if="{{role!='staff' && !demo_book}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
+      <button class="btn" size="mini" wx:if="{{role!='staff' && !demo_book}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
+      <button class="btn warn" size="mini" wx:if="{{role!='staff' && !demo_book && staff_enabled}}" bindtap="staffOff">🚫 一键停用员工口令</button>
+      <view class="tip" wx:if="{{demo_book}}">这是演示账套（示例数据），不能设权限、不建员工账号、不分客户。要在自己的账里设，去 设置 → 账套切换。</view>
       <view class="tip" wx:if="{{role=='owner'}}">微信审核 / 想先看看的人用的口令（只能看，不能改账、不能导出；审核驳回常因为「登录受限」，填它就能过）：{{demo_enabled?'已开着，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role=='owner'}}" bindtap="setDemoKey">{{demo_enabled?'🎬 改演示口令（审核 / 试用）':'🎬 设演示口令（审核 / 试用）'}}</button>
       <button class="btn ghost" size="mini" wx:if="{{role=='owner'}}" bindtap="toggleDemoBuiltin">{{demo_builtin!==false?'👀 内置演示入口：开着（点这里关掉）':'👀 内置演示入口：关着（点这里打开）'}}</button>
@@ -1932,7 +1933,7 @@
         <view class="row1"><text class="nm">{{big?'🔠 大字号（已开）':'🔠 大字号（字太小看不清就开）'}}</text><text class="amt">{{big?'开着':'关着'}}</text></view>
         <view class="row2">开了以后全站字放大一号、输入框变高，戴着老花镜也能看清。</view>
       </view>
-      <view wx:if="{{role!='staff'}}">
+      <view wx:if="{{role!='staff' && !demo_book}}">
         <button class="btn ghost" size="mini" bindtap="loadStaffPerms">👥 员工权限（谁能看哪块）</button>
         <view wx:if="{{spm}}">
           <view class="tip">{{spm.text}}</view>
@@ -1971,7 +1972,7 @@
           </view>
         </view>
       </view>
-      <view wx:if="{{role!='staff'}}">
+      <view wx:if="{{role!='staff' && !demo_book}}">
         <button class="btn ghost" size="mini" bindtap="loadStaffUsers">👤 员工账号（一人一个口令）</button>
         <view wx:if="{{su}}">
           <view class="tip">{{su.text}}</view>
@@ -3365,7 +3366,7 @@
     </view>
     <view class="form">
       <view class="frow">
-        <button class="btn ghost" size="mini" bindtap="loadPartyStaff">👤 客户分给员工</button>
+        <button class="btn ghost" size="mini" wx:if="{{!demo_book}}" bindtap="loadPartyStaff">👤 客户分给员工</button>
       </view>
       <block wx:if="{{psv}}">
         <view class="box">

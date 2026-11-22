@@ -200,7 +200,7 @@ Page({
     adv_in: [], adv_out: [], adv_type: 0, a_party: '', a_amount: '', a_remark: '',
     new_acc_name: '', new_acc_opening: '', new_cat_name: '', new_cat_type: 0,
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日', '客户名单：名称,类型,联系人,电话'],
-    role: 'owner', staff_enabled: false, demo: false, demo_enabled: false, demo_builtin: true,
+    role: 'owner', staff_enabled: false, demo: false, demo_book: false, demo_enabled: false, demo_builtin: true,
     super: false, super_enabled: false, book_admin: false, book_own_key: false,
     key_open: false, key_input: '', key_mode: 'enter', key_err: '', cf: null, cfl: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
@@ -7322,7 +7322,7 @@ Page({
         const d = res.data || {}
         // 三种身份：老板 / 员工 / 演示（只读，给微信审核和试用的人看）
         const r = d.role === 'staff' ? 'staff' : d.role === 'demo' ? 'demo' : 'owner'
-        this.setData({ role: r, demo: r === 'demo', staff_enabled: !!d.staff_enabled, demo_enabled: !!d.demo_enabled, demo_builtin: d.demo_builtin !== false, super: !!d.super, super_enabled: !!d.super_enabled, book_admin: !!d.book_admin, book_own_key: !!d.book_own_key })
+        this.setData({ role: r, demo: r === 'demo', demo_book: !!d.demo_book, staff_enabled: !!d.staff_enabled, demo_enabled: !!d.demo_enabled, demo_builtin: d.demo_builtin !== false, super: !!d.super, super_enabled: !!d.super_enabled, book_admin: !!d.book_admin, book_own_key: !!d.book_own_key })
       }
     })
   },

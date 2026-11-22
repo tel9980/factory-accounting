@@ -23,8 +23,9 @@ const ok = (msg) => console.log('  ✅ ' + msg)
 const no = (msg, extra) => { bad++; console.log('  ❌ ' + msg + (extra !== undefined ? ' ' + JSON.stringify(extra) : '')) }
 const eq = (name, got, want) => (got === want ? ok(`${name} = ${want}`) : no(`${name} 应为 ${want} → ${got}`))
 
-async function call(method, path, body, key) {
+async function call(method, path, body, key, book) {
   const opt = { method, headers: { 'x-access-key': key || KEY } }
+  if (book) opt.headers['x-book'] = String(book)
   if (body !== undefined) { opt.headers['content-type'] = 'application/json'; opt.body = JSON.stringify(body) }
   const r = await fetch(BASE + path, opt)
   const text = await r.text()
@@ -162,6 +163,33 @@ async function main() {
   eq('再打开', onB.d && onB.d.builtin, true)
   const afterOn = await call('GET', '/ar', undefined, BUILTIN)
   eq('打开后又可以进', afterOn.s, 200)
+
+  // 10) 演示账套里不能设权限（微信审核驳回理由之一）
+  // 前面已经用内置演示口令进过第 3 本账 → 那边已经种过示例数据（demo_seeded=1）。
+  // 现在用老板口令切到第 3 本账，各种权限入口都该被拒。
+  const b3Me = await call('GET', '/me', undefined, KEY, 3)
+  eq('老板口令也能进第 3 本账', b3Me.s, 200)
+  eq('…第 3 本被认出是演示账套', b3Me.d && b3Me.d.demo_book, true)
+  for (const p of ['/staff-users', '/staff-perms', '/party-staff']) {
+    const r = await call('GET', p, undefined, KEY, 3)
+    eq('演示账套不能看 ' + p, r.s, 403)
+    eq('…' + p + ' 返回 demo_no_perm', r.d && r.d.code, 'demo_no_perm')
+  }
+  const suPost = await call('POST', '/staff-users', { name: '演示员工' }, KEY, 3)
+  eq('演示账套不能加员工账号', suPost.s, 403)
+  const spPost = await call('POST', '/staff-perms', { modules: ['ar'] }, KEY, 3)
+  eq('演示账套不能改员工权限', spPost.s, 403)
+  const psPost = await call('POST', '/party-staff', { party: '演示·张老板', staff: '小王' }, KEY, 3)
+  eq('演示账套不能把客户分给员工', psPost.s, 403)
+  const stPost = await call('POST', '/auth/staff', { key: KEY, password: '1234' }, KEY, 3)
+  eq('演示账套不能设员工口令', stPost.s, 403)
+  // 主账套（真账）照常能用这些入口 —— 别把老板自己拦了
+  const mSu = await call('GET', '/staff-users', undefined, KEY, 1)
+  eq('真账套照常能看员工账号', mSu.s, 200)
+  const mSp = await call('GET', '/staff-perms', undefined, KEY, 1)
+  eq('真账套照常能看员工权限', mSp.s, 200)
+  const mPs = await call('GET', '/party-staff', undefined, KEY, 1)
+  eq('真账套照常能看客户分给员工', mPs.s, 200)
 
   console.log(bad ? `\n❌ 演示口令：${bad} 项没过` : '\n✅ 演示口令：全部通过（只读真的只读，老板照常）')
   process.exit(bad ? 1 : 0)
