@@ -77,7 +77,7 @@
       <view class="qbtn3 orange" bindtap="quickGo" data-t="expense"><view class="qb-t">－ 记一笔支出</view><view class="qb-d">当场花的钱</view></view>
     </view>
     <view class="form">
-      <input class="inp qinp" placeholder="一句话记账：收张老板加工费5000" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
+      <input class="inp qinp" placeholder="一句话记账：张老板加工费5000（开单）" value="{{q_text}}" bindinput="onQText" bindconfirm="quick"/>
       <view class="qrow">
         <button class="btn" size="mini" bindtap="quick">记</button>
         <button class="btn btn-ghost" size="mini" bindtap="savePhrase">存为常用</button>

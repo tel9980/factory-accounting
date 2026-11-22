@@ -42,22 +42,8 @@ for (const line of src.split('\n')) {
   if (m) allRoutes.push([m[1].toUpperCase(), m[2]])
 }
 const writes = allRoutes.filter(([m]) => m !== 'GET')
-// 与 backend/index.js 里的 STAFF_WRITE_OK 一一对应：员工「记账本身」需要的动作
-const STAFF_WRITE_OK = [
-  /^\/orders$/, /^\/orders\/\d+\/receive$/, /^\/orders\/\d+\/status$/,
-  /^\/receive-batch$/, /^\/pay-batch$/, /^\/quick$/,
-  /^\/payables$/, /^\/payables\/\d+\/pay$/,
-  /^\/expenses$/, /^\/advances$/, /^\/loans$/, /^\/loans\/\d+\/(return|reimburse)$/,
-  /^\/attachments?$/, /^\/batch$/,
-  /^\/edit-request$/, /^\/edit-requests\/\d+\/cancel$/,
-  /^\/(import|import-rows|import-xlsx|import-pack|parse-import|detect-import)$/,
-  /^\/(reconcile|recon-confirm|pipeline-summary)$/,
-  /^\/statement-log$/, /^\/statement-log\/\d+\/(ack|resolve)$/,
-  /^\/party-terms$/, /^\/party-terms\/apply$/, /^\/dunning-log$/, /^\/profiles$/,
-  /^\/(materials|material-moves|frame-prices|outsource|rework|invoices)$/, /^\/outsource\/\d+\/back$/,
-  // 大文件切片上传：员工能导入，所以也得能切片传（不然他打开就传不了几 MB 的表）
-  /^\/upload-(start|part|finish)$/
-]
+// 与 backend/index.js 共用同一份白名单（backend/perm-rules.mjs）：改线上权限忘改测试的时代结束了。
+import { STAFF_WRITE_OK } from '../backend/perm-rules.mjs'
 const isStaffOk = (p) => STAFF_WRITE_OK.some((re) => re.test(p))
 
 const run = async () => {

@@ -330,6 +330,22 @@ if (reqBlock) {
   say(miss === 0, `/schema-check 列的 ${Object.keys(req).length} 张表要求，schema.sql 都对得上`, `和 /schema-check 的要求有 ${miss} 处不一致`)
 }
 
+// ── 4.8 账套不能写死 3 本（BOOK_MAX=9，写死 DB/DB2/DB3 会让第 4 本开始的功能静默失效）──
+console.log('\n[4.7] 多账套')
+{
+  const hard = []
+  // 允许 bookBindingName() 里那次字面量拼装（它就是按 DB+n 生成绑定名的），其余出现算写死。
+  for (const m of beSrc.matchAll(/\b(?:all|c\.env\.ENV_ALL|envAll|ENV_ALL)\s*\.\s*(DB2|DB3)\b|\b(?:DB2|DB3)\s*:/g)) {
+    const line = beSrc.slice(0, m.index).split('\n').length
+    hard.push(line)
+  }
+  say(hard.length === 0, '账套入口没有写死 DB2/DB3（统一走 bookDbs()）', `backend/index.js 第 ${[...new Set(hard)].join('、')} 行写死了第二/第三本账`)
+  // 白名单单一事实源：后端和权限测试必须都 import perm-rules.mjs，不能各存一份
+  const permSrc = fs.readFileSync(path.join(ROOT, 'backend/perm-rules.mjs'), 'utf8')
+  const permTest = fs.readFileSync(path.join(ROOT, 'scripts/test-perm.mjs'), 'utf8')
+  say(permSrc.includes('export const STAFF_WRITE_OK') && beSrc.includes("from './perm-rules.mjs'") && permTest.includes("perm-rules.mjs"), '员工写接口白名单后端和测试共用一份', '员工写接口白名单出现第二份拷贝（改一处会漏另一处）')
+}
+
 // ── 5. 前端调的接口，后台有没有 ──
 console.log('\n[5] 前端调后台')
 const norm = (p) => p.split('?')[0].replace(/\$\{[^}]*\}/g, ':x').replace(/\/\d+/g, '/:x').replace(/\/$/, '') || '/'

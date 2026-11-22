@@ -5745,7 +5745,10 @@ Page({
         if (d.error) {
           wx.showToast({ title: d.error, icon: 'none' })
         } else {
-          wx.showToast({ title: d.dup_ok ? '这笔刚记过了' : '已记：' + d.summary, icon: 'none' })
+          // 「收」这个词最容易误会：一句话记的是「开了一张应收单」，不是钱到账。
+          // 把这句挂在成功提示上，别让用户记完才发现（文案警示藏在下面两行 tip 里没人看）。
+          const hint = /^收|收款|收到/.test(t) ? '（开单，不是收到钱）' : ''
+          wx.showToast({ title: d.dup_ok ? '这笔刚记过了' : ('已记：' + d.summary + hint), icon: 'none' })
           this.setData({ q_text: '' })
           this.refresh({ lite: true })
         }

@@ -1728,6 +1728,15 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+345. ✅ **四维查漏补缺：多账套不再写死三本、员工越权口子堵上、连点两下不再记两遍、缺 secret 不再假绿**：用户说「从性能，高效，便捷、稳定优化」，四路只读审计（后端性能 / 效率工程化 / 便捷 / 稳定性）+ 我逐条回代码核对，按「稳定 → 性能 → 便捷 → 工程化」分组做。这一轮的题眼是**「静默」**——越权不报错、缺 token 还绿、连点两下各记一遍，全都「看起来没事」。
+    - **稳定**：①员工写接口白名单抽成单一事实源 `backend/perm-rules.mjs`（后端权限中间件与 `scripts/test-perm.mjs` 共用一份，改线上忘改测试的时代结束），并删掉 `/profiles` 越权口子（员工 PIN 曾能改客户 / 供应商档案）；②备份包不再泄露 `super_key`/`recover_code`/`staff_salt`（`dumpAll` 的 settings 过滤改用 `BACKUP_SETTINGS_SKIP`，并把它补全）；③`/receive-batch`、`/pay-batch`、`/payroll/pay` 的防重从「先查后记」改成 `opClaim` 先占坑（连点两下只有一个能往下走，参数错 / 没单据时放掉坑）；④撤销核销加「删到 0 行」校验（连点两下撤两次会把 `written_off` 多扣一遍，现在第二次直接回「已撤销过」）；⑤`/book-reset` 清空前自动备份没做成时不再继续清空（避免「点错了退不回去」）。
+    - **性能**：`/recon-progress` 每家一条 N+1 → 一条 `GROUP BY party` 子查询；`/payroll/pay` 每工人 3 条 SUM → 三条 `GROUP BY worker` 建 Map；`/books` 每本账 3 条串行 → `Promise.all`；`targetHistory` 每月 3 条串行 → 两条按月聚合 + targets 一条。
+    - **便捷**：`/pc` 账套下拉不再写死 1/2/3（看 `/books-all` 动态重建，改名也跟着变）；`/pc` 员工口令从「只在消息里显示一次」改成「放进只读输入框 + 复制口令按钮」；首页一句话记账示例从「收张老板加工费5000」改成「张老板加工费5000（开单）」，成功 toast 对「收…」开头额外提示「开单，不是收到钱」。
+    - **工程化**：`scripts/check.mjs` 加 [4.7] 断言（禁 `DB2`/`DB3` 字面量 + 白名单单一事实源）；`deploy.yml` 缺 `CF_API_TOKEN` 或 `PROD_KEY` 时从「warning + exit 0」改成「::error + exit 1」——以前缺 secret 静默跳过、CI 仍绿，会误以为改动已上线。
+    - **验证**：`run-all.mjs` 36 件全过 0 失败（80s）；`check.mjs` 全绿（434 路由 / 59 表 / 685 SQL / 265 调用 / 788 绑定）；`gen-api-list --check` 434/63、`gen-guide --check` 27KB、`check-version` v1.3.0 一致。
+    - ⚠️ 动了前端（`index.wxml`/`index.js` 一句话记账示例与 toast）→ 小程序要重新上传发布。
+    - 有意没做（理由记在这）：`opClaim` 失败仍 `return true`（fail-open，防重是安全网，库坏了宁让业务先走，真实写还有条件守卫兜底）；导入预览 4 处 `.catch(()=>({results:[]}))`（只读预览，查不到就当 0 条，不改数据，新装缺列已有 check.mjs + `/schema-check` 兜底）。
+
 344. ✅ **快捷面板再加一块「月度对账」：谁确认了、谁说对不上、谁还没回音，跟该催谁放一起**：接着 343 往下做，电脑上批处理最常做的另一件事就是对账。原来要知道对账进度得滚到报表页翻「对账看板」，现在首屏就给结论。
    - **新增对账提醒**（`quick_recon`，跟 `quickLoad` 一起刷新）：一屏显示**近 60 天确认对得上 / 说对不上 / 本月还没回音**三家的家数 + 一句建议；说不对上的前 5 家直接列成表（客户 / 月份 / 时间 / 备注），并提示去「报表 → 争议」核差额，**别直接改单据**。
    - 复用现成接口 `/statement-acks?days=60`（第三次 fetch 并进原来的 `Promise.all`，不增加串行往返），**没加路由、没动账本逻辑**；员工 / 演示权限沿用原接口。

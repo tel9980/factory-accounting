@@ -1266,3 +1266,12 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 它全部复用现成接口（`/dashboard`、`/collect-list`、`/archive-pack?kind=monthly`、`/due-schedule-xlsx`），**没加路由、没改后端账务逻辑**，所以：改这块不用碰小程序、不用灌库、不用改 `wrangler.toml`。要在电脑上更快干活，打开 `https://<你的域名>/pc` 直接用即可；小程序仍是随手记账的主入口。
 
 接着 4.34：快捷面板底部又多了一块「月度对账」（近 60 天确认 / 有异议 / 本月没回音的家数 + 有异议清单），跟「该催谁」同一屏、点「刷新数据」一起更新。同样只动 `/pc` 内嵌网页、复用 `/statement-acks`，**没加路由、没动账本逻辑、不用重传小程序**。
+
+### 4.35 多账套与权限的几处「静默」坑（改前必读）
+
+这一轮四维审计修的都是**不报错、看着没事**的坑，其中两条以后改代码最容易再踩：
+
+- **账套不能写死 `DB`/`DB2`/`DB3`**。仓库最多 9 本账（`wrangler.toml` 里加 `DB4…DB9` 即可，`bookDbs()` 自动枚举）。历史上有 4 处把三本写死（`handoverData`、`/merge-summary`、`/books-check` 的 defs 和 schema 检查），加 DB4 后这些接口还只认三本、静默丢第 4 本。现在统一走 `bookDbs(env)`，`scripts/check.mjs` [4.7] 会拦任何 `DB2`/`DB3` 字面量。**以后新增任何「遍历账套」的代码，一律用 `bookDbs()`，别写死。**
+- **员工写接口白名单是单一事实源 `backend/perm-rules.mjs`**。后端权限中间件和 `scripts/test-perm.mjs` 都 import 它。改白名单只改这一个文件，改完两端同步；`check.mjs` [4.7] 会断言两边都 import 同一份。以前后端和测试各存一份，改线上忘改测试 → 测试全绿但线上权限已经错。**注意白名单默认关**：新写接口不加进去就是 403（关错顶多不方便，开错就是越权）；`/profiles` 就是这类越权口子，已从白名单移除（员工 PIN 曾能改客户 / 供应商档案）。
+- **防重别再用「先查后记」**：`opSeen` → 干完 → `opMark` 挡不住并发双击（两个请求都查不到标记就各记一遍）。正确的姿势是 `opClaim` 先 `INSERT OR IGNORE` 占坑（唯一索引 `client_id` 保证只有一个能往下走），参数错 / 没单据 / 抛异常时 `opRelease` 放坑。`/receive-batch`、`/pay-batch`、`/payroll/pay` 已改，新增「按 `client_id` 幂等」的写接口照这个模板做。`opClaim` 失败时 `return true` 是**故意的 fail-open**：防重是安全网，库坏了宁让业务先走（真实写还有条件守卫兜底），别把它改成 fail-close。
+- **缺 secret 必须让 CI 红**。`deploy.yml` 里缺 `CF_API_TOKEN` / `PROD_KEY` 现在都是 `::error` + `exit 1`，不再「warning 后继续绿」——否则部署被跳过 / 体检被跳过，CI 还显示成功，会误以为改动上线。配法见 1.4（Settings → Secrets and variables → Actions）。

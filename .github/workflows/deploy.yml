@@ -290,27 +290,26 @@ jobs:
       - name: 安装依赖
         run: npm ci
         working-directory: backend
-      # 这个仓库一直没配 CF_API_TOKEN（2026-11 查过：GitHub 里 0 个 secret），
-      # 所以「部署」这步从加上 CI 那天起就没成功过，每次 push 都是一个红叉 —— 红在那里没人会去点开看。
-      # 改成：没配 token 就跳过 + 在运行摘要上挂一条 warning，写明怎么配；配了 token 就照常部署。
+      # 2026-11 查过仓库还没配 secret；2026-11-21 起 CF_API_TOKEN/PROD_KEY 都已配好。
+      # 缺 token 时不再「warning 后继续绿」：那会让人以为改动上线了。现在直接失败，
+      # 并在运行摘要上写明怎么配；配了 token 就照常部署。
       - name: 有没有 Cloudflare token
         id: token
         env:
           CF_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: |
           if [ -z "$CF_TOKEN" ]; then
-            echo "::warning title=部署这一步跳过了::仓库没配 CF_API_TOKEN，所以只有自检和冒烟跑了，线上代码没更新。配法见 DEPLOYMENT.md 1.4 节（Settings → Secrets and variables → Actions → New repository secret）。"
+            echo "::error title=部署这一步没跑::仓库没配 CF_API_TOKEN，自检过了但线上代码没更新。配法见 DEPLOYMENT.md 1.4 节（Settings → Secrets and variables → Actions → New repository secret）。"
             echo "can=false" >> "$GITHUB_OUTPUT"
-            # 只打一行 ::warning 容易被忽略（日志要展开才看得到）。同时写进运行摘要页，
-            # 点进这次 run 第一眼就能看到「这次 push 没有上线」。
             {
-              echo "## ⚠️ 这次 push 没有部署到线上"
+              echo "## ❌ 这次 push 没有部署到线上"
               echo ""
-              echo "仓库没配 \`CF_API_TOKEN\`，所以只跑了自检 + 冒烟，**线上代码还是旧的**。"
+              echo "仓库没配 \`CF_API_TOKEN\`，所以只跑了自检 + 冒烟，**线上代码还是旧的**。这次 CI 断在这里，配好之前新改动不会上线。"
               echo ""
               echo "配法：Settings → Secrets and variables → Actions → New repository secret，名字 \`CF_API_TOKEN\`。"
               echo "配好之前，改完后请在本机手动部署：\`cd backend && CLOUDFLARE_API_TOKEN=… npx wrangler deploy --var APP_VERSION:…\`"
             } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           else
             echo "can=true" >> "$GITHUB_OUTPUT"
           fi
@@ -361,8 +360,8 @@ jobs:
       # 线上表结构对比：本机自检只能证明「schema.sql 在空库上建得出来」，
       # 证明不了「线上那个库到底缺不缺列」。这里用一把只读口令把线上所有 GET 接口打一遍，
       # 再问一次 /schema-check —— 线上真缺列时会明确列出哪张表缺哪个字段。
-      # 口令要单独配一个 GitHub secret（PROD_KEY = 线上老板口令）；没配就跳过并挂 warning，
-      # 不会因为没配就红一片。
+      # 口令要单独配一个 GitHub secret（PROD_KEY = 线上老板口令）；2026-11-21 已配好。
+      # 没配就明确失败：否则「部署成功 + 体检没跑」会让 CI 绿灯骗人（本地没部署过的旧版本照样显示成功）。
       # 这一步以前也挂在「有没有 CF token」上：结果是「本机手动部署了（没走 CI）」时，
       # 线上体检永远不跑。现在只要有 PROD_KEY 就跑，跟部署在不在 CI 里无关。
       - name: 线上表结构与接口体检
@@ -371,8 +370,9 @@ jobs:
           PROD_KEY: ${{ secrets.PROD_KEY }}
         run: |
           if [ -z "$PROD_KEY" ]; then
-            echo "::warning title=线上体检跳过了::仓库没配 PROD_KEY（线上老板口令），跳过了部署后的线上体检。配法：Settings → Secrets → New repository secret，名字 PROD_KEY。"
-            exit 0
+            echo "::error title=线上体检没跑::仓库没配 PROD_KEY（线上老板口令），部署后的线上体检没法做。配法：Settings → Secrets and variables → Actions → New repository secret，名字 PROD_KEY。"
+            echo "## ❌ 线上体检没跑" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           node scripts/smoke.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"
           node -e '
