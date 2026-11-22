@@ -5538,10 +5538,12 @@ Page({
   loadReportView() {
     const m = (this.data.rv_month || '').trim()
     if (m && !/^\d{4}-\d{2}$/.test(m)) return wx.showToast({ title: '月份写成 2026-11 这样', icon: 'none' })
+    this._loading('rv', true)
     this.req({
       url: API_BASE + '/report-view' + (m ? '?month=' + m : ''),
-      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ rv: d }) },
-      fail: () => wx.showToast({ title: '看不了，下拉刷新再试', icon: 'none' })
+      success: (res) => { const d = res.data || {}; if (d.ok) this.setData({ rv: d, rv_err: false }) },
+      fail: () => { this.setData({ rv_err: true }); wx.showToast({ title: '看不了，下拉刷新再试', icon: 'none' }) },
+      complete: () => this._loading('rv', false)
     })
   },
   loadAnomaly() {

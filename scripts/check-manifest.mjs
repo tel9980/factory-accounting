@@ -1,0 +1,65 @@
+// 比对「run-all.mjs 登记的回归清单」和两个 workflow 里写死的步骤，防止三处漂移。
+//
+// 为什么值得：以前加一个测试脚本要在 run-all.mjs、deploy.yml（可能还有 release.yml）三处
+// 各加一遍，漏一处 = 那个测试在 CI 里根本不跑，本地却「全绿」，给人假的安全感。
+// 现在 run-all.mjs 是单一事实源，这里只做一件事：谁跟它不一致就红。
+//
+// 规则：
+//   - ONLINE 每件都必须出现在 deploy.yml（联网件，起本地服务后打后端）。
+//   - OFFLINE 每件都必须出现在 deploy.yml 和 release.yml（纯离线，不用起服务）。
+//   - workflow 里引用到的 test-*.mjs 如果不在 CASES 里（除了部署后体检那几条特殊步骤），
+//     说明是「登记漏了」，也红。
+//
+// 用法：node scripts/check-manifest.mjs
+
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { CASES, OFFLINE, ONLINE } from './run-all.mjs'
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const DEPLOY = path.join(ROOT, '.github/workflows/deploy.yml')
+const RELEASE = path.join(ROOT, '.github/workflows/release.yml')
+
+const deploy = fs.readFileSync(DEPLOY, 'utf8')
+const release = fs.readFileSync(RELEASE, 'utf8')
+
+const bad = []
+const fail = (m) => { bad.push(m); console.log('  ❌ ' + m) }
+
+// workflow 里以 `node scripts/<name>.mjs` 跑过的测试（去掉 --base/--key 等参数）。
+const scriptsOf = (src) => [...src.matchAll(/node\s+scripts\/([a-z0-9-]+\.mjs)/g)].map((m) => m[1])
+
+const deployScripts = new Set(scriptsOf(deploy))
+const releaseScripts = new Set(scriptsOf(release))
+
+// 1) 联网件：deploy.yml 里必须都有
+for (const name of ONLINE) {
+  if (!deployScripts.has(name + '.mjs')) fail(`ONLINE「${name}」在 deploy.yml 里没有对应步骤（新测试要登记进 run-all.mjs 的 ONLINE，再在 deploy.yml 的 smoke job 加一步）`)
+}
+
+// 2) 离线件：deploy.yml 和 release.yml 里都必须有
+for (const name of OFFLINE) {
+  if (!deployScripts.has(name + '.mjs')) fail(`OFFLINE「${name}」在 deploy.yml 里没有对应步骤`)
+  if (!releaseScripts.has(name + '.mjs')) fail(`OFFLINE「${name}」在 release.yml 里没有对应步骤`)
+}
+
+// 3) 反向：workflow 里引用的 test-*.mjs 不该是「清单里没有」的孤儿
+const caseSet = new Set(CASES)
+for (const [label, set] of [['deploy.yml', deployScripts], ['release.yml', releaseScripts]]) {
+  for (const s of set) {
+    const base = s.replace(/\.mjs$/, '')
+    // smoke / smoke-write / gen-* 这些不是「测试清单」里的件，属于部署/生成步骤，跳过；
+    // 只盯 test-* 这一族的孤儿。
+    if (!base.startsWith('test-')) continue
+    if (!caseSet.has(base)) fail(`${label} 引用了 test 脚本「${base}」，但 run-all.mjs 的清单里没有它（登记漏了，或该删却只删了 workflow）`)
+  }
+}
+
+console.log(`\n[check-manifest] run-all.mjs：离线 ${OFFLINE.length} 件 + 联网 ${ONLINE.length} 件 = ${CASES.length} 件`)
+console.log(`  deploy.yml 引用了 ${deployScripts.size} 个 node scripts/*.mjs，release.yml 引用了 ${releaseScripts.size} 个`)
+if (bad.length) {
+  console.log(`\n❌ 清单漂移 ${bad.length} 处，修完再部署\n`)
+  process.exit(1)
+}
+console.log('✅ 三处清单一致\n')

@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { STAFF_WRITE_OK } from './perm-rules.mjs'
+import { AsyncLocalStorage } from 'node:async_hooks'
 // 员工口令可写的接口白名单抽到 perm-rules.mjs 了：测试脚本和权限中间件共用同一份，
 // 改一处两边同步；新增写接口默认关（关错顶多不方便，开错就是越权）。
 // GUIDE_HTML 不再顶层静态 import：guide.js 是 50KB 的纯静态 HTML 字符串，静态 import 会让每次冷启动
@@ -8,7 +9,6 @@ import { STAFF_WRITE_OK } from './perm-rules.mjs'
 const app = new Hono()
 
 app.use('*', async (c, next) => {
-  failBucket.length = 0
   c.header('Access-Control-Allow-Origin', '*')
   c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS')
   c.header('Access-Control-Allow-Headers', 'Content-Type,X-Access-Key,X-Book')
@@ -58,7 +58,7 @@ app.use('*', async (c, next) => {
   const st = c.res ? c.res.status : 200
   // 500 时把「哪条统计失败了」一起记下来（noteFail 收集的），不然日志里只剩一个 500 没有原因
   const dur = Date.now() - t0
-  if (st >= 500) await logError(c, st, failBucket.join(' | '), dur)
+  if (st >= 500) await logError(c, st, failsNow().join(' | '), dur)
   // 服务器自己在这次请求里花了多少毫秒（不含网络）：排查"到底慢在服务器还是慢在网上"时看这个头
   try { c.header('Server-Timing', 'app;dur=' + dur) } catch (e) {}
   if (dur >= SLOW_MS) {
@@ -127,13 +127,17 @@ const invOf = (v) => { const s = String(v || '').trim(); return INV_STATES[s] ? 
 // ===== 统一口径（全站同一个"赚了多少"，避免不同页面数字打架）=====
 // 净利（权责）= 本月接单额 − 本月单子上的材料·外协成本 − 本月现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息
 // 赊购（应付）只影响欠款和现金流，不重复算成本；付给供应商的钱若已算在单子成本里也不再算一次。
-// 静默失败的“留痕”：并发查询里 try/catch 不能把错误吃掉，否则界面上只是数字变成 0
-const failBucket = []
+// 静默失败的“留痕”：并发查询里 try/catch 不能把错误吃掉，否则界面上只是数字变成 0。
+// 每个请求一个 failBucket，挂在 AsyncLocalStorage 上（不能再用模块级数组：一个 isolate 会同时
+// 处理多个请求，A 的清空会把 B 的降级条目冲掉、B 的写日志还会把 A 的 degraded 写进 B 的 error_log）。
+const als = new AsyncLocalStorage()
+const failsNow = () => { const s = als.getStore(); return (s && s.fails) || [] }
 function noteFail(e, tag) {
   try {
     const msg = String((e && (e.message || e.error)) || e || 'unknown').slice(0, 200)
     const t = tag ? `${tag}: ${msg}` : msg
-    if (failBucket.indexOf(t) < 0 && failBucket.length < 20) failBucket.push(t)
+    const f = failsNow()
+    if (f.indexOf(t) < 0 && f.length < 20) f.push(t)
   } catch (_) {}
 }
 // 后台定时任务 / 自愈没有请求上下文，catch 掉之后必须留痕到 error_log，
@@ -154,12 +158,13 @@ function noteFailDb(db, e, tag, book) {
 let _quietAt = 0
 function noteQuiet(db, book) {
   try {
-    if (!db || !failBucket.length) return
+    const fails = failsNow()
+    if (!db || !fails.length) return
     const t = Date.now()
     if (t - _quietAt < 600000) return
     _quietAt = t
     db.prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,0,?)')
-      .bind(num(book) || 1, 'QUIET', 'degraded', 0, String(failBucket.slice().join(' ; ')).slice(0, 400), now()).run()
+      .bind(num(book) || 1, 'QUIET', 'degraded', 0, String(fails.slice().join(' ; ')).slice(0, 400), now()).run()
   } catch (_) {}
 }
 // 断网补发去重：手机端把没发出去的记账先存本地，联网后重发；同一个 client_id 只入账一次
@@ -1847,7 +1852,7 @@ app.get('/materials', async (c) => {
     ok: true, month: m, count: rows.length, low_cnt: low.length,
     low: low.slice(0, 20), rows,
     text: rows.length === 0 ? '材料台账还是空的。' : `共 ${rows.length} 种材料${low.length ? `，${low.length} 种低于下限（${low.slice(0, 3).map((r) => r.name).join('、')}）` : '，都还够用'}。`,
-    advice, degraded: failBucket.slice()
+    advice, degraded: failsNow().slice()
   })
 })
 app.post('/materials', async (c) => {
@@ -2004,7 +2009,7 @@ app.get('/frame-prices', async (c) => {
   return c.json({
     ok: true, count: rows.length, party_count: parts.size, rows,
     text: rows.length === 0 ? '还没有约定过框架价。常做的老客户，把「一张多少钱、一年内不变」写进来，以后下单低于这个价就会提醒你。' : `共 ${rows.length} 条框架价，涉及 ${parts.size} 家：` + rows.slice(0, 6).map((r) => r.text).join('；'),
-    degraded: failBucket.slice()
+    degraded: failsNow().slice()
   })
 })
 app.post('/frame-prices', async (c) => {
@@ -2113,7 +2118,7 @@ app.get('/outsource-book', async (c) => {
   return c.json({
     ok: true, today, month, status, count: all.length, amount: round2(all.reduce((t, r) => t + r.price, 0)),
     open_cnt: openRows.length, open_amount: openAmount, late_cnt: lateRows.length,
-    rows: all.slice(0, 100), parties, advice, text, degraded: failBucket.slice()
+    rows: all.slice(0, 100), parties, advice, text, degraded: failsNow().slice()
   })
 })
 app.post('/outsource', async (c) => {
@@ -2219,7 +2224,7 @@ app.get('/delivery-plan', async (c) => {
     overdue, high, warn: rows.filter((r) => r.risk === 'warn').length,
     no_date: num(noDate && noDate.n),
     by_day: Object.values(byDay).sort((a, b) => String(a.date).localeCompare(String(b.date))),
-    rows: rows.slice(0, 60), advice, text, degraded: failBucket.slice()
+    rows: rows.slice(0, 60), advice, text, degraded: failsNow().slice()
   })
 })
 
@@ -5441,7 +5446,7 @@ app.get('/next-step', async (c) => {
   const top = cand[0] || null
   const total = num(c0.ar_soon) + num(c0.ap_soon) + num(c0.no_cost) + num(c0.recon_open) + num(u0.ar_n) + num(u0.ap_n)
   return c.json({
-    ok: true, today, item: top, degraded: failBucket.slice(),
+    ok: true, today, item: top, degraded: failsNow().slice(),
     others: cand.slice(1, 6).map((x) => ({ k: x.k, title: x.title, why: x.why, tab: x.tab, amount: x.amount })),
     rest: Math.max(cand.length - 1, 0),
     text: top ? `现在先做这一件：${top.title}——${top.why}` : (total === 0 ? '今天没有必须处理的事，有空把今天的单记上就行。' : '没有急事，往下翻有别的提醒。')
@@ -9180,6 +9185,7 @@ app.get('/books-check', async (c) => {
 // ===== 账套（多本账）=====
 // 一本账 = 一个 D1 绑定：DB、DB2、DB3…DB9。以前这里写死三本，想多开一本得改代码；
 // 现在只要在 wrangler.toml 里多加一个 DB4 绑定（并建好库），代码自动认。
+// 本机版（Node）同一份「9 本」在 server/books.mjs 的 BOOKS，两处必须一致（check.mjs [4.11] 会钉住）。
 const BOOK_MAX = 9
 const BOOK_DEF_NAMES = ['主账套', '账套二', '账套三', '账套四', '账套五', '账套六', '账套七', '账套八', '账套九']
 const bookBindingName = (id) => (id === 1 ? 'DB' : 'DB' + id)
@@ -9472,7 +9478,7 @@ app.get('/dashboard', async (c) => {
   return c.json({
     role,
     hide_profit: hideProfit,
-    degraded: failBucket.slice(),
+    degraded: failsNow().slice(),
     issue_count: hideProfit ? 0 : Number((scRow && scRow.value) || 0),
     issue_at: (scAt && scAt.value) || '',
     ar_total: round2(num(ar.total)),
@@ -15310,14 +15316,20 @@ app.get('/report-view', async (c) => {
     equity: s.equity,
     check: round2(s.apLeft + s.debtLeft + num(s.adv_in) + s.equity - (s.cash + s.arLeft + num(s.adv_out)))
   }
+  // 空账（一笔数据都没有）：不能给「这个月账看着挺稳」这种误导，直接说还没有数据。
+  const empty = s.orderAdd === 0 && s.orderCost === 0 && s.expCash === 0 && s.inc === 0 && s.out === 0 && s.arLeft === 0 && s.apLeft === 0 && s.cash === 0 && s.debtLeft === 0
   const tips = []
-  if (s.net < 0) tips.push({ tone: 'bad', text: '这个月净利是负的（' + s.net + ' 元）：要么单少了，要么费用比赚的多。' })
-  if (s.gross > 0 && s.expCash > s.gross) tips.push({ tone: 'bad', text: '现金支出（' + s.expCash + '）超过毛利（' + s.gross + '），钱是从老底子里出的。' })
-  if (s.arLeft > 0 && s.inc === 0) tips.push({ tone: 'bad', text: '这个月一笔没收回来，但账上还挂着 ' + s.arLeft + ' 元应收 —— 去催款清单看看。' })
-  if (s.arLeft > 0 && s.cash < s.apLeft) tips.push({ tone: 'bad', text: '手头现金比欠别人的少，注意周转。' })
-  if (cats.length && cats[0].amt > s.orderAdd * 0.3) tips.push({ tone: 'warn', text: '「' + cats[0].category + '」花了 ' + round2(cats[0].amt) + ' 元，是这个月最大头。' })
-  if (!tips.length) tips.push({ tone: 'ok', text: '这个月账看着挺稳：有单、有收、费用没冒尖。' })
-  return c.json({ ok: true, month: m, pl, bs, cash: { inc: s.inc, out: s.out, net: round2(s.inc - s.out) }, cats: cats.map((x) => ({ name: x.category || '其他', amount: round2(num(x.amt)) })), tips })
+  if (empty) {
+    tips.push({ tone: 'ok', text: '这本账还没有任何数据。去「记一笔」录第一张单、收第一笔钱，这里就会出利润表。' })
+  } else {
+    if (s.net < 0) tips.push({ tone: 'bad', text: '这个月净利是负的（' + s.net + ' 元）：要么单少了，要么费用比赚的多。' })
+    if (s.gross > 0 && s.expCash > s.gross) tips.push({ tone: 'bad', text: '现金支出（' + s.expCash + '）超过毛利（' + s.gross + '），钱是从老底子里出的。' })
+    if (s.arLeft > 0 && s.inc === 0) tips.push({ tone: 'bad', text: '这个月一笔没收回来，但账上还挂着 ' + s.arLeft + ' 元应收 —— 去催款清单看看。' })
+    if (s.arLeft > 0 && s.cash < s.apLeft) tips.push({ tone: 'bad', text: '手头现金比欠别人的少，注意周转。' })
+    if (cats.length && cats[0].amt > s.orderAdd * 0.3) tips.push({ tone: 'warn', text: '「' + cats[0].category + '」花了 ' + round2(cats[0].amt) + ' 元，是这个月最大头。' })
+    if (!tips.length) tips.push({ tone: 'ok', text: '这个月账看着挺稳：有单、有收、费用没冒尖。' })
+  }
+  return c.json({ ok: true, month: m, empty, pl, bs, cash: { inc: s.inc, out: s.out, net: round2(s.inc - s.out) }, cats: cats.map((x) => ({ name: x.category || '其他', amount: round2(num(x.amt)) })), tips })
 })
 
 // ===== 异常自动盯：某类费用突然冒尖 / 某家欠款突然翻倍 =====
@@ -17120,7 +17132,7 @@ async function healthScan(db) {
   }
   const prevRec = hist.filter((x) => x.d !== today).slice(-1)[0]
   const delta = prevRec ? round2(score - num(prevRec.s)) : 0
-  const fails = failBucket.slice()
+  const fails = failsNow().slice()
   if (fails.length) items2.unshift({ k: 'fail', label: '有统计查询失败了', count: fails.length, tip: '某项统计没算出来（会显示成 0）。把下面这条发给开发：', go: '报表 → 🐞 运行日志', tab: 'report', list: fails.slice(0, 3).map((x) => ({ party: '', amount: 0, note: x })), party: String(fails[0] || '').slice(0, 60) })
   // 每项问题的「哪天发现 / 哪天修好」：顺带记进 settings.health_items，体检报告单要用
   let ih = {}
@@ -20485,7 +20497,7 @@ app.get('/reminders', async (c) => {
       if (due.length) push('yellow', `${due.length} 家到了该对账的日子`, 'import', due.slice(0, 3))
     }
   } catch (e) {}
-  return c.json({ items, count: items.length, today, degraded: failBucket.slice() })
+  return c.json({ items, count: items.length, today, degraded: failsNow().slice() })
 })
 
 // ── 第四档：坏账核销 / 账户内部转账 ──
@@ -20755,7 +20767,7 @@ export default {
     // 首页按时段统计、按月查账全部少一块，自检还会天天报「单据没记上月份」。
     // ensureMonthCols 自己有 PRAGMA 判断，列齐了就只剩两三条查询，每个 isolate 一次。
     try { await ensureMonthCols(db) } catch (e) { noteFail(e, '补月份兜底') }
-    return app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx)
+    return als.run({ fails: [] }, () => app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx))
   },
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站
   scheduled: async (event, env, ctx) => {

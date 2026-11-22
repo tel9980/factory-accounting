@@ -54,6 +54,8 @@ jobs:
           node-version: 24
       - name: 跑自检
         run: node scripts/check.mjs
+      - name: 回归清单三处一致（run-all / deploy / release）
+        run: node scripts/check-manifest.mjs
       # README 里的接口清单是自动生成的。后端加了/改了接口而忘了重新生成，
       # 文档就跟不上代码（这半年已经发生过两次）。--check 只比对、不改文件。
       - name: README 接口清单是不是最新的
@@ -74,6 +76,10 @@ jobs:
       # 补发途中又记的一笔不能丢，口令过期要停下来等登录而不是把每条都标成「口令错误」。
       - name: 离线补发回归（没补上的留在「待补」里，补上的不许重复、补发途中新记的不许丢）
         run: node scripts/test-offline.mjs
+      # 第 4 本账演练：自己起本机版（9 本账），验证代码不写死三本——
+      # /books-all 列 9 本、X-Book:4 能写进第 4 本、/books-check 与 /merge-summary 都扫 9 本。
+      - name: 第 4 本账演练（多账套不写死三本）
+        run: node scripts/test-book4.mjs
 
   smoke:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍
@@ -250,6 +256,14 @@ jobs:
       # 还得靠 SQL 自带条件（不是靠测试跑得快），所以这里同时钉住那些条件还在（第 19 组静态护栏）。
       - name: 并发回归（两人同时点同一笔，只能记一次）
         run: node scripts/test-concurrency.mjs --base http://127.0.0.1:8791 --key 8888
+      # 写接口覆盖：把 24 个此前从没被脚本调过的写接口（check.mjs [5.6] 名单）挨个造数据调一遍，
+      # 证明它们的真实执行路径不 5xx、返回结构合理。新加写接口记得来这补一条。
+      - name: 写接口覆盖回归（24 个冷门写接口都能跑通）
+        run: node scripts/test-write-coverage.mjs --base http://127.0.0.1:8791 --key 8888
+      # 本月利润一致性：首页/利润对比/报表/月结/经营体检 5 处「本月赚了多少」必须同一个数
+      # （收付实现制）。谁改了一处 SQL 口径、别处没跟着改，这条就会红。
+      - name: 本月利润一致回归（5 处同一个数）
+        run: node scripts/test-profit-consistency.mjs --base http://127.0.0.1:8791 --key 8888
       # 老备份兼容：用户手里可能躺着半年前导出的包（orders 没有 month/ar_cat/tax_*，
       # ledger 没有 inv_state/inv_no/tax）。这类包恢复进去不会报错，只是分类报表变「未分类」、
       # 税表归零、按月报表少几个月。这条把「老包恢复后数字对不对」钉住；会覆盖账本，放最后跑。

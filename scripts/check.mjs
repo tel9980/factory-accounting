@@ -331,7 +331,7 @@ if (reqBlock) {
 }
 
 // ── 4.8 账套不能写死 3 本（BOOK_MAX=9，写死 DB/DB2/DB3 会让第 4 本开始的功能静默失效）──
-console.log('\n[4.7] 多账套')
+console.log('\n[4.8] 多账套')
 {
   const hard = []
   // 允许 bookBindingName() 里那次字面量拼装（它就是按 DB+n 生成绑定名的），其余出现算写死。
@@ -344,6 +344,60 @@ console.log('\n[4.7] 多账套')
   const permSrc = fs.readFileSync(path.join(ROOT, 'backend/perm-rules.mjs'), 'utf8')
   const permTest = fs.readFileSync(path.join(ROOT, 'scripts/test-perm.mjs'), 'utf8')
   say(permSrc.includes('export const STAFF_WRITE_OK') && beSrc.includes("from './perm-rules.mjs'") && permTest.includes("perm-rules.mjs"), '员工写接口白名单后端和测试共用一份', '员工写接口白名单出现第二份拷贝（改一处会漏另一处）')
+}
+
+// ── 4.9 文档里「总共几张表」跟 schema.sql 对齐（README/DEPLOYMENT 写死 57 就再也改不动）──
+console.log('\n[4.9] 文档表数')
+{
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8')
+  const deploy = fs.readFileSync(path.join(ROOT, 'DEPLOYMENT.md'), 'utf8')
+  // 只盯「新装时建几张表」这种当前口径的句子；编年史里「当时是 54/56/57 张」是历史记录，不拦。
+  const docChecks = [
+    [readme, 'README.md', /建全\s*(\d+)\s*张表/g],
+    [readme, 'README.md', /建库\s*(\d+)\s*张表/g],       // 「确认建库 N 张」也命中这条
+    [readme, 'README.md', /自动建好\s*(\d+)\s*张表/g],
+    [deploy, 'DEPLOYMENT.md', /建出全部\s*(\d+)\s*张表/g],
+    [deploy, 'DEPLOYMENT.md', /建库\s*(\d+)\s*张表/g],
+  ]
+  let bad9 = 0
+  for (const [src, label, re] of docChecks) {
+    for (const m of src.matchAll(re)) {
+      const line = src.slice(0, m.index).split('\n').length
+      if (Number(m[1]) !== declared.size) {
+        fail(`${label} 第 ${line} 行写「${m[1]} 张表」，但 schema.sql 实际建 ${declared.size} 张——加表/删表后记得改文档`)
+        bad9++
+      }
+    }
+  }
+  say(bad9 === 0, `文档里的「建 N 张表」和 schema.sql（${declared.size} 张）一致`)
+}
+
+// ── 4.10 SQL 排除口径一致（ref_type NOT IN 的名单，改一处漏一处会静默串账）──
+console.log('\n[4.10] SQL 排除口径')
+{
+  // 全库「排除内部转账/税金往来」和「排除借支/转账」这两类口径，名单必须逐字一致。
+  // 有人要是只改其中一处（比如给某个报表多排一个 ref_type、或漏一个），就会变成新名单 → 这里红。
+  const canonical = new Set([
+    "('transfer','tax_ar','tax_ap')",
+    "('loan','transfer')",
+  ])
+  const drift = []
+  for (const m of beSrc.matchAll(/ref_type\s+NOT\s+IN\s*(\([^)]*\))/g)) {
+    const norm = m[1].replace(/\s+/g, '')
+    if (!canonical.has(norm)) {
+      const line = beSrc.slice(0, m.index).split('\n').length
+      drift.push(`第 ${line} 行：${m[1]}`)
+    }
+  }
+  say(drift.length === 0, `「ref_type NOT IN」排除名单全部是标准口径（两种，共 ${[...beSrc.matchAll(/ref_type\s+NOT\s+IN/g)].length} 处）`, `出现非标准排除名单 ${drift.length} 处：${drift.slice(0, 5).join('；')}`)
+}
+
+// ── 4.11 账套数口径统一（backend 的 BOOK_MAX 和本机版 server/books.mjs 的 BOOKS 不能漂移）──
+console.log('\n[4.11] 账套数')
+{
+  const beMax = Number((beSrc.match(/const\s+BOOK_MAX\s*=\s*(\d+)/) || [])[1])
+  const serverBooks = Number((fs.readFileSync(path.join(ROOT, 'server/books.mjs'), 'utf8').match(/export\s+const\s+BOOKS\s*=\s*(\d+)/) || [])[1])
+  say(beMax === 9 && serverBooks === 9, '账套数口径一致：backend BOOK_MAX=9、server BOOKS=9（可扩九本，最多 9 本）', `账套数漂移：backend BOOK_MAX=${beMax}、server BOOKS=${serverBooks}，两处必须都是 9（改库位数时两处一起改）`)
 }
 
 // ── 5. 前端调的接口，后台有没有 ──

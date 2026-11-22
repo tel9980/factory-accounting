@@ -44,7 +44,7 @@ npx wrangler d1 execute factory-db2 --remote --file=schema.sql   # 建了 DB2 �
 npx wrangler d1 execute factory-db3 --remote --file=schema.sql   # 建了 DB3 才要
 ```
 
-**一个 `schema.sql` 就够**：它会建出全部 57 张表、索引和 `month` 列的触发器，
+**一个 `schema.sql` 就够**：它会建出全部 59 张表、索引和 `month` 列的触发器，
 不用再手工 ALTER、也不用单独跑别的脚本。重复执行是安全的（都是 `IF NOT EXISTS`）。
 
 > 历史坑：2026-11 之前 `schema.sql` 是「线上库更新、文件没跟上」的状态，
@@ -347,7 +347,7 @@ node scripts/build-exe.mjs --out dist
 ```
 
 脚本会 esbuild 打包 → 生成 SEA blob（`schema.sql` 作为资源塞进去）→ postject 注入 →
-**自己跑一遍自测**（`/version` 版本号、落地页、建库 57 张表），不通就报错退出。
+**自己跑一遍自测**（`/version` 版本号、落地页、建库 59 张表），不通就报错退出。
 macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签）。
 
 ### 4.4 本机版的注意事项
@@ -1275,3 +1275,15 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **员工写接口白名单是单一事实源 `backend/perm-rules.mjs`**。后端权限中间件和 `scripts/test-perm.mjs` 都 import 它。改白名单只改这一个文件，改完两端同步；`check.mjs` [4.7] 会断言两边都 import 同一份。以前后端和测试各存一份，改线上忘改测试 → 测试全绿但线上权限已经错。**注意白名单默认关**：新写接口不加进去就是 403（关错顶多不方便，开错就是越权）；`/profiles` 就是这类越权口子，已从白名单移除（员工 PIN 曾能改客户 / 供应商档案）。
 - **防重别再用「先查后记」**：`opSeen` → 干完 → `opMark` 挡不住并发双击（两个请求都查不到标记就各记一遍）。正确的姿势是 `opClaim` 先 `INSERT OR IGNORE` 占坑（唯一索引 `client_id` 保证只有一个能往下走），参数错 / 没单据 / 抛异常时 `opRelease` 放坑。`/receive-batch`、`/pay-batch`、`/payroll/pay` 已改，新增「按 `client_id` 幂等」的写接口照这个模板做。`opClaim` 失败时 `return true` 是**故意的 fail-open**：防重是安全网，库坏了宁让业务先走（真实写还有条件守卫兜底），别把它改成 fail-close。
 - **缺 secret 必须让 CI 红**。`deploy.yml` 里缺 `CF_API_TOKEN` / `PROD_KEY` 现在都是 `::error` + `exit 1`，不再「warning 后继续绿」——否则部署被跳过 / 体检被跳过，CI 还显示成功，会误以为改动上线。配法见 1.4（Settings → Secrets and variables → Actions）。
+
+### 4.36 测试防线与可观测性的硬规矩（改后端并发 / 加写接口 / 动 CI 清单前先读）
+
+这一轮 12 条优化的主题是「改错的时候能更早发现」，其中几条规矩以后改代码会反复用到：
+
+- **新增任何写接口，`check.mjs` [5.6] 会点名「没被脚本调用过」**。补齐覆盖的路子是 `scripts/test-write-coverage.mjs`：先造种子再打目标接口，断言「没 500 + `ok:true`」。种子端点签名见脚本内注释（订单/应付/借支/预付/账期/对账单/改单申请/外协/银行流水）。**别让一个写接口长期裸奔**——现在 195 个写接口 195 个都有脚本跑。
+- **测试样板抽在 `scripts/_harness.mjs`**（`harness({tag})` → `arg/ok/no/yes/eq/near/call/post/wait/finish`）。**新测试脚本一律 import 它**，别再复制 arg/BASE/KEY/TAG 那 40 行。既有 36 个老脚本不迁（helper 签名已分化，强迁有「改错断言让它静默变绿」的风险）。
+- **CI 清单是单一事实源 `run-all.mjs`**。它导出 `OFFLINE/ONLINE/CASES`，`scripts/check-manifest.mjs` 断言 run-all、deploy.yml、release.yml 三处一致——**新增测试脚本要同时改 run-all.mjs（`OFFLINE` 或 `ONLINE`）+ deploy.yml + release.yml 三处**，漏一处 `check-manifest` 就红（已挂在两个 workflow 的 check.mjs 之后）。自包含（不依赖 --base）的测试放 `OFFLINE`（如 test-book4 自己起本机版），依赖 wrangler dev 的放 `ONLINE`。
+- **本月利润的「唯一答案」是收付实现制**，有 5 处实现（首页 `/dashboard`、`/profit-compare`、`/report-view`、`/month-end`、`/kpi`），口径都是 `ledger WHERE cash=1 AND ref_type NOT IN ('transfer','tax_ar','tax_ap')`。`test-profit-consistency.mjs` 用「塞 1000 收 + 300 支，断言 5 处都涨 700 且相等」钉住——**改任何一处的利润算法，先保证这个测试还绿**，否则五处会再分叉（4.33 那次就是这个坑）。
+- **`ref_type NOT IN` 的排除名单只有两种标准**：`('transfer','tax_ar','tax_ap')`（排除内部转账和代垫税）和 `('loan','transfer')`（借支口径）。`check.mjs` [4.10] 会拦第三种名单。**改排除项要三处一起想**：语义上到底排谁、跟其它 66 处一不一致、check.mjs 会不会红。
+- **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
+- **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。

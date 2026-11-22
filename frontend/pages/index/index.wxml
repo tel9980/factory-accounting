@@ -1363,7 +1363,13 @@
         <view class="tip">{{tax.text}}</view>
         <view class="tip" wx:if="{{tax.by_account.length}}">按账户：<text wx:for="{{tax.by_account}}" wx:key="account">{{item.account}}　收{{item.in_amt}} / 付{{item.out_amt}} / 税{{item.tax_in}}·{{item.tax_out}}；</text></view>
       </view>
-      <view wx:if="{{rv}}">
+      <view wx:if="{{rv_busy && !rv}}" class="tip">正在算报表…</view>
+      <view wx:if="{{rv_err && !rv}}" class="tip">报表没拉出来。<button class="btn ghost" size="mini" bindtap="loadReportView">再试一次</button></view>
+      <view wx:if="{{rv && rv.empty}}" class="empty">
+        <view class="prev-h">还没有数据</view>
+        <view class="tip">这本账一笔都还没记。去首页「＋ 记一笔」录第一张单、收第一笔钱，这里就会出利润表和家底。</view>
+      </view>
+      <block wx:elif="{{rv}}">
         <view class="prev-h">利润表　{{rv.month}}</view>
         <view class="plrow" wx:for="{{rv.pl}}" wx:key="label">
           <text class="{{item.strong?'pll strong':'pll'}}">{{item.label}}</text>
@@ -1385,7 +1391,7 @@
         <view class="tip">平衡校验差额 {{rv.bs.check}}（0 = 账是平的）　本月现金：收 {{rv.cash.inc}} − 付 {{rv.cash.out}} = {{rv.cash.net}}</view>
         <view class="tip">钱花在哪：<text wx:for="{{rv.cats}}" wx:key="name">{{item.name}} {{item.amount}}　</text></view>
         <view class="aline {{item.tone}}" wx:for="{{rv.tips}}" wx:key="text">{{item.text}}</view>
-      </view>
+      </block>
       <view wx:if="{{ano}}">
         <view class="prev-h">异常提醒　{{ano.count}} 条（{{ano.month}}）</view>
         <view class="tip" wx:if="{{!ano.count}}">没发现异常：费用没冒尖、欠款没突变、成本都填了。</view>
