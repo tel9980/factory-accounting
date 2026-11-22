@@ -47,6 +47,10 @@ function boot(opts) {
       const pick = cfg.onModal ? cfg.onModal(o, modals.length) : true
       if (pick !== 'pending') setTimeout(() => o.success && o.success({ confirm: pick !== false, cancel: pick === false }), 0)
     },
+    showActionSheet: (o) => {
+      // 微信的选择列表：默认点第 1 项
+      setTimeout(() => o.success && o.success({ tapIndex: 0 }), 0)
+    },
     request: (o) => {
       const i = n++
       hits.push(String(o.url))

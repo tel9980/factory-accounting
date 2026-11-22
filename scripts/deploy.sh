@@ -72,6 +72,19 @@ echo "→ 部署 $V  commit $C$DIRTY"
 
 EXTRA=""
 [ "$DRY" = "1" ] && EXTRA="--dry-run"
+
+# ---- 迁移（跟 CI 同一件事、同一份脚本，别各写一套）----
+# 为什么在部署之前：迁移是「加列/加索引」，先跑迁移再上新代码，新代码才一定用得上新列；
+# 反过来（先部署再迁移）中间那几分钟老代码会撞新表结构。CI 里也是这个顺序（deploy.yml
+# 的「跑远程数据库迁移」在「部署到 Cloudflare」之前）。跑失败的迁移脚本会 exit 1，
+# 所以这里直接终止，不会「迁移没过还照样部署」。
+if [ "$DRY" = "1" ]; then
+  echo "（--dry-run：跳过迁移）"
+else
+  echo "→ 跑远程数据库迁移"
+  node scripts/d1-migrate.mjs
+fi
+
 cd backend
 npx wrangler deploy $EXTRA --var APP_VERSION:"$V" --var APP_BUILT:"$B" --var APP_COMMIT:"$C"
 [ "$DRY" = "1" ] && { echo "（--dry-run：没有真发）"; exit 0; }

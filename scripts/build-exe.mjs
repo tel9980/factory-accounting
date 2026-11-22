@@ -50,7 +50,7 @@ const sh = (cmd, args, opt = {}) => {
 }
 const version = (() => {
   if (process.env.RELEASE_VERSION) return process.env.RELEASE_VERSION
-  const g = spawnSync('git', ['describe', '--tags', '--always', '--dirty'], { cwd: ROOT, encoding: 'utf8' })
+  const g = spawnSync('git', ['describe', '--tags', '--always'], { cwd: ROOT, encoding: 'utf8' })
   const v = (g.stdout || '').trim()
   return v || 'local'
 })()
@@ -69,7 +69,7 @@ await esbuild.build({
   bundle: true,
   platform: 'node',
   format: 'cjs',
-  target: 'node22',
+  target: 'node24',
   logLevel: 'warning',
   sourcemap: false,
   minify: false,
@@ -146,7 +146,7 @@ if (!flag('no-test')) {
     if (page.status !== 200 || !page.text.includes('本地记账服务')) throw new Error('落地页不对（HTTP ' + page.status + '）')
     const st = JSON.parse((await get('/__local/status')).text)
     if (!st.dbFile || st.orders !== 0) throw new Error('状态接口不对：' + JSON.stringify(st).slice(0, 120))
-    // 建库是启动时做的，这里确认真的建出来了（57 张表）
+    // 建库是启动时做的，这里确认真的建出来了（60 张表）
     const files = fs.readdirSync(dataDir).filter((f) => f.endsWith('.db'))
     // 库文件个数跟 server/books.mjs 的 BOOKS 走。以前这里写死 3，服务改成 9 本以后
     // 断言没跟，打出来的程序明明是好的，自测却判失败 → 三个平台的 release 全红。

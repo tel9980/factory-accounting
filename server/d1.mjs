@@ -11,6 +11,9 @@
 //   2) D1 的 run() 返回 { success, meta: { changes, last_row_id } }，不是 { changes }。
 //      （README 迭代 285 记过：按 { changes } 写会让「库存已扣却回 409」这类假失败。）
 import { DatabaseSync } from 'node:sqlite'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // node:sqlite 只认 null / number / string / Uint8Array；D1 会自己转 true/false，
 // 这里也得转，否则布尔参数直接抛「TypeError: Provided value cannot be bound」。
@@ -213,6 +216,49 @@ export async function completeColumns(db, schemaSql) {
   return { added, failed }
 }
 
+// 迁移文件（backend/migrations/*.sql）—— 本机版启动时按文件名顺序跑。
+// 为什么要跑：线上是 D1，靠 deploy.yml 的「跑远程数据库迁移」步骤执行 migrations/*.sql；
+// 本机版没有那个步骤，schema.sql 全是 CREATE TABLE IF NOT EXISTS，
+// 老库缺列/缺索引就只能靠代码里的 EXTRA_COLS 兜底 —— 索引补不上。
+// 幂等性：每条语句单独跑，「列已存在 / 已存在」当成功跳过，其余错误抛出去（不吞）。
+const MIG_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'backend', 'migrations')
+
+function listMigrationFiles(dir) {
+  try {
+    if (!fs.existsSync(dir)) return []
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort()
+  } catch (e) { return [] }
+}
+
+// 把迁移文件拆成一条条语句（去掉整行 -- 注释，按 ';' 切）
+function splitMigrationStatements(sql) {
+  const clean = sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n')
+  return clean.split(';').map((s) => s.trim()).filter(Boolean)
+}
+
+export async function applyMigrations(db, dir = MIG_DIR) {
+  const files = listMigrationFiles(dir)
+  const applied = []
+  const skipped = []
+  const failed = []
+  for (const f of files) {
+    let sql = ''
+    try { sql = fs.readFileSync(path.join(dir, f), 'utf8') } catch (e) { failed.push(f + ': ' + String(e.message || e)); continue }
+    for (const stmt of splitMigrationStatements(sql)) {
+      try {
+        await db.exec(stmt)
+        applied.push(f)
+      } catch (e) {
+        const msg = String((e && e.message) || e)
+        // 幂等：列/表/索引已存在 → 跳过；其余错误记下来（不吞，交由调用方打印）
+        if (/duplicate column name/i.test(msg) || /already exists/i.test(msg)) { skipped.push(f); continue }
+        failed.push(f + ': ' + msg)
+      }
+    }
+  }
+  return { files: files.length, applied, skipped, failed }
+}
+
 export async function ensureSchema(db, schemaSql) {
   const CNT = "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
   const has = await db.prepare(CNT).first()
@@ -229,6 +275,15 @@ export async function ensureSchema(db, schemaSql) {
   if (firstErr) {
     try { await db.exec(schemaSql) } catch (e) { throw e }
   }
+  // 迁移文件（backend/migrations/*.sql）：线上由 deploy.yml 跑，本机版由这里跑。
+  // 放在 schema.sql 之后、补列之后：这样 0000 补的列和 0001 建的索引都能落上。
+  const mig = await applyMigrations(db)
   const after = await db.prepare(CNT).first()
-  return { before, after: Number((after && after.n) || 0), added: cols.added, failed: cols.failed }
+  return {
+    before,
+    after: Number((after && after.n) || 0),
+    added: cols.added,
+    failed: [...cols.failed, ...(mig.failed || [])],
+    migrations: { files: mig.files, applied: mig.applied.length, skipped: mig.skipped.length, failed: mig.failed },
+  }
 }

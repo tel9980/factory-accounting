@@ -184,14 +184,17 @@ ${body}
 </div>
 </div></body></html>`
 
+// 故意不写「生成时间」：每次生成都变的时间戳会让 git 永远有 diff，
+// 也会让 --check 只能靠「先把时间戳抹掉再比」这种绕法。
+// 要看内容有没有更新，看 scripts/gen-guide.mjs --check 的结果就行。
 const file = `// 这个文件由 scripts/gen-guide.mjs 从 docs/新手教程.md 生成，不要手改。
-// 生成时间：${new Date().toISOString()}
 export const GUIDE_HTML = ${JSON.stringify(html)}
 `
 
 if (process.argv.includes('--check')) {
   const old = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : ''
-  const strip = (x) => x.replace(/^\/\/ 生成时间：.*$/m, '')
+  // 兼容老版本 guide.js 里那一行「// 生成时间：…」（连换行一起吃掉）
+  const strip = (x) => x.replace(/^\/\/ 生成时间：.*\n?/m, '')
   if (strip(old) !== strip(file)) {
     console.error('❌ backend/guide.js 跟 docs/新手教程.md 不一致：跑一次 node scripts/gen-guide.mjs')
     process.exit(1)

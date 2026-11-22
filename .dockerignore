@@ -1,14 +1,13 @@
-# 镜像里只要 backend/ 的 index.js + schema.sql + server/ + package.json
+# 构建镜像时不需要的东西（别进镜像，别把上下文传大）
 node_modules
-backend/node_modules
-backend/.wrangler
-dist
-build
-data
-frontend
-scripts
-docs
-.github
-*.md
-*.log
+**/node_modules
 .git
+.gitignore
+.github
+dist
+data
+*.log
+.DS_Store
+docs
+scripts
+frontend

@@ -12,7 +12,7 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 693 条 SQL 在新库上跑不跑得通、
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 687 条 SQL 在新库上跑不跑得通、
 前端 265 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
@@ -142,7 +142,7 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 值：  线上那本账的老板口令
 ```
 
-这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/smoke.mjs`（235 个 GET，
+这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/smoke.mjs`（239 个 GET，
 只读不写）；②问一次 `/schema-check`，线上真缺列就直接红，并打印缺哪张表哪个字段。
 为什么不配也能跑：`check.mjs` 只能证明「`schema.sql` 在空库上建得出来」，证明不了
 「线上那个库缺不缺列」——这两个 secret 都不配时，CI 只能保证「代码能跑」，保证不了「线上是对的」。
@@ -1288,6 +1288,28 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.38 第十轮的几处硬规矩（改权限名单 / 改恢复 / 改幂等 / 改迁移前先读）
+
+这一轮 100 多条改动里有几个「不改就会出事」的点：
+
+- **「加一条接口」必须同时想「员工能不能看」**。员工侧的名单是三张正则（`STAFF_MONEY_DENY` / `STAFF_MONEY_SCRUB` / `STAFF_COST_PATHS`）加上 `denyStaff` 块里 63 条内联正则。**只加三张名单里的不够，63 条内联也要算**（漏算会误报 47 条）。`scripts/_staff-leak.mjs` + check.mjs **[5.8]** 会扫所有 GET 路由 handler 里出现的钱/成本/利润字段（cost/profit/margin/gross/…16 个），断言每条都被拦或被脱敏。**新增带成本/利润的 GET 接口，check.mjs 会红，别去改名单让它绿，要先决定这个字段该不该给员工看。**
+- **公开链接的签名要带过期时间**。`sigBook(db, book, party, type, exp)` 的签名串末尾是 `|x<exp>`，**校验时必须一起看 `exp`**（`linkExpired(exp)`，没有 exp 视为已过期）。目前只有 statement/payroll/track 三类链接带过期（7 天 / 1 天 / 30 天），其余（handover/report/order-print/recon/quote/ack/year*/health）仍是永久签名 —— 给它们加过期时要一起改生成端和校验端，只改一端等于全失效。
+- **恢复码不随备份走**。`RESTORE_SETTINGS_SKIP` 里含 `recover_code/recover_hash/recover_fail/recover_lock`，恢复时这几个键一律不恢复。**备份文件等同万能钥匙**（恢复码通常抄在纸上，纸又和备份放一起）。
+- **跟着主表走的表，在包里缺失时必须一并清空**。`FOLLOW_TABLES = ['writeoffs','advances','debt_repays','transfers']`：主表（orders/payables/ledger）是整表替换的，这 4 张表留着旧记录就会挂在已经不存在的单据上（实测每恢复一次多一份核销记录，自检必报「单据已核销 600，核销记录合计 2400」）。**别把 D4 的「空数组不清空」套到这 4 张表上** —— 那 4 张要清。
+- **备份分片必须校验**。`saveBackup` 存 `sha256` + `parts`，`readBackupContent` 拼回来后核对，不符就抛 `backup_corrupt` 拒绝恢复。`size` 按字节（`TextEncoder().encode(content).length`），不是字符数。
+- **金额聚合表达式一定要加括号**。`SUM_MONEY(col)` 现在是 `SUM(CAST(ROUND((col)*100) AS INTEGER))/100.0`。**不加括号时 `*100` 只作用于最后一项，整列会缩小 100 倍**（实测应收 600 变成 6）—— 这是第 10 轮真实踩到的坑，也是 `test-numbers` 抓出来的。
+- **去重键要带业务类型**。`opKey(cid, kind) = cid + '#' + kind`。`op_dedupe.client_id` 是全局唯一，跨业务共用会互相误判「重复」，把真实操作静默丢弃。**新增用到 opClaim/opSeen 的接口时，kind 要传，且和前端 `once` 的键一致。**
+- **`opMark` 必须刷新 `created_at`**。不刷新的话 7 天后幂等窗口过期，重试会**重复记账**。GC 分两段：未完成的占坑（`ref_id=-1`）1 小时后清，已完成的 30 天后清。
+- **占坑失败要释放**。用了 `opClaim` 的接口，每个提前返回的分支都要 `opRelease(db, cid, kind)`（金额无效、已付清、月锁、并发冲突、异常），否则用户改个金额再提交就被当成重复操作挡掉。
+- **`Promise.all` 的解构个数必须和数组元素个数严格一致**。多写一个占位名，后面所有变量整体错位一格（`/dashboard` 曾经因此整页 500：`debtReps` 拿到账户余额数组）。改这块务必 `node --check` + 跑 `test-numbers`。
+- **批次上限留余量**。D1 的 `batch` 最多 100 条语句 / 100 个参数；代码里统一用 `D1_MAX_STMTS = 90` / `D1_MAX_VARS = 90`。N×2 的批量（每张未结单两条语句）超过 45 张就会撞上限 —— 批量整户收付款必须分块。
+- **CI 的「写接口全覆盖」要按字面路径+方法匹配**。以前用宽松正则拼接路径，`DELETE /staff-users/:id` 会被 `POST /staff-users` 命中 —— 实际有 56 条写接口从没跑过（其中 31 条 DELETE，前端在用）。现在 `scripts/test-write-methods.mjs` 表驱动逐条真调，新增写接口必须加进这个表。
+- **迁移要在部署之前跑，失败就中止**。`scripts/d1-migrate.mjs` 逐条执行 `backend/migrations/*.sql` 并写进 `migrations` 表，库名从 `backend/wrangler.toml` 的 `[[d1_databases]]` 读。**迁移文件要能跑在老库上**（`written_off` 这类列是运行时 `EXTRA_COLS` 补的，迁移时还不存在 → 先补列再建索引）。SQLite 的 `ADD COLUMN` 没有 `IF NOT EXISTS`，执行器把「duplicate column name」当已执行跳过。
+- **回滚判据用显式标记**。deploy.yml 的自动回滚看 `steps.health.outputs.bad == 'true'`，不要用「job 失败」—— 体检步骤缺 secret 时是 exit 0，用 job 失败当判据会误回滚（run 254 就这么把一次好好的部署退回去了）。
+- **`check.mjs` 新增断言**：[4.12] 迁移在老库上能跑且能幂等复跑、[4.13] D1 绑定与迁移库一致、[5.7] 接口清单与后端一致、[5.8] 员工看不到成本。
+
+---
+
 ### 4.37 第九轮的几处硬规矩（改权限 / 改多表写入 / 动 cron / 改镜像前先读）
 
 这一轮 60 多条改动里有几个「不改就会出事」的点，记在这里：
@@ -1301,7 +1323,7 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **查询失败不能当成「没有事」**：`/cash-forecast`、`/next-step` 以前把异常吞成 0，于是「应收查询挂了」显示成「一切正常，没有待办」。现在这两处返回 `failed:true`，前端会显示「没算出来，点一下重试」。
 - **`scheduled()` 必须有测试**。线上每天的自动记账、备份、推送全靠它，而它以前**一次都没被测过**。`scripts/test-cron.mjs` 在进程内 import worker + 用 `node:sqlite` 造 D1，4 条 cron 各跑一遍（70 项断言）。**改 cron 分支或它调用的函数，先跑这个测试**。它必须在有 `npm ci`（backend 依赖 hono）的 job 里跑，不能放没有依赖的 check job。
 - **`Dockerfile` 要 COPY 全 `backend/*.js` 依赖**：顶层 `import './perm-rules.mjs'` 和动态 `import('./guide.js')` 都会让容器启动即 `ERR_MODULE_NOT_FOUND`。exe 走 esbuild bundle 所以 exe 正常——**两条打包路径不一致，CI 从不 `docker run` 冒烟**。现在 release.yml 的 image job 后有一步 docker run 冒烟（/version、/help、/guide 都得 200）。
-- **老库补列只覆盖 16 张表**（`EXTRA_COLS`），新加列要么写进 `EXTRA_COLS`、要么走 `backend/migrations/*.sql`。**远程 D1 现在会跑迁移**（deploy.yml 里 `d1 execute --remote --file=migrations/*.sql`），但迁移文件要**幂等**（`IF NOT EXISTS`），因为失败只 warning 不拦。`migrations` 表记的是「这台库跑过哪些迁移」，不在备份里。
+- **老库补列只覆盖 16 张表**（`EXTRA_COLS`），新加列要么写进 `EXTRA_COLS`、要么走 `backend/migrations/*.sql`。**远程 D1 的迁移现在由 `scripts/d1-migrate.mjs` 统一跑**（deploy.yml 和 `scripts/deploy.sh` 都调它，库名从 `backend/wrangler.toml` 的 `[[d1_databases]]` 读，不写死），**在部署之前跑，失败就 exit 1 拦住部署**（不再只是 warning）。迁移文件要**幂等**：SQLite 的 `ADD COLUMN` 没有 `IF NOT EXISTS`，所以由执行器把「duplicate column name」当成已执行跳过。`migrations` 表记的是「这台库跑过哪些迁移」（跑完一条就 `INSERT OR IGNORE`），不在备份里。
 - **恢复备份会检查版本**：`data.version > 3` 直接拒（更新的包恢复不了，会静默丢字段）。`buildBackup` 写的 `version:3`，加字段时记得同步。
 - **`check.mjs` 的表结构漂移检测是双向的**：基线里有、现在 `schema.sql` 没有的列 = 删列，会红。以前只算新增，删列永远发现不了。
 - **CI 的 action 全部钉了 40 位 SHA**，`.nvmrc` 与 `backend/package.json` 的 `engines` 声明 Node ≥ 22.5（自检用 `node:sqlite`，Node 20 没有这个模块）。`npm audit --audit-level=high --omit=dev` 真会拦（审计接口本身不可用时才跳过）。

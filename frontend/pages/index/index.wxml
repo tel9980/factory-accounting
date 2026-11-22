@@ -4,11 +4,17 @@
   <view class="offbar demo" wx:if="{{demo}}" bindtap="exitDemo">👀 演示账套（示例数据，随便点都动不到你的账）· 点这里换成我自己的口令</view>
   <view class="offbar sup" wx:if="{{super}}">👑 超级管理员：哪一本账都能管 · 点这里换账套</view>
   <view class="offbar sup" wx:elif="{{book_admin}}">🔑 这本账的管理员（别的账套看不到）</view>
-  <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}}的数据 · 点这里重试</view>
+  <!-- F7：断网时要说清「这份数据是什么时候的」，不然用户会把旧金额当今天的 -->
+  <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}} 存下来的数据（金额不是最新的）· 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
   <view class="offbar" wx:if="{{net_bad}}" bindtap="retryAll">⚠️ 有些数据没拉出来（网不太好）· 点这里重试</view>
   <view class="offbar" wx:if="{{no_key && !key_open}}" bindtap="reopenKey">🔒 还没输口令，现在这页是空的（不是真没钱）· 点这里输口令</view>
   <view class="sealbar" wx:if="{{sealed}}" bindtap="goSeal">🔒 这本账已封存（只读），{{sealed_at}}起 · 点这里去解封</view>
+  <!-- G8（分包）：本项目没有分包目录约定（app.json 里只有一个页面、没有 subpackages），
+       所以不做分包改造，也不动构建体系。替代做法：所有大块列表都用 wx:if 懒渲染 ——
+       数据没加载出来就不建 DOM，切到哪个页签才渲染哪块，避免主包一次性铺开。
+       以后要真分包，优先把「报表」和「材料」两块搬进分包目录。 -->
+
   <view class="mask" wx:if="{{key_open}}" catchtap="closeKey">
     <view class="keycard" catchtap="noop">
       <view class="keytt">{{key_mode=='set'?'第一次用，设个口令':'输入访问口令'}}</view>
@@ -293,7 +299,7 @@
       <view class="tip">{{cf.advice}}</view>
       <view wx:if="{{cf_open}}">
         <view class="item" wx:for="{{cf.rows}}" wx:key="k">
-          <view class="row1"><text class="nm">{{item.label}}</text><text class="amt">{{item.amount}}</text></view>
+          <view class="row1"><text class="nm">{{item.label}}</text><text class="amt">¥{{item.amount}}</text></view>
           <view class="row2">{{item.note}}</view>
         </view>
         <view class="tip" wx:if="{{cf.no_due_note}}">{{cf.no_due_note}}</view>
@@ -404,9 +410,10 @@
       </view>
       <view class="chips" wx:if="{{sug_ar.length}}">
         <text class="chip-label">常记：</text>
-        <text class="chip" wx:for="{{sug_ar}}" wx:key="index" bindtap="fillSug" data-t="ar" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
+        <text class="chip" wx:for="{{sug_ar}}" wx:key="index" bindtap="fillSug" data-t="ar" data-i="{{index}}">{{item.party}} {{item.item}} ¥{{item.amount}}</text>
       </view>
-      <view class="tip" wx:if="{{last_tip}}">{{last_tip}}（已自动填好，改金额直接记）</view>
+      <!-- F17：自动填上次的数据要显眼（原来是一行灰色小字，扫一眼根本看不到） -->
+      <view class="tip warn-t" wx:if="{{last_tip}}">⚠ {{last_tip}}（已自动填好，金额不对就直接改）</view>
       <input class="inp" placeholder="产品/项目" value="{{o_item}}" bindinput="onOItem" bindblur="blurOItem"/>
       <view class="tip" wx:if="{{price_tip}}">{{price_tip}}</view>
       <input class="inp" placeholder="加工费(元)" type="digit" value="{{o_price}}" bindinput="onOPrice" bindblur="onOPriceBlur"/>
@@ -736,7 +743,7 @@
     <view class="list" wx:if="{{ar_view=='order'}}">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
-        <view class="row2">总 ¥{{item.price}}{{item.ar_cat ? ' · ' + item.ar_cat : ''}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">总 ¥{{item.price}}{{item.ar_cat ? ' · ' + item.ar_cat : ''}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收 ¥{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="row2" wx:if="{{item.cost>0}}">成本 ¥{{item.cost}} · 毛利 ¥{{item.gross}}（{{item.gross_pct}}%）</view>
         <view class="row2">{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.settled?' · 已结清':''}}</view>
         <!-- 一行只留最常用的三个：收款 / 收清 / 更多。以前一行 15 个 mini 按钮，
@@ -764,9 +771,9 @@
       <input class="inp" placeholder="供应商/收款人" value="{{p_supplier}}" bindinput="onPSupplier" bindblur="blurPSupplier"/>
       <view class="chips" wx:if="{{sug_ap.length}}">
         <text class="chip-label">常记：</text>
-        <text class="chip" wx:for="{{sug_ap}}" wx:key="index" bindtap="fillSug" data-t="ap" data-i="{{index}}">{{item.party}} {{item.item}} {{item.amount}}</text>
+        <text class="chip" wx:for="{{sug_ap}}" wx:key="index" bindtap="fillSug" data-t="ap" data-i="{{index}}">{{item.party}} {{item.item}} ¥{{item.amount}}</text>
       </view>
-      <view class="tip" wx:if="{{last_tip}}">{{last_tip}}</view>
+      <view class="tip warn-t" wx:if="{{last_tip}}">⚠ {{last_tip}}（已自动填好，金额不对就直接改）</view>
       <input class="inp" placeholder="金额(元)" type="digit" value="{{p_amount}}" bindinput="onPAmount" bindblur="loadSupplyPrice"/>
       <view class="chips">
         <text class="chip-label">金额是：</text>
@@ -943,7 +950,7 @@
     <view class="list" wx:if="{{ap_view=='order'}}">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
-        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总 ¥{{item.amount}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总 ¥{{item.amount}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已付 ¥{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns btns2">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="payAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">付清</button>
@@ -963,7 +970,7 @@
       <picker range="{{acc_names}}" bindchange="onEAcc"><view class="picker">付自：{{acc_names[e_acc] || '现金'}} ▾</view></picker>
       <view class="chips" wx:if="{{sug_ex.length}}">
         <text class="chip-label">常记：</text>
-        <text class="chip" wx:for="{{sug_ex}}" wx:key="index" bindtap="fillSug" data-t="ex" data-i="{{index}}">{{item.party}} {{item.amount}}</text>
+        <text class="chip" wx:for="{{sug_ex}}" wx:key="index" bindtap="fillSug" data-t="ex" data-i="{{index}}">{{item.party}} ¥{{item.amount}}</text>
       </view>
       <view class="chips">
         <text class="chip-label">常用：</text>
@@ -1414,7 +1421,7 @@
           <text class="plv ok">{{rv.bs.equity}}</text>
         </view>
         <view class="tip">平衡校验差额 {{rv.bs.check}}（0 = 账是平的）　本月现金：收 {{rv.cash.inc}} − 付 {{rv.cash.out}} = {{rv.cash.net}}</view>
-        <view class="tip">钱花在哪：<text wx:for="{{rv.cats}}" wx:key="name">{{item.name}} {{item.amount}}　</text></view>
+        <view class="tip">钱花在哪：<text wx:for="{{rv.cats}}" wx:key="name">{{item.name}} ¥{{item.amount}}　</text></view>
         <view class="aline {{item.tone}}" wx:for="{{rv.tips}}" wx:key="text">{{item.text}}</view>
       </block>
       <view wx:if="{{ano}}">
@@ -1835,7 +1842,7 @@
         <view class="prev-row" wx:for="{{fc.months}}" wx:key="month">
           <text class="prev-t">{{item.month}}</text>
           <text class="prev-n">应收 {{item.ar}}（账面 {{item.ar_raw}}） · 应付 {{item.ap}}</text>
-          <text class="{{item.net>=0?'ok':'red'}}">净 {{item.net}}</text>
+          <text class="{{item.net>=0?'ok':'red'}}">净 ¥{{item.net}}</text>
         </view>
         <view class="tip">未来 {{fc.months.length}} 个月预计收回 {{fc.total_ar}} 元、要付 {{fc.total_ap}} 元，净进 {{fc.net}} 元；已逾期没收回 {{fc.overdue}} 元另算。{{fc.note}}</view>
         <view class="frow"><button class="btn" size="mini" bindtap="copyForecast">📋 复制预测</button></view>
@@ -2275,7 +2282,7 @@
       </view>
       <view class="list" wx:if="{{debts.length}}">
         <view class="item" wx:for="{{debts}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.lender}}</text><text class="amt out">还欠 ¥{{item.remain}}</text></view>
+          <view class="row1"><text class="nm ellip">{{item.lender}}</text><text class="amt out">还欠 ¥{{item.remain}}</text></view>
           <view class="row2">{{item.kind_name}} · 年息 {{item.rate}}% · 月息 {{item.monthly_interest}} 元 · {{item.pay_kind_name}}</view>
           <view class="row2" wx:if="{{item.status=='open'}}">下次还款 {{item.next_due}} 约 {{item.next_amount}} 元<text class="red" wx:if="{{item.overdue}}"> · 已逾期，快处理</text></view>
           <view class="row2" wx:else>已还清</view>
@@ -2702,7 +2709,7 @@
             <button class="btn ghost" size="mini" bindtap="toggleWageDeduct">收起</button>
           </view>
           <view class="item" wx:for="{{wd_rows}}" wx:key="id">
-            <view class="row1"><text class="nm">{{item.worker}} · {{item.kind}}</text><text class="amt">−¥{{item.amount}}</text></view>
+            <view class="row1"><text class="nm ellip">{{item.worker}} · {{item.kind}}</text><text class="amt">−¥{{item.amount}}</text></view>
             <view class="row2">{{item.remark}}</view>
             <view class="btns"><button size="mini" class="ghost" bindtap="delWageDeduct" data-id="{{item.id}}">删</button></view>
           </view>
@@ -2737,7 +2744,7 @@
         </view>
         <view class="empty" wx:if="{{errs.wage}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadWageRecs">　重试</text></view>
         <view class="item" wx:for="{{pw_recs}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.worker}}{{item.item?' · '+item.item:''}}{{item.process?' · '+item.process:''}}</text><text class="amt">¥{{item.amount}}</text></view>
+          <view class="row1"><text class="nm ellip">{{item.worker}}{{item.item?' · '+item.item:''}}{{item.process?' · '+item.process:''}}</text><text class="amt">¥{{item.amount}}</text></view>
           <view class="row2">{{item.date}} · {{item.qty}} × {{item.rate}} 元</view>
           <view class="btns"><button size="mini" class="ghost" bindtap="delWageRec" data-id="{{item.id}}">删</button></view>
         </view>
@@ -2923,7 +2930,7 @@
           <view class="row1"><text class="nm">{{cb2.month}} 净利 → 现金</text><text class="amt {{cb2.actual<0?'red':''}}">现金变化 {{cb2.actual}}</text></view>
           <view class="row2">净利 {{cb2.profit}} · 解释合计 {{cb2.explained}} · 还差 {{cb2.residual}}</view>
           <view class="item" wx:for="{{cb2.rows}}" wx:key="k">
-            <view class="row1"><text class="nm">{{item.label}}</text><text class="amt {{item.amount<0?'red':''}}">{{item.amount}}</text></view>
+            <view class="row1"><text class="nm">{{item.label}}</text><text class="amt {{item.amount<0?'red':''}}">¥{{item.amount}}</text></view>
             <view class="row2" wx:if="{{item.note}}">{{item.note}}</view>
           </view>
         </view>
@@ -2943,7 +2950,7 @@
         <view class="tip">{{pb.count}} 组价格{{pb.party_filter ? '（' + pb.party_filter + '）' : ''}}，按最近成交排序</view>
         <view class="list">
           <view class="item" wx:for="{{pb.rows}}" wx:key="index">
-            <view class="row1"><text class="nm">{{item.party}} · {{item.item}}</text><text class="amt">{{item.last_price}}</text></view>
+            <view class="row1"><text class="nm ellip">{{item.party}} · {{item.item}}</text><text class="amt">{{item.last_price}}</text></view>
             <view class="row2">{{item.cnt}} 单 · 平均 {{item.avg_price}} · 区间 {{item.min_price}}~{{item.max_price}}{{item.last_cost>0 ? ' · 成本 ' + item.last_cost + ' · 毛利率 ' + item.gross_pct + '%' : ' · 没填成本'}}</view>
             <view class="row2">最近一次 {{item.last_date}}</view>
           </view>
@@ -2953,7 +2960,7 @@
       <view wx:if="{{pa}}">
         <view class="aline {{pa.count ? 'warn':'ok'}}">{{pa.advice}}</view>
         <view class="item" wx:for="{{pa.rows}}" wx:key="id" bindtap="openOrderFromPrice" data-id="{{item.id}}">
-          <view class="row1"><text class="nm">{{item.party}} · {{item.item}}</text><text class="amt {{item.dir=='low'?'red':'ok'}}">{{item.price}}（老价 {{item.avg_price}}）</text></view>
+          <view class="row1"><text class="nm">{{item.party}} · {{item.item}}</text><text class="amt {{item.dir=='low'?'red':'ok'}}">¥{{item.price}}（老价 ¥{{item.avg_price}}）</text></view>
           <view class="row2">{{item.date}} · {{item.dir=='low' ? '便宜了 ' : '贵了 '}}{{item.pct}}% · 历史 {{item.hist_cnt}} 单 · 点开看单子</view>
         </view>
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closePriceAnomaly">收起</button></view>
@@ -2975,7 +2982,7 @@
         <view class="duesoon" wx:if="{{aging.over60>0}}">超过 60 天的款有 {{aging.over60}} 元，建议单独去催一次</view>
         <view class="list" wx:if="{{aging.worst.length}}">
           <view class="item" wx:for="{{aging.worst}}" wx:key="id">
-            <view class="row1"><text class="nm">{{item.party}}</text><text class="amt">{{item.amount}}</text></view>
+            <view class="row1"><text class="nm">{{item.party}}</text><text class="amt">¥{{item.amount}}</text></view>
             <view class="row2">已经 {{item.days}} 天了</view>
           </view>
         </view>
@@ -3341,6 +3348,8 @@
         <view class="frow"><button class="btn ghost" size="mini" bindtap="closeReconCal">收起</button></view>
         <view class="tip">到点没发的首页会提醒；发完用「📄 发好了，记一笔」登记，日历上就变成本月已发。日历每进一次「单位」页自动刷新，不用手动点。</view>
       </view>
+      <!-- G8：无分包目录约定，主包体积只能靠「不渲染」来省：数据没回来就不建 DOM -->
+      <block wx:if="{{terms.length}}">
       <view class="item" wx:for="{{terms}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.party}}</text><text class="amt {{item.recon_due?'red':''}}">{{item.due_text}}</text></view>
         <view class="row2">{{item.kind_text}} · {{item.term_text}} · {{item.cycle_text}} · 欠{{item.ar_left>0?item.ar_left:item.ap_left}} · 最久{{item.oldest_days}}天</view>
@@ -3350,6 +3359,7 @@
           <button size="mini" bindtap="delTerm" data-i="{{index}}">删</button>
         </view>
       </view>
+      </block>
       <view class="tip" wx:if="{{terms_unset.length}}">还没设账期但有欠款：<text wx:for="{{terms_unset}}" wx:key="party" class="red" data-i="{{index}}" bindtap="pickUnsetParty">{{item.party}} </text>——点名字自动填到上面</view>
       <view class="tip">「补到期日」= 给这家现有还没结完的单，按账期天数补上到期日（这样首页 7 天内到期提醒才准）。</view>
     </view>
@@ -3450,6 +3460,7 @@
         </view>
       </view>
       <view class="empty" wx:if="{{errs.profiles}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadProfiles">　重试</text></view>
+      <block wx:if="{{profiles.length}}">
       <view class="item" wx:for="{{profiles}}" wx:key="party">
         <view class="row1"><text class="nm">{{item.party}}{{item.kind=='ap'?'（供应商）':''}}</text><text class="amt {{item.left>0?'red':'ok'}}">欠 {{item.left}}</text></view>
         <view class="row2">{{item.phone ? item.phone : '还没填电话'}}{{item.contact ? ' · ' + item.contact : ''}}{{item.addr ? ' · ' + item.addr : ''}}</view>
@@ -3463,6 +3474,7 @@
           <button size="mini" bindtap="openCustCard" data-p="{{item.party}}">📇 画像</button>
         </view>
       </view>
+      </block>
     </view>
     <view class="form" wx:if="{{st_log}}">
       <view class="tip">对账单送达与回音 · {{st_log.party}}　共 {{st_log.count}} 份</view>
@@ -3562,7 +3574,7 @@
     </view>
     <view class="list" wx:if="{{tr_rows.length}}">
       <view class="item" wx:for="{{tr_rows}}" wx:key="id">
-        <view class="row1"><text class="nm">{{item.from_name}} → {{item.to_name}}</text><text class="amt">¥{{item.amount}}</text></view>
+        <view class="row1"><text class="nm ellip">{{item.from_name}} → {{item.to_name}}</text><text class="amt">¥{{item.amount}}</text></view>
         <view class="row2">{{item.created_at}}{{item.remark ? ' · ' + item.remark : ''}}</view>
         <view class="btns"><button size="mini" bindtap="delTransfer" data-id="{{item.id}}">删</button></view>
       </view>
@@ -3586,7 +3598,7 @@
       <view class="tip">账套（两厂/两车间分开核算，数据互不影响）</view>
       <view class="list">
         <view class="item" wx:for="{{books}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.name}}{{item.id==book?'（当前）':''}}</text><text class="amt">欠{{item.ar}}</text></view>
+          <view class="row1"><text class="nm">{{item.name}}{{item.id==book?'（当前）':''}}</text><text class="amt">欠 ¥{{item.ar}}</text></view>
           <view class="row2">应收单 {{item.orders}} 张</view>
           <view class="btns">
             <button size="mini" wx:if="{{item.id!=book}}" bindtap="switchBook" data-id="{{item.id}}">切换到这套</button>
@@ -3659,9 +3671,10 @@
     </view>
     <block wx:if="{{contact_type=='ar'}}">
       <view class="list">
+        <block wx:if="{{contacts_ar.length}}">
         <view class="item" wx:for="{{contacts_ar}}" wx:key="name">
           <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
-          <view class="row2">累计{{item.total}} · 已收{{item.paid}} · {{item.cnt}}笔</view>
+          <view class="row2">累计 ¥{{item.total}} · 已收 ¥{{item.paid}} · {{item.cnt}}笔</view>
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ar" data-name="{{item.name}}">打印版</button>
@@ -3670,21 +3683,24 @@
             <button size="mini" wx:if="{{role!='staff'}}" bindtap="setCreditLimit" data-name="{{item.name}}">设额度</button>
           </view>
         </view>
+        </block>
         <view class="empty" wx:if="{{errs.contacts}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadContacts">　重试</text></view>
         <view class="empty" wx:elif="{{!contacts_ar.length}}">暂无客户记录</view>
       </view>
     </block>
     <block wx:else>
       <view class="list">
+        <block wx:if="{{contacts_ap.length}}">
         <view class="item" wx:for="{{contacts_ap}}" wx:key="name">
           <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
-          <view class="row2">累计{{item.total}} · 已付{{item.paid}} · {{item.cnt}}笔</view>
+          <view class="row2">累计 ¥{{item.total}} · 已付 ¥{{item.paid}} · {{item.cnt}}笔</view>
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ap" data-name="{{item.name}}">往来明细</button>
             <button size="mini" bindtap="printStatement" data-type="ap" data-name="{{item.name}}">打印版</button>
             <button size="mini" bindtap="oneLiner" data-type="ap" data-n="{{item.name}}">一句话</button>
           </view>
         </view>
+        </block>
         <view class="empty" wx:if="{{!contacts_ap.length}}">暂无供应商记录</view>
       </view>
     </block>
@@ -3733,7 +3749,7 @@
     <view class="paycard" catchtap="noop">
       <view class="paytt">{{pay_title}}</view>
       <view class="tip" wx:if="{{pay_remain > 0}}">这张单还剩 ¥{{pay_remain}}</view>
-      <input class="inp full" type="digit" value="{{pay_amt}}" data-f="pay_amt" bindinput="onPayField"
+      <input id="payAmtInput" class="inp full" type="digit" value="{{pay_amt}}" data-f="pay_amt" bindinput="onPayField"
         placeholder="{{pay_taxonly ? '不用填（税金看下面）' : '这次收/付多少（整笔点「收清 ' + pay_remain + '」）'}}" disabled="{{pay_taxonly}}" />
       <view class="tip">哪天收/付的？（补录以前的就用这一天，默认今天）</view>
       <input class="inp full" value="{{pay_date}}" data-f="pay_date" bindinput="onPayField" placeholder="2026-11-22（默认今天）" />
@@ -3809,7 +3825,7 @@
     <view class="rec-h">用恢复码找回口令</view>
     <view class="rec-d">输入当时抄下来的 16 位恢复码，再设一个新口令。恢复码不在这台手机上也没关系，纸上的就行。</view>
     <input class="inp" placeholder="恢复码，如 ABCD-EFGH-JKLM-NPQR" value="{{rec_code}}" bindinput="onRecCode" />
-    <input class="inp" password placeholder="新口令（至少 4 位）" value="{{rec_pw}}" bindinput="onRecPw" />
+    <input class="inp" password placeholder="新口令（至少 8 位）" value="{{rec_pw}}" bindinput="onRecPw" />
     <view class="rec-d">没有恢复码？那只能用原口令进；实在进不去，找帮你搭系统的人从后台处理。</view>
     <view class="hobtns">
       <button class="btn" size="mini" bindtap="doRecover" loading="{{rec_busy}}">重设口令</button>

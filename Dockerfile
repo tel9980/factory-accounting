@@ -16,18 +16,24 @@ WORKDIR /app
 COPY backend/package.json backend/package-lock.json ./backend/
 RUN cd backend && npm ci --omit=dev && npm cache clean --force
 
-COPY backend/index.js backend/schema.sql backend/perm-rules.mjs backend/guide.js ./backend/
-COPY server ./server
-
+# 版本号：构建时传 --build-arg VERSION=xxx，运行时可以从环境变量读出来
+ARG VERSION=dev
 ENV PORT=8787 \
     FACTORY_DATA=/data \
-    NODE_ENV=production
+    NODE_ENV=production \
+    FACTORY_VERSION=${VERSION}
+
+# 整个 backend 目录都拷进去（index.js / schema.sql / perm-rules.mjs / guide.js /
+# migrations/*.sql / package.json …）。以前是一份份列举，加一个文件就漏一个，
+# 容器启动直接 ERR_MODULE_NOT_FOUND —— 现在整目录拷，不会漏。
+COPY backend/ ./backend/
+COPY server ./server
 
 RUN mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 8787
 
-# 起来后 20 秒内能打通 /version 才算健康（首次启动要建 59 张表，别设太短）
+# 起来后 20 秒内能打通 /version 才算健康（首次启动要建 60 张表，别设太短）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/version').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 

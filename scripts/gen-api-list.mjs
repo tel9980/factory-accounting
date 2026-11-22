@@ -4,13 +4,16 @@
 //   node scripts/gen-api-list.mjs --out x.md  → 写到别的文件，不碰 README
 // 以前没有 --check：CI 里想验「清单是不是过时了」只能真的跑一遍，跑完工作区就变脏了。
 import fs from 'node:fs'
+import { extractRoutes } from './_route-usage.mjs'
 const ARGS = process.argv.slice(2)
 const CHECK = ARGS.indexOf('--check') >= 0
 const OUT_I = ARGS.indexOf('--out')
 const OUT = OUT_I >= 0 ? ARGS[OUT_I + 1] : 'README.md'
 const src = fs.readFileSync('backend/index.js', 'utf8')
+// 路由提取统一走 _route-usage.mjs：6 种方法 + 三种引号 + 模板串都认，
+// 免得清单里的接口数比后端实际注册的少（以前只有 4 种方法、单引号，PUT 一条都没算进去）。
 const set = new Set()
-for (const m of src.matchAll(/app\.(get|post|patch|delete)\('([^']+)'/g)) set.add(m[1] + ' ' + m[2])
+for (const r of extractRoutes(src)) set.add(r.m + ' ' + r.p)
 const routes = [...set].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 const raw = new Map()
 for (const r of routes) {

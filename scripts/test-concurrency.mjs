@@ -391,8 +391,10 @@ const main = async () => {
     const fs = await import('node:fs')
     const src = fs.readFileSync(new URL('../backend/index.js', import.meta.url), 'utf8')
     const has = (m, frag) => yes(m, src.includes(frag), { 缺少片段: frag })
-    has('应收：收款语句带「不超金额」条件', 'AND paid + COALESCE(written_off,0) + ? <= price + 0.005')
-    has('应付：付款语句带「不超金额」条件', 'AND paid + COALESCE(written_off,0) + ? <= amount + 0.005')
+    // 第 10 轮 C7：paid 也补了 COALESCE(paid,0)（老库里 paid 可能是 NULL，
+    // NULL 参与比较会变成 NULL → 条件恒不成立 → 收款被误挡）。两种写法都认。
+    has('应收：收款语句带「不超金额」条件', 'COALESCE(paid,0) + COALESCE(written_off,0) + ? <= price + 0.005')
+    has('应付：付款语句带「不超金额」条件', 'COALESCE(paid,0) + COALESCE(written_off,0) + ? <= amount + 0.005')
     has('预收抵扣：改单带「已收仍是老值」', 'AND paid BETWEEN ? - 0.005 AND ? + 0.005')
     has('预收抵扣：改单带「预收还够」子查询', "FROM advances WHERE type='in' AND party=?) >= ? - 0.005")
     has('预付抵扣：改单带「预付还够」子查询', "FROM advances WHERE type='out' AND party=?) >= ? - 0.005")

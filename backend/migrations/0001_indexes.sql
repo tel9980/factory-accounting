@@ -1,8 +1,22 @@
 -- 第 1 号迁移：给查得最勤的三张表补索引。
--- 为什么放在迁移文件里而不是只靠代码里的 EXTRA_COLS：
---   EXTRA_COLS 只管「加列」，索引既没有版本号也没地方记。
---   结果就是：本地库和线上库到底有哪些索引，全靠碰运气对一下。
--- 现在每个迁移文件跑一次就跑过了，跑过的不再跑（记录在 migrations 表）。
+--
+-- 幂等说明（老库兼容）：
+--   · 建索引用 `CREATE INDEX IF NOT EXISTS`，重复跑不会报错。
+--   · 下面两段补列用的是 `ALTER TABLE ... ADD COLUMN`，SQLite **没有** IF NOT EXISTS，
+--     在已经有该列的库上会报 "duplicate column name"。
+--     迁移执行器（scripts/d1-migrate.mjs 跑远程 D1；server/d1.mjs 跑本机库）
+--     是**逐条语句**执行的，只把 "duplicate column name" / "already exists"
+--     这两类错误当成功跳过，其余错误一律报错中断（不吞错误）。
+--     所以本文件重复执行多少次都不会失败，也不会把库改坏。
+--   · 索引建在 written_off 上，所以必须先把这一列补上，
+--     否则老库直接报「no such column: written_off」，整份迁移失败。
+
+-- 已销账金额：单据被核销掉多少（0 = 没销账）
+-- 老库里没有这一列，先补上；已经有就跳过（执行器负责幂等）。
+ALTER TABLE orders ADD COLUMN written_off REAL NOT NULL DEFAULT 0;
+
+-- 应付单同理
+ALTER TABLE payables ADD COLUMN written_off REAL NOT NULL DEFAULT 0;
 
 -- 流水按「来源单据」查得最勤（核销记录、预收预付、工资都靠它回溯是哪张单）
 CREATE INDEX IF NOT EXISTS idx_ledger_ref_dir ON ledger(ref_type, ref_id, direction);

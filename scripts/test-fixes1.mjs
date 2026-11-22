@@ -190,12 +190,14 @@ const main = async () => {
   if ((feJs.match(/title: '记上了'/g) || []).length >= 3) ok('[7] 三个主表单都有「记上了」')
   else no('[7] 「记上了」少于 3 处', (feJs.match(/title: '记上了'/g) || []).length)
   // C18：补记快键
-  must('quickDate 处理器在', feJs, /quickDate\(e\) \{[\s\S]{0,300}setUTCDate/)
+  // 日期基准有两种写法：setUTCDate（老）或者 dayOf(d)（F12 之后统一走本地时间），都算数
+  must('quickDate 处理器在', feJs, /quickDate\(e\) \{[\s\S]{0,400}(setUTCDate|dayOf)/)
   // 应收/应付/支出/收款面板/记工 五个地方各 3 个日期快键（后来又给材料/开票/设备等补了快键，只要求「至少 15 个」）
   if ((feWx.match(/bindtap="quickDate"/g) || []).length >= 15) ok('[7] 五个表单都有日期快键')
   else no('[7] 日期快键少于 15 个', (feWx.match(/bindtap="quickDate"/g) || []).length)
   // C19：报表页进去就有数 + 月份快键
-  must('进报表页就拉本月', feJs, /t === 'report'\) \{\s*this\.loadReportView\(\)/)
+  // 中间允许有注释行（前端加过一行说明），只要求进了报表页就调 loadReportView
+  must('进报表页就拉本月', feJs, /t === 'report'\) \{[\s\S]{0,300}?this\.loadReportView\(\)/)
   must('报表月份有快键', feWx, /bindtap="pickRvMonth"/)
   // C20：/pc 的模板/预览/导入都带账套号
   eq('[7] /pc 四处导入相关请求都带 X-Book', (beJs.match(/import-(?:template-pack|template-xlsx|pack)'[^\n]*X-Book/g) || []).length + (beJs.match(/'x-access-key': K, 'X-Book': bk\(\) \}, body: JSON\.stringify\(\{ b64/g) || []).length, 4)

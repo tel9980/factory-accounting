@@ -8,7 +8,7 @@
 #   5. 微信小程序「我的 → 设置 → 服务器地址」改成 http://<这台机器IP>:8787
 #
 # 镜像两个 arch 都有（amd64 / arm64，群晖、树莓派、N100 小主机都能跑）。
-# 账本数据全在 ./data 里的三个 SQLite 文件（book1/2/3.db），备份就是拷这个目录。
+# 账本数据全在 ./data 里的九个 SQLite 文件（book1..book9.db，一本账一个文件），备份就是拷这个目录。
 
 services:
   factory-accounting:

@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS backups (
   -- 摘要（订单/应付/流水各多少笔、金额合计）。备份列表只要这些数字，
   -- 以前每次把最近 12 份备份整份读回来再 JSON.parse，几千单的账本一打开就卡。
   stat TEXT DEFAULT '',
+  -- 第 10 轮 D2/D6：sha256 是完整性校验（读分片时核对，缺片当场拒绝，不再静默截断）；
+  -- size 改成按「字节」记（以前记字符数，中文一字 3 字节，体积被低估约 3 倍）；
+  -- parts 是这份备份被切成几片。
+  sha256 TEXT DEFAULT '',
+  parts INTEGER DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -685,10 +690,15 @@ CREATE TABLE IF NOT EXISTS writeoffs (
   party TEXT DEFAULT '',
   amount REAL NOT NULL DEFAULT 0,
   reason TEXT DEFAULT '',
+  -- 第 10 轮 C2：核销归属哪个月。以前没有这一列，只能按 created_at 推 →
+  -- 4 月 1 日核销 3 月的旧单，核销落 4 月、单子落 3 月 → 3 月利润高估、4 月低估。
+  -- 现在写入时显式给「这张单所属的月份」。
+  month TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_writeoffs_ref ON writeoffs(ref_type, ref_id);
 CREATE INDEX IF NOT EXISTS idx_writeoffs_month ON writeoffs(substr(created_at,1,7));
+CREATE INDEX IF NOT EXISTS idx_writeoffs_m ON writeoffs(month);
 CREATE TABLE IF NOT EXISTS targets (
   month TEXT PRIMARY KEY,
   receive REAL DEFAULT 0,

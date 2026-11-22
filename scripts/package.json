@@ -1,0 +1,15 @@
+{
+  "name": "factory-accounting-scripts",
+  "private": true,
+  "description": "本仓库的运维/回归脚本。真正的后端依赖在 backend/package.json 里（hono 等）；这里只声明脚本自己要的 Node 版本。",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "check-backup": "node scripts/check-backup.mjs",
+    "check-manifest": "node scripts/check-manifest.mjs",
+    "all": "node scripts/run-all.mjs"
+  }
+}

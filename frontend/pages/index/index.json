@@ -1,3 +1,5 @@
 {
-  "navigationBarTitleText": "加工费记账"
+  "navigationBarTitleText": "加工费记账",
+  "adjustPosition": true,
+  "cursorSpacing": 20
 }

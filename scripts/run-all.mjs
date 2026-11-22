@@ -25,6 +25,9 @@ export const OFFLINE = [
   // 定时任务（worker 的 scheduled()）离线回归：进程内 import backend/index.js，
   // 用 node:sqlite 造 D1 兼容环境，把 4 条 cron 各跑一遍。自包含、不联网、不依赖 --base。
   'test-cron',
+  // 备份口径自检：读 backend/index.js 里真实的 BACKUP_SKIP / BACKUP_SETTINGS_SKIP，
+  // 确认口令类的东西不会混进备份包。只用内置模块，不联网、不依赖服务。
+  'check-backup',
 ]
 
 export const ONLINE = [
@@ -59,6 +62,7 @@ export const ONLINE = [
   'test-bookiso',
   'test-concurrency',
   'test-write-coverage',
+  'test-write-methods',
   'test-profit-consistency',
   'test-oldbackup',
 ]
@@ -74,6 +78,9 @@ if (import.meta.main) {
   }
   const BASE = opt('base', 'http://127.0.0.1:8791').replace(/\/+$/, '')
   const KEY = opt('key', '8888')
+  // --offline：只跑离线件套（不联网、不依赖 --base 那个服务）。
+  // release.yml 的自检 job 用它 —— 那里没有 wrangler dev 起的服务。
+  const onlyOffline = argv.includes('--offline')
 
   const failed = []
   let passN = 0
@@ -85,15 +92,18 @@ if (import.meta.main) {
     else failed.push(name + '（离线，退出码 ' + r.status + '）')
   }
 
-  for (const name of ONLINE) {
-    const r = spawnSync('node', [`scripts/${name}.mjs`, '--base', BASE, '--key', KEY], { stdio: 'inherit' })
-    if (r.status === 0) passN++
-    else failed.push(name)
+  if (!onlyOffline) {
+    for (const name of ONLINE) {
+      const r = spawnSync('node', [`scripts/${name}.mjs`, '--base', BASE, '--key', KEY], { stdio: 'inherit' })
+      if (r.status === 0) passN++
+      else failed.push(name)
+    }
   }
 
+  const total = onlyOffline ? OFFLINE.length : OFFLINE.length + ONLINE.length
   const sec = Math.round((Date.now() - t0) / 1000)
   console.log('\n──────────────────────────────────────────────')
-  console.log(`跑完 ${OFFLINE.length + ONLINE.length} 件，通过 ${passN}，失败 ${failed.length}，用时 ${sec}s`)
+  console.log(`跑完 ${total} 件，通过 ${passN}，失败 ${failed.length}，用时 ${sec}s`)
   if (failed.length) {
     console.log('失败清单：')
     for (const f of failed) console.log('  ❌ ' + f)

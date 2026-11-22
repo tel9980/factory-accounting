@@ -54,6 +54,21 @@ jobs:
           node-version: 24
       - name: 跑自检
         run: node scripts/check.mjs
+      # workflow 自己的 YAML 写错了，GitHub 会整个 job 不跑 —— 报错还看不懂。
+      # 这里先自己用 python3 的 yaml 解析一遍，语法错当场红。
+      - name: workflow YAML 语法
+        run: |
+          python3 - <<'PY'
+          import glob, yaml, sys
+          bad = 0
+          for f in glob.glob('.github/workflows/*.yml'):
+              try:
+                  yaml.safe_load(open(f, encoding='utf-8'))
+                  print('  OK', f)
+              except Exception as e:
+                  print('  ❌', f, e); bad += 1
+          sys.exit(1 if bad else 0)
+          PY
       - name: 回归清单三处一致（run-all / deploy / release）
         run: node scripts/check-manifest.mjs
       # README 里的接口清单是自动生成的。后端加了/改了接口而忘了重新生成，
@@ -76,6 +91,11 @@ jobs:
       # 补发途中又记的一笔不能丢，口令过期要停下来等登录而不是把每条都标成「口令错误」。
       - name: 离线补发回归（没补上的留在「待补」里，补上的不许重复、补发途中新记的不许丢）
         run: node scripts/test-offline.mjs
+      # 备份口径自检：口令类的东西（access_key/staff_key/sign_secret/recover_*/staff_salt）
+      # 一旦混进备份包，包转发出去就等于把口令发出去。这条读 backend/index.js 里真实的
+      # BACKUP_SKIP / BACKUP_SETTINGS_SKIP 名单，不写死。
+      - name: 备份里没有口令类的东西
+        run: node scripts/check-backup.mjs
 
   smoke:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍
@@ -105,7 +125,13 @@ jobs:
             exit 1
           fi
           if [ $rc -ne 0 ] && ! grep -qi "vulnerabilit" /tmp/audit.txt; then
-            echo "::warning title=依赖审计没跑成::审计接口不可用（不是发现漏洞），跳过"
+            echo "::warning title=依赖审计没跑成::审计接口不可用（不是发现漏洞），这次**没有**做漏洞检查"
+            {
+              echo "## ⚠️ 依赖审计没跑成"
+              echo ""
+              echo "\`npm audit\` 审计接口不可用（网络/镜像源不支持），这次**没有**验证依赖漏洞。这不等于「没有漏洞」。"
+              echo "审计输出见本次运行日志。"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
         working-directory: backend
       - name: 用 schema.sql 灌本地库（顺便验证新装能用）
@@ -269,6 +295,10 @@ jobs:
       # 证明它们的真实执行路径不 5xx、返回结构合理。新加写接口记得来这补一条。
       - name: 写接口覆盖回归（24 个冷门写接口都能跑通）
         run: node scripts/test-write-coverage.mjs --base http://127.0.0.1:8791 --key 8888
+      # 写接口方法覆盖：check.mjs [5.6] 认出来的「从没被脚本调过的写路由」逐条真调一遍，
+      # 证明它们的真实执行路径不 5xx（以前那些路由是「门禁绿着、其实从没跑过」）。
+      - name: 写接口方法覆盖（所有写路由都被脚本真调过）
+        run: node scripts/test-write-methods.mjs --base http://127.0.0.1:8791 --key 8888
       # 本月利润一致性：首页/利润对比/报表/月结/经营体检 5 处「本月赚了多少」必须同一个数
       # （收付实现制）。谁改了一处 SQL 口径、别处没跟着改，这条就会红。
       - name: 本月利润一致回归（5 处同一个数）
@@ -322,7 +352,10 @@ jobs:
       - name: 安装依赖
         run: npm ci
         working-directory: backend
-      # 2026-11 查过仓库还没配 secret；2026-11-21 起 CF_API_TOKEN/PROD_KEY 都已配好。
+      # 两个 secret 的地位不一样，别混为一谈：
+      #   CF_API_TOKEN —— 部署/迁移必需。缺了 = 这次 push 没上线，直接失败（红）。
+      #   PROD_KEY     —— 线上老板口令，只用于「部署后的附加体检」。缺了 = 没法体检，
+      #                  跳过并写进摘要，但不能装作体检过了（那会误触发回滚判断）。
       # 缺 token 时不再「warning 后继续绿」：那会让人以为改动上线了。现在直接失败，
       # 并在运行摘要上写明怎么配；配了 token 就照常部署。
       - name: 有没有 Cloudflare token
@@ -345,6 +378,26 @@ jobs:
           else
             echo "can=true" >> "$GITHUB_OUTPUT"
           fi
+      # 迁移：以前远程 D1 从来没跑过任何迁移文件，全靠线上代码第一次访问时自己补列，
+      # 补不上的接口就 500（EXTRA_COLS 只覆盖 16 张表）。
+      # 现在把 backend/migrations/*.sql 在远程 D1 上跑一遍（幂等：全是 IF NOT EXISTS，
+      # 且每跑过一个会记进 migrations 表，不会重复执行）。失败不拦部署，但要显眼。
+      # 迁移放在「部署到 Cloudflare」之前：迁移失败时线上还是旧代码 + 旧表结构，
+      # 不会「新代码配旧库」上线（那正是 500 的来源）。失败直接红（exit 1）。
+      - name: 跑远程数据库迁移
+        if: steps.token.outputs.can == 'true'
+        run: |
+          set -euo pipefail
+          # 迁移改成「逐条语句」跑（scripts/d1-migrate.mjs）：
+          #   · 库名从 backend/wrangler.toml 的 [[d1_databases]] 里读，不写死；
+          #   · 逐条语句执行，只把「列已存在 / 已存在」当幂等跳过，其余错误立刻中止；
+          #   · 每个文件跑完在 migrations 表记一行 INSERT OR IGNORE，跑过的不再跑。
+          node scripts/d1-migrate.mjs
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+
       - name: 部署到 Cloudflare
         id: deploy
         if: steps.token.outputs.can == 'true'
@@ -360,25 +413,8 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
 
-      # 迁移：以前远程 D1 从来没跑过任何迁移文件，全靠线上代码第一次访问时自己补列，
-      # 补不上的接口就 500（EXTRA_COLS 只覆盖 16 张表）。
-      # 现在部署完把 backend/migrations/*.sql 在远程 D1 上跑一遍（幂等：全是 IF NOT EXISTS，
-      # 且每跑过一个会记进 migrations 表，不会重复执行）。失败不拦部署，但要显眼。
-      - name: 跑远程数据库迁移
-        if: steps.token.outputs.can == 'true'
-        run: |
-          set -e
-          for db in factory-db factory-db2 factory-db3; do
-            for f in migrations/*.sql; do
-              [ -e "$f" ] || continue
-              echo "→ $db / $f"
-              npx wrangler d1 execute "$db" --remote --file="$f" || echo "::warning title=迁移失败::$db $f 没跑成功"
-            done
-          done
-        working-directory: backend
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+      # 迁移已经在「部署到 Cloudflare」之前跑完了（迁移失败 → 直接红，线上不上线）。
+      # 所以这里不再重复跑一遍。
 
       - name: 部署后验版本
         if: steps.token.outputs.can == 'true'
@@ -391,9 +427,10 @@ jobs:
             exit 1
           fi
 
-      # 线上到底跑的是哪一版：和这次 push 的 commit 对不上就在摘要里写清楚（不算失败，
-      # 因为部署可能是手动的、顺序也可能反），至少别让人以为「CI 绿了就等于上线了」。
+      # 线上到底跑的是哪一版：和这次 push 的 commit 对不上 = 线上不是这次 push 的代码。
+      # 这在「部署本身就失败/被跳过」时是真实故障，必须报错（exit 1），不能只是 warning。
       - name: 线上版本 vs 这次 push
+        id: liveversion
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           node -e '
@@ -405,46 +442,61 @@ jobs:
               const lines = ["## 线上版本", "", "- 这次 push：`" + sha + "`", "- 线上在跑：`" + (live || "不知道") + "`", "- 版本号：`" + String(d.version || "") + "`"];
               fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
               console.log(lines.join(" "));
-              if (!same) console.log("::warning title=线上不是这次 push 的代码::线上 commit=" + (live || "空") + "，这次 push=" + sha + "（如果是手动 CLI 部署，部署完这条提示就过时了）");
-            }).catch((e) => console.log("::warning title=问不到 /version::" + e.message));
+              if (!same) {
+                console.error("::error title=线上不是这次 push 的代码::线上 commit=" + (live || "空") + "，这次 push=" + sha);
+                process.exit(1);
+              }
+            }).catch((e) => { console.error("::error title=问不到 /version::" + e.message); process.exit(1); });
           '
 
       # 线上表结构对比：本机自检只能证明「schema.sql 在空库上建得出来」，
       # 证明不了「线上那个库到底缺不缺列」。这里用一把只读口令把线上所有 GET 接口打一遍，
       # 再问一次 /schema-check —— 线上真缺列时会明确列出哪张表缺哪个字段。
       # 口令要单独配一个 GitHub secret（PROD_KEY = 线上老板口令）。
-      # 注意：PROD_KEY 目前**还没配**，所以这一步现在会跳过（写 warning）。它是「部署后的
-      # 附加体检」，不是部署本身——部署靠上面的 CF_API_TOKEN（那个已配好、缺失会红）。
-      # 别把这一步的缺 secret 改成 exit 1：体检步一旦失败，下面的「体检没过就自动回滚」会把
-      # 一次好好的部署又退回上一版。缺 PROD_KEY 是「没法体检」，不是「体检没过」，不该回滚。
+      # 注意：PROD_KEY 是「线上老板口令」，只用于这一步的附加体检。
+      # 缺 PROD_KEY = 没法体检（跳过、写 warning、写摘要），不是「体检没过」，
+      # 所以不 exit 1，也不该触发回滚；缺 CF_API_TOKEN（部署必需）才红。
       # 这一步以前也挂在「有没有 CF token」上：结果是「本机手动部署了（没走 CI）」时，
       # 线上体检永远不跑。现在只要有 PROD_KEY 就跑，跟部署在不在 CI 里无关。
+      # 输出：bad=true 表示「体检真的没过」→ 触发下面的自动回滚；
+      # 缺 PROD_KEY 时 bad=false（跳过 ≠ 通过，摘要里会写明跳过）。
       - name: 线上表结构与接口体检
+        id: health
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           PROD_KEY: ${{ secrets.PROD_KEY }}
         run: |
           if [ -z "$PROD_KEY" ]; then
-            echo "::warning title=线上体检跳过了::仓库没配 PROD_KEY（线上老板口令），跳过部署后的线上体检。配法：Settings → Secrets and variables → Actions → New repository secret，名字 PROD_KEY。"
-            echo "## ⚠️ 线上体检没跑（没配 PROD_KEY）" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=线上体检已跳过::仓库没配 PROD_KEY（线上老板口令），跳过部署后的线上体检。配法：Settings → Secrets and variables → Actions → New repository secret，名字 PROD_KEY。"
+            echo "bad=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## ⚠️ 线上体检已跳过（不是「通过」）"
+              echo ""
+              echo "没配 \`PROD_KEY\`，这次**没有**做线上表结构/接口体检。部署本身成功了，但线上有没有缺列这次没验证。"
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          node scripts/smoke.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"
-          node -e '
-            const k = process.env.PROD_KEY;
-            fetch("https://jz.qy663.de5.net/schema-check", { headers: { "x-access-key": k } })
-              .then((r) => r.json())
-              .then((d) => {
-                // 以前只判 ok===false，而 /schema-check 的 ok 恒为 true —— 线上真缺列也绿。
-                // 现在两样都判：ok 必须真的 true，bad_count 必须是 0。
-                if (!d || d.ok !== true || Number(d.bad_count || 0) > 0) {
-                  console.error("线上表结构有问题：" + JSON.stringify((d && (d.text || d.books)) || d));
-                  process.exit(1);
-                }
-                console.log("线上表结构对得上：" + JSON.stringify(d.books || "ok"));
-              })
-              .catch((e) => { console.error("问不到 /schema-check：" + e.message); process.exit(1) });
-          '
+          echo "bad=false" >> "$GITHUB_OUTPUT"
+          if node scripts/smoke.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"; then
+            node -e '
+              const k = process.env.PROD_KEY;
+              fetch("https://jz.qy663.de5.net/schema-check", { headers: { "x-access-key": k } })
+                .then((r) => r.json())
+                .then((d) => {
+                  // 以前只判 ok===false，而 /schema-check 的 ok 恒为 true —— 线上真缺列也绿。
+                  // 现在两样都判：ok 必须真的 true，bad_count 必须是 0。
+                  if (!d || d.ok !== true || Number(d.bad_count || 0) > 0) {
+                    console.error("线上表结构有问题：" + JSON.stringify((d && (d.text || d.books)) || d));
+                    process.exit(1);
+                  }
+                  console.log("线上表结构对得上：" + JSON.stringify(d.books || "ok"));
+                })
+                .catch((e) => { console.error("问不到 /schema-check：" + e.message); process.exit(1) });
+            ' || { echo "::error title=线上体检没过::线上表结构/接口体检失败"; echo "bad=true" >> "$GITHUB_OUTPUT"; exit 1; }
+          else
+            echo "::error title=线上体检没过::smoke.mjs 跑不过"; echo "bad=true" >> "$GITHUB_OUTPUT"; exit 1
+          fi
+          echo "bad=false" >> "$GITHUB_OUTPUT"
 
       # 线上最近 24 小时有没有报错：以前 error_log 只有老板手动点「运行日志」才看得到，
       # CI 一次都不查 —— 线上 500 了没人知道，只有老板用的时候才发现。
@@ -457,7 +509,8 @@ jobs:
           PROD_KEY: ${{ secrets.PROD_KEY }}
         run: |
           if [ -z "$PROD_KEY" ]; then
-            echo "::warning title=没查线上报错::没配 PROD_KEY，跳过"
+            echo "::warning title=附加体检已跳过::没配 PROD_KEY，查不了线上最近一天的报错（这不是「没有报错」）"
+            echo "## ⚠️ 线上报错排查已跳过（没配 PROD_KEY）" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node -e '
@@ -480,9 +533,12 @@ jobs:
           '
 
       # 部署完了但线上体检没过（缺列、接口 500）→ 自动退回上一版，别让坏版本挂着。
+      # 条件用体检步自己报出来的 bad=true（以前写 failure() && steps.deploy.outcome=='success'，
+      # 但体检步缺 PROD_KEY 时 exit 0，永远不会失败 → 那个条件基本不触发）。
+      # 现在：体检真没过 → 体检步写 bad=true 并 exit 1 → 这里看到 bad=true 就回滚。
       # 只在这一步「真的部署过」时才回滚，没配 token 的情况下什么都不做。
       - name: 体检没过就自动回滚
-        if: failure() && steps.deploy.outcome == 'success' && steps.token.outputs.can == 'true'
+        if: steps.health.outputs.bad == 'true' && steps.deploy.outcome == 'success' && steps.token.outputs.can == 'true'
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

@@ -40,12 +40,29 @@ jobs:
       # 光跑静态自检不够：以前 release 只验「代码能解析」，打包出来的东西能不能跑完全没验。
       # 这几个是纯离线的（不需要起服务、不连库），出错说明前端首屏/401 重放/分批这些真坏了。
       - run: node scripts/check.mjs
+      # workflow 自己的 YAML 写错了，GitHub 会整个 job 不跑 —— 报错还看不懂。
+      # 这里先自己用 python3 的 yaml 解析一遍，语法错当场红。
+      - name: workflow YAML 语法
+        run: |
+          python3 - <<'PY'
+          import glob, yaml, sys
+          bad = 0
+          for f in glob.glob('.github/workflows/*.yml'):
+              try:
+                  yaml.safe_load(open(f, encoding='utf-8'))
+                  print('  OK', f)
+              except Exception as e:
+                  print('  ❌', f, e); bad += 1
+          sys.exit(1 if bad else 0)
+          PY
       - run: node scripts/check-manifest.mjs
       - run: node scripts/test-batch.mjs
       - run: node scripts/test-key-queue.mjs
       - run: node scripts/test-firstscreen.mjs
       - run: node scripts/test-list.mjs
       - run: node scripts/test-offline.mjs
+      # 备份口径自检：口令类的东西不能混进备份包（包是要往外发的）
+      - run: node scripts/check-backup.mjs
       # 第 4 本账演练要自己起 server/main.mjs（依赖 hono），必须先装后端依赖。
       - name: 装后端依赖（第 4 本账演练要起本机服务）
         run: npm ci
@@ -53,6 +70,36 @@ jobs:
       - run: node scripts/test-book4.mjs
       # 定时任务回归：worker 的 scheduled() 4 条 cron 各跑一遍（自包含，不依赖外部服务）
       - run: node scripts/test-cron.mjs
+      # 离线件套一把跑完（run-all.mjs --offline = scripts/run-all.mjs 里的 OFFLINE 清单）。
+      # 以前这里是一个个手写步骤，加测试时容易漏；现在清单只有一个事实源。
+      - name: 离线件套一把跑完
+        run: node scripts/run-all.mjs --offline
+      # 联网件套里最要紧的六件也补上（以前 release 完全没跑，坏了要到用户手上才发现）：
+      # 备份恢复、员工权限、并发、超管、员工端、老备份兼容。
+      # 它们要打一个真服务，所以先起本机版（本机版和线上跑的是同一份 backend/index.js）。
+      - name: 起本机版服务（联网件套要打它）
+        run: |
+          nohup node server/main.mjs --port 8791 --no-open --no-cron > /tmp/fa-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if node -e "fetch('http://127.0.0.1:8791/version').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              echo "服务起来了（等了 ${i}s）"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error title=本机服务没起来::等了 60 秒 /version 还是不通"
+          tail -60 /tmp/fa-server.log || true
+          exit 1
+        working-directory: .
+      - name: 联网件套六件（备份恢复 / 权限 / 并发 / 超管 / 员工端 / 老备份）
+        run: |
+          set -e
+          node scripts/test-restore.mjs --base http://127.0.0.1:8791 --key 8888
+          node scripts/test-perm.mjs --base http://127.0.0.1:8791 --key 8888
+          node scripts/test-concurrency.mjs --base http://127.0.0.1:8791 --key 8888
+          node scripts/test-super.mjs --base http://127.0.0.1:8791 --key 8888
+          node scripts/test-staff.mjs --base http://127.0.0.1:8791 --key 8888
+          node scripts/test-oldbackup.mjs --base http://127.0.0.1:8791 --key 8888
+        working-directory: .
       # 文档和代码对不上就别发版：接口清单、网页版教程都是从源文件生成的产物，
       # 忘了重新生成的话，发出去的 exe 里带的是旧教程。
       - run: node scripts/gen-api-list.mjs --check
@@ -85,7 +132,7 @@ jobs:
       - name: 安装构建依赖
         run: npm ci
         working-directory: backend
-      # 这一步里自带自测：打完会真的跑一遍（/version、落地页、建库 57 张表），
+      # 这一步里自带自测：打完会真的跑一遍（/version、落地页、建库 60 张表），
       # 不通就让整个 job 红掉，不会把坏文件发出去。
       - name: 打包（并自测）
         run: node scripts/build-exe.mjs --out dist
@@ -170,7 +217,7 @@ jobs:
             echo '```'
             echo ''
             echo '免安装版跑的是和线上同一份后端，只是数据库换成本机 SQLite；账目、备份、导出、'
-            echo '打印页全都在。第一次启动会自动建好 57 张表，不用手工初始化。'
+            echo '打印页全都在。第一次启动会自动建好 60 张表，不用手工初始化。'
             echo ''
             echo '## 这次改了什么'
             echo ''
@@ -232,6 +279,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 版本号打进镜像（Dockerfile 里 ARG VERSION → ENV FACTORY_VERSION）。
+          # 以前镜像里没有版本信息，docker run 起来后 /version 只能显示 dev，
+          # 出问题分不清是哪个版本。
+          build-args: |
+            VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # 推上 GHCR 不算好：backend/perm-rules.mjs 是顶层 import，backend/guide.js 是运行期

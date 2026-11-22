@@ -6,6 +6,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { extractRoutes, scanScriptUsage, uncoveredWrites } from './_route-usage.mjs'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
 const BE = path.join(ROOT, 'backend/index.js')
@@ -257,6 +258,17 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
       extras.set(m[1], cols)
     }
   }
+  // backend/migrations/*.sql 里 ALTER TABLE xxx ADD COLUMN yyy —— 这些列由迁移补，不算漏。
+  const migCols = new Set()
+  {
+    const migDir = path.join(ROOT, 'backend/migrations')
+    if (fs.existsSync(migDir)) {
+      for (const f of fs.readdirSync(migDir).filter((x) => x.endsWith('.sql'))) {
+        const ms = fs.readFileSync(path.join(migDir, f), 'utf8')
+        for (const m of ms.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi)) migCols.add(m[1] + '.' + m[2])
+      }
+    }
+  }
   let bad47 = 0
   if (!blk) { fail('找不到 EXTRA_COLS（老库补列清单），老库升级会缺列'); bad47++ }
   for (const [t, cols] of extras) {
@@ -280,9 +292,13 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
       const old = new Set(base[t] || [])
       if (!old.size) continue // 新表：整张表都不在老库，不需要逐列补
       const fresh = cols.filter((c) => !old.has(c))
-      const miss = fresh.filter((c) => !(extras.get(t) && extras.get(t).has(c)))
+      // 新列有两种合法的补法：
+      //   ① 进 EXTRA_COLS（后端启动时补列）；
+      //   ② 写进 backend/migrations/*.sql 的 ALTER TABLE ... ADD COLUMN（迁移时补）。
+      // 只认 ① 会把走 ② 的列误报成「老库必 500」—— 迁移文件就是干这个的。
+      const miss = fresh.filter((c) => !(extras.get(t) && extras.get(t).has(c)) && !migCols.has(t + '.' + c))
       if (miss.length) {
-        fail(`表 ${t} 新加的列没进 EXTRA_COLS：${miss.join(', ')}（老库升级后一查就 500；补进 EXTRA_COLS 再跑 --update-baseline）`)
+        fail(`表 ${t} 新加的列没进 EXTRA_COLS 也没有迁移补：${miss.join(', ')}（老库升级后一查就 500；补进 EXTRA_COLS 或 backend/migrations/*.sql 再跑 --update-baseline）`)
         bad47++
       }
     }
@@ -362,27 +378,103 @@ console.log('\n[4.8] 多账套')
 // ── 4.9 文档里「总共几张表」跟 schema.sql 对齐（README/DEPLOYMENT 写死 57 就再也改不动）──
 console.log('\n[4.9] 文档表数')
 {
-  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8')
-  const deploy = fs.readFileSync(path.join(ROOT, 'DEPLOYMENT.md'), 'utf8')
+  // 期望值**自动推导**：数 backend/schema.sql 里真正建出来的表（不是手写清单），
+  // 加表/删表以后这条断言自己就跟着变。
+  const schemaTables = new Set()
+  for (const m of schemaSrc.replace(/--[^\n]*/g, '').matchAll(/CREATE TABLE IF NOT EXISTS\s+(\w+)/g)) schemaTables.add(m[1])
+  const expect = schemaTables.size
+
+  // 扫描范围：README / DEPLOYMENT / Dockerfile / docker-compose / 所有 workflow / docs 下所有 md
+  const scopeFiles = [
+    'README.md', 'DEPLOYMENT.md', 'Dockerfile', 'docker-compose.yml',
+    ...fs.readdirSync(path.join(ROOT, '.github/workflows')).filter((f) => f.endsWith('.yml')).map((f) => '.github/workflows/' + f),
+    ...(fs.existsSync(path.join(ROOT, 'docs')) ? fs.readdirSync(path.join(ROOT, 'docs')).filter((f) => f.endsWith('.md')).map((f) => 'docs/' + f) : []),
+  ]
   // 只盯「新装时建几张表」这种当前口径的句子；编年史里「当时是 54/56/57 张」是历史记录，不拦。
   const docChecks = [
-    [readme, 'README.md', /建全\s*(\d+)\s*张表/g],
-    [readme, 'README.md', /建库\s*(\d+)\s*张表/g],       // 「确认建库 N 张」也命中这条
-    [readme, 'README.md', /自动建好\s*(\d+)\s*张表/g],
-    [deploy, 'DEPLOYMENT.md', /建出全部\s*(\d+)\s*张表/g],
-    [deploy, 'DEPLOYMENT.md', /建库\s*(\d+)\s*张表/g],
+    /建全\s*(\d+)\s*张表/g,
+    /建库\s*(\d+)\s*张表/g,       // 「确认建库 N 张」也命中这条
+    /自动建好\s*(\d+)\s*张表/g,
+    /建出全部\s*(\d+)\s*张表/g,
   ]
   let bad9 = 0
-  for (const [src, label, re] of docChecks) {
-    for (const m of src.matchAll(re)) {
-      const line = src.slice(0, m.index).split('\n').length
-      if (Number(m[1]) !== declared.size) {
-        fail(`${label} 第 ${line} 行写「${m[1]} 张表」，但 schema.sql 实际建 ${declared.size} 张——加表/删表后记得改文档`)
-        bad9++
+  for (const rel of scopeFiles) {
+    const abs = path.join(ROOT, rel)
+    if (!fs.existsSync(abs)) continue
+    const src = fs.readFileSync(abs, 'utf8')
+    for (const re of docChecks) {
+      for (const m of src.matchAll(re)) {
+        const line = src.slice(0, m.index).split('\n').length
+        if (Number(m[1]) !== expect) {
+          fail(`${rel} 第 ${line} 行写「${m[1]} 张表」，但 schema.sql 实际建 ${expect} 张——加表/删表后记得改文档`)
+          bad9++
+        }
       }
     }
   }
-  say(bad9 === 0, `文档里的「建 N 张表」和 schema.sql（${declared.size} 张）一致`)
+  say(bad9 === 0, `${scopeFiles.length} 个文件里「建 N 张表」都和 schema.sql（${expect} 张）一致`)
+}
+
+// ── 4.12 老库升级：迁移文件能不能在「旧结构」的库上跑通（SQLite 没有 ADD COLUMN IF NOT EXISTS）──
+console.log('\n[4.12] 迁移在老库上干跑')
+{
+  const migDir = path.join(ROOT, 'backend/migrations')
+  const migFiles = fs.existsSync(migDir) ? fs.readdirSync(migDir).filter((f) => f.endsWith('.sql')).sort() : []
+  if (!migFiles.length) {
+    say(true, '没有迁移文件（不用干跑）')
+  } else {
+    const { listMigrations, splitStatements, runStatement } = await import('./migrations-lib.mjs')
+    let err = null
+    let addedCols = []
+    try {
+      const { DatabaseSync } = await import('node:sqlite')
+      const old = new DatabaseSync(':memory:')
+      old.exec(schemaSrc)
+      // 模拟「老版本 schema」：把两列改名（老库里就没这些新列的名字）
+      old.exec('ALTER TABLE orders RENAME COLUMN written_off TO old_written_off')
+      old.exec('ALTER TABLE payables RENAME COLUMN written_off TO old_written_off')
+      for (const f of listMigrations(migDir)) {
+        for (const stmt of splitStatements(fs.readFileSync(f.path, 'utf8'))) {
+          const r = runStatement((x) => old.exec(x), stmt)
+          if (r.error) throw new Error(f.name + ' 这条跑挂了：' + stmt.slice(0, 80) + ' → ' + r.error.message)
+        }
+      }
+      for (const t of ['orders', 'payables']) {
+        const cols = old.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name)
+        addedCols.push(t + ':' + (cols.includes('written_off') ? '有' : '缺'))
+      }
+      const miss = addedCols.filter((x) => x.endsWith('缺'))
+      if (miss.length) throw new Error('迁移跑完了但列还没补上：' + miss.join('、'))
+      // 再跑一遍（幂等性）：同一个文件跑两次不能报错
+      for (const f of listMigrations(migDir)) {
+        for (const stmt of splitStatements(fs.readFileSync(f.path, 'utf8'))) {
+          const r = runStatement((x) => old.exec(x), stmt)
+          if (r.error) throw new Error(f.name + ' 第二遍跑挂了（不幂等）：' + r.error.message)
+        }
+      }
+    } catch (e) {
+      err = e
+    }
+    say(!err, `${migFiles.length} 个迁移文件在老库上跑通（含第二遍幂等复跑）`, `迁移在老库上跑挂了：${err ? err.message : ''}`)
+  }
+}
+
+// ── 4.13 每个 d1 绑定都有迁移覆盖（写死的库名迟早跟 wrangler.toml 对不上）──
+console.log('\n[4.13] d1 绑定与迁移')
+{
+  const tomlPath = path.join(ROOT, 'backend/wrangler.toml')
+  const tomlSrc = fs.readFileSync(tomlPath, 'utf8')
+  const bindings = []
+  for (const blk of tomlSrc.split('[[d1_databases]]').slice(1)) {
+    const binding = (blk.match(/^\s*binding\s*=\s*"([^"]+)"/m) || [])[1]
+    const name = (blk.match(/^\s*database_name\s*=\s*"([^"]+)"/m) || [])[1]
+    if (name) bindings.push({ binding: binding || name, database_name: name })
+  }
+  const migSrc = fs.readFileSync(path.join(ROOT, 'scripts/d1-migrate.mjs'), 'utf8')
+  const covers = bindings.every((b) => migSrc.includes(b.database_name) || /readD1Bindings/.test(migSrc))
+  say(bindings.length > 0 && covers,
+    `${bindings.length} 个 d1 绑定（${bindings.map((b) => b.database_name).join('、')}）都由 scripts/d1-migrate.mjs 按 wrangler.toml 读出来统一迁移`,
+    `wrangler.toml 有 ${bindings.length} 个 d1 绑定，但迁移没覆盖到（迁移必须读 wrangler.toml，不能写死库名）`)
 }
 
 // ── 4.10 SQL 排除口径一致（ref_type NOT IN 的名单，改一处漏一处会静默串账）──
@@ -431,20 +523,56 @@ if (dead.length && !really.length) warn.push(`这 ${dead.length} 个前端路径
 say(true, `${calls.size} 个前端调用，${dead.length} 个没直接命中（${really.length} 个需要人工看）`)
 
 // ── 5.6 写接口有没有人真跑过（没人跑 = 出了事也没人知道）──
-// 240 多个写接口里，只要脚本从没打过它，就等于「上线了但从没执行过一次」。
-// 这里不拦（有些确实只能人工验），但必须把名单摆出来，别让「全绿」变成错觉。
+// 判定方式统一走 scripts/_route-usage.mjs：**方法 + 逐段严格比对**。
+// 以前这里用宽松正则分段拼接，`DELETE /staff-users/:id` 会被 `POST /staff-users` 命中 ——
+// 门禁一直是绿的，几十条写路由其实从没执行过一次。现在差集就是红的（除非在下面的白名单里）。
 {
-  const scriptsDir = path.join(ROOT, 'scripts')
-  const allScripts = fs.readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs')).map((f) => fs.readFileSync(path.join(scriptsDir, f), 'utf8')).join('\n')
-  const writes = routes.filter((r) => r.m !== 'GET')
-  const never = writes.filter((r) => {
-    const parts = r.p.split('/').filter(Boolean).filter((x) => !x.startsWith(':'))
-    if (!parts.length) return false
-    const pat = parts.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('(?:[\\s\\S]{0,120}?)')
-    return !new RegExp(pat).test(allScripts)
-  })
-  say(true, `${writes.length} 个写接口里 ${writes.length - never.length} 个脚本跑过、${never.length} 个没有`, '')
-  if (never.length) warn.push('这 ' + never.length + ' 个写接口从没被任何脚本调用过（真实执行路径没人验）：' + never.slice(0, 12).map((r) => r.m + ' ' + r.p).join('、') + (never.length > 12 ? ' …' : ''))
+  const routesAll = extractRoutes(beSrc)
+  const used = scanScriptUsage(path.join(ROOT, 'scripts'))
+  const never = uncoveredWrites(routesAll, used)
+  // 故意不测的写路由：一条一行，写清为什么。
+  // 加白名单的人得负责说明理由，别把白名单当成垃圾桶。
+  const SKIP = [
+    // 'POST /xxx' — 为什么故意不测
+  ]
+  const skipKeys = new Set(SKIP.map((x) => x.trim()))
+  const hard = never.filter((r) => !skipKeys.has(r.m + ' ' + r.p))
+  if (never.length) {
+    console.log(`  ℹ️ 写路由 ${routesAll.filter((r) => r.m !== 'GET').length} 条，其中 ${never.length} 条脚本没碰过：`)
+    for (const r of never) console.log(`      ${skipKeys.has(r.m + ' ' + r.p) ? '（白名单）' : '❌'} ${r.m} ${r.p}`)
+  }
+  for (const r of hard) fail(`写接口 ${r.m} ${r.p} 从没被任何脚本调用过（真实执行路径没人验）——补 scripts/test-write-methods.mjs，或在 check.mjs 的 SKIP 白名单里写清为什么故意不测`)
+  say(hard.length === 0, `${routesAll.filter((r) => r.m !== 'GET').length} 个写接口全部有脚本真跑过（${never.length - hard.length} 条在白名单里）`)
+}
+
+// ── 5.7 接口清单跟后端实际注册的路由对得上（清单是自动生成的，别让它悄悄过期）──
+console.log('\n[5.7] 接口清单')
+{
+  const routesAll = extractRoutes(beSrc)
+  const uniq = new Set(routesAll.map((r) => r.m + ' ' + r.p))
+  const readmeTxt = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8')
+  const bi = readmeTxt.indexOf('<!-- API-LIST:BEGIN -->')
+  const ej = readmeTxt.indexOf('<!-- API-LIST:END -->')
+  const block = bi >= 0 && ej > bi ? readmeTxt.slice(bi, ej) : ''
+  const listed = new Set([...block.matchAll(/^- `([A-Z]+ [^`]+)`/gm)].map((m) => m[1]))
+  const missing = [...uniq].filter((k) => !listed.has(k))
+  say(missing.length === 0 && listed.size === uniq.size,
+    `README 接口清单跟后端一致（${uniq.size} 条）`,
+    `README 接口清单跟后端对不上：后端 ${uniq.size} 条，清单 ${listed.size} 条，缺 ${missing.length} 条${missing.length ? '（例如 ' + missing.slice(0, 5).join('、') + '）' : ''}——跑 node scripts/gen-api-list.mjs 同步`)
+}
+
+// ── 5.8 员工能不能看到成本/毛利（漏过一次：/price-lookup 把成本单价发给员工）──
+console.log('\n[5.8] 员工看不到成本')
+{
+  const { scanMoneyRoutes, staffLists, denyStaffRegexes, classify } = await import('./_staff-leak.mjs')
+  const lists = staffLists(beSrc)
+  const extra = denyStaffRegexes(beSrc)
+  const rows = scanMoneyRoutes(beSrc)
+  const bad = rows.filter((r) => classify(r.path, lists, extra) === 'none')
+  if (bad.length) {
+    for (const r of bad) fail(`GET ${r.path} 的响应里带「${r.words.join('/')}」这类钱数，但它不在 STAFF_MONEY_DENY / STAFF_MONEY_SCRUB / STAFF_COST_PATHS 也不在 denyStaff 的拦截名单里——员工能看到钱数`)
+  }
+  say(bad.length === 0, `${rows.length} 个带成本/利润字段的 GET 路由全部在员工拦截/脱敏名单里（denyStaff 内联规则 ${extra.length} 条 + 三张名单）`)
 }
 
 // ── 6. 页面绑定和方法重名（README 227/229 两个 bug 都出在这）──

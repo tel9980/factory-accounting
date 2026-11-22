@@ -7,14 +7,23 @@
 //   node scripts/cli.mjs clean  [--base URL] [--key K] [--days 180] 清日志（业务数据不动）
 //   node scripts/cli.mjs diag   [--base URL] [--key K] [--book N]   一键诊断（转发给 diag.mjs）
 //   node scripts/cli.mjs reset  [--base URL] [--key K] --yes        清空账本（危险，必须 --yes）
-// 默认 BASE=http://127.0.0.1:8787（本机版 server/main.mjs 的默认端口）、KEY=8888。
+//   node scripts/cli.mjs backups [--base URL] [--key K]            列最近的备份
+//   node scripts/cli.mjs restore <id> [--base URL] [--key K] --yes 回到某份备份（危险，必须 --yes）
+//   node scripts/cli.mjs errors  [--base URL] [--key K] [--days 7] 看最近的报错
+//   node scripts/cli.mjs migrate [--base URL] --yes               跑远程 D1 迁移（改库，必须 --yes）
+// BASE/KEY 可以用环境变量给：FA_BASE / FA_KEY（命令行参数优先，其次环境变量，最后默认值）。
+// 默认 BASE=http://127.0.0.1:8791（scripts/_harness.mjs 的默认）、KEY=8888。
 import { harness } from './_harness.mjs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
 const cmd = process.argv[2]
-const h = harness({ tag: 'cli' })
+// 环境变量优先（FA_BASE / FA_KEY），命令行参数其次，最后才是默认值。
+// 这样在 CI / 容器里不用把口令写进命令行历史。
+const envBase = process.env.FA_BASE || ''
+const envKey = process.env.FA_KEY || ''
+const h = harness({ tag: 'cli', base: envBase || undefined, key: envKey || undefined })
 const { BASE, KEY, arg, get, post } = h
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -75,12 +84,57 @@ async function main() {
     process.exit(0)
   }
 
+  if (cmd === 'backups') {
+    const r = await get('/backup-list')
+    if (r.status >= 400) return fail('列备份失败 HTTP ' + r.status, r.d)
+    const rows = Array.isArray(r.d) ? r.d : (r.d && r.d.rows) || []
+    if (!rows.length) { console.log('（还没有备份）'); process.exit(0) }
+    console.log('最近 ' + rows.length + ' 份备份：')
+    for (const b of rows) console.log('  #' + b.id + '  ' + (b.created_at || b.at || '') + '  ' + (b.size ?? '?') + ' 字节  第' + (b.book || '1') + '本账')
+    console.log('恢复其中一份：node scripts/cli.mjs restore <id> --yes')
+    process.exit(0)
+  }
+
+  if (cmd === 'restore') {
+    const id = Number(process.argv[3])
+    if (!id) { console.log('❌ 要写明恢复哪一份备份：node scripts/cli.mjs restore <id> --yes'); process.exit(1) }
+    if (!process.argv.includes('--yes')) {
+      console.log('❌ 恢复会用备份覆盖现在的账目（不可逆，只剩快照能退）。确认要恢复就在命令末尾加 --yes。')
+      process.exit(1)
+    }
+    const r = await post('/backup-restore', { id, confirm: '覆盖' })
+    if (r.status >= 400) return fail('恢复失败 HTTP ' + r.status, r.d)
+    console.log('✅ 已恢复到备份 #' + id)
+    process.exit(0)
+  }
+
+  if (cmd === 'errors') {
+    const days = Math.round(Number(arg('days', 7)))
+    const r = await get('/error-log?days=' + days + '&limit=50')
+    if (r.status >= 400) return fail('查报错失败 HTTP ' + r.status, r.d)
+    const rows = (r.d && (r.d.rows || r.d.items)) || []
+    console.log('最近 ' + days + ' 天 ' + (r.d && r.d.total != null ? r.d.total : rows.length) + ' 条报错')
+    for (const e of rows.slice(0, 30)) console.log('  ' + (e.created_at || '') + '  ' + (e.status || '') + '  ' + (e.method || '') + ' ' + (e.path || '') + '  ' + String(e.msg || e.message || '').slice(0, 120))
+    process.exit(0)
+  }
+
+  if (cmd === 'migrate') {
+    if (!process.argv.includes('--yes')) {
+      console.log('❌ 迁移会改线上数据库的结构（加列、加索引），确认要跑就在命令末尾加 --yes。')
+      process.exit(1)
+    }
+    const r = spawnSync('node', [path.join(here, 'd1-migrate.mjs')], { stdio: 'inherit' })
+    process.exit(r.status || 0)
+  }
+
   usage(); process.exit(1)
 }
 
 function usage() {
   console.log('本机版运维 CLI —— 用法：node scripts/cli.mjs <命令> [--base URL] [--key K] [--book N]')
   console.log('  命令：status | backup | cron | clean [--days N] | diag | reset --yes')
+  console.log('        backups | restore <id> --yes | errors [--days N] | migrate --yes')
+  console.log('  BASE/KEY 也可用环境变量给：FA_BASE / FA_KEY')
 }
 function fail(msg, d) {
   console.log('❌ ' + msg)
