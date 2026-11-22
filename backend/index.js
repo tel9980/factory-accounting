@@ -7359,6 +7359,7 @@ app.get('/pc', async (c) => {
   <div id="quick_msg" class="tip"></div>
   <div id="quick_nums" class="tip">填好上面的口令点「刷新数据」：本月收 / 付 / 剩、应收应付、逾期单数一屏看完。</div>
   <div id="quick_top"></div>
+  <div id="quick_recon"></div>
 </div>
 
 <div class="card">
@@ -7727,9 +7728,10 @@ function quickLoad(){
   var hd = { 'x-access-key': K, 'X-Book': bk() }
   Promise.all([
     fetch('/dashboard', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } }),
-    fetch('/collect-list', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } })
+    fetch('/collect-list', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } }),
+    fetch('/statement-acks?days=60', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } })
   ]).then(function(a){
-    var d = a[0] || {}, c = a[1] || {}
+    var d = a[0] || {}, c = a[1] || {}, s = a[2] || {}
     if (d.error) { qmsg('总览没读出来：' + (d.error || '口令对吗？'), false); return }
     var prof = (d.month_profit == null) ? '—' : qmoney(d.month_profit)
     var bits = []
@@ -7753,6 +7755,29 @@ function quickLoad(){
       h = '<div class="tip">没有需要催的（或者催款清单没读出来，点刷新再试）。</div>'
     }
     document.getElementById('quick_top').innerHTML = h
+    // 月度对账提醒：谁确认了、谁说对不上、这个月还有谁没回音
+    var rh = ''
+    if (s.error) {
+      rh = '<div class="tip">对账状态没读出来：' + esc(s.error) + '</div>'
+    } else {
+      var doubtN = Number(s.doubt_count) || 0, okN = Number(s.ok_count) || 0, pendN = Number(s.pending) || 0
+      var bits2 = []
+      bits2.push('确认对得上 <b class="ok">' + okN + '</b> 家')
+      bits2.push('说对不上 <b class="bad">' + doubtN + '</b> 家')
+      bits2.push('本月没回音 <b>' + pendN + '</b> 家')
+      rh = '<div style="margin-top:14px;padding-top:12px;border-top:1px solid #eef0f3">'
+        + '<div style="font-weight:600;margin-bottom:6px">月度对账（近 60 天回音）</div>'
+        + '<div class="tip" style="margin:0 0 6px">' + bits2.join(' &nbsp;·&nbsp; ') + '</div>'
+        + '<div class="tip" style="margin:0">' + esc(s.advice || s.text || '') + '</div>'
+      var drows = (s.rows || []).filter(function(x){ return x.ack === 'doubt' }).slice(0, 5)
+      if (drows.length) {
+        rh += '<table style="margin-top:10px"><tr><th>说对不上</th><th>月份</th><th>时间</th><th>备注</th></tr>'
+        drows.forEach(function(x){ rh += '<tr><td>' + esc(x.party) + '</td><td>' + esc(x.month || '') + '</td><td>' + esc(x.at || '') + '</td><td>' + esc(x.note || '') + '</td></tr>' })
+        rh += '</table><div class="tip">有异议的先去「报表 → 争议」把差额核清楚再补记/核销，别直接改单据。</div>'
+      }
+      rh += '</div>'
+    }
+    document.getElementById('quick_recon').innerHTML = rh
     qmsg('读好了', true)
   }).catch(function(e){ qmsg('读不出来：' + e, false) })
 }
