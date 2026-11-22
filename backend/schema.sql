@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- 迁移记录：以前加列全靠代码里的 EXTRA_COLS 自愈（只覆盖 16 张表），
+-- 远程 D1 上从来没跑过任何迁移，全靠线上代码第一次访问时自己补 —— 补不上的就 500。
+-- 现在有这张表：每个迁移文件跑一次就跑过了，跑过的不再跑。
+CREATE TABLE IF NOT EXISTS migrations (
+  name TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+
 -- 云端快照备份（全量 JSON，自动+手动）
 CREATE TABLE IF NOT EXISTS backups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

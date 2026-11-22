@@ -2,6 +2,8 @@
 
 面向**以收取加工费为主要收入**的小型工厂：记录应收（客户欠我）、应付（我欠供应商）、日常支出、批量导入、对账、报表与备份。**零服务器成本**，小白也能自己部署使用。
 
+> 本文带日期的迭代记录是历史快照，数字以当前版本为准（当前：434 个接口 / 60 张表 / 265 个前端调用）。
+
 ## 技术架构
 
 | 层 | 技术 | 说明 |
@@ -94,8 +96,8 @@ docs/               文档
 
 ## 快速开始
 
-1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 59 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
-   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 632 条 SQL 在这种新库上跑不跑得通、前端的 258 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
+1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 60 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
+   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 693 条 SQL 在这种新库上跑不跑得通、前端的 265 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
 2. **前端**：微信开发者工具导入 `frontend` 目录，把 `frontend/pages/index/index.js` 顶部 `API_BASE` 改成你的 Worker 地址。
 3. **上线**：微信公众平台把该域名加进 `request` 合法域名；本地调试勾选「不校验合法域名」。
 
@@ -137,7 +139,7 @@ Intel 芯片的 Mac 没有现成包（GitHub 的 macOS 机器都是 arm64，交�
   先设一个口令（就是小程序里要输的那个），下面会给出恢复码，抄下来。
 - **Linux / macOS**：`chmod +x factory-accounting-linux-x64` 后直接跑；macOS 第一次打开如果提示
   「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。
-- 数据在**程序旁边的 `data/` 目录**（`book1.db` … `book9.db`，一本账一份文件；默认只开 3 本，多开的空库不占地方）。
+- 数据在**程序旁边的 `data/` 目录**（`book1.db` … `book9.db`，一本账一份文件）。程序**支持最多 9 本**账，**线上（Cloudflare D1）目前只配了 3 本**（DB / DB2 / DB3），本机版启动时**默认建 9 个库文件**，多开的空库不占什么地方。
   把整个 `data/` 拷走就是备份；换电脑时拷回来接着用。
 - 命令行参数：`--port 8787`（换端口）、`--host 127.0.0.1`（只允许本机访问）、
   `--data <目录>`（换数据位置）、`--no-cron`（不跑每日维护）、`--no-open`（不自动开浏览器）。
@@ -181,7 +183,7 @@ cd backend && npm install          # 要 Node 24（node:sqlite 是内置的）
 node scripts/build-exe.mjs --out dist
 ```
 
-打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 59 张表——
+打完脚本会**自己跑一遍**：起服务、打 `/version`（版本号对不对）、打开落地页、确认建库 60 张表——
 不通就直接红，不会把坏文件发出去。CI 里三个平台各跑一次。
 
 ### 本机版和线上版的差别
@@ -395,7 +397,7 @@ node scripts/build-exe.mjs --out dist
 140. ✅ **月度对账小结**（这个月和谁对过、差多少、补了几笔、还有谁没对，一页说清，可直接发微信）：`GET /recon-month?month=&type=ar|ap` 返回 reconciled/match/diff/fixed_count/fixed_amount/open_diff/never_count/never_left/statements/disputes + `text`（厂名抬头、对过几家、补记几笔合计、有差异不补的名单、还没处理完几家、没对过的几家及欠款、发出对账单几份/异议几份、对账的日子、一句建议）；前端报表页「📋 出本月对账小结」，可复制文字或存成图片。补记金额从台账备注「补记 X 元」里读回，无需另存字段。
 141. ✅ **导入批次能追回单据**（以前导入只记「某天导了几条」，出了错不知道是哪一笔、也反查不到）：`orders/payables/ledger/loans` 新增 `import_batch` 列，导入时每笔打上批次号（形如 `IM2026111611351591`）；`import_log` 同步存 `batch`。新增 `GET /import-log/:id` 返回这一批**到底导了哪几笔、现在什么状态**（单位/金额/已收已付/核销/还欠/是否已结清/已被删几笔），导入记录里点「看这几笔」直接展开；单据「明细」里多一行「导入来源：11-16 11:35 · 粘贴导入 · 这批共 2 笔 5000 元」，手工录的单不显示。这样一批导错时，能先看清这批含哪些单，再决定撤回还是逐笔改。
 142. ✅ **本月财务流程清单**（小白最容易漏步骤，首页直接给出 5 步走到哪了）：`GET /pipeline?month=` 返回五步状态 —— ①把单子录进来（应收/应付/支出笔数）②和客户供应商对账（对过几家、一致几家、有差异几家）③把差异处理掉（还有几家没处理完；一致但对过的不算未处理）④出一页月度小结 ⑤结账归档；每步带 done、detail、tip 和该跳的页面，另有 done_count/percent/next_key/advice。前端首页「本月财务流程 X/5」卡片：进度条 + 五步逐条（✓/序号，当前该做的标黄）＋「去办 ›」直达对应页；出月度对账小结时自动打第 4 步的勾（`POST /pipeline-summary {month}`，存 settings.pipeline_summary）。
-143. ✅ **整库备份 / 搬家**（防误删、防停机、想换账户或换环境重建）：`GET /export-all` 把数据库里**每一张表**原样导出成一个 JSON 包（自动枚举 `sqlite_master`，38 张表、带 `kind:'factory-accounting-full'` 标记、`at` 时间、`counts` 行数、`book` 厂名），**访问口令与员工口令不进包**（包常被转发到微信/网盘）；`POST /import-all {pkg, mode:'replace'|'merge', confirm:'覆盖'}` 整包灌回：replace 先清表再按原 id 灌（必须 `confirm:'覆盖'`，动手前自动留一份本地快照，灌完把当前口令放回去，口令不会被包覆盖），merge 只补缺的行；逐表返回 done/skipped，缺表或灌失败会写明原因。内部表 `_cf_KV` 这类下划线表自动跳过（否则 SELECT 会 500）。前端报表页备份区「📦 整库备份」（可复制 JSON 或存成 .json 文件转发）与「📦 从整库包恢复」（弹窗要手输「覆盖」才执行）。**换手机其实不用备份**：新手机装好、输同一个访问口令，数据就在云端——这点已写进界面提示。
+143. ✅ **整库备份 / 搬家**（防误删、防停机、想换账户或换环境重建）：`GET /export-all` 把数据库里**每一张表**原样导出成一个 JSON 包（自动枚举 `sqlite_master`，60 张表、带 `kind:'factory-accounting-full'` 标记、`at` 时间、`counts` 行数、`book` 厂名），**访问口令与员工口令不进包**（包常被转发到微信/网盘）；`POST /import-all {pkg, mode:'replace'|'merge', confirm:'覆盖'}` 整包灌回：replace 先清表再按原 id 灌（必须 `confirm:'覆盖'`，动手前自动留一份本地快照，灌完把当前口令放回去，口令不会被包覆盖），merge 只补缺的行；逐表返回 done/skipped，缺表或灌失败会写明原因。内部表 `_cf_KV` 这类下划线表自动跳过（否则 SELECT 会 500）。前端报表页备份区「📦 整库备份」（可复制 JSON 或存成 .json 文件转发）与「📦 从整库包恢复」（弹窗要手输「覆盖」才执行）。**换手机其实不用备份**：新手机装好、输同一个访问口令，数据就在云端——这点已写进界面提示。
 144. ✅ **默认账期（新用户最容易漏的一步）**：以前账期要一家一家设，漏了就等于「录入的欠款没有到期日」，到期提醒、逾期榜、账龄全都不准。现在设置 → 单位 里可以填一个**默认账期天数**（如 30 天）：`GET/POST /term-default {days, fill}`，`termDue()` 在单位没单独设账期时回落用它，新单自动「单据日期 + N 天」算到期日；保存时可选「顺手把现在还没到期日的未结单都补上」（`fill:true`，按各自单据日期补）。开账引导也加了第 4 步「设个默认账期」（判定=有默认账期或有任一家单独账期），引导变成 4 步。`/reminders` 新增黄条「N 张单还没到期日（设个默认账期就会自动算）」，只在没设默认账期时出现。
 145. ✅ **新手提示 + 数据维护**：① 应收/应付录单页在「约定收/付款日」下加了动态提示——设了默认账期显示「留空：按账期自动算（默认 N 天）」，没设则提示「留空就不会提醒你收/付钱，去设置里设个默认账期更省事」；`term_default` 改为首页加载时就取（原来只在单位页取）。② 设置页新增「数据维护」：`GET /db-stats` 列出 12 张主要表的行数（单据/流水/日志/快照/回收站/归档等）与合计，`POST /db-clean {days}` 只清**日志类**（audit_log/error_log/import_log 超期部分；回收站按 `deleted_at` 留 30 天；本地快照留 30 份），业务数据一行不动，清理结果逐表回报。顺带修掉一个真 bug：`/db-clean` 里误用 `created_at` 读回收站（该表实际字段是 `deleted_at`），会让清理静默失败。③ 修 UI 结构错误：上一轮加整库备份按钮时多插了一个 `</view>`，导致备份表单提前闭合、后面半页被塞进 flex 行容器里；已改正并做了全文件标签配平检查（栈为空、无错配）。
 146. ✅ **结账前自检（防「点错了就改不了」）**：`GET /close-precheck?month=` 在结账前把该做的六件事列出来——①本月对账差异是否处理完（有未处理即 ✗ 阻断）②本月有没有跟人核过账 ③有没有出本月小结（没出即 ✗ 阻断）④最近 7 天有没有备份 ⑤本月还有几张单没结清（只提示，不影响结账）⑥上个月有没有结账（跳着结会打乱对账）；返回 items（每条 k/label/count/tone/tip）、blockers、warns、can_close、text。`POST /month-close` 增加 `confirm` 门：不传 confirm 且存在阻断项时返回 **409 `{code:'need_confirm', blockers, items, text}`**，传 `confirm:true` 才真正结转（快照 + 锁定该月）。前端「结转归档」按钮改为先查自检 → 弹窗逐条列出「✓ 已做 / ✗ 没做 / ！建议」→「照样结账」才提交；若后端仍报 409，再确认一次（预防并发）。删除单据的确认文案同步改成「删掉后 30 天内在「设置 → 回收站」还能找回」，让用户知道删了不是没了。
@@ -407,7 +409,7 @@ node scripts/build-exe.mjs --out dist
 152. ✅ **钱和票对一下（发票与收款对照）**：`GET /invoice-check?month=` 把「这个月收了多少、开了多少票」摆在一页——本月接单额、实收额、开票张数与金额（含税额）、差额一句话（「收的钱和开的票对得上 ✓」/「还有 5000 元收了没开票」/「多开了 800 元票，钱还没到账」）；三个清单：**收了钱没开票**（按已收金额算）、**开了部分票**（还差多少票额）、**开了票钱没到**（按票额−已收算），每条点一下直接打开那张单核对。「📋 复制给会计」输出可直接发微信的文字：【厂名】2026-11 发票与收款对照 / 本月接单、收到、开票（含税额）张数 / 差额 / 三个清单摘要。发票仍只做台账、不影响收支和利润（避免一笔钱算两次），这张表只做「钱与票是否对得上」的对照。
 153. ✅ **客户进度页（一条链接，客户自己看做到哪了）**：单位页每个客户行加「发进度」——生成一条只读签名链接（不用登录、不含口令，篡改即失效），复制发微信给客户，他点开就看到：还没收的钱合计、共几单/合计/已收，以及每单的日期、产品、当前工序（待加工/加工中/已交付 + 最近一次工序记录如「11-16 已切完，在打磨」）、已收金额、未收金额与逾期天数；页脚带厂名、电话、地址。**只能看到自己这一家的单，看不到别家、也改不了账**。每次点开会留痕，小程序里再点「发进度」会告诉老板「对方点开过 N 次，最近一次 X」——问过没问过心里有数。
 154. ✅ **我的活（今天该干什么，一进来就看见）**：`GET /my-work` 把「非办不可的事」按人摆出来——①**该收**（3 天内到期或已逾期的应收，带还剩多少、超几天）②**该付**（同口径的应付）③**在做但没记进度**的单子（客户随时会问「做到哪了」）。首页「我的活」卡片逐行列出，点「收/付」直接跳到应收/应付，点工序那行直接打开那张单；顶部一句话「今天有 6 件事：该收 2 笔、该付 1 笔、3 张单还没更新进度」。老板和员工看到的是同一个清单（这也解决了「员工登录后不知道自己要干什么」）。
-155. ✅ **一页纸用法 + 接口清单自动同步**：首页新增「❓ 怎么用（一页纸）」——每天 30 秒、每周 5 分钟、每月 20 分钟各做什么，加上「要给别人用（员工口令/客户进度链接）」「换手机或丢了手机」「记错了怎么办」四段，新接手的人不用问。README 末尾新增「接口清单」附录，由 `python3 scripts/gen-api-list.py` 从 `backend/index.js` 自动抽取（当前 238 个接口、37 组），改完后端跑一次脚本就同步，避免文档与代码越走越偏。
+155. ✅ **一页纸用法 + 接口清单自动同步**：首页新增「❓ 怎么用（一页纸）」——每天 30 秒、每周 5 分钟、每月 20 分钟各做什么，加上「要给别人用（员工口令/客户进度链接）」「换手机或丢了手机」「记错了怎么办」四段，新接手的人不用问。README 末尾新增「接口清单」附录，由 `node scripts/gen-api-list.mjs` 从 `backend/index.js` 自动抽取（当前 434 个接口、63 组），改完后端跑一次脚本就同步，避免文档与代码越走越偏。
 156. ✅ **记完自查（记上就提醒，不用等月底对账才发现）**：录应收、应付、收款后，后端对这笔数据做 6 项自查，有问题就把人话摆在弹窗里（只提醒、不拦，账已经记上，要改就点那一条编辑）——①**重复记**：同一客户同一天、同产品、同金额已有一张 → 「今天已经有一张一样的「切割 ¥3000」，是不是重复记了？」②**成本比加工费还高**：「成本 ¥800 不比金额 ¥500 低，这单不赚钱甚至倒贴」③**客户名打错一个字**：「甲客戶」和已有的「甲客户」只差一个字（打错会当成两家，欠款就分开算）；为避免噪音，只在「前两个字相同」或「名字≥4 个字」时才提醒，甲乙丙这类不同客户不会误报 ④**到期日早于开单日**：「约定日期（2026-10-01）比开单日（2026-11-10）还早，是不是年份填错了？」⑤**金额多打一个 0**：比近 90 天最大的一笔大 5 倍且超过 2 万，或第一次就记 5 万以上 ⑥**收款日期早于开单日**：「这单是先收钱后开单吗？不是的话改一下日期」。自查放在写入之前算（否则新单会把自己算成「重复」和「历史最大」——这是实测发现并修掉的 bug）。
 157. ✅ **一句话对账（你家到底欠我多少）**：单位页每个客户/供应商行加「一句话」，点一下生成一段可以直接发给对方的文字——截至今天的往来总额、已收已付、核销、还欠多少、还欠几笔、其中超 90 天多少、最久一笔欠多少天，然后逐笔列出未结清单（日期/产品/金额/已收/还欠/超期天数），再补上账期、对账单还没确认几份、有几天对账差异没处理、已催几次（上次哪天）。带联系人/电话/地址（取自单位档案）。顶部「复制这段话」直接发微信；「看往来明细」跳到该客户的全部单据、流水与处理记录。`GET /party-balance?type=ar|ap&party=` 单家；不传 party 返回所有还欠钱的单位排行（`total_left`），可以回答「现在一共被欠多少」。顺带补了一个安全口子：`/orders/:id/receive` 与 `/payables/:id/pay` 之前只在小程序前端限制「不能超过未收（未付）金额」，直接调接口仍能多收 → 后端现在也拦，返回「这单只剩 ¥2000 没收，收不了 ¥3000」。
 158. ✅ **现金流水账（这个月钱怎么变的）**：`GET /cashbook?month=&big=5000` 一张纸说清现金流向——按账户列出**月初手头、本月进、本月出、月底手头**（未指定账户的老流水计入第一个账户，口径与账户页一致），再给本月「花在哪些地方」的分类小计、单笔 ≥5000 的大额支出清单（金额倒序，最多 15 笔），以及**对不上的地方**：①某个账户月底变负数（漏记收入，或从这个账户花了没记内部转账）②应收单据上「已收」合计与流水里记的收款合计差额（删过流水、或收预付款/抵扣没走现金）。前端报表页「💰 现金流水账」可填月份，一键复制成文字发微信。顺带补了 `POST /transfers` 别名（原来只有 `POST /transfer`，参数是 from/to；别名同时收 from_acc/to_acc），实测转账后两账户各自增减、合计不变（内部转账不算收支），且与账户页余额逐项一致。
@@ -533,14 +535,14 @@ node scripts/build-exe.mjs --out dist
 - **✅ 没有 `ETag`/`304`**：全库 0 处 `ETag`。现在中间件给 GET 的 JSON/HTML 响应打 `W/"长度-哈希"`（FNV-1a，不算安全用途），**客户端带了 `if-none-match` 且对得上就回 304**；>256KB 的响应（`/backup` 那种 9MB）直接跳过不打。小程序 `wx.request` 从来不发这个头，所以对现有前端只是多一个响应头、不改任何行为。
   - **线上实测踩到一个坑**：Cloudflare 一旦压缩响应就会把这个头**摘掉**——同一条 `/statement-ack`，本地有 `ETag`、线上没有（内容字节完全一致，1621 字节）。所以 17 个打印页（对账单/工资单/报价/订单/年结那些）额外加了 `Cache-Control: no-cache, no-transform`：这些页面就几 KB，客户会反复点同一条链接，304 比压缩更省。加完线上复测：`ETag` 保住了，带 `if-none-match` 第二次请求返回 **304**。
   - 代价说清楚：JSON 接口仍走压缩（手机端省流量更重要），所以那部分的 `ETag` 在线上会被摘掉，等于只在本地开发时可见。
-- **⏸ D1 读复制：查过、能开，故意没开**。`wrangler d1 info factory-db` 现在是 `read_replication.mode = disabled`。不开的理由是这套系统到处是「刚记完一笔就刷新看」：开了 auto 模式，读会就近走副本，副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，**账就重了**。要安全用必须配 Sessions API（`env.DB.withSession('first-primary')` 把写后读钉回主库），399 个接口逐个改，改动面远大于收益；何况现在库才 594KB、每天读 3.3 万行，省下的延迟根本看不见。开启方法和注意事项写在 `backend/wrangler.toml` 的注释里（`read_replication` 配置键要 wrangler 4 才有；2026-11-19 已经把 wrangler 从 3.114 升到 4.165，真要用时直接在 `backend/wrangler.toml` 里加那两行就行）。
+- **⏸ D1 读复制：查过、能开，故意没开**。`wrangler d1 info factory-db` 现在是 `read_replication.mode = disabled`。不开的理由是这套系统到处是「刚记完一笔就刷新看」：开了 auto 模式，读会就近走副本，副本晚几百毫秒就会显示「没记上」，人会以为没存进去再记一遍，**账就重了**。要安全用必须配 Sessions API（`env.DB.withSession('first-primary')` 把写后读钉回主库），434 个接口逐个改，改动面远大于收益；何况现在库才 594KB、每天读 3.3 万行，省下的延迟根本看不见。开启方法和注意事项写在 `backend/wrangler.toml` 的注释里（`read_replication` 配置键要 wrangler 4 才有；2026-11-19 已经把 wrangler 从 3.114 升到 4.165，真要用时直接在 `backend/wrangler.toml` 里加那两行就行）。
 
 > 审计方法：只读源码 + `node:sqlite` 在本地 D1 副本（6003 单 / 15001 流水 / 2000 应付）上跑 `EXPLAIN QUERY PLAN` 验证索引是否命中；行号对应 2026-11-18 的 `backend/index.js`（15164 行）版本。
 
 ## 说明
 
 - **「赚了多少」只有一个算法（权责口径）**：净利 = 本月接单额 − 单子上的材料·外协成本 − 现金费用（支出 + 固定支出）− 摊销 − 折旧 − 预提利息。赊购只算欠款、不重复算成本。想看「按收付现金算赚多少」，用报表页「两口径」（现金口径 = 实收 − 实付）。
-- **新账套怎么开始**：**不用初始化**。第一次打开时自动建好 59 张表、9 个支出分类、3 个收入分类、4 个账户（现金/银行卡/微信/支付宝），你只需要做一件事——**设个口令**（新账本第一次进去会提示，同时给一串恢复码，只显示这一次，记得截图）。然后把底数填上：首页开账引导里点「⚡ 一屏填完」，一屏填完账户余额、默认账期、期初应收、期初应付（一家一行：`张老板 12000`），点保存就开始记账了。账套二、账套三各自独立，**口令也是各自独立的**。
+- **新账套怎么开始**：**不用初始化**。第一次打开时自动建好 60 张表、9 个支出分类、3 个收入分类、4 个账户（现金/银行卡/微信/支付宝），你只需要做一件事——**设个口令**（新账本第一次进去会提示，同时给一串恢复码，只显示这一次，记得截图）。然后把底数填上：首页开账引导里点「⚡ 一屏填完」，一屏填完账户余额、默认账期、期初应收、期初应付（一家一行：`张老板 12000`），点保存就开始记账了。账套二、账套三各自独立，**口令也是各自独立的**。
 - **工资怎么记**：默认就按**实发数**记一笔支出（支出页「发工资（按实发数）」一键预设，分类=工资）。要按件算钱（单价表、记工、月底算、扣宿舍水电、打工资单）再去 设置 → 功能模块 把「计件工资」打开；关着的时候那块界面和接口都不出现，数据一条不删。
 - **含税 / 不含税怎么记**：**不拆税**。金额就是你实际收到/付出去的钱——含税就记含税的数，不含税就记不含税的数，税多税少系统不替你算。`invoices` 里的 `tax` 只是登记备注，不进利润也不进现金流。
 - **实际收付跟当初记的不一样**：按实际的记。多收/多付的部分自动记成这家的预收/预付（下次开单可以直接抵）；剩下的尾差不想要了，收款弹窗里填「结清」或点「差额抹零」，系统记一条核销把单子结清——**抹零不进现金流**（钱确实没收到），但「被欠多少」不再挂着它。
@@ -1137,7 +1139,7 @@ node scripts/build-exe.mjs --out dist
    - **全接口冒烟**：脚本从 `backend/index.js` 正则抽出全部路由，对 220 个 GET 接口逐个真发请求（占位参数用 `1`）。结果 **201 个 200**，19 个非 200 里 18 个是**正常的业务拒绝**（缺参数 400、对象不存在 404），只有 1 个是真 bug：`GET /statement`（老的对账单文本接口）在没带 `name` 时 `bind(undefined)` → `D1_TYPE_ERROR: Type 'undefined' not supported` → 500。已修：`type` 归一成 ar/ap、`name` 去空格后为空直接 400「要看哪一家？在单位页点客户名字旁边的「🧾 对账单」」。修后再测：无参 400、带参正常出对账单、不存在的单位出「共 0 笔未结清 / 合计欠款 0 元」。
    - **三库结构比对**：把 `backend/schema.sql` 按 `;` 切成语句，逐条解析 `CREATE TABLE` 的列与全部 `ALTER TABLE … ADD COLUMN`，再对三本账逐个 `PRAGMA table_info` 比对。**42 张表 × 3 本账 = 0 处缺失**（`/schema-check` 那个接口只核 12 张关键表，这次是全量表）。顺带确认 `dunning_log` 本来就没有 `month` 列、代码里全部用 `substr(created_at,1,7)`，早先那个「缺 month」是解析脚本把相邻语句一起吃进去的误报。
    - **文档对账**：README 正文 `^\d+\. ✅` 共 **268 条，编号 1–260 无缺号**，重号只有 10–13、44–47 这两段历史重号（已在「编号说明」里写明保留不改）；「接口清单」附录条数与代码里 `new Set(method + path)` 的 **394 个**一致，60 个分组。
-   - **顺手修文档与实现不一致**：附录原来写「跑一次 `python3 scripts/gen-api-list.py`」，但容器里 python 已经没有了 → 新增 `scripts/gen-api-list.mjs`（同算法：去重 → 按 `method path` 排序 → 按一级路径分组、少于 2 条的并进「其它（单个接口）」），附录改成 `node scripts/gen-api-list.mjs`。
+   - **顺手修文档与实现不一致**：附录原来写「跑一次 `python3 scripts/gen-api-list.py`」（这个旧脚本名已删除，现在统一跑 `node scripts/gen-api-list.mjs`），但容器里 python 已经没有了 → 新增 `scripts/gen-api-list.mjs`（同算法：去重 → 按 `method path` 排序 → 按一级路径分组、少于 2 条的并进「其它（单个接口）」），附录改成 `node scripts/gen-api-list.mjs`。
    - **空态复查**（清库后逐个人话文案）：首页「今天没有必须处理的事」、「我的活」为空、健康分 100 分、`/books-check`「现在只有「主账本」在用…空着的：第二本、第三本」、`/month-end` 五件没办、`/cash-forecast`「这几天没有要收要付的款」、`/churn-risk`「都在正常节奏里」、`/process-stale`「没有，未交付的都在 7 天内动过」、`/delivery-plan`「7 天内没有要交的活」、`/outsource-book`「还没有外协记录」、`/materials`「材料台账还是空的」、`/payroll`「还没有记工记录」、`/rework-book`「共 0 笔，损失 ¥0」、`/party-staff`「还没有给员工分过客户」、`/book-templates`「这本账还是空的，挑一个模板一次配好」。
    - **前端静态检查**（每次改 wxml/js 都跑）：绑定方法是否都有定义 `missing: []`、方法名重复 `dups: []`、标签栈配平 `unclosed: [] mismatch: []`。
    - **已知边界**（写在这里免得反复讨论）：小程序真机与提审发布、微信订阅消息推送（要 AppID/Secret/模板审核）、微信登录到人（同上）、开发票与报税申报（个人主体无接口）、微信支付收款（需企业主体）、银行流水自动直连（各行无公开接口）。这些不是代码能补的，其余功能都已在线上可用。
@@ -1282,7 +1284,7 @@ node scripts/build-exe.mjs --out dist
    - **踩到的坑**：`_memoDdl` 那个记忆化包装器**只 `await` 不返回**，拿它包 `staffPinReady` 会把「有没有 pin_hash 列」这个返回值吞掉，导致所有员工 PIN 一律 401——改成自己用 `_pinReadyDb` 记；另外迁移必须和「结构就绪」拆开：结构只跑一次（记忆化），迁移在查不到人时再补跑一次，否则老库升级后第一次登录必然失败。
    - **ETag / 304**：中间件 `applyEtag(c, noTransform)`，GET + 200 + JSON/HTML + ≤256KB 才打 `W/"<len36>-<fnv36>"`；只有客户端真发了 `if-none-match` 才回 304。放行的打印页（`/quote-print`、`/statement-ack` 等 17 条白名单）也走同一个函数——原来白名单分支是 `return next()`，后面的后处理根本不会执行。
    - **线上才发现的问题**：第一次部署后线上**所有响应都没有 ETag**，而本地有。查下来是 Cloudflare 压缩响应时会摘掉 `ETag`（本地 workerd 压缩后仍保留，所以本地看不出来）。解法是给打印页加 `Cache-Control: no-cache, no-transform`（禁压缩），线上复测 `ETag` 保住、`if-none-match` 命中返回 304。JSON 接口维持压缩，其 ETag 线上会被摘掉——这点在文档里写明了，不装作有效。
-   - **D1 读复制：没开，理由写在 `backend/wrangler.toml` 注释里**。`read_replication.mode` 实测 `disabled`；auto 模式会让「刚写完就读」读到滞后副本，这套系统里等于让人重复记账。要安全用得上 Sessions API（`withSession('first-primary')`），399 个接口逐个改不划算；且现在库 594KB、每天读 3.3 万行，收益为零。
+   - **D1 读复制：没开，理由写在 `backend/wrangler.toml` 注释里**。`read_replication.mode` 实测 `disabled`；auto 模式会让「刚写完就读」读到滞后副本，这套系统里等于让人重复记账。要安全用得上 Sessions API（`withSession('first-primary')`），434 个接口逐个改不划算；且现在库 594KB、每天读 3.3 万行，收益为零。
    - **验证**：`check.mjs` 全绿（399 路由 / 55 表 / 607 SQL / 733 绑定）、`test-batch.mjs` 4 项全绿、`smoke.mjs` 224 个 GET 无 5xx；实测 5 个口令矩阵（老板 `9999` 200、员工新口令 200、两个老明文 PIN 迁移后 200、被轮换掉的旧口令 401）；`/dashboard` 首请求拿 ETag → 再请求 304、错误 ETag → 200；`/quote-print` 200 带 ETag → 304；`/backup` 9MB 不打 ETag；`/me`、`/access-guide` 在员工总口令开/关两种状态下都是 200。
    - **本轮动了前端**（员工列表文案 + 改口令弹窗）：小程序需要重新上传发布。
 
@@ -1425,14 +1427,14 @@ node scripts/build-exe.mjs --out dist
 295. ✅ **能在 GitHub 上生成免安装 exe 和 Docker 镜像了**：用户说「最后本项目可以在github生成免安装exe和镜像」。
    - **为什么不是另写一份**：整个后端是照 Cloudflare Workers 写的（`env.DB` 走 D1、`scheduled` 走 cron），要让它在厂长自己电脑上跑，只有两条路——重写一套，或者把 D1 的接口面在本机实现一遍。选了后者：新增 `server/d1.mjs`，用 Node 24 内置的 `node:sqlite` 把 `prepare / bind / first / all / run / batch / exec` 补齐，业务代码一行不改。
    - **两个必须对上的细节**：①`batch()` 必须真包 `BEGIN`/`COMMIT`（D1 的 batch 是事务语义，「整户收款一次改多张单」靠的就是它）；②`run()` 要返回 `{ success, meta: { changes, last_row_id } }`，不是 `{ changes }`——README 迭代 285 记过那个坑（按 `{ changes }` 写会让「库存已扣却回 409」）。
-   - **`server/main.mjs`**：把 Node 的 `http` 请求转成 Web `Request` 交给 `worker.fetch`，准备好 `env`（三个本地库 + 版本号 + 可选笔记绑定），首次启动把 `backend/schema.sql` 整段跑一遍（全是 `IF NOT EXISTS`，重复执行安全，56 张表），再提供一个落地页。CORS、ETag、打印页白名单这些都在中间件里，等于免费继承。
+   - **`server/main.mjs`**：把 Node 的 `http` 请求转成 Web `Request` 交给 `worker.fetch`，准备好 `env`（三个本地库 + 版本号 + 可选笔记绑定），首次启动把 `backend/schema.sql` 整段跑一遍（全是 `IF NOT EXISTS`，重复执行安全，60 张表），再提供一个落地页。CORS、ETag、打印页白名单这些都在中间件里，等于免费继承。
    - **落地页**（`/`）：看状态（数据文件、大小、单数、客户数、流水数）、**首次设口令**（直接调 `/auth/setup`，把恢复码显示出来让用户抄）、**下载完整备份**（调 `/backup` 存成 `factory-backup-日期.json`）、以及「手机小程序该填哪个地址」（自动列出局域网 IP）。`/__local/status` 只允许本机/局域网访问。
    - **每日维护**：Cloudflare 那边是 4 条 cron，本机版简化成「每天 01:00–06:00 之间跑一次」`worker.scheduled()`（这些任务本身幂等：固定支出/摊销/预提/折旧都先查有没有记过）。`--no-cron` 可关。
-   - **打包**（`scripts/build-exe.mjs`）：esbuild 把 `main.mjs` + `index.js` + hono 打成单个 CJS → `node --experimental-sea-config` 生成 blob（`schema.sql` 当资源塞进去）→ `postject` 注入到 node 二进制副本。macOS 要先 `codesign --remove-signature`、注入完再 `codesign --sign -`，且注入时必须带 `--macho-segment-name NODE_SEA`——少了这个参数 postject 照样说「Injection done」，但打出来的二进制一启动就被系统 SIGKILL、连一行输出都没有（第一次跑 CI 就是这么红的）。打完**自动自测**：起服务、`/version` 版本号对得上、落地页正常、建出 3 个库且主库有内容（WAL 下主库文件可能还是 4 KB，得把 `book1.db*` 一起算）。
+   - **打包**（`scripts/build-exe.mjs`）：esbuild 把 `main.mjs` + `index.js` + hono 打成单个 CJS → `node --experimental-sea-config` 生成 blob（`schema.sql` 当资源塞进去）→ `postject` 注入到 node 二进制副本。macOS 要先 `codesign --remove-signature`、注入完再 `codesign --sign -`，且注入时必须带 `--macho-segment-name NODE_SEA`——少了这个参数 postject 照样说「Injection done」，但打出来的二进制一启动就被系统 SIGKILL、连一行输出都没有（第一次跑 CI 就是这么红的）。打完**自动自测**：起服务、`/version` 版本号对得上、落地页正常、建出 9 个库且主库有内容（WAL 下主库文件可能还是 4 KB，得把 `book1.db*` 一起算）。
    - **镜像**：`Dockerfile` 直接 `node server/main.mjs`（不需要打 exe），只装 `hono` 一个运行时依赖，`/data` 挂卷，健康检查打 `/version`。
    - **发布流程**（`.github/workflows/release.yml`）：先跑 `scripts/check.mjs`，再 matrix 打 Windows/Ubuntu/macOS 三个平台（每个平台都自测）、出 `SHA256SUMS.txt`、发 GitHub Release；另一个 job 用 buildx 推 `ghcr.io/tel9980/factory-accounting`（`linux/amd64` + `linux/arm64`，tag 是版本号 + `latest`）。
    - **CI 也管这一层了**：`.github/workflows/deploy.yml` 的冒烟 job 末尾新加「本机版（Node 直跑）冒烟」——用 `server/main.mjs` 起一个库，跑 `smoke.mjs` + `smoke-write.mjs`。这样本机适配层（事务、changes、日期）一旦退化，PR 阶段就红。
-   - **验证**（本机 Linux x64 真跑）：`node server/main.mjs` 建出 56 张表；`smoke.mjs` 227 个 GET 无 5xx；`smoke-write.mjs` 主流程 + 92 写路由 + `/run-cron` + 自检 10 类全 0；`test-crossmonth` 16 项、`test-apcat` 31 项、`test-import-xlsx` 32 项、`test-onboarding` 19 项、`test-safety` 39 项全绿。打成 exe 后又把 `smoke` / `smoke-write` / `test-crossmonth` / `test-safety` / `test-import-xlsx` 跑了一遍，同样全绿。
+   - **验证**（本机 Linux x64 真跑）：`node server/main.mjs` 建出 59 张表；`smoke.mjs` 227 个 GET 无 5xx；`smoke-write.mjs` 主流程 + 92 写路由 + `/run-cron` + 自检 10 类全 0；`test-crossmonth` 16 项、`test-apcat` 31 项、`test-import-xlsx` 32 项、`test-onboarding` 19 项、`test-safety` 39 项全绿。打成 exe 后又把 `smoke` / `smoke-write` / `test-crossmonth` / `test-safety` / `test-import-xlsx` 跑了一遍，同样全绿。
    - **新增文件**：`server/main.mjs`、`server/d1.mjs`、`scripts/build-exe.mjs`、`Dockerfile`、`.dockerignore`、`.github/workflows/release.yml`；`backend/package.json` 加 devDep `esbuild` / `postject`；`.gitignore` 加 `dist/ build/ data/`；`check.mjs` 把 `server/*.mjs` 也纳入语法检查。
 
 296. ✅ **第五轮审计 31 条全修：接口回 200、账却错了的那一类清干净**：用户问「本项目还有哪些优化空间」，我派三路只读审计（后端 / 前端 / 本机版与工程化）再逐条回代码核对行号，按「会不会算错钱 → 点不点得通 → 会不会静默失败」排序，用户答「好的，继续，净资产不算押金和借支」后全部实施。
@@ -1554,7 +1556,7 @@ node scripts/build-exe.mjs --out dist
    - `/pc` 加第 6 块「账套（可以开几本 / 改名字）」：「看我的账套」出表格（#/名称/单数/应收/有没有口令/是否封存），每行「改名」「用这本」；口令改成**按账套分别记**（`localStorage.fa_key_<账套号>`，切账套自动换口令）；改名字用 `window.prompt`。
    - 演示口令看不到账套列表（`/books-all` 403，跟其它管理类接口一致）。
    - `scripts/test-book.mjs` 从 26 项扩到 **35 项**：`/books-all` 能列、`max >= 3`、标出当前账套、给第 2 本改名生效再改回、改不存在的账套 404 `no_book`、名字空着 400、演示口令 403。
-   - 实测：本地三本账时 `/books-all` 返回 3 本；临时加 `DB4` 绑定后返回 4 本、`X-Book: 4` 能进第 4 本、改名生效（验证完把 `wrangler.toml` 里那段删掉，只在注释里留下「怎么加第 4 本」的说明）。
+   - 实测：本地三本账时 `/books-all` 返回 3 本；临时加 `DB4` 绑定后返回 4 本、`X-Book: 4` 能进第 4 本、改名生效（验证完把 `wrangler.toml` 里那段删掉，只在注释里留下「怎么加第 4 本」的说明）。（**历史记录**：这段「手动加 DB4 演练」是当时的一次性验证记录，不是现在的配置说明——现在程序支持最多 9 本账，本机版默认建 9 个库文件，线上 D1 配了几本就开几本，加一本账见 `DEPLOYMENT.md` 的多账套小节。）
    - `wrangler.toml` 补注释：`npx wrangler d1 create factory-db4` → `d1 execute --remote --file=schema.sql` → `wrangler deploy`，DB5…DB9 同理。
 
 314. ✅ **报表存档：日报 / 月报 / 年报 / 应收 / 应付 / 明细账 / 科目余额表，一键出 Excel**：用户问「这些可以导出存档吗」。查下来原来只有月报（`/month-pack`，8 张表）和几个打印页，日报、年报、应收/应付台账、明细账、科目余额表都没有「能存成文件」的入口。
@@ -1727,6 +1729,17 @@ node scripts/build-exe.mjs --out dist
    - **新增 `scripts/test-arcat.mjs`（33 项，已挂 CI，在 `test-apcat` 之后）**：模板第 5 列有下拉 / 日常台账包有应收对账页 / 粘贴认出分类并且金额不串位 / 老格式金额对分类空 / 四种宽松写法 / 手工建单带分类 / 改分类回 `changed` 且落库变了 / 按分类筛时别的类不出现 / `/ar-by-category` 的开单·已收·还欠对得上。
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
+
+347. ✅ **第九轮查漏补缺——60+ 条：员工能翻别人的单、导入一半留下半截账、cron 从没被测过、Docker 镜像根本起不来**：用户说「继续下一轮查漏补缺，生成具体优化方案」，我派三路只读审计（后端正确性 / 前端体验 / 运维工程化）+ 自己逐条回代码核实，合并成 A–I 九组 60 多条方案，用户说「这个顺序开始实施，全部由你来完成」，于是分五批做完。这一轮的题眼是**「静默的洞」**——员工猜个 id 就能翻别人的单据照片、导入失败留下半截数据、多收的钱记不进去却显示「记好了」、cron 每天在跑但一次都没被测过、Docker 镜像 COPY 少两个文件一启动就崩。
+    - **A 组 · 账务正确性与权限**：①**员工能按 id 打开任意单据详情和照片**——`/orders/:id/detail`、`/payables/:id/detail`、`/orders/:id/processes`、`/attachments`、`/attachment/:id` 全都没套 `scopeOwn/selfOnly`（列表接口套了、详情接口漏了），老板设的「员工只看自己的客户」在详情页完全失效；新增 `orderVisible/payableVisible/attRefVisible` 三个闸门，不满足返 404。②`recon-fix` 的核销 UPDATE **没有金额守卫**（正式核销路由有）→ 并发时 `written_off` 能超过未收金额，照抄正式路由的守卫。③`PATCH /orders/:id`、`/payables/:id` 的 rev 检查是 TOCTOU（前置比了 rev，UPDATE 里没有 `AND rev=?`）→ 并发丢更新，改成 UPDATE 带闸门、0 行返 409。④税金收/付是裸 INSERT 不在 batch、无幂等 → 重复入账，并入 batch + `opMark`。⑤`receive-batch`/`pay-batch` 第二段 batch 失败被吞、**仍返 200** → 用户以为记了钱没记，现在回 `code:'partial'` + 明确提示手工补。⑥多收转预收的流水用 `last_insert_rowid()`（注释说 MAX(id)）→ 预收台账与流水对不上，改 MAX(id)。⑦员工可用 `/import-rows` 批量灌单 → 改成员工一次最多 100 行、期初余额只能老板导。⑧`POST /quick` 不写 `created_by` → 员工一句话记账产生「无主单据」，补上。⑨`active:true` 被 `num()` 当成 0 → 员工明明是启用却被停用，改显式布尔判定。⑪`opClaim` 失败时 `catch{return true}` → 幂等保护整体失效，改成记日志再抛。⑫12 个公开打印页早退时跳过了模块开关检查 → 关掉的模块还能从打印链接看到，补上（封存不拦 GET 打印页，是原意）。
+    - **B 组 · 事务原子性**：`/advances`、`/loans`、`/bank-import`（失败后已插流水残留 → 重试=双倍收款）、`/import-rows`、`/payroll/pay`、`/prepaids`、回收站恢复、`/staff-perms`（先 SELECT 再 INSERT → 并发 500 且权限落一半）、`/book-template/apply`、`/onboarding/apply`、`/material-moves` 等 10 处多写接口改成 `db.batch` 一次事务（D1 的 batch 是原子的）；导入改成每 50 行一批、预付/工资单等改成按分整数累加（`centsSum`）。
+    - **C 组 · 金额精度**：几百上千行浮点累加会出 0.1 级尾差（备份合计、工资单与银行流水差几分）→ 抽 `centsSum()` 按分累加；历史均价、催收 left、导入合计等一并改。
+    - **D/E 组 · 稳定与静默截断**：**136 处 `await c.req.json()` 没有 `.catch()`** → body 非法时 400 变 500，全补；`JSON.parse` 无保护 → 坏数据让整个回收站页 500，加 try；`?month=2026-1a` → Date.UTC RangeError 500，加格式校验；`/cash-forecast`、`/next-step` 把查询失败当 0 → 会输出「这 14 天没什么要收要付」的错误建议，改成返回 `failed:true` 并提示重试；`dueRows` LIMIT 3000 静默丢掉最老的单、`/export-all` 每表 LIMIT 5000 静默截断 → 改成显式 `truncated` 标记 + 说明。
+    - **F 组 · 前端**：**核销金额填「1.2万」只核销 1.2 元、打成「.」→ 整笔欠款被抹掉**（`Number(v)||unpaid` 的兜底）→ 改用已有的 `toAmount()`，解析不出就拒绝；本地算欠款漏算核销 → 改用服务端返回的 `unpaid`；13 个 loader 拉失败显示成「真没有」→ 统一加「没拉出来（不是没有）· 重试」；13 个金额输入框补金额快键；切 tab 无序号 → 旧响应覆盖新数据，加 `_tabSeq` 令牌；离线补发后表单不清 → 抽公用 reset；日期输入统一校验（不再静默落今天）；列表金额加 ¥、时间戳格式化、「未结清/已逾期」与「摊销/预提利息」术语统一；列表分页改成逐条追加不再整份塞 data。
+    - **H 组 · 运维**：**Docker 镜像必崩**——`Dockerfile` 只 COPY 了 `index.js` 和 `schema.sql`，漏了顶层 `import './perm-rules.mjs'` 和动态 `import('./guide.js')`，容器启动即 `ERR_MODULE_NOT_FOUND`（exe 走 esbuild bundle 所以 exe 没事）→ 补 COPY + release 加 docker run 冒烟（/version、/help、/guide 都得 200）。**39 件回归一件都没碰过 cron**——而线上每天的自动记账、备份、推送全靠 `scheduled()` → 新增 `scripts/test-cron.mjs`（进程内 import worker + node:sqlite 造 D1，4 条 cron 各跑一遍，70 项断言：心跳、自检计数、备份产出与分片、账行数不变、错账数不变、第 2 本账也被跑到、假微信配置也不崩）。`error_log` 只写不读 → scheduled 里每天检查近 24h 的 5xx，有就推微信给老板；CI 部署后把 `/error-log?days=1` 贴进 `$GITHUB_STEP_SUMMARY`。慢日志 27 路径白名单外的接口再慢也不记 → 全路径记。`/error-log` 只查当前账套 → 改成默认遍历所有账本。**没有迁移机制**——老库新增的列只有 16 张表会被补上、删列永远查不出来 → 加 `backend/migrations/` + `migrations` 表、check.mjs 改成双向 diff、deploy 加跑远程 D1 迁移；恢复旧备份不检查版本 → 加版本闸门（更新的包直接拒）。CI 的 action 全钉 40 位 SHA、`npm audit` 从「永不拦」改成真拦、加 `.nvmrc` 与 `engines`。
+    - **I 组 · 性能**：鉴权每请求 3–4 条 SQL 且 `getKey` 每次读库 → 加 15 秒缓存；`accountBalances` 一次冷启动跑 6 遍 → 加 30 秒缓存（写操作后自动失效）。
+    - **验证**：`run-all.mjs` **40 件全过 0 失败（118s）**（新增第 4 本账 + 定时任务 2 件）；`test-cron.mjs` **70 项全过**；`check.mjs` 全绿（434 路由 / 60 表 / 693 SQL / 265 调用 / 798 绑定）；`check-manifest` 离线 7 + 联网 33 = 40 件三处一致；冒烟 239 个 GET 无 5xx。
+    - ⚠️ 动了前端（金额快键、日期快键、列表分页、错误态、文案）→ 小程序要重新上传发布。
 
 346. ✅ **测试与回归防线、可观测性、口径一致性——12 条收尾优化**：用户说「还有哪些优化空间，给出具体方案」，我核出 12 条再分四组做。这一轮的题眼是**「改错的时候能更早发现」**——以前 24 个写接口从来没被测试脚本碰过、36 个测试脚本各复制 40 行样板、三处 CI 清单各写各的会漂移、本月利润有 5 处实现怕哪天口径又分叉、日志降级在并发下会串台。
     - **测试与回归防线**：①新增 `scripts/test-write-coverage.mjs`——把 check.mjs 点名「24 个写接口从没被脚本调用过」的全补齐，先造种子（订单/应付/借支/预付/账期/对账单/改单申请/外协/银行流水）再逐个打，61 项全过，`[5.6]` 从此变成「195 个写接口里 195 个脚本跑过、0 个没有」；②抽 `scripts/_harness.mjs` 测试样板（arg/BASE/KEY/TAG + ok/no/yes/eq/near + call/post/wait + finish，新脚本一条 import 搞定，不用再复制 40 行）；③CI 清单单一源——`run-all.mjs` 导出 `OFFLINE/ONLINE/CASES`，新增 `check-manifest.mjs` 断言 run-all、deploy.yml、release.yml 三处一致；④新增 `test-profit-consistency.mjs`——塞「开单+收 1000、支出 300」后断言本月利润 5 处（首页/利润对比/报表/月结/KPI）都涨 700 且彼此相等。
@@ -1961,6 +1974,54 @@ node scripts/build-exe.mjs --out dist
    - **应收列表空态分三种说法**：按分类筛出来是空 → 「这一类没有未结的单（上面再点一下分类就取消筛选）」；搜不到 → 「没搜到「xxx」（换个词，或点上面的搜索框清掉）」；真没有 → 原来的「没有未结清的应收」。以前一律说「没有未结清的应收」，用户以为自己记漏了。
    - **验证**（干净库 `/tmp/d1h3` + dev 9231，三本账都灌 schema，按 CI 顺序）：`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）→ `smoke` 236 GET 无 5xx → `test-modules` → `smoke-write`（主流程 + 写路由 + 备份恢复闭环 + 恢复模块默认 + 自检 10 类全 0）→ `test-crossmonth` 16 / `test-apcat` 31 / `test-import-xlsx` 32 / `test-onboarding` / `test-safety` 48 / `test-demo` 60 / `test-archive` 41 / `test-book` 40 / `test-super` 36 / `test-staff` **58** / `test-arcat` **36** / `test-pack` 65 / `test-tax` 52，离线 `test-batch` / `test-key-queue` / `test-firstscreen` / `test-list` 全绿。
    - ⚠️ 动了前端（录单分类清空、应收空态文案）→ 小程序要重新上传发布。
+
+## 本机运维命令与测试脚本（改代码、出问题先看这里）
+
+这一节说清楚「装在自己电脑上怎么查、怎么跑回归」。**所有命令都在仓库根目录跑**，要 **Node 24**。
+CI 里用的两个本地端口先记住：**8791 = `wrangler dev` 起的线上同款后端**，**8792 = `node server/main.mjs` 起的本机版**（`--data` 指到临时目录，不碰你的正式数据）。
+
+### 一键诊断与运维 CLI
+
+- **`node scripts/diag.mjs`**：一键体检。查版本号与 commit、比对表结构有没有缺列（拿 `backend/schema-baseline.json` 当基准）、跑一遍后端自检（含 cron 心跳）、翻最近报错日志、列出慢接口、统计各表数据量。**装完先跑它、出问题先跑它**，比人工一条条查快得多。
+- **`node scripts/cli.mjs <命令>`**：本机版的运维命令行，子命令有 `status`（当前状态）、`backup`（导一份备份）、`cron`（手动跑一次定时任务）、`clean`（清理日志类旧数据）、`diag`（同 `diag.mjs`）、`reset`（**清空重来，需显式加 `--yes` 才会真删**）。默认打 `http://127.0.0.1:8787`（本机版默认端口），用 `--base` 或 `--port` 改。
+
+```bash
+node server/main.mjs --port 8792 --data /tmp/fa-local --no-open --no-cron &   # 本机版
+node scripts/cli.mjs status --base http://127.0.0.1:8792
+node scripts/diag.mjs --base http://127.0.0.1:8792
+```
+
+### 回归测试：一条命令跑完
+
+- **`node scripts/run-all.mjs`**：一把跑完全套回归（离线件照跑，联网件逐个打后端，失败不中断，最后汇总「失败 N 项」并以非 0 退出）。用法：`node scripts/run-all.mjs --base http://127.0.0.1:8791 --key 8888`。
+- **它导出的 `OFFLINE` / `ONLINE` / `CASES` 清单是「全套回归有哪些测试」的单一事实源**。新增一个测试脚本，先在 `run-all.mjs` 的 `OFFLINE`（不依赖后端、自包含）或 `ONLINE`（依赖 `--base` 那个 wrangler 服务）里登记，再在 `.github/workflows/deploy.yml` 补一步。
+- **`node scripts/check-manifest.mjs`**：清单一致性检查——拿 `run-all.mjs` 的清单去比对 `deploy.yml` / `release.yml` 里写死的步骤，**少一个、多一个都会红**（它已经挂在两个 workflow 的 `check.mjs` 之后）。所以别只在 workflow 里加步骤而忘了在 `run-all.mjs` 登记。
+
+### 写测试脚本：别再抄样板
+
+- **`scripts/_harness.mjs`**：测试脚本的公共脚手架。`harness({tag})` 返回 `BASE`（默认 `http://127.0.0.1:8791`）、`KEY`（默认 8888）、`TODAY/MONTH/YEAR/TAG` 这几个常量，以及一整套断言：`ok` / `no` / `yes` / `eq` / `near`（允许 1 分以内的浮点差）/ `r2` / `n0` / `call` / `get` / `post` / `wait` / `finish`。新写 `test-*.mjs` 一律 `import { harness } from './_harness.mjs'`，别再复制那 40 行 arg/BASE/KEY/TAG 样板。
+
+```js
+import { harness } from './_harness.mjs'
+const { BASE, eq, get, post, finish } = harness({ tag: 'demo' })
+```
+
+### 这几个专项测试各管什么
+
+- **`scripts/test-book4.mjs`**：第 4 本账演练——自己起一个本机版（9 本账），验第 4 本不会被写死成三本（`/books-all` 列出 9 本、`X-Book: 4` 能写进第 4 本）。
+- **`scripts/test-list.mjs`**：列表分页的离线回归（不联网也能跑）。
+- **`scripts/test-profit-consistency.mjs`**：本月利润在 5 处实现（首页 / 利润对比 / 报表 / 月结 / 经营体检）必须给出**同一个数**；改任何一处的利润算法前先保证它还绿。
+- **`scripts/test-write-coverage.mjs`**：把 `check.mjs` [5.6] 点名的「还没被任何脚本调用过的写接口」补上覆盖（先造种子再打目标接口，断言没 500 且 `ok:true`）。
+
+### 在本机复现 CI（两个端口）
+
+```bash
+# 8791：wrangler dev，线上同款后端（另开一个终端）
+cd backend && npx wrangler dev --port 8791
+
+# 8792：本机版（Node 直跑 server/main.mjs），CI 里也是这么冒烟的
+node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
+```
 
 <!-- API-LIST:BEGIN -->
 

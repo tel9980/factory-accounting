@@ -22,6 +22,9 @@ export const OFFLINE = [
   // 这个不是「离线」——它自己起一个本机版服务（9 本账）验第 4 本账不写死三本；
   // 放这里只是因为它不依赖 --base 那个 wrangler 服务、自包含。
   'test-book4',
+  // 定时任务（worker 的 scheduled()）离线回归：进程内 import backend/index.js，
+  // 用 node:sqlite 造 D1 兼容环境，把 4 条 cron 各跑一遍。自包含、不联网、不依赖 --base。
+  'test-cron',
 ]
 
 export const ONLINE = [

@@ -286,6 +286,19 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
         bad47++
       }
     }
+    // 反向对比：基线里有、现在 schema.sql 里没有的列 = 这列被删了。
+    // 以前只算「新增」，删列永远发现不了 —— 老库还留着那列，新库没有，
+    // 于是同一份代码在两台机器上表现不一样（新库一查就 500，老库正常）。
+    // 现在双向都查：删列要么补回 schema.sql，要么确认「老库这列留着也无害」后跑 --update-baseline。
+    for (const [t, oldCols] of Object.entries(base)) {
+      const now = declared.get(t)
+      if (!now) continue // 整张表删了：另说，不在列级检查范围
+      const gone = (oldCols || []).filter((c) => !now.has(c))
+      if (gone.length) {
+        fail(`表 ${t} 的列被删了但基线里还在：${gone.join(', ')}（老库还留着这几列，新库没有 → 同一份代码两台机器表现不一样）。要么把列加回 schema.sql，要么确认无害后跑 node scripts/check.mjs --update-baseline`)
+        bad47++
+      }
+    }
   }
   say(bad47 === 0, `老库补列清单对得上（${extras.size} 张表有补列规则）`, `老库补列有 ${bad47} 处问题（见上）`)
 }

@@ -12,8 +12,8 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 652 条 SQL 在新库上跑不跑得通、
-前端 258 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 693 条 SQL 在新库上跑不跑得通、
+前端 265 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
 
@@ -44,7 +44,7 @@ npx wrangler d1 execute factory-db2 --remote --file=schema.sql   # 建了 DB2 �
 npx wrangler d1 execute factory-db3 --remote --file=schema.sql   # 建了 DB3 才要
 ```
 
-**一个 `schema.sql` 就够**：它会建出全部 59 张表、索引和 `month` 列的触发器，
+**一个 `schema.sql` 就够**：它会建出全部 60 张表、索引和 `month` 列的触发器，
 不用再手工 ALTER、也不用单独跑别的脚本。重复执行是安全的（都是 `IF NOT EXISTS`）。
 
 > 历史坑：2026-11 之前 `schema.sql` 是「线上库更新、文件没跟上」的状态，
@@ -245,7 +245,7 @@ npx wrangler tail --format pretty      # 带表格线，人看着舒服些
 - **备份在哪**：`backups` 表，每天 cron 自动存一份，保留最近 30 份；`GET /backup` 可当场导出一份 JSON。
 - **备份了什么**：46 张表（账目、客户、材料、工钱、外协、返工、待摊、银行流水…），标 `version: 3`。
   单份备份超过 900KB 会自动切成几片存进 `backup_parts`（D1 单行上限 2MB），取回时自动拼回来，用起来感觉不到。
-  另有 11 张表**按设计不进备份**（附件照片、月度报表 xlsx、员工口令、试错计数、运行日志…），`/backup-verify` 会把它们和原因一起列出来。
+  另有 14 张表**按设计不进备份**（附件照片、月度报表 xlsx、员工口令、试错计数、运行日志…），`/backup-verify` 会把它们和原因一起列出来。
 - **什么不进备份、为什么**：图片（`attachments`）、月报 xlsx（`month_report`）、员工 PIN（`staff_users`）、
   审计流水（`audit_log`）、报错与慢接口日志、备份自己（`backups`）、去重标记（`op_dedupe`）、
   小程序试用额度（`wx_users`）。`GET /backup-verify` 会把这张清单**原样列给用户看**。
@@ -347,7 +347,7 @@ node scripts/build-exe.mjs --out dist
 ```
 
 脚本会 esbuild 打包 → 生成 SEA blob（`schema.sql` 作为资源塞进去）→ postject 注入 →
-**自己跑一遍自测**（`/version` 版本号、落地页、建库 59 张表），不通就报错退出。
+**自己跑一遍自测**（`/version` 版本号、落地页、建库 60 张表），不通就报错退出。
 macOS 上会自己处理代码签名（先去掉签名，注入完再 ad-hoc 签）。
 
 ### 4.4 本机版的注意事项
@@ -1287,3 +1287,66 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **`ref_type NOT IN` 的排除名单只有两种标准**：`('transfer','tax_ar','tax_ap')`（排除内部转账和代垫税）和 `('loan','transfer')`（借支口径）。`check.mjs` [4.10] 会拦第三种名单。**改排除项要三处一起想**：语义上到底排谁、跟其它 66 处一不一致、check.mjs 会不会红。
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
+
+### 4.37 第九轮的几处硬规矩（改权限 / 改多表写入 / 动 cron / 改镜像前先读）
+
+这一轮 60 多条改动里有几个「不改就会出事」的点，记在这里：
+
+- **写接口有多张表要改，就用一次 `db.batch`**。D1 的 `batch()` 是事务语义（`server/d1.mjs` 本机版也是 `BEGIN`+逐条+`COMMIT`，失败 `ROLLBACK`），一条 batch 里的语句顺序执行，所以第二条可以用 `(SELECT MAX(id) FROM t)` 拿到刚插的那条。**手工补偿（catch 里 DELETE 主表）不是事务**——进程在中途挂掉就留半截数据（`/advances`、`/loans`、`/bank-import` 以前就是这样，`/bank-import` 失败后已插的流水留在库里，重试一次就是双倍收款）。**batch 一次最多 100 条语句、100 个参数**（`D1_MAX_STMTS` / `D1_MAX_PARAMS`），自己拼的批留点余量（≤90）。
+- **batch 里不要用 `last_insert_rowid()`**：它依赖语句顺序，D1 不保证。**用 `(SELECT MAX(id) FROM t)`**（或第一条的 `meta.last_row_id`）。
+- **金额合计一律按分累加**（`centsSum(arr, get)`）。浮点直接累加几百上千行会出 0.1 级尾差，表现为「工资单和银行流水差几分」「备份里的合计对不上」。
+- **乐观锁的 UPDATE 必须自带闸门**：`AND COALESCE(rev,0)=?`（改单）、`AND COALESCE(written_off,0)+? <= price - paid + 0.005`（核销）。**前置比一次 rev 不算闸门**（TOCTOU，两个请求都读到同一个 rev 就会丢更新）。改完记得判 `changesOf(...)===0` → 409。
+- **员工可见性有两个函数**：`selfOnly(c)`（只看自己的单）和 `scopeOwn(c)`（按 `party_staff` 看分配给自己的客户）。**列表接口套了不代表详情接口套了**——`/orders/:id/detail`、`/payables/:id/detail`、`/orders/:id/processes`、`/attachments`、`/attachment/:id` 以前一个都没套，员工猜个 id 就能翻别人的单据和照片。现在统一走 `orderVisible/payableVisible/attRefVisible`。**新增任何按 id 取单据的接口，都要过这两个函数**。
+- **`await c.req.json()` 必须带 `.catch(() => ({}))`**：body 非法时 Hono 会抛 → 500 而不是 400。现在 136 处全带了。**`JSON.parse` 也要 try**（老库里存过坏数据，一行坏数据曾让整个回收站页 500）。
+- **查询失败不能当成「没有事」**：`/cash-forecast`、`/next-step` 以前把异常吞成 0，于是「应收查询挂了」显示成「一切正常，没有待办」。现在这两处返回 `failed:true`，前端会显示「没算出来，点一下重试」。
+- **`scheduled()` 必须有测试**。线上每天的自动记账、备份、推送全靠它，而它以前**一次都没被测过**。`scripts/test-cron.mjs` 在进程内 import worker + 用 `node:sqlite` 造 D1，4 条 cron 各跑一遍（70 项断言）。**改 cron 分支或它调用的函数，先跑这个测试**。它必须在有 `npm ci`（backend 依赖 hono）的 job 里跑，不能放没有依赖的 check job。
+- **`Dockerfile` 要 COPY 全 `backend/*.js` 依赖**：顶层 `import './perm-rules.mjs'` 和动态 `import('./guide.js')` 都会让容器启动即 `ERR_MODULE_NOT_FOUND`。exe 走 esbuild bundle 所以 exe 正常——**两条打包路径不一致，CI 从不 `docker run` 冒烟**。现在 release.yml 的 image job 后有一步 docker run 冒烟（/version、/help、/guide 都得 200）。
+- **老库补列只覆盖 16 张表**（`EXTRA_COLS`），新加列要么写进 `EXTRA_COLS`、要么走 `backend/migrations/*.sql`。**远程 D1 现在会跑迁移**（deploy.yml 里 `d1 execute --remote --file=migrations/*.sql`），但迁移文件要**幂等**（`IF NOT EXISTS`），因为失败只 warning 不拦。`migrations` 表记的是「这台库跑过哪些迁移」，不在备份里。
+- **恢复备份会检查版本**：`data.version > 3` 直接拒（更新的包恢复不了，会静默丢字段）。`buildBackup` 写的 `version:3`，加字段时记得同步。
+- **`check.mjs` 的表结构漂移检测是双向的**：基线里有、现在 `schema.sql` 没有的列 = 删列，会红。以前只算新增，删列永远发现不了。
+- **CI 的 action 全部钉了 40 位 SHA**，`.nvmrc` 与 `backend/package.json` 的 `engines` 声明 Node ≥ 22.5（自检用 `node:sqlite`，Node 20 没有这个模块）。`npm audit --audit-level=high --omit=dev` 真会拦（审计接口本身不可用时才跳过）。
+
+---
+
+## 附录：本机运维命令与测试脚本（出问题时先看这里）
+
+装完先跑一次诊断，改完代码跑一次全套回归——这两件事都有现成命令，不用自己拼。
+**所有命令都在仓库根目录跑**，要 **Node 24**。
+
+### 一键诊断与运维 CLI
+
+- **`node scripts/diag.mjs`**：一键体检。查版本号与 commit、比对表结构有没有缺列（拿 `backend/schema-baseline.json` 当基准）、跑一遍后端自检（含 cron 心跳）、翻最近报错日志、列出慢接口、统计各表数据量。**装完先跑它、出问题先跑它**。
+- **`node scripts/cli.mjs <命令>`**：本机版的运维命令行，子命令有 `status`（当前状态）、`backup`（导一份备份）、`cron`（手动跑一次定时任务）、`clean`（清理日志类旧数据）、`diag`（同 `diag.mjs`）、`reset`（**清空重来，需显式加 `--yes` 才会真删**）。默认打 `http://127.0.0.1:8787`（本机版默认端口）。
+
+```bash
+node server/main.mjs --port 8792 --data /tmp/fa-local --no-open --no-cron &   # 本机版
+node scripts/cli.mjs status --base http://127.0.0.1:8792
+node scripts/diag.mjs --base http://127.0.0.1:8792
+```
+
+### 回归测试：一条命令跑完
+
+- **`node scripts/run-all.mjs`**：一把跑完全套回归（离线件照跑，联网件逐个打后端，失败不中断，最后汇总「失败 N 项」并以非 0 退出）。用法：`node scripts/run-all.mjs --base http://127.0.0.1:8791 --key 8888`。
+- **它导出的 `OFFLINE` / `ONLINE` / `CASES` 清单是「全套回归有哪些测试」的单一事实源**。新增测试脚本先在这里登记（自包含、不依赖 `--base` 的放 `OFFLINE`，依赖 wrangler dev 的放 `ONLINE`），再在 `.github/workflows/deploy.yml` 补一步。
+- **`node scripts/check-manifest.mjs`**：清单一致性检查——拿 `run-all.mjs` 的清单比对 `deploy.yml` / `release.yml` 里写死的步骤，少一个、多一个都会红（已挂在两个 workflow 的 `check.mjs` 之后）。
+
+### 写测试脚本：别再抄样板
+
+- **`scripts/_harness.mjs`**：测试脚本的公共脚手架。`harness({tag})` 返回 `BASE`（默认 `http://127.0.0.1:8791`）、`KEY`（默认 8888）、`TODAY/MONTH/YEAR/TAG`，以及一整套断言：`ok` / `no` / `yes` / `eq` / `near`（允许 1 分以内浮点差）/ `r2` / `n0` / `call` / `get` / `post` / `wait` / `finish`。新写 `test-*.mjs` 一律 `import { harness } from './_harness.mjs'`。
+
+### 这几个专项测试各管什么
+
+- **`scripts/test-book4.mjs`**：第 4 本账演练——自己起本机版（9 本账），验第 4 本不会被写死成三本。
+- **`scripts/test-list.mjs`**：列表分页的离线回归。
+- **`scripts/test-profit-consistency.mjs`**：本月利润在 5 处实现必须给出同一个数（首页 / 利润对比 / 报表 / 月结 / 经营体检）。
+- **`scripts/test-write-coverage.mjs`**：补齐 `check.mjs` [5.6] 点名的「还没被脚本调用过的写接口」的覆盖。
+
+### 在本机复现 CI（两个端口）
+
+```bash
+# 8791：wrangler dev，线上同款后端
+cd backend && npx wrangler dev --port 8791
+
+# 8792：本机版（Node 直跑 server/main.mjs），CI 里也是这么冒烟的
+node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
+```

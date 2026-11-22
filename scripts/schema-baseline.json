@@ -72,6 +72,10 @@
     "key",
     "value"
   ],
+  "migrations": [
+    "applied_at",
+    "name"
+  ],
   "backups": [
     "content",
     "created_at",

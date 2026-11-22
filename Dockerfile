@@ -16,7 +16,7 @@ WORKDIR /app
 COPY backend/package.json backend/package-lock.json ./backend/
 RUN cd backend && npm ci --omit=dev && npm cache clean --force
 
-COPY backend/index.js backend/schema.sql ./backend/
+COPY backend/index.js backend/schema.sql backend/perm-rules.mjs backend/guide.js ./backend/
 COPY server ./server
 
 ENV PORT=8787 \
@@ -27,7 +27,7 @@ RUN mkdir -p /data
 VOLUME ["/data"]
 EXPOSE 8787
 
-# 起来后 20 秒内能打通 /version 才算健康（首次启动要建 57 张表，别设太短）
+# 起来后 20 秒内能打通 /version 才算健康（首次启动要建 59 张表，别设太短）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/version').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 

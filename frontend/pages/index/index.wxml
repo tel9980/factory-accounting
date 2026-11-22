@@ -1,4 +1,5 @@
 <view class="page {{big?'big':''}}">
+<!-- 术语口径：应收/应付只说「未结清」和「已逾期」；成本统一说「摊销」「设备摊销」「预提利息」。 -->
   <view class="bookbar" bindtap="setTab" data-t="contact">当前账套：{{book_name}}（点此切换 / 改名）</view>
   <view class="offbar demo" wx:if="{{demo}}" bindtap="exitDemo">👀 演示账套（示例数据，随便点都动不到你的账）· 点这里换成我自己的口令</view>
   <view class="offbar sup" wx:if="{{super}}">👑 超级管理员：哪一本账都能管 · 点这里换账套</view>
@@ -207,7 +208,7 @@
     <view class="aline bad" wx:if="{{dash_err}}" bindtap="loadDashboard">{{dash_err}}（点这里重试）</view>
     <view class="aline bad" wx:if="{{degraded}}" bindtap="loadDashboard">首页有 {{degraded}} 块没算出来（{{degraded_text}}），这几个数字可能偏小，点这里重试；一直这样就看「错误日志」</view>
     <view class="monthline">本月收 {{month_income}} · 付 {{month_outcome}}<text wx:if="{{role!='staff'}}">　|　单子算（含没收回来的）赚 {{profit_biz}}</text></view>
-    <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 折旧 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
+    <view class="monthline" wx:if="{{role!='staff' && (month_amort>0 || month_accrue_int>0)}}">成本已含：摊销 {{month_amort}}<text wx:if="{{month_dep>0}}"> · 设备摊销 {{month_dep}}</text><text wx:if="{{month_accrue_int>0}}"> · 预提利息 {{month_accrue_int}}</text>（本月成本合计 {{month_expense_cash}}）</view>
     <view class="card" wx:if="{{ns || (mw && mw.count>0)}}">
       <view class="card-h">今天的活<text class="card-n" wx:if="{{ns.rest>0}}" bindtap="toggleNextAll">{{ns_open ? '收起' : '还有 ' + ns.rest + ' 件 ›'}}</text></view>
       <view class="mwrow pri" wx:if="{{ns && ns.item}}" bindtap="goNext">
@@ -455,6 +456,7 @@
       <view class="tip">客户先给钱、活还没做 → 记预收款，开单后可一键抵扣</view>
       <input class="inp" placeholder="客户名" value="{{a_party}}" bindinput="onAParty"/>
       <input class="inp" placeholder="预收金额(元)" type="digit" value="{{a_amount}}" bindinput="onAAmount"/>
+      <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="a_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{a_remark}}" bindinput="onARemark"/>
       <button class="btn" size="mini" bindtap="addAdvance">记一笔预收款</button>
       <view class="chips" wx:if="{{adv_in.length}}">
@@ -466,7 +468,13 @@
       <view class="tip">客户一次打款，自动抵多张单（先老后新）</view>
       <input class="inp" placeholder="客户名" value="{{rb_customer}}" bindinput="onRbCustomer"/>
       <input class="inp" placeholder="收到金额(元)" type="digit" value="{{rb_amount}}" bindinput="onRbAmount"/>
-      <input class="inp" placeholder="收款日期(可选，如07-05)" value="{{rb_date}}" bindinput="onRbDate"/>
+      <input class="inp" placeholder="收款日期(可选，如 2026-07-05 或 07-05)" value="{{rb_date}}" bindinput="onRbDate"/>
+      <view class="chips">
+        <text class="chip-label">日期快键：</text>
+        <text class="chip" data-f="rb_date" data-n="0" bindtap="quickDate">今天</text>
+        <text class="chip" data-f="rb_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="rb_date" data-n="2" bindtap="quickDate">前天</text>
+      </view>
       <button class="btn" size="mini" bindtap="receiveBatch">批量核销收款</button>
       <button class="btn gray" size="mini" bindtap="dunning">生成催款清单</button>
       <view class="chips" wx:if="{{contacts_ar.length}}">
@@ -477,7 +485,7 @@
     </block>
     <view class="sumstrip">
       <view class="su"><view class="sun">{{ar_sum.open_amount || 0}}</view><view class="sul">未收合计 {{ar_sum.open_count || 0}} 单</view></view>
-      <view class="su"><view class="sun red">{{ar_sum.overdue_amount || 0}}</view><view class="sul">逾期30天+ {{ar_sum.overdue_count || 0}} 单</view></view>
+      <view class="su"><view class="sun red">{{ar_sum.overdue_amount || 0}}</view><view class="sul">已逾期30天+ {{ar_sum.overdue_count || 0}} 单</view></view>
       <view class="su"><view class="sun org">{{ar_sum.due_amount || 0}}</view><view class="sul">7天内到期 {{ar_sum.due_count || 0}} 单</view></view>
       <view class="su"><view class="sun green">{{ar_sum.month_settled || 0}}</view><view class="sul">本月已收 · 新单 {{ar_sum.month_new || 0}}</view></view>
       <view class="frow">
@@ -664,7 +672,7 @@
       </view>
 
       <view class="prev" wx:if="{{due && due.type=='ar'}}">
-        <view class="prev-h">到期表　未结 {{due.count}} 张 · 合计 {{due.total}} 元</view>
+        <view class="prev-h">到期表　未结清 {{due.count}} 张 · 合计 {{due.total}} 元</view>
         <view class="prev-row red"><text class="prev-t">已逾期 {{due.overdue_total}} 元</text><text class="prev-n">7 天内到期 {{due.soon_total}} 元</text><text>没到期日 {{due.no_due_total}} 元</text></view>
         <view class="prev-row" wx:for="{{due.rows}}" wx:key="id">
           <text class="prev-t">{{item.party}}  {{item.left}}</text>
@@ -697,12 +705,12 @@
     <view class="list" wx:if="{{ar_view=='party'}}">
       <view class="grp" wx:for="{{ar_groups}}" wx:key="name">
         <view class="grp-h" bindtap="toggleGroupAr" data-n="{{item.name}}">
-          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{ar_open==item.name?'收起':'欠'+item.unpaid}}</text></view>
-          <view class="row2">{{item.cnt}} 单 · 欠款合计 {{item.unpaid}} · 最久 {{item.oldest_days}} 天{{item.overdue>0?' · 逾期'+item.overdue+'单':''}}{{item.due_soon>0?' · 7天内到期'+item.due_soon+'单':''}}</view>
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{ar_open==item.name?'收起':'欠 ¥'+item.unpaid}}</text></view>
+          <view class="row2">{{item.cnt}} 单 · 欠款合计 ¥{{item.unpaid}} · 最久 {{item.oldest_days}} 天{{item.overdue>0?' · 已逾期'+item.overdue+'单':''}}{{item.due_soon>0?' · 7天内到期'+item.due_soon+'单':''}}</view>
         </view>
         <view class="grp-b" wx:if="{{ar_open==item.name}}">
           <view class="gitem" wx:for="{{item.items}}" wx:for-item="it" wx:key="id">
-            <view class="row1"><text class="nm">{{it.title}}</text><text class="amt">欠{{it.unpaid}}</text></view>
+            <view class="row1"><text class="nm">{{it.title}}</text><text class="amt">欠 ¥{{it.unpaid}}</text></view>
             <view class="row2">总{{it.total}} · 已收{{it.paid}}{{it.written_off>0?' · 核销'+it.written_off:''}} · 已欠{{it.days}}天{{it.due_short?' · 约定'+it.due_short:''}}{{it.operator?' · '+it.operator:''}}</view>
             <view class="btns">
               <button size="mini" bindtap="receiveAll" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">收清</button>
@@ -723,13 +731,13 @@
           </view>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ar_groups.length}}">按{{ar_filter=='overdue'?'逾期':'未结'}}没有客户欠款</view>
+      <view class="empty" wx:if="{{!ar_groups.length}}">按{{ar_filter=='overdue'?'已逾期':'未结清'}}没有客户欠款</view>
     </view>
     <view class="list" wx:if="{{ar_view=='order'}}">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
-        <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">总{{item.price}}{{item.ar_cat ? ' · ' + item.ar_cat : ''}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
-        <view class="row2" wx:if="{{item.cost>0}}">成本 {{item.cost}} · 毛利 {{item.gross}}（{{item.gross_pct}}%）</view>
+        <view class="row1"><text class="nm">{{item.customer}} · {{item.item_name}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
+        <view class="row2">总 ¥{{item.price}}{{item.ar_cat ? ' · ' + item.ar_cat : ''}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已收{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row2" wx:if="{{item.cost>0}}">成本 ¥{{item.cost}} · 毛利 ¥{{item.gross}}（{{item.gross_pct}}%）</view>
         <view class="row2">{{item.status==2?'已交付':item.status==1?'加工中':'待加工'}}{{item.progress?' · 工序:'+item.progress:''}}{{item.settled?' · 已结清':''}}</view>
         <!-- 一行只留最常用的三个：收款 / 收清 / 更多。以前一行 15 个 mini 按钮，
              手机上每个点击区约 28px（短于手指），「删」还紧挨着「月结」。其余动作收进「更多」的菜单里。 -->
@@ -740,7 +748,7 @@
         </view>
       </view>
       <view class="empty" wx:if="{{ar_err}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadAr">　重试</text></view>
-      <view class="empty" wx:elif="{{!ar_list.length}}">{{ar_cat ? '这一类没有' + (ar_filter=='closed'?'已结清的':'未结的') + '单（上面再点一下分类就取消筛选）' : (ar_kw ? '没搜到「' + ar_kw + '」（换个词，或点上面的搜索框清掉）' : (ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'))}}</view>
+      <view class="empty" wx:elif="{{!ar_list.length}}">{{ar_cat ? '这一类没有' + (ar_filter=='closed'?'已结清的':'未结清的') + '单（上面再点一下分类就取消筛选）' : (ar_kw ? '没搜到「' + ar_kw + '」（换个词，或点上面的搜索框清掉）' : (ar_filter=='closed'?'没有已结清的应收':'没有未结清的应收'))}}</view>
       <view class="loadmore" wx:if="{{ar_more}}"><button class="btn" size="mini" disabled="{{ar_busy}}" bindtap="loadMoreTap">{{ar_busy ? '正在加载…' : '加载更早的'}}</button></view>
       <view class="tip" wx:if="{{ar_more}}">只显示了最近一部分，上拉或点按钮继续加载</view>
     </view>
@@ -797,6 +805,7 @@
       <view class="tip">先付了定金、货还没到 → 记预付款，到货后可一键抵扣</view>
       <input class="inp" placeholder="供应商名" value="{{a_party}}" bindinput="onAParty"/>
       <input class="inp" placeholder="预付金额(元)" type="digit" value="{{a_amount}}" bindinput="onAAmount"/>
+      <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="a_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="备注(可选)" value="{{a_remark}}" bindinput="onARemark"/>
       <button class="btn" size="mini" bindtap="addAdvancePre">记一笔预付款</button>
       <view class="chips" wx:if="{{adv_out.length}}">
@@ -872,7 +881,7 @@
       </view>
 
       <view class="prev" wx:if="{{due && due.type=='ap'}}">
-        <view class="prev-h">到期表　未结 {{due.count}} 张 · 合计 {{due.total}} 元</view>
+        <view class="prev-h">到期表　未结清 {{due.count}} 张 · 合计 {{due.total}} 元</view>
         <view class="prev-row red"><text class="prev-t">已逾期 {{due.overdue_total}} 元</text><text class="prev-n">7 天内到期 {{due.soon_total}} 元</text><text>没到期日 {{due.no_due_total}} 元</text></view>
         <view class="prev-row" wx:for="{{due.rows}}" wx:key="id">
           <text class="prev-t">{{item.party}}  {{item.left}}</text>
@@ -906,11 +915,11 @@
       <view class="grp" wx:for="{{ap_groups}}" wx:key="name">
         <view class="grp-h" bindtap="toggleGroupAp" data-n="{{item.name}}">
           <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">{{ap_open==item.name?'收起':'欠'+item.unpaid}}</text></view>
-          <view class="row2">{{item.cnt}} 笔 · 欠款合计 {{item.unpaid}} · 最久 {{item.oldest_days}} 天{{item.overdue>0?' · 超30天'+item.overdue+'笔':''}}{{item.due_soon>0?' · 7天内要付'+item.due_soon+'笔':''}}</view>
+          <view class="row2">{{item.cnt}} 笔 · 欠款合计 ¥{{item.unpaid}} · 最久 {{item.oldest_days}} 天{{item.overdue>0?' · 超30天'+item.overdue+'笔':''}}{{item.due_soon>0?' · 7天内要付'+item.due_soon+'笔':''}}</view>
         </view>
         <view class="grp-b" wx:if="{{ap_open==item.name}}">
           <view class="gitem" wx:for="{{item.items}}" wx:for-item="it" wx:key="id">
-            <view class="row1"><text class="nm">{{it.title}}</text><text class="amt">欠{{it.unpaid}}</text></view>
+            <view class="row1"><text class="nm">{{it.title}}</text><text class="amt">欠 ¥{{it.unpaid}}</text></view>
             <view class="row2">总{{it.total}} · 已付{{it.paid}}{{it.written_off>0?' · 核销'+it.written_off:''}} · 已欠{{it.days}}天{{it.due_short?' · 约定'+it.due_short:''}}</view>
             <view class="btns">
               <button size="mini" bindtap="payAll" data-id="{{it.id}}" data-unpaid="{{it.unpaid}}">付清</button>
@@ -929,12 +938,12 @@
           </view>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ap_groups.length}}">按{{ap_filter=='overdue'?'超30天':'未结'}}没有供应商欠款</view>
+      <view class="empty" wx:if="{{!ap_groups.length}}">按{{ap_filter=='overdue'?'已逾期':'未结清'}}没有供应商欠款</view>
     </view>
     <view class="list" wx:if="{{ap_view=='order'}}">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
-        <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠{{item.unpaid}}</text></view>
-        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总{{item.amount}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
+        <view class="row1"><text class="nm">{{item.supplier}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
+        <view class="row2">{{item.category ? '【' + item.category + '】' : ''}}总 ¥{{item.amount}}{{item.tax_kind ? '(' + item.tax_kind + (item.tax_rate ? item.tax_rate + '%':'') + '，税' + item.tax_amt + ')' : ''}} · 已付{{item.paid}}{{item.written_off>0?' · 核销'+item.written_off:''}} · 已欠{{item.days}}天{{item.due_short?' · 约定'+item.due_short:''}}{{item.remark ? ' · ' + item.remark : ''}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns btns2">
           <button size="mini" bindtap="payPayable" data-id="{{item.id}}">付款</button>
           <button size="mini" bindtap="payAll" data-id="{{item.id}}" data-unpaid="{{item.unpaid}}" wx:if="{{!item.settled}}">付清</button>
@@ -983,6 +992,7 @@
       <view class="tip">员工借支 / 报销（借出先记账不冲成本，报销时按分类记支出，冲借支不动现金）<text wx:if="{{loan_open}}"> · 未清 ¥{{loan_open}}</text></view>
       <input class="inp" placeholder="员工姓名" value="{{l_staff}}" bindinput="onLStaff"/>
       <input class="inp" placeholder="借出金额(元)" type="digit" value="{{l_amount}}" bindinput="onLAmount"/>
+      <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="l_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="用途备注(可选)" value="{{l_remark}}" bindinput="onLRemark"/>
       <button class="btn" size="mini" bindtap="addLoan">借出</button>
 
@@ -990,6 +1000,7 @@
         <view class="tip">正在报销：{{cur_loan_name}}</view>
         <picker range="{{categories}}" bindchange="onRlCategory"><view class="picker">分类：{{categories[rl_category] || '其他'}} ▾</view></picker>
         <input class="inp" placeholder="报销金额(默认全部结清)" type="digit" value="{{rl_amount}}" bindinput="onRlAmount"/>
+        <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="rl_amount" data-v="{{item}}">{{item}}</view></view>
         <input class="inp" placeholder="备注(可选)" value="{{rl_remark}}" bindinput="onRlRemark"/>
         <view class="btns">
           <button size="mini" bindtap="doReimburse">确认报销</button>
@@ -999,7 +1010,7 @@
 
       <view class="list">
         <view class="item" wx:for="{{loans}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.staff}}</text><text class="amt out">借 {{item.amount}}</text></view>
+          <view class="row1"><text class="nm">{{item.staff}}</text><text class="amt out">借 ¥{{item.amount}}</text></view>
           <view class="row2">已报 {{item.used}} · 退回 {{item.returned}} · 未清 {{item.remain}}{{item.remark?' · '+item.remark:''}}</view>
           <view class="btns">
             <button size="mini" wx:if="{{item.remain>0}}" bindtap="startReimburse" data-id="{{item.id}}" data-name="{{item.staff}}" data-remain="{{item.remain}}">报销</button>
@@ -1007,7 +1018,8 @@
             <button size="mini" wx:if="{{item.used==0 && item.returned==0}}" bindtap="delLoan" data-id="{{item.id}}">删</button>
           </view>
         </view>
-        <view class="empty" wx:if="{{!loans.length}}">还没有员工借支</view>
+        <view class="empty" wx:if="{{errs.loans}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadLoans">　重试</text></view>
+        <view class="empty" wx:elif="{{!loans.length}}">还没有员工借支</view>
       </view>
     </view>
     <view class="form">
@@ -1015,7 +1027,7 @@
     </view>
     <view class="list">
       <view class="item" wx:for="{{expense_list}}" wx:key="id">
-        <view class="row1"><text class="nm">{{item.category}}</text><text class="amt out">{{item.amount}}</text></view>
+        <view class="row1"><text class="nm">{{item.category}}</text><text class="amt out">¥{{item.amount}}</text></view>
         <view class="row2">{{item.remark}} · {{item.created_at}}{{item.operator?' · '+item.operator:''}}</view>
         <view class="btns">
           <button size="mini" wx:if="{{role!='staff'}}" bindtap="editExpense" data-id="{{item.id}}">改</button>
@@ -1046,7 +1058,13 @@
       <picker wx:if="{{mats_names.length}}" range="{{mats_names}}" bindchange="pickMat"><view class="picker">从已有的里面选一种 ▾</view></picker>
       <input class="inp" type="digit" placeholder="数量" value="{{mt_qty}}" bindinput="onMtQty"/>
       <input class="inp" type="digit" placeholder="{{mt_kind==0?'单价（元，可不填）':'单价（不填就按最近进价估）'}}" value="{{mt_price}}" bindinput="onMtPrice"/>
-      <input class="inp" placeholder="日期（如 11-20，不填就今天）" value="{{mt_date}}" bindinput="onMtDate"/>
+      <input class="inp" placeholder="日期（如 2026-11-20 或 11-20，不填就今天）" value="{{mt_date}}" bindinput="onMtDate"/>
+      <view class="chips">
+        <text class="chip-label">日期快键：</text>
+        <text class="chip" data-f="mt_date" data-n="0" bindtap="quickDate">今天</text>
+        <text class="chip" data-f="mt_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="mt_date" data-n="2" bindtap="quickDate">前天</text>
+      </view>
       <input class="inp" placeholder="备注（给哪张单用的，可不填）" value="{{mt_note}}" bindinput="onMtNote"/>
       <view class="btns"><button class="btn" size="mini" bindtap="addMove">记一笔</button><button class="btn ghost" size="mini" bindtap="toggleMatNew">新建材料</button></view>
       <block wx:if="{{mat_new}}">
@@ -1159,6 +1177,12 @@
         </view>
         <textarea class="ta" placeholder="兴旺五金,5000,3500,2026-06-15&#10;丙客户,3000&#10;乙客户,1800,,2026-07-01" value="{{mg_text}}" bindinput="onMigText"></textarea>
         <input class="inp" placeholder="统一日期，如 2026-06-30（行里没写日期就用这天）" value="{{mg_date}}" bindinput="onMigDate"/>
+      <view class="chips">
+        <text class="chip-label">日期快键：</text>
+        <text class="chip" data-f="mg_date" data-n="0" bindtap="quickDate">今天</text>
+        <text class="chip" data-f="mg_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="mg_date" data-n="2" bindtap="quickDate">前天</text>
+      </view>
         <view class="frow">
           <button class="btn ghost" size="mini" bindtap="migCostMode" data-m="none">成本不填</button>
           <button class="btn {{mg_cost_mode=='pct'?'':'ghost'}}" size="mini" bindtap="migCostMode" data-m="pct">按毛利率 {{mg_margin}}% 估成本</button>
@@ -1351,6 +1375,7 @@
         <button class="btn ghost" size="mini" bindtap="loadTaxSummary">💰 本月税金</button>
       </view>
       <!-- 税金：有这个月才知道要交多少、有多少没票不能抵 -->
+      <view class="empty" wx:if="{{errs.tax}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadTaxSummary">　重试</text></view>
       <view wx:if="{{tax}}">
         <view class="prev-h">税金　{{tax.month}}</view>
         <view class="plrow"><text class="pll">销项税（收进来的税）</text><text class="plv">{{tax.sales_tax}}</text></view>
@@ -1555,7 +1580,7 @@
           <view class="row1"><text class="nm">{{item.party}}（{{item.kind_text}}）</text><text class="amt {{item.left>0?'red':'ok'}}">{{item.resolved ? '已处理' : '待处理'}}</text></view>
           <view class="row2">{{item.date}} 发的{{item.month ? ' ' + item.month + ' 月账单' : '对账单'}} · {{item.days}} 天前</view>
           <view class="row2">对方说：{{item.note || '对不上'}}</view>
-          <view class="row2">现在欠 {{item.left}}（{{item.open_cnt}} 笔未结）· {{item.advice}}</view>
+          <view class="row2">现在欠 {{item.left}}（{{item.open_cnt}} 笔未结清）· {{item.advice}}</view>
           <view class="btns" wx:if="{{!item.resolved}}">
             <button size="mini" bindtap="resolveDispute" data-id="{{item.id}}" data-k="fixed">✓ 核对完了</button>
             <button size="mini" bindtap="resolveDispute" data-id="{{item.id}}" data-k="ignore">不用管</button>
@@ -1567,7 +1592,7 @@
     <view class="form" wx:if="{{dbk}}">
       <view class="tip">争议台账{{dbk.party_filter ? ' · ' + dbk.party_filter : ''}}（每笔从「对方说对不上」到「怎么收场」的一条线）</view>
       <view class="aline {{dbk.count ? 'warn':'ok'}}">{{dbk.advice}}</view>
-      <view class="tip">共 {{dbk.total}} 笔 · 未结 {{dbk.count}} 笔{{dbk.fixed_total ? ' · 累计核实补记 ¥' + dbk.fixed_total : ''}}</view>
+      <view class="tip">共 {{dbk.total}} 笔 · 未结清 {{dbk.count}} 笔{{dbk.fixed_total ? ' · 累计核实补记 ¥' + dbk.fixed_total : ''}}</view>
       <view class="item" wx:for="{{dbk.rows}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.party}}（{{item.kind_text || (item.type=='ap'?'应付':'应收')}}）</text><text class="amt {{item.resolved?'ok':'red'}}">{{item.resolved?'已了结':'拖了 '+item.days_open+' 天'}}</text></view>
         <view class="row2">{{item.month}} 期对账单 · 现在欠 ¥{{item.left}}{{item.fixed_amount ? ' · 核实补记 ¥' + item.fixed_amount : ''}}</view>
@@ -1604,7 +1629,7 @@
         <button class="btn half" size="mini" bindtap="loadYearBook">看这一年</button>
       </view>
       <view wx:if="{{yb}}">
-        <view class="tip">{{yb.year}} 年：接单 {{yb.totals.income}} · 材料外协 {{yb.totals.mat}} · 现金费用 {{yb.totals.exp}} · 摊销折旧 {{yb.totals.adj}} → 净利 {{yb.totals.profit}}（净利率 {{yb.totals.margin}}%）</view>
+        <view class="tip">{{yb.year}} 年：接单 {{yb.totals.income}} · 材料外协 {{yb.totals.mat}} · 现金费用 {{yb.totals.exp}} · 摊销 {{yb.totals.adj}} → 净利 {{yb.totals.profit}}（净利率 {{yb.totals.margin}}%）</view>
         <view class="plrow" wx:for="{{yb.months}}" wx:key="m">
           <text class="pll">{{item.label}}</text>
           <text class="plv {{item.profit<0?'bad':'ok'}}">{{item.profit}}</text>
@@ -1800,6 +1825,7 @@
         <view class="row1"><text class="nm">{{item.month}} 全套报表</text><text class="amt">{{item.kb}} KB</text></view>
         <view class="row2">{{item.created}} 生成　点一下下载</view>
       </view>
+      <view class="empty" wx:if="{{errs.packs}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadPacks">　重试</text></view>
       <view class="tip" wx:if="{{packs.length==0}}">还没有自动生成的报表包。每月 1 号会自动生成上个月的；也可以点上面按钮立刻生成。</view>
 
       <view class="tip" style="margin-top:16rpx">📈 回款预测（按账期排到未来几个月，再按历史回款率打折）</view>
@@ -2086,6 +2112,7 @@
       <input class="inp" placeholder="备注，如 3月工资" value="{{f_remark}}" bindinput="onFRemark"/>
       <button class="btn" size="mini" bindtap="addFixed">添加固定支出</button>
       <button class="btn" size="mini" bindtap="runFixed">立即补记本月</button>
+      <view class="empty" wx:if="{{errs.fixed}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadFixed">　重试</text></view>
       <view class="list" wx:if="{{fixed_list.length}}">
         <view class="item" wx:for="{{fixed_list}}" wx:key="id">
           <view class="row1">{{item.remark || item.category}} · 每月{{item.day}}号 · ¥{{item.amount}}</view>
@@ -2099,6 +2126,7 @@
         <view class="inp picker">{{categories[b_category]}}</view>
       </picker>
       <input class="inp" placeholder="每月额度，如 5000" type="digit" value="{{b_amount}}" bindinput="onBAmount"/>
+      <view class="amts"><view class="amtx" wx:for="{{amts_big}}" wx:key="*this" bindtap="fillAmt" data-f="b_amount" data-v="{{item}}">{{item}}</view></view>
       <button class="btn" size="mini" bindtap="saveBudget">保存预算</button>
       <view class="list" wx:if="{{budgets.length}}">
         <view class="item" wx:for="{{budgets}}" wx:key="id">
@@ -2138,7 +2166,7 @@
         <view class="prev-h">{{me.month}} · {{me.total}} 件事办了 {{me.done_count}}/{{me.total}}</view>
         <view class="tip" wx:if="{{me.locked}}">🔒 这个月已经结账锁定了，不能再增删改；要改就在下面归档区点「解锁」，改完重新结一次。</view>
         <view class="aline {{me.ready?'ok':'warn'}}">{{me.advice}}</view>
-        <view class="tip">本月赚的（收 − 付）{{me.numbers.profit}} · 接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销折旧 {{me.numbers.cost_other}} → 按单子算（权责，含没收回来的）{{me.numbers.profit_accrual}} · 手头现金 {{me.numbers.cash}}</view>
+        <view class="tip">本月赚的（收 − 付）{{me.numbers.profit}} · 接单 {{me.numbers.income}} · 材料·外协 {{me.numbers.mat}} · 现金费用+摊销 {{me.numbers.cost_other}} → 按单子算（权责，含没收回来的）{{me.numbers.profit_accrual}} · 手头现金 {{me.numbers.cash}}</view>
         <view class="hk-row" wx:for="{{me.steps}}" wx:key="k" bindtap="meGo" data-tab="{{item.tab}}">
           <view class="hk-main">
             <view class="hk-t {{item.done?'ok':''}}">{{item.done?'✓':'○'}} {{item.no}}. {{item.title}}</view>
@@ -2155,7 +2183,7 @@
       <view class="list" wx:if="{{archives.length}}">
         <view class="item" wx:for="{{archives}}" wx:key="month">
           <view class="row1"><text class="nm">{{item.month}} 已归档</text><text class="amt">净利 {{item.profit}}</text></view>
-          <view class="row2">接单 {{item.order_add}} · 材料成本 {{item.mat_cost}} · 现金费用+摊销折旧 {{item.cost}} · 净利率 {{item.margin}}% · 净资产 {{item.net_worth}}</view>
+          <view class="row2">接单 {{item.order_add}} · 材料成本 {{item.mat_cost}} · 现金费用+摊销 {{item.cost}} · 净利率 {{item.margin}}% · 净资产 {{item.net_worth}}</view>
           <view class="row2">归档于 {{item.created_at}}</view>
           <view class="btns">
             <button size="mini" bindtap="viewArchive" data-m="{{item.month}}">看快照</button>
@@ -2178,7 +2206,8 @@
           </view>
         </view>
       </view>
-      <view class="empty" wx:if="{{!trash_list.length}}">回收站是空的</view>
+      <view class="empty" wx:if="{{errs.trash}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadTrash">　重试</text></view>
+      <view class="empty" wx:elif="{{!trash_list.length}}">回收站是空的</view>
     </view>
     <view class="form">
       <view class="tip">操作日志（最近 100 条，防有人乱改账）</view>
@@ -2229,6 +2258,7 @@
           <picker range="{{debt_kinds}}" value="{{d_kind}}" bindchange="onDKind"><view class="picker">类型：{{debt_kinds[d_kind]}} ▾</view></picker>
           <input class="inp half" placeholder="本金" type="digit" value="{{d_principal}}" bindinput="onDPrincipal"/>
         </view>
+        <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="d_principal" data-v="{{item}}">{{item}}</view></view>
         <view class="frow">
           <input class="inp half" placeholder="年利率 %" type="digit" value="{{d_rate}}" bindinput="onDRate"/>
           <input class="inp half" placeholder="几期(月)" type="number" value="{{d_term}}" bindinput="onDTerm"/>
@@ -2245,7 +2275,7 @@
       </view>
       <view class="list" wx:if="{{debts.length}}">
         <view class="item" wx:for="{{debts}}" wx:key="id">
-          <view class="row1"><text class="nm">{{item.lender}}</text><text class="amt out">还欠 {{item.remain}}</text></view>
+          <view class="row1"><text class="nm">{{item.lender}}</text><text class="amt out">还欠 ¥{{item.remain}}</text></view>
           <view class="row2">{{item.kind_name}} · 年息 {{item.rate}}% · 月息 {{item.monthly_interest}} 元 · {{item.pay_kind_name}}</view>
           <view class="row2" wx:if="{{item.status=='open'}}">下次还款 {{item.next_due}} 约 {{item.next_amount}} 元<text class="red" wx:if="{{item.overdue}}"> · 已逾期，快处理</text></view>
           <view class="row2" wx:else>已还清</view>
@@ -2267,6 +2297,7 @@
           <input class="inp half" placeholder="一共付了多少" type="digit" value="{{pp_total}}" bindinput="onPPTotal"/>
           <input class="inp half" placeholder="摊几个月（0=押金不摊）" type="number" value="{{pp_months}}" bindinput="onPPMonths"/>
         </view>
+        <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="pp_total" data-v="{{item}}">{{item}}</view></view>
         <view class="frow">
           <block wx:for="{{pp_cats}}" wx:key="*this">
             <text class="chip {{pp_cat==item?'on':''}}" bindtap="pickPPCat" data-k="{{item}}">{{item}}</text>
@@ -2289,7 +2320,7 @@
           </view>
         </view>
       </view>
-      <view class="tip" wx:else>还没有待摊费用。比如一次交了 1 年房租 1.2 万，记成 12 个月摊：钱当天出账，成本每月只算 1000，利润不会某个月特别难看。</view>
+      <view class="tip" wx:else>还没有预付费用要摊销。比如一次交了 1 年房租 1.2 万，记成 12 个月摊：钱当天出账，成本每月只算 1000，利润不会某个月特别难看。</view>
     </view>
 
     <view class="chart" wx:if="{{nw.length}}">
@@ -2331,7 +2362,7 @@
       <view class="kpi-row"><text>应收周转天数</text><text class="kpi-n">{{kpi.turn_days}} 天</text></view>
       <view class="kpi-row"><text>现金能撑几个月</text><text class="kpi-n {{kpi.cushion_months>=1?'ok':'bad'}}">{{kpi.cushion_months}} 个月</text></view>
       <view class="kpi-row" wx:if="{{kpi.top_customer}}"><text>最大客户占比</text><text class="kpi-n {{kpi.conc_pct>=60?'bad':''}}">{{kpi.top_customer}} {{kpi.conc_pct}}%</text></view>
-      <view class="kpi-row"><text>本月成本合计</text><text class="kpi-n">{{kpi.cost_total}}（材料 {{kpi.mat_cost}} + 现金费用 {{kpi.cash_cost}} + 摊销 {{kpi.amort}} + 折旧 {{kpi.dep}} + 预提息 {{kpi.accrue_int}}）</text></view>
+      <view class="kpi-row"><text>本月成本合计</text><text class="kpi-n">{{kpi.cost_total}}（材料 {{kpi.mat_cost}} + 现金费用 {{kpi.cash_cost}} + 摊销 {{kpi.amort}} + 设备摊销 {{kpi.dep}} + 预提利息 {{kpi.accrue_int}}）</text></view>
       <view class="kpi-row"><text>费用率（成本/接单）</text><text class="kpi-n {{kpi.expense_ratio>=100?'bad':''}}">{{kpi.expense_ratio}}%</text></view>
       <view class="kpi-row" wx:if="{{kpi.break_even>0}}"><text>保本月收入</text><text class="kpi-n">约 {{kpi.break_even}} 元（低于这个数就亏）</text></view>
       <view class="kpi-row"><text>净资产</text><text class="kpi-n {{kpi.net_worth<0?'bad':'ok'}}">{{kpi.net_worth}} 元</text></view>
@@ -2343,7 +2374,7 @@
           <text class="bar-num">{{item.profit}}（{{item.margin}}%）</text>
         </view>
       </view>
-      <view class="tip">本月赚的 = 本月实际收到的钱 − 实际付出去的钱（收付实现制，和首页、报表页同一个数）。净利率 = 本月赚的 ÷ 本月收款。另一套「按单子算」的权责净利 = 接单 − 材料·外协 − 现金费用 − 摊销 − 折旧 − 预提息，两者差多少就是赊出去还没收回来的钱。现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
+      <view class="tip">本月赚的 = 本月实际收到的钱 − 实际付出去的钱（收付实现制，和首页、报表页同一个数）。净利率 = 本月赚的 ÷ 本月收款。另一套「按单子算」的权责净利 = 接单 − 材料·外协 − 现金费用 − 摊销 − 设备摊销 − 预提利息，两者差多少就是赊出去还没收回来的钱。现金能撑几个月 = 手头现金 / 近 3 月平均月支出。</view>
     </view>
 
     <view class="form">
@@ -2364,7 +2395,7 @@
         <view class="list">
           <view class="item" wx:for="{{mb.list}}" wx:key="name">
             <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.profit<0?'red':''}}">{{item.profit}}</text></view>
-            <view class="row2">{{item.cnt}} 单 · 收入 {{item.revenue}} · 成本 {{item.cost}} · 毛利率 {{item.margin_pct}}%<text wx:if="{{item.no_cost>0}}"> · {{item.no_cost}} 单没填成本</text></view>
+            <view class="row2">{{item.cnt}} 单 · 收入 ¥{{item.revenue}} · 成本 ¥{{item.cost}} · 毛利率 {{item.margin_pct}}%<text wx:if="{{item.no_cost>0}}"> · {{item.no_cost}} 单没填成本</text></view>
             <view class="row2" wx:if="{{item.unpaid>0}}">还没收 {{item.unpaid}} 元</view>
           </view>
         </view>
@@ -2704,6 +2735,7 @@
             <button class="btn ghost half" size="mini" bindtap="loadWageRates">单价表</button>
           </view>
         </view>
+        <view class="empty" wx:if="{{errs.wage}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadWageRecs">　重试</text></view>
         <view class="item" wx:for="{{pw_recs}}" wx:key="id">
           <view class="row1"><text class="nm">{{item.worker}}{{item.item?' · '+item.item:''}}{{item.process?' · '+item.process:''}}</text><text class="amt">¥{{item.amount}}</text></view>
           <view class="row2">{{item.date}} · {{item.qty}} × {{item.rate}} 元</view>
@@ -2938,7 +2970,7 @@
         <view class="kpi-row" wx:for="{{aging.buckets}}" wx:key="key">
           <text>{{item.label}}</text><text class="kpi-n {{item.key=='d999'&&item.amount>0?'bad':''}}">{{item.amount}} 元 / {{item.cnt}} 笔 · 占 {{item.pct}}%</text>
         </view>
-        <view class="kpi-row"><text>合计未结</text><text class="kpi-n">{{aging.total}} 元</text></view>
+        <view class="kpi-row"><text>合计未结清</text><text class="kpi-n">{{aging.total}} 元</text></view>
         <view class="kpi-row" wx:if="{{aging.type=='ar'}}"><text>建议坏账准备</text><text class="kpi-n {{aging.provision>0?'bad':''}}">{{aging.provision}} 元</text></view>
         <view class="duesoon" wx:if="{{aging.over60>0}}">超过 60 天的款有 {{aging.over60}} 元，建议单独去催一次</view>
         <view class="list" wx:if="{{aging.worst.length}}">
@@ -2982,8 +3014,15 @@
       <input class="inp" placeholder="发票号（可不填）" value="{{inv_no}}" bindinput="onInvNo"/>
       <input class="inp" placeholder="{{inv_type=='out' ? '客户名称' : '供应商名称'}}" value="{{inv_party}}" bindinput="onInvParty"/>
       <input class="inp" placeholder="开票金额（含税）" type="digit" value="{{inv_amount}}" bindinput="onInvAmount"/>
+      <view class="amts"><view class="amtx" wx:for="{{amts}}" wx:key="*this" bindtap="fillAmt" data-f="inv_amount" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="其中税额（可不填）" type="digit" value="{{inv_tax}}" bindinput="onInvTax"/>
-      <input class="inp" placeholder="开票日期，如 11-10（不填=今天）" value="{{inv_date}}" bindinput="onInvDate"/>
+      <input class="inp" placeholder="开票日期，如 2026-11-10 或 11-10（不填=今天）" value="{{inv_date}}" bindinput="onInvDate"/>
+      <view class="chips">
+        <text class="chip-label">日期快键：</text>
+        <text class="chip" data-f="inv_date" data-n="0" bindtap="quickDate">今天</text>
+        <text class="chip" data-f="inv_date" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="inv_date" data-n="2" bindtap="quickDate">前天</text>
+      </view>
       <input class="inp" placeholder="备注（可不填）" value="{{inv_remark}}" bindinput="onInvRemark"/>
       <button class="btn" size="mini" bindtap="addInvoice">记一张发票</button>
       <view class="tip">发票只做台账，不影响收支和利润（免得一笔钱算两次）。</view>
@@ -3032,6 +3071,7 @@
         </view>
       </view>
     </view>
+    <view class="empty" wx:if="{{errs.inv}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadInvoices">　重试</text></view>
     <view class="list" wx:if="{{inv_rows.length}}">
       <view class="item" wx:for="{{inv_rows}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.type=='out' ? '开出' : '收到'}} · {{item.party}}</text><text class="amt">¥{{item.amount}}</text></view>
@@ -3041,17 +3081,24 @@
     </view>
 
     <view class="form">
-      <view class="tip">固定资产折旧（在用 {{asset_rows.length}} 台：原值合计 {{asset_cost_total}}，每月折旧 {{asset_monthly}}，现在值 {{asset_net}}）</view>
-      <view class="aline warn" wx:if="{{asset_sold_count>0}}">已处置 {{asset_sold_count}} 台，卖了 {{asset_sold_amount}}，{{asset_sold_gain>=0 ? '合计赚 ' : '合计亏 '}}{{asset_sold_gain>=0 ? asset_sold_gain : -asset_sold_gain}} 元（折旧已停）</view>
+      <view class="tip">设备摊销（固定资产折旧；在用 {{asset_rows.length}} 台：原值合计 {{asset_cost_total}}，每月摊销 {{asset_monthly}}，现在值 {{asset_net}}）</view>
+      <view class="aline warn" wx:if="{{asset_sold_count>0}}">已处置 {{asset_sold_count}} 台，卖了 {{asset_sold_amount}}，{{asset_sold_gain>=0 ? '合计赚 ' : '合计亏 '}}{{asset_sold_gain>=0 ? asset_sold_gain : -asset_sold_gain}} 元（摊销已停）</view>
       <input class="inp" placeholder="设备名称，如 数控车床" value="{{asset_name}}" bindinput="onAssetName"/>
       <input class="inp" placeholder="原值（买入价）" type="digit" value="{{asset_cost}}" bindinput="onAssetCost"/>
+      <view class="amts"><view class="amtx" wx:for="{{amts_big}}" wx:key="*this" bindtap="fillAmt" data-f="asset_cost" data-v="{{item}}">{{item}}</view></view>
       <input class="inp" placeholder="买入日期，如 2025-06-01" value="{{asset_buy}}" bindinput="onAssetBuy"/>
+      <view class="chips">
+        <text class="chip-label">日期快键：</text>
+        <text class="chip" data-f="asset_buy" data-n="0" bindtap="quickDate">今天</text>
+        <text class="chip" data-f="asset_buy" data-n="1" bindtap="quickDate">昨天</text>
+        <text class="chip" data-f="asset_buy" data-n="2" bindtap="quickDate">前天</text>
+      </view>
       <input class="inp" placeholder="用几年（不填=5 年）" type="digit" value="{{asset_life}}" bindinput="onAssetLife"/>
       <input class="inp" placeholder="残值率 %（不填=5）" type="digit" value="{{asset_res}}" bindinput="onAssetRes"/>
       <input class="inp" placeholder="几保一次（月），不填=不提醒" type="digit" value="{{asset_maint}}" bindinput="onAssetMaint"/>
       <button class="btn" size="mini" bindtap="addAsset">加一台设备</button>
-      <button class="btn-ghost" size="mini" bindtap="runDepreciation">立即计提本月折旧（记一笔支出）</button>
-      <view class="tip">直线法：每月折旧 =（原值 − 残值）÷ 使用月数；计提后才进成本，不点就不会自动扣。</view>
+      <button class="btn-ghost" size="mini" bindtap="runDepreciation">立即计提本月摊销（记一笔支出）</button>
+      <view class="tip">直线法：每月摊销 =（原值 − 残值）÷ 使用月数；计提后才进成本，不点就不会自动扣。</view>
       <view class="frow">
         <button class="btn ghost" size="mini" bindtap="loadAssetMaint">🔧 哪些设备该保养了</button>
       </view>
@@ -3071,10 +3118,11 @@
         </view>
       </block>
     </view>
+    <view class="empty" wx:if="{{errs.asset}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadAssets">　重试</text></view>
     <view class="list" wx:if="{{asset_rows.length}}">
       <view class="item" wx:for="{{asset_rows}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">净值 ¥{{item.net}}</text></view>
-        <view class="row2">原值 {{item.cost}} · 月折旧 {{item.monthly}} · 已折 {{item.used_months}} 个月{{item.done ? ' · 已折完' : ' · 还剩 ' + item.remain_months + ' 个月'}}</view>
+        <view class="row2">原值 {{item.cost}} · 月摊销 {{item.monthly}} · 已摊 {{item.used_months}} 个月{{item.done ? ' · 已摊完' : ' · 还剩 ' + item.remain_months + ' 个月'}}</view>
         <view class="row2" wx:if="{{item.disposed}}">已处置（{{item.disposed_at}}）卖了 {{item.dispose_amount}} 元，{{item.gain>=0 ? '赚' : '亏'}} {{item.gain>=0 ? item.gain : -item.gain}} 元</view>
         <view class="btns">
           <button size="mini" wx:if="{{!item.disposed && role!='staff'}}" bindtap="disposeAsset" data-id="{{item.id}}">卖掉/报废</button>
@@ -3129,6 +3177,7 @@
       <view class="tip">坏账核销记录（本月要不回来的 {{wf_bad}} 元 · 供应商免掉的 {{wf_waived}} 元）</view>
       <view class="tip">核销只是把这笔往来抹掉，不动现金、不算收支；核销错了可以撤销。</view>
     </view>
+    <view class="empty" wx:if="{{errs.wf}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadWriteoffs">　重试</text></view>
     <view class="list" wx:if="{{wf_rows.length}}">
       <view class="item" wx:for="{{wf_rows}}" wx:key="id">
         <view class="row1"><text class="nm">{{item.ref_type=='order' ? '应收核销' : '应付核销'}} · {{item.party}}</text><text class="amt red">¥{{item.amount}}</text></view>
@@ -3198,7 +3247,8 @@
           <button class="btn ghost" size="mini" bindtap="delFlow" data-id="{{item.id}}">删</button>
         </view>
       </view>
-      <view class="empty" wx:if="{{!flows.rows.length}}">{{flows.tip || '这个范围没有流水'}}</view>
+      <view class="empty" wx:if="{{errs.flows}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadFlows">　重试</text></view>
+      <view class="empty" wx:elif="{{!flows.rows.length}}">{{flows.tip || '这个范围没有流水'}}</view>
     </view>
   </block>
 
@@ -3228,7 +3278,8 @@
         </view>
         <view class="row2">{{item.settle_date}} 结清 · {{item.days_text}}{{item.accs ? ' · ' + item.accs : ''}}{{item.wo > 0 ? ' · 含核销 ¥' + item.wo : ''}}{{item.operator ? ' · ' + item.operator : ''}}</view>
       </view>
-      <view class="empty" wx:if="{{!st.rows.length}}">{{history_type=='ar' ? '这个范围里没有已结清的应收' : '这个范围里没有已结清的应付'}}</view>
+      <view class="empty" wx:if="{{errs.settled}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadHistory">　重试</text></view>
+      <view class="empty" wx:elif="{{!st.rows.length}}">{{history_type=='ar' ? '这个范围里没有已结清的应收' : '这个范围里没有已结清的应付'}}</view>
       <view class="row2" wx:if="{{st.has_more}}" bindtap="loadStMore" style="text-align:center;color:#1f6feb;padding:16rpx">已列 {{st.shown}} / 共 {{st.count}} 单 · 点这里再看 100 单 ›</view>
     </view>
   </block>
@@ -3398,6 +3449,7 @@
           <button class="btn ghost" size="mini" bindtap="closeProfile">取消</button>
         </view>
       </view>
+      <view class="empty" wx:if="{{errs.profiles}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadProfiles">　重试</text></view>
       <view class="item" wx:for="{{profiles}}" wx:key="party">
         <view class="row1"><text class="nm">{{item.party}}{{item.kind=='ap'?'（供应商）':''}}</text><text class="amt {{item.left>0?'red':'ok'}}">欠 {{item.left}}</text></view>
         <view class="row2">{{item.phone ? item.phone : '还没填电话'}}{{item.contact ? ' · ' + item.contact : ''}}{{item.addr ? ' · ' + item.addr : ''}}</view>
@@ -3608,7 +3660,7 @@
     <block wx:if="{{contact_type=='ar'}}">
       <view class="list">
         <view class="item" wx:for="{{contacts_ar}}" wx:key="name">
-          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
           <view class="row2">累计{{item.total}} · 已收{{item.paid}} · {{item.cnt}}笔</view>
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ar" data-name="{{item.name}}">往来明细</button>
@@ -3618,13 +3670,14 @@
             <button size="mini" wx:if="{{role!='staff'}}" bindtap="setCreditLimit" data-name="{{item.name}}">设额度</button>
           </view>
         </view>
-        <view class="empty" wx:if="{{!contacts_ar.length}}">暂无客户记录</view>
+        <view class="empty" wx:if="{{errs.contacts}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadContacts">　重试</text></view>
+        <view class="empty" wx:elif="{{!contacts_ar.length}}">暂无客户记录</view>
       </view>
     </block>
     <block wx:else>
       <view class="list">
         <view class="item" wx:for="{{contacts_ap}}" wx:key="name">
-          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠{{item.unpaid}}</text></view>
+          <view class="row1"><text class="nm">{{item.name}}</text><text class="amt">欠 ¥{{item.unpaid}}</text></view>
           <view class="row2">累计{{item.total}} · 已付{{item.paid}} · {{item.cnt}}笔</view>
           <view class="btns">
             <button size="mini" bindtap="contactDetail" data-type="ap" data-name="{{item.name}}">往来明细</button>

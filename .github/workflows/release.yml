@@ -31,8 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           cache: npm
@@ -51,6 +51,8 @@ jobs:
         run: npm ci
         working-directory: backend
       - run: node scripts/test-book4.mjs
+      # 定时任务回归：worker 的 scheduled() 4 条 cron 各跑一遍（自包含，不依赖外部服务）
+      - run: node scripts/test-cron.mjs
       # 文档和代码对不上就别发版：接口清单、网页版教程都是从源文件生成的产物，
       # 忘了重新生成的话，发出去的 exe 里带的是旧教程。
       - run: node scripts/gen-api-list.mjs --check
@@ -74,8 +76,8 @@ jobs:
             name: macos-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           cache: npm
@@ -102,7 +104,7 @@ jobs:
             node -e "const c=require('node:crypto'),fs=require('fs');const h=c.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex');console.log(h+'  '+process.argv[1])" "$f" >> "$OUT"
           done
           cat "$OUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bin-${{ matrix.name }}
           path: dist/*
@@ -118,10 +120,10 @@ jobs:
       contents: write
     steps:
       # fetch-depth: 0 才有完整 tag 历史，下面要算「上一个 tag 到今天改了哪些东西」
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: bin-*
           merge-multiple: true
@@ -183,7 +185,7 @@ jobs:
             echo '见 `SHA256SUMS.txt`（三个文件都在里面）。'
           } > RELEASE_BODY.md
           head -20 RELEASE_BODY.md
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             bins/*
@@ -202,17 +204,17 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         with:
           platforms: arm64
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
@@ -222,7 +224,7 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
             type=sha,format=short,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
@@ -232,3 +234,37 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # 推上 GHCR 不算好：backend/perm-rules.mjs 是顶层 import，backend/guide.js 是运行期
+      # 动态 import，两者只要漏 COPY，容器一起就 ERR_MODULE_NOT_FOUND。
+      # 这里把刚推上去的镜像拉回来真跑一个容器（CI runner 自带 curl），
+      # 打三个接口：/version（免口令，确认服务活着）、/help（走完整鉴权链，需要先设口令）、
+      # /guide（唯一会动态 import('./guide.js') 的路由，返回 200 才说明 guide.js 真的进镜像了）。
+      - name: docker run 冒烟（/version、/help、/guide 必须都是 200）
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo "${{ steps.meta.outputs.tags }}" | head -1 | tr -d '\r')"
+          echo "冒烟镜像：$IMAGE"
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker rm -f smoke-factory >/dev/null 2>&1 || true
+          docker run -d --name smoke-factory -p 8787:8787 -e FACTORY_DATA=/data "$IMAGE"
+          # 首次启动要建库，等 /version 通了再往下测（最多等 60 秒）
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8787/version >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/version)
+          echo "/version → $code"
+          if [ "$code" != "200" ]; then docker logs smoke-factory; exit 1; fi
+          # 刚起的新容器还没有口令：先在口令外面设一个，再带着口令访问 /help
+          curl -fsS -X POST http://127.0.0.1:8787/auth/setup \
+            -H 'content-type: application/json' -d '{"key":"smoke1234"}' >/dev/null
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'x-access-key: smoke1234' http://127.0.0.1:8787/help)
+          echo "/help → $code"
+          if [ "$code" != "200" ]; then docker logs smoke-factory; exit 1; fi
+          # /guide 是唯一走动态 import('./guide.js') 的路由：200 才证明 guide.js 真的被 COPY 进去了
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/guide)
+          echo "/guide → $code"
+          if [ "$code" != "200" ]; then docker logs smoke-factory; exit 1; fi
+          docker logs smoke-factory | tail -20 || true
+          docker rm -f smoke-factory >/dev/null 2>&1 || true
