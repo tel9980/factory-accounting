@@ -1577,11 +1577,15 @@ app.use('*', async (c, next) => {
   // 口令只存主账套，所有账套共用一个口令
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
-  if (!saved) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
+  const given = String(c.req.header('x-access-key') || '')
+  // 演示口令「不用设口令就能进」：微信审核不允许「必须先注册/先设口令才能看到任何东西」，
+  // 所以新装的库（还没有 access_key）也必须放演示口令进来。
+  // 以前这一行是 `if (!saved) return no_key`，把演示口令一起挡在外面 ——
+  // 审核员头一次打开小程序，看到的就是「设个口令」，点不进任何页面。
+  if (!saved && given !== DEMO_KEY) return c.json({ error: '首次使用请设置访问口令', code: 'no_key' }, 401)
   const ip = clientIp(c)
   const wait = await authLocked(mainDb, ip)
   if (wait) return c.json(tooMany(wait), 429)
-  const given = String(c.req.header('x-access-key') || '')
   let role = ''
   let staffMods = null
   if (given && (await verifyKey(mainDb, given, saved))) role = 'owner'

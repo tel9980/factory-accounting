@@ -1730,6 +1730,14 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+350. ✅ **演示账套要「不设口令也能进」（微信审核第二个驳回项）**：用户接着说「演示账套是不设密码要能正常过审核」。这句话点出的是上一轮没解决的那一半 —— 上一轮把演示账里的权限入口关掉了，但**新装的库还没设过口令时，演示口令根本进不来**：中间件的 `no_key` 守卫写在取 `X-Access-Key` 之前，`if (!saved) return 401 no_key` 把演示口令一起挡在外面；前端登录卡上的「先看看演示」又带着 `key_mode!='set'` 条件，第一次用（还没有口令）时正好被藏起来。结果就是审核员头一次打开小程序，只看到「设个口令」，一个页面都点不进去 —— 典型的「登录受限」驳回。
+    - **后端：演示口令在「还没设口令」时也放行**。`backend/index.js` 中间件把 `const given = String(c.req.header('x-access-key') || '')` 提到 `getKey()` 结果之前，守卫改成 `if (!saved && given !== DEMO_KEY) return no_key`。除了演示口令，别的请求在没口令时照样 401（`test-book4` 专门钉住这一条，防止有人顺手把守卫拆了）。
+    - **前端：设口令这一步旁边也有演示入口**。`index.wxml` 的 `keydemo` 入口条件从 `key_mode!='set' && demo_builtin!==false` 改成只看 `demo_builtin!==false`，并在「第一次用，设个口令」卡片里多一行说明「不用设口令也能先看：演示账套是示例数据，跟你的账不混」；顶部的 `no_key` 提示条文案也跟着改（「点这里设（想先看看就走『先看看演示』，不用口令）」）。
+    - **第 3 本演示账没灌过 schema 会 503**：以前 `deploy.yml` 只给**本地**库灌 schema，远程只有 migrations，所以新开一本账（尤其第 3 本演示账）是空库 —— 演示口令进去回 503「演示账套还没准备好」，审核员正好撞上它。新增 `scripts/d1-seed-schema.mjs`（从 `wrangler.toml` 读所有 `[[d1_databases]]`，逐库 `wrangler d1 execute --remote --file=backend/schema.sql`；`schema.sql` 全是 `CREATE ... IF NOT EXISTS`、零 INSERT，跑在有数据的库上不会丢任何东西）并挂进 `deploy.yml`「部署到 Cloudflare」**之前**，失败直接红。
+    - **断言（`scripts/test-book4.mjs` 开头，3 项，本机版 9 本账、一次口令都没设）**：演示口令打 `/ar` 必须 200；`/me` 的 `role==='demo'` 且进的是第 3 本；不带口令的 `/ar` 仍必须 401。
+    - **验证**：42 件回归全绿（92s）、`test-cron` 70 项、`check.mjs` 全绿、check-manifest 三处一致。
+    - ⚠️ 动了小程序前端（登录卡）→ 小程序要重新上传发布。
+
 349. ✅ **演示账套不能设权限（微信审核驳回项）**：用户说「演示账套不能设权限，不然过不了审核」。审核员拿内置演示口令进的是第 3 本账（示例数据），那本账里原来照样能建员工账号、改员工权限、把客户分给员工、设员工口令、设账套管理员口令 —— 审核视角看起来就是「一个没经过审核的多角色权限系统」，属于常见驳回项。这一轮把演示账的整类权限入口关掉。
     - **后端一道闸门管全部**：新增 `isDemoDb(db, bookId)` / `isDemoBook(c)` / `denyDemoPerm(c)`。判定**不写死「第 3 本」**——先看 `settings.demo_seeded === '1'`（只有 `seedDemoBook` 种过示例数据的账才有），再看账名以「演示账套」开头且确实是第 3 本。这样万一老板把第 3 本当二厂在用（里面是真数据），那本账不会被误伤。
     - **拦哪些**：`/staff-users`（员工账号增删改）、`/staff-perms`（员工权限、只看自己、只看自己的客户）、`/party-staff`（客户分给员工）、`/auth/staff` + `/auth/staff-off`（设/停员工口令）、`/book-admin-key`（给这本账设独立管理员口令）。命中统一回 403 `{code:'demo_no_perm', error:'演示账套不能设权限（它是给审核看的示例数据，不建员工、不分客户、不改权限）'}`。

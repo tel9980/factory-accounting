@@ -384,6 +384,18 @@ jobs:
       # 且每跑过一个会记进 migrations 表，不会重复执行）。失败不拦部署，但要显眼。
       # 迁移放在「部署到 Cloudflare」之前：迁移失败时线上还是旧代码 + 旧表结构，
       # 不会「新代码配旧库」上线（那正是 500 的来源）。失败直接红（exit 1）。
+      # 补表结构：schema.sql 里全是 CREATE ... IF NOT EXISTS，跑在有数据的库上不会丢任何东西。
+      # 为什么要在 CI 里跑：线上是「每本账一个独立 D1」，新开一本账（尤其第 3 本演示账）
+      # 如果没人手动灌过 schema，那本账就是空库 —— 演示口令进去会 503「演示账套还没准备好」，
+      # 而微信审核员点「先看看演示」正好撞上它。这一步失败要红：演示进不去就等于审核过不了。
+      - name: 给远程库补表结构（幂等）
+        if: steps.token.outputs.can == 'true'
+        run: node scripts/d1-seed-schema.mjs
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+
       - name: 跑远程数据库迁移
         if: steps.token.outputs.can == 'true'
         run: |

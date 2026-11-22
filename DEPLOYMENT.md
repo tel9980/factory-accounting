@@ -1059,13 +1059,17 @@ node scripts/test-fixes3.mjs     # 29 项：设备买→折旧→维修→处置
 （第 3 本账，第一次进自动种一批示例数据：几个客户、几张单、应付、日常支出、材料进料），
 可以随便记一笔试试，**碰不到你的真账本**；导出/备份/改设置这些照旧不给。
 
+**连口令都还没设过的新装库，这一行也在**（审核不允许「必须先设口令才能看到东西」，见 4.40）。
+
 所以提审时备注写一句就够：**「打开小程序点『先看看演示』即可完整体验，不需要口令。」**
 
 审核过了，如果不想让任何人点进来，小程序里 **设置 → 单位·账户·设置 →
 「👀 内置演示入口：开着（点这里关掉）」** 点一下即可关闭（关掉后登录页不再显示那一行）。
 
-> ⚠️ 演示账套用的是**第 3 个库**（绑定名 `DB3` = `factory-db3`）。如果新装时只灌了主账套，
-> 第一次点「先看看演示」会提示「演示账套还没准备好」，补一条命令即可（只灌一次）：
+> ⚠️ 演示账套用的是**第 3 个库**（绑定名 `DB3` = `factory-db3`）。
+> 走 CI 部署的话不用管：`deploy.yml` 在部署前会跑 `node scripts/d1-seed-schema.mjs`，
+> 把 `wrangler.toml` 里**每一本账**的表结构都补齐（幂等，跑在有数据的库上也不丢东西）。
+> 手动部署 / 新开一本账时，自己补一条（只灌一次，也可以在任意时候重跑）：
 >
 > ```bash
 > npx wrangler d1 execute factory-db3 --remote --file=schema.sql
@@ -1287,6 +1291,17 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **`ref_type NOT IN` 的排除名单只有两种标准**：`('transfer','tax_ar','tax_ap')`（排除内部转账和代垫税）和 `('loan','transfer')`（借支口径）。`check.mjs` [4.10] 会拦第三种名单。**改排除项要三处一起想**：语义上到底排谁、跟其它 66 处一不一致、check.mjs 会不会红。
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
+
+### 4.40 演示入口必须「不设口令就能进」（微信审核驳回项之二）
+
+审核要求是**「不许必须先注册/先设口令才能看到任何东西」**。所以演示这条路有两个硬约束，别改回去：
+
+- **新装的库（还没有 `access_key`）也必须放演示口令进来**。中间件里 `const given = String(c.req.header('x-access-key') || '')` 必须写在 `getKey()` 结果之前，守卫只能是 `if (!saved && given !== DEMO_KEY) return no_key`。上一版是 `if (!saved) return no_key`，把演示口令一起挡了 —— 审核员头一次打开小程序只看到「设个口令」，一个页面都点不进去。改成「谁都放行」也不行：`scripts/test-book4.mjs` 钉着「不带口令的 `/ar` 仍必须 401」，别顺手拆守卫。
+- **登录卡上「设口令」这一步（`key_mode=='set'`）也要有演示入口**。`index.wxml` 的 `keydemo` 只判断 `demo_builtin!==false`，**不要再加 `key_mode!='set'` 这类条件**（第一次用正好会被藏起来）。
+- **第 3 本演示账必须有表结构**。`deploy.yml` 里 `node scripts/d1-seed-schema.mjs` 会在部署前把 `schema.sql` 逐库补一遍（`schema.sql` 全是 `CREATE ... IF NOT EXISTS`、零 INSERT，跑在有数据的库上不丢东西），失败直接红。**新开一本书（DB4…DB9）也要进这一步**，否则切过去就是空库。
+- **自测口径**：`node scripts/test-book4.mjs`（本机版 9 本、一次口令都没设）开头 3 项就是这根线，改动登录/演示相关的代码先跑它。
+
+---
 
 ### 4.39 演示账套为什么不能设权限（要过微信审核就得读这条）
 

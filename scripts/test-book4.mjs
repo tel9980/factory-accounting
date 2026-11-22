@@ -65,6 +65,17 @@ const run = async () => {
   const base = `http://127.0.0.1:${PORT}`
   yes('本机版服务能起来（9 本建库）', await waitUp(base), '等了 90s 还没起来')
 
+  // 0) 还没设口令的时候，演示账套必须能进 —— 微信审核不许「必须先设口令才能看到任何东西」。
+  // 这一条以前是坏的：中间件的 no_key 守卫把演示口令一起挡在外面，审核员头一次打开
+  // 小程序只会看到「设个口令」，一个页面都点不进去。
+  const DEMO = 'demo-look'
+  const dAr = await fetch(base + '/ar', { headers: { 'X-Access-Key': DEMO } })
+  yes('一次口令都没设时，演示口令照样能进（审核员不用先注册）', dAr.status === 200, dAr.status)
+  let dMe = null
+  try { dMe = await (await fetch(base + '/me', { headers: { 'X-Access-Key': DEMO } })).json() } catch (e) {}
+  yes('…身份是 demo、进的是第 3 本演示账', !!dMe && dMe.role === 'demo' && String(dMe.book) === '3', dMe && { role: dMe.role, book: dMe.book })
+  yes('…而且没口令时别的请求还是 401（不能借演示把真账打开）', (await fetch(base + '/ar')).status === 401, 'no_key 守卫被绕过了')
+
   const setup = await api(base, 'POST', '/auth/setup', { key: KEY, confirm: KEY })
   if (setup.status !== 200) { no('设口令', setup); cleanup(); finish('第 4 本账演练'); return }
   ok('设口令')

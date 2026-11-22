@@ -8,7 +8,7 @@
   <view class="offbar" wx:if="{{offline_at}}" bindtap="refresh">📴 现在没网，看到的是 {{offline_at}} 存下来的数据（金额不是最新的）· 点这里重试</view>
   <view class="pendbar" wx:if="{{pending_count}}" bindtap="viewPending">📤 有 {{pending_count}} 笔没发出去（已存在手机上）· 点这里查看 / 重发</view>
   <view class="offbar" wx:if="{{net_bad}}" bindtap="retryAll">⚠️ 有些数据没拉出来（网不太好）· 点这里重试</view>
-  <view class="offbar" wx:if="{{no_key && !key_open}}" bindtap="reopenKey">🔒 还没输口令，现在这页是空的（不是真没钱）· 点这里输口令</view>
+  <view class="offbar" wx:if="{{no_key && !key_open}}" bindtap="reopenKey">🔒 还没设口令，现在这页是空的（不是真没钱）· 点这里设（想先看看就走「先看看演示」，不用口令）</view>
   <view class="sealbar" wx:if="{{sealed}}" bindtap="goSeal">🔒 这本账已封存（只读），{{sealed_at}}起 · 点这里去解封</view>
   <!-- G8（分包）：本项目没有分包目录约定（app.json 里只有一个页面、没有 subpackages），
        所以不做分包改造，也不动构建体系。替代做法：所有大块列表都用 wx:if 懒渲染 ——
@@ -23,7 +23,10 @@
       <input class="inp" password placeholder="{{key_mode=='set'?'设置口令（至少 4 位）':'输入口令'}}" value="{{key_input}}" bindinput="onKeyInput"/>
       <view class="keyerr" wx:if="{{key_err}}">{{key_err}}</view>
       <button class="btn" bindtap="submitKey">{{key_mode=='set'?'设好，开始记账':'进入'}}</button>
-      <view class="keydemo" wx:if="{{key_mode!='set' && demo_builtin!==false}}" bindtap="enterDemoLook">👀 先看看演示（不用口令，示例数据）</view>
+      <view class="keydemo" wx:if="{{demo_builtin!==false}}" bindtap="enterDemoLook">👀 先看看演示（不用口令，示例数据）</view>
+      <!-- 审核要求：不许「必须先设口令才能看到任何东西」。所以「设口令」这一步旁边也要有演示入口，
+           而且新装的库（还没设过口令）用演示口令也必须进得来（后端 no_key 守卫已放行 DEMO_KEY）。 -->
+      <view class="keydemo" wx:if="{{key_mode=='set' && demo_builtin!==false}}">不用设口令也能先看：演示账套是示例数据，跟你的账不混</view>
       <view class="keyrecover" wx:if="{{key_mode!='set'}}" bindtap="keyRecover">忘了口令？用恢复码重设</view>
       <view class="keyclose" bindtap="closeKey">先不看</view>
     </view>
