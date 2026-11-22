@@ -360,8 +360,11 @@ jobs:
       # 线上表结构对比：本机自检只能证明「schema.sql 在空库上建得出来」，
       # 证明不了「线上那个库到底缺不缺列」。这里用一把只读口令把线上所有 GET 接口打一遍，
       # 再问一次 /schema-check —— 线上真缺列时会明确列出哪张表缺哪个字段。
-      # 口令要单独配一个 GitHub secret（PROD_KEY = 线上老板口令）；2026-11-21 已配好。
-      # 没配就明确失败：否则「部署成功 + 体检没跑」会让 CI 绿灯骗人（本地没部署过的旧版本照样显示成功）。
+      # 口令要单独配一个 GitHub secret（PROD_KEY = 线上老板口令）。
+      # 注意：PROD_KEY 目前**还没配**，所以这一步现在会跳过（写 warning）。它是「部署后的
+      # 附加体检」，不是部署本身——部署靠上面的 CF_API_TOKEN（那个已配好、缺失会红）。
+      # 别把这一步的缺 secret 改成 exit 1：体检步一旦失败，下面的「体检没过就自动回滚」会把
+      # 一次好好的部署又退回上一版。缺 PROD_KEY 是「没法体检」，不是「体检没过」，不该回滚。
       # 这一步以前也挂在「有没有 CF token」上：结果是「本机手动部署了（没走 CI）」时，
       # 线上体检永远不跑。现在只要有 PROD_KEY 就跑，跟部署在不在 CI 里无关。
       - name: 线上表结构与接口体检
@@ -370,9 +373,9 @@ jobs:
           PROD_KEY: ${{ secrets.PROD_KEY }}
         run: |
           if [ -z "$PROD_KEY" ]; then
-            echo "::error title=线上体检没跑::仓库没配 PROD_KEY（线上老板口令），部署后的线上体检没法做。配法：Settings → Secrets and variables → Actions → New repository secret，名字 PROD_KEY。"
-            echo "## ❌ 线上体检没跑" >> "$GITHUB_STEP_SUMMARY"
-            exit 1
+            echo "::warning title=线上体检跳过了::仓库没配 PROD_KEY（线上老板口令），跳过部署后的线上体检。配法：Settings → Secrets and variables → Actions → New repository secret，名字 PROD_KEY。"
+            echo "## ⚠️ 线上体检没跑（没配 PROD_KEY）" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           node scripts/smoke.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"
           node -e '
