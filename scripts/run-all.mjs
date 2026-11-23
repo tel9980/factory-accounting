@@ -57,6 +57,7 @@ export const ONLINE = [
   'test-fixes2',
   'test-fixes3',
   'test-fixes4',
+  'test-cash-bridge',
   'test-tax',
   'test-numbers',
   'test-bookiso',

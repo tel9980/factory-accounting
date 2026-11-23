@@ -36,6 +36,7 @@ const PATHS = [
   '/cashbook?month=' + nowM(),
   '/report-data?month=' + nowM(),
   '/month-brief?month=' + nowM(),
+  '/cash-bridge?month=' + nowM(),
   '/health-check?fresh=1',
   '/selfcheck',
   '/accounts',
@@ -100,6 +101,20 @@ const main = async () => {
     try { d = JSON.parse(sc.text) } catch (e) { d = {} }
     if (d.ok !== true || Number(d.bad_count || 0) > 0) bad.push(['/schema-check', '线上表结构对不上：' + String(d.text || JSON.stringify(d.books || d)).slice(0, 200)])
     else ok.push('/schema-check（表结构对得上）')
+  }
+
+  // 4) 「钱去哪了」：这张表是身份等式（每一类现金进出都有一行 + 兜底行），正常账套残差必须是 0。
+  //    生产上要是有人手工改过单据的「已收/已付」，残差或 doc_gap 会不为 0 —— 那是**数据**问题，
+  //    不该拦发布（拦了就没法发修数据的新版本），所以这里只提示，不进 bad。
+  const cb = await hit('/cash-bridge?month=' + nowM())
+  if (cb.status === 200) {
+    let d = {}
+    try { d = JSON.parse(cb.text) } catch (e) { d = {} }
+    const res = Number(d.residual || 0)
+    const gap = d.doc_gap || {}
+    const gAr = Number(gap.ar || 0), gAp = Number(gap.ap || 0)
+    if (Math.abs(res) < 0.01 && Math.abs(gAr) < 0.01 && Math.abs(gAp) < 0.01) console.log('✅ /cash-bridge 残差 0、单据与流水对得上')
+    else console.log(`⚠️ /cash-bridge 残差 ${res}、单据差 应收 ${gAr} / 应付 ${gAp} —— 线上账本可能被手工改过（不拦发布，去「账目体检」看明细）`)
   }
 
   console.log(`\n通过 ${ok.length} 项`)

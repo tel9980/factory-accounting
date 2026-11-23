@@ -544,7 +544,8 @@ const plOf = async (db, mm, opts) => {
     (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='debt_int' AND ${cond}) AS accrue,
     (SELECT ${SUM_MONEY('amount')} FROM payables WHERE ${cond}) AS payable_add,
     (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='out' AND cash=1 AND ref_type='payable' AND ${cond}) AS paid_payable,
-    (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ${woCond}) AS wo,
+    (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ${woCond} AND ref_type='order') AS wo_ar,
+    (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ${woCond} AND ref_type='payable') AS wo_ap,
     (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ${COST_EXP_WHERE} AND ${cond} AND (category LIKE '%材料%' OR category LIKE '%辅料%' OR category LIKE '%原料%' OR category LIKE '%采购%')) AS mat_buy,
     -- 收付实现制：这个月真正进账的钱 − 真正付出去的钱。和首页「本月净利」用同一句 SQL 口径，
     -- 免得同一个「本月赚了多少」在首页和报表页差一倍（原来差 92%）。
@@ -559,7 +560,8 @@ const plOf = async (db, mm, opts) => {
   args.push(...A) // accrue
   args.push(...A) // payable_add
   args.push(...A) // paid_payable
-  args.push(...A) // wo
+  args.push(...A) // wo_ar
+  args.push(...A) // wo_ap
   args.push(...A) // mat_buy
   args.push(...A) // cash_in
   args.push(...A) // cash_out
@@ -569,7 +571,10 @@ const plOf = async (db, mm, opts) => {
   const adj = round2(amort + dep + accrue)
   // 坏账核销：确认收不回来的钱，是损失但不是现金支出。利润里必须减掉它，
   // 否则「这个月赚了 3 万」和「家底少了 5 千」会长期对不上（家底那边早就把它划掉了）。
-  const wo = round2(num(r.wo))
+  // 核销分两种：收不回来的应收 = 损失，不用还的应付 = 收益。以前它们合成一个数，
+  // 只有「豁免应付」的账套会把利润少算一倍（残差正好是豁免额的 2 倍），永远对不上。
+  const woAr = round2(num(r.wo_ar)), woAp = round2(num(r.wo_ap))
+  const wo = round2(woAr - woAp)
   const matBuy = round2(num(r.mat_buy))
   const cashIn = round2(num(r.cash_in)), cashOut = round2(num(r.cash_out))
   const costAccrual = round2(mat + cashExp + adj + (includeWriteoff ? wo : 0))
@@ -579,7 +584,7 @@ const plOf = async (db, mm, opts) => {
   const basis = !includeAccrual ? 'cash' : (includeWriteoff ? 'accrual' : 'partial')
   const out = {
     month: mm, income, mat, cash_exp: cashExp, amort, dep, accrue, adj,
-    cost: costAccrual, cost_cash: cashOut, writeoff: wo, mat_buy: matBuy,
+    cost: costAccrual, cost_cash: cashOut, writeoff: woAr, writeoff_ap: woAp, writeoff_net: wo, mat_buy: matBuy,
     // 料算两遍的提示：单子上填了材料成本，同时又拿现金买了料记为「材料」支出 —— 两边都进成本就重了。
     // 系统不会自动替你减（谁该算哪边只有你知道），但必须说出来，否则成本永远偏高还查不到。
     cost_hint: (mat > 0 && matBuy > 0) ? `本月单子上填的材料成本 ¥${mat}，另外还记了「材料/采购」类现金支出 ¥${matBuy}。如果这些料已经算在单子的材料成本里，成本就重复了 —— 单子上填的料如果是现钱买的，这里那笔支出应该只记「没进单子的料」或者干脆不记。` : '',
@@ -13123,70 +13128,135 @@ app.get('/year-customers', async (c) => {
 })
 
 // 利润 → 现金 桥接：赚的钱为什么没变成现金
+// 第 15 轮：这张表以前漏了五类真实现金进出（预付货款、预付抵扣、押金/预付房租、
+// 卖设备收的钱、银行对账认领的「其他现金收入」），而且应收/应付的「月初→月底」是用**现在的**
+// paid 倒算的 —— 只要查上个月，这个月收到的钱就会被算回上个月，残差必然对不上。
+// 现在一律按「本月发生的单据事件 + 本月流水」算，每一类现金进出都有自己的一行，
+// 再加一行「账本里有、这几行没覆盖」的兜底；残差只剩「账本本身前后矛盾」那一种情况。
 app.get('/cash-bridge', async (c) => {
   const db = c.env.DB
   const m = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
-  const start = m + '-01'
-  const end = addDaysIso(start, new Date(Date.UTC(num(m.slice(0, 4)), num(m.slice(5, 7)), 0)).getUTCDate() - 1)
   const pl = await monthPL(db, m)
   const q1 = async (sql, ...b) => num(((await db.prepare(sql).bind(...b).first()) || {}).v)
-  const [arBegin, arEnd, apBegin, apEnd, debtIn, debtRepay, advIn, advUsed, loanOut, loanBack, woAr, woAp, cashIn, cashOut, taxIn, taxOut] = await Promise.all([
-    q1("SELECT COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) AS v FROM orders WHERE substr(created_at,1,10) < ?", start),
-    q1("SELECT COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) AS v FROM orders WHERE substr(created_at,1,10) <= ?", end),
-    q1("SELECT COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) AS v FROM payables WHERE substr(created_at,1,10) < ?", start),
-    q1("SELECT COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) AS v FROM payables WHERE substr(created_at,1,10) <= ?", end),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='debt' AND month=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='debt' AND month=?", m),
-    // 本月真正收到手的预收（多收转预收也在这，它的 created_at 是收款那天）
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM advances WHERE type='in' AND substr(created_at,1,7)=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE cash=0 AND ref_type='order' AND month=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='loan' AND month=?", m),
+  const WOC = 'COALESCE(month,substr(created_at,1,7))=?'
+  const [collected, orderOff, orderRefund, woAr, paidPayable, payableOff, supplierRefund, woAp,
+    debtIn, debtRepay, advIn, advOut, prepaidOut, disposeIn, otherIn, loanOut, loanBack, taxIn, taxOut,
+    cashIn, cashOut, uncov] = await Promise.all([
+    // 客户往来：本月真收到的钱 / 用预收抵扣（不动现金）/ 退款给客户
+    // 注意：每一条都必须把 cash 写清楚。「预收/预付抵扣」写的是 cash=0 的流水，
+    // 要是这里不写 cash=1，同一笔抵扣会被「收回的钱」和「抵扣」两处各算一次（残差直接翻倍）。
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='order' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE cash=0 AND ref_type='order' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='order' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM writeoffs WHERE ref_type='order' AND ${WOC}`, m),
+    // 供应商往来：本月真付出去的钱 / 用预付抵扣（不动现金）/ 供应商退款
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='payable' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=0 AND ref_type='payable' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='payable' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM writeoffs WHERE ref_type='payable' AND ${WOC}`, m),
+    // 借款：借进来 / 还出去（含付利息；利息已经在净利里按预提扣过，这里只认真出去的现金）
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='debt' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='debt' AND month=?`, m),
+    // 预收 / 预付：收到手的和掏出去的（抵扣那两笔不动现金，各自单独成行）
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='advance' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='advance' AND month=?`, m),
+    // 付房东 / 押金：这个月掏出去的钱（以后按月摊销，摊销数已经算在「加回」那一行）
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='prepaid' AND month=?`, m),
+    // 卖设备收到的钱（不是卖货赚的，账面净值从家底里划掉）
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='dispose' AND month=?`, m),
+    // 银行流水认领出来的「其他收入」（这类记法是 ref_type=expense、方向 in）
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='expense' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='loan' AND month=?`, m),
     // 退回借支记的是 ref_type='loan_return'（以前这里找 'loan'，恒为 0，残差永远差一笔）
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='loan_return' AND month=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,7)=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type='payable' AND substr(created_at,1,7)=?", m),
-    q1(`SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND cash=1 AND ${CASH_EXCLUDE} AND month=?`, m),
-    q1(`SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND cash=1 AND ${CASH_EXCLUDE} AND month=?`, m),
-    // 代收/代付的税点单独一行：钱进出了，但不是收入也不是支出
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='in' AND ref_type='tax_ar' AND month=?", m),
-    q1("SELECT COALESCE(SUM(amount),0) AS v FROM ledger WHERE direction='out' AND ref_type='tax_ap' AND month=?", m)
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='loan_return' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ref_type='tax_ar' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='tax_ap' AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ${CASH_EXCLUDE} AND month=?`, m),
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ${CASH_EXCLUDE} AND month=?`, m),
+    // 兜底：按 ref_type 把本月所有真金白银的流水分组拿回来，下面再用 BRIDGE_COVERED 把「已有行」的剔掉，
+    // 剩下的就是「上面几行都不认」的类别 —— 以前这些直接被算进残差，没人知道是什么。
+    // 注意这里故意不写「排除名单」那种 SQL：那样名单要写两遍，加一行忘了改另一处就静默串账。
+    db.prepare(`SELECT ref_type, direction, COUNT(*) AS n, ${SUM_MONEY('amount')} AS s FROM ledger
+      WHERE cash=1 AND ${CASH_EXCLUDE} AND month=?
+      GROUP BY ref_type, direction`).bind(m).all().catch(() => ({ results: [] }))
   ])
-  const dAR = round2(arEnd - arBegin)
-  const dAP = round2(apEnd - apBegin)
+  // 应收变动（用本月发生的事算）：本月接单 − 收回 − 预收抵扣 − 核销 + 退给客户（退款会让欠款变多）。
+  // 以前是「月底欠款 − 月初欠款」，两个数都用**现在**的 paid 倒算，查历史月份必然错。
+  const dAR = round2(pl.income - collected - orderOff - woAr + orderRefund)
+  // 应付变动：本月赊购 − 付掉 − 预付抵扣 − 豁免 + 供应商退回来的
+  const dAP = round2(pl.payable_add - paidPayable - payableOff - woAp + supplierRefund)
   const adj = round2(pl.amort + pl.dep + pl.accrue)
   const netDebt = round2(debtIn - debtRepay)
   const actual = round2(cashIn - cashOut)
+  // 上面每一行各自认领的 ref_type（这张名单是「一行一类」的唯一事实源：兜底行按它剔，
+  // 以后新增写 ledger 的类别只要在这里登记 + 加一行，就不会变成残差）。
+  const BRIDGE_COVERED = new Set(['order', 'payable', 'advance', 'prepaid', 'expense', 'fixed',
+    'debt', 'loan', 'loan_return', 'dispose', 'tax_ar', 'tax_ap', 'transfer'])
+  const uncovRows = ((uncov && uncov.results) || []).filter((x) => !BRIDGE_COVERED.has(String(x.ref_type || '')))
+  const otherCash = round2(uncovRows.reduce((a, x) => a + (x.direction === 'in' ? num(x.s) : -num(x.s)), 0))
   const rows = [
     { k: 'profit', label: '本月净利（权责口径）', amount: pl.profit, note: '收入减材料、现金费用、折旧摊销、坏账核销' },
     { k: 'adj', label: '加回 折旧 / 摊销 / 预提利息', amount: adj, note: '这些进了利润表，但没花现金' },
-    { k: 'ar', label: '应收变动（变多=钱压在客户那，记账为负）', amount: round2(-dAR), note: `月初别人欠 ¥${arBegin} → 月底 ¥${arEnd}` },
-    { k: 'ap', label: '应付变动（变多=赊来的钱）', amount: dAP, note: `月初我欠 ¥${apBegin} → 月底 ¥${apEnd}` },
+    { k: 'ar', label: '应收变动（本月新增 − 本月收回）', amount: round2(-dAR), note: `本月接单 ¥${pl.income}、收回 ¥${collected}、预收抵扣 ¥${orderOff}${orderRefund > 0 ? `、退给客户 ¥${orderRefund}` : ''}${woAr > 0 ? `、核销 ¥${woAr}` : ''}` },
+    { k: 'ap', label: '应付变动（本月新增 − 本月付出）', amount: dAP, note: `本月赊购 ¥${pl.payable_add}、付掉 ¥${paidPayable}、预付抵扣 ¥${payableOff}${supplierRefund > 0 ? `、供应商退回来 ¥${supplierRefund}` : ''}${woAp > 0 ? `、豁免 ¥${woAp}` : ''}` },
     { k: 'mat_gap', label: '材料成本 与 本月赊购的差', amount: round2(pl.mat - pl.payable_add), note: `这月单子上用了料 ¥${pl.mat}，赊购了 ¥${pl.payable_add}（差额是现钱买的料，或料没用完）` },
-    { k: 'debt', label: '借款净增（还本记负）', amount: netDebt, note: `借入 ¥${debtIn}、还 ¥${debtRepay}` },
+    { k: 'debt', label: '借款净增（还本付息记负）', amount: netDebt, note: `借入 ¥${debtIn}、还 ¥${debtRepay}` },
     { k: 'adv', label: '本月收到预收款', amount: advIn, note: advIn > 0 ? `本月收预收 ¥${advIn}（还没干活的活钱）` : '' },
+    { k: 'adv_out', label: '本月付出的预付款（以后抵货款）', amount: round2(-advOut), note: advOut > 0 ? `先给供应商 ¥${advOut}，不算这个月花掉，抵到单子上才算` : '' },
     // 预收抵扣：应收少了一笔但没收到钱，所以要从解释里扣回来（以前少这一行，残差永远对不上）
-    { k: 'adv_used', label: '预收抵扣（不动现金）', amount: round2(-advUsed), note: advUsed > 0 ? `本月用预收抵掉 ¥${advUsed}，账上欠款少了但钱没进来` : '' },
+    { k: 'adv_used', label: '预收抵扣（不动现金）', amount: round2(-orderOff), note: orderOff > 0 ? `本月用预收抵掉 ¥${orderOff}，账上欠款少了但钱没进来` : '' },
+    // 预付抵扣：应付少了一笔但没付钱，跟上面那条正好反过来
+    { k: 'adv_used_pay', label: '预付抵扣（不动现金）', amount: payableOff, note: payableOff > 0 ? `本月用预付抵掉 ¥${payableOff}，账上欠款少了但钱没出去` : '' },
+    { k: 'prepaid', label: '本月付的房租 / 押金（以后按月摊）', amount: round2(-prepaidOut), note: prepaidOut > 0 ? `本月掏出去 ¥${prepaidOut}；摊销只动账不动钱，已经在「加回」那一行里了` : '' },
+    { k: 'dispose', label: '卖设备收到的钱', amount: disposeIn, note: disposeIn > 0 ? `处置设备收回 ¥${disposeIn}，不算做生意的收入` : '' },
+    { k: 'other_in', label: '其他现金收入（银行对账认领的）', amount: otherIn, note: otherIn > 0 ? `银行流水认领成收入 ¥${otherIn}（没挂在单子上，所以不在净利里）` : '' },
     { k: 'tax', label: '代收/代付的税点', amount: round2(taxIn - taxOut), note: taxIn || taxOut ? `代收 ¥${taxIn}、代付 ¥${taxOut}，都不是自己的收入支出` : '' },
     { k: 'loan', label: '员工借支净变化（借出记负）', amount: round2(loanBack - loanOut), note: `借出 ¥${loanOut}、退回 ¥${loanBack}` },
-    // 核销不再是这一行扣：坏账核销已经是「净利」里的一笔损失（见 monthSnapshot 的 writeoff_loss），
-    // 而应收变动那一行（-dAR）又会把它加回来 —— 两下相抵正好是「核销不动现金」。
-    // 以前 profit 不算核销、这里扣一行，看着也对；但家底和利润会越走越远，所以改成上面那样。
-    { k: 'wo', label: '核销（不走现金，已算进上面的净利）', amount: 0, note: `本月核销应收 ¥${woAr}、豁免应付 ¥${woAp}；它是损失，不进现金流` }
+    { k: 'other', label: '账本里有、上面几行没归类', amount: otherCash, note: uncovRows.length ? uncovRows.map((x) => `${x.ref_type || '(空类别)'}${x.direction === 'in' ? '收' : '付'} ¥${round2(num(x.s))}×${num(x.n)}笔`).join('、') : '' },
+    // 核销不再是这一行扣：坏账核销已经是「净利」里的一笔损失，应收变动那一行又会把它加回来 ——
+    // 两下相抵正好是「核销不动现金」。以前 profit 不算核销、这里扣一行，看着也对；
+    // 但家底和利润会越走越远，所以改成上面那样。
+    { k: 'wo', label: '核销（不走现金，已算进上面的净利）', amount: 0, note: `本月核销应收 ¥${woAr}、豁免应付 ¥${woAp}；它是损失/收益，不进现金流` }
   ]
   const explained = round2(rows.reduce((a, x) => a + num(x.amount), 0))
   const residual = round2(actual - explained)
+  // 顺带对一次「单据 vs 流水」：应收/应付的余额，按单据算和按流水累计算，差多少。
+  // 差不为 0 说明有人直接改过单子的「已收/已付」却没记流水（或者手工删过流水）。这事跟月份无关，算总量。
+  const docChk = async () => {
+    const one = async (sql) => num(((await db.prepare(sql).first()) || {}).v)
+    const arDoc = await one("SELECT COALESCE(SUM(price - COALESCE(paid,0) - COALESCE(written_off,0)),0) AS v FROM orders")
+    const apDoc = await one("SELECT COALESCE(SUM(amount - COALESCE(paid,0) - COALESCE(written_off,0)),0) AS v FROM payables")
+    const arLed = await one(`SELECT COALESCE(SUM(price),0)
+      - (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='in' AND cash=1 AND ref_type='order')
+      + (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='out' AND cash=1 AND ref_type='order')
+      - (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE cash=0 AND ref_type='order')
+      - (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ref_type='order') AS v FROM orders`)
+    const apLed = await one(`SELECT COALESCE(SUM(amount),0)
+      - (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='out' AND cash=1 AND ref_type='payable')
+      - (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='out' AND cash=0 AND ref_type='payable')
+      + (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='in' AND cash=1 AND ref_type='payable')
+      - (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ref_type='payable') AS v FROM payables`)
+    return { ar: round2(arDoc - arLed), ap: round2(apDoc - apLed) }
+  }
+  let docGap = { ar: 0, ap: 0 }
+  try { docGap = await docChk() } catch (e) { noteFail(e, '钱去哪了·单据对流水') }
   const out = {
     ok: true, month: m,
     profit: pl.profit, adj, d_ar: dAR, d_ap: dAP, net_debt: netDebt,
     cash_in: cashIn, cash_out: cashOut, actual, explained, residual,
     rows: rows.map((x) => Object.assign({}, x, { abs: Math.abs(num(x.amount)) })),
     huge: Math.abs(residual) >= 1,
+    uncovered: uncovRows.map((x) => ({ ref_type: x.ref_type || '', direction: x.direction, count: num(x.n), amount: round2(num(x.s)) })),
+    doc_gap: docGap,
     advice: []
   }
   if (Math.abs(residual) < 1) out.advice.push('对得上：净利加减这些项目，正好等于本月现金变化 ✓')
   else {
-    out.advice.push(`还有 ¥${residual} 没解释，常见原因：预收款用了没算现金、内部转账漏记、直接把钱花在别的地方没记账。`)
-    if (advUsed > 0) out.advice.push(`其中本月用预收抵扣了 ¥${advUsed}（不动现金，所以会让「现金变化」比账面少）。`)
+    out.advice.push(`还有 ¥${residual} 没解释。多半是账本被手工动过：直接改过单子的「已收/已付」、或删过流水。`)
+    if (Math.abs(otherCash) >= 1) out.advice.push(`其中「没归类」那行有 ¥${otherCash}，是系统还不认识的流水类别，已经原样摆在这里。`)
+  }
+  if (Math.abs(docGap.ar) >= 1 || Math.abs(docGap.ap) >= 1) {
+    out.advice.push(`另外核了一下单据和流水：应收差 ¥${docGap.ar}、应付差 ¥${docGap.ap}。不为 0 说明有人直接改过单子的「已收/已付」却没记流水（钱和单子对不上，去「账目体检」看明细）。`)
   }
   if (Math.abs(pl.profit) > 0 && Math.abs(actual) < Math.abs(pl.profit) * 0.3 && pl.profit > 0)
     out.advice.push('利润有，现金没跟上——钱多半压在应收里，看一下「账龄」和「催款清单」。')
