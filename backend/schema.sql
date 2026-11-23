@@ -340,7 +340,10 @@ CREATE TABLE IF NOT EXISTS statement_log (
   resolved_at TEXT,         -- 有异议的那家，哪天处理完的
   created_at TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_statement_log_party ON statement_log(party);
+-- 第 13 轮 E7：这里必须和 backend/migrations/0001_indexes.sql 完全一致（原来 schema 是 (party)、
+-- 迁移是 (party, type)）：新库靠 schema.sql 建、老库靠迁移建，两边不一致时同一个索引
+-- 在不同库里长得不一样，查询计划也就跟着变，排查时对不上。check.mjs [4.15] 会盯这件事。
+CREATE INDEX IF NOT EXISTS idx_statement_log_party ON statement_log(party, type);
 
 -- 运行出错留痕（线上 5xx 会记一条，报表页「数据体检」里能查）
 -- ray / ref / params 是后来补的三列：出 500 时得能说清「是哪一次请求、动的是哪张单、带了什么参数」，

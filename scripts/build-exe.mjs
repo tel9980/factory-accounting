@@ -80,16 +80,27 @@ await esbuild.build({
 const cjsSize = fs.statSync(cjs).size
 console.log(`  build/app.cjs  ${(cjsSize / 1024).toFixed(0)} KB`)
 
-// 2) 生成 SEA blob（schema.sql 当资源塞进去，程序里读得到）
+// 2) 生成 SEA blob（schema.sql + 迁移文件当资源塞进去，程序里读得到）
 step('2/4 生成 SEA blob')
 const cfgPath = path.join(BUILD, 'sea-config.json')
+// 第 13 轮 E2：以前只塞 schema.sql，不塞 backend/migrations/*.sql —— exe 里没有那个目录，
+// 启动时跑不到迁移，0001 建的索引在 exe 上永久缺失（大账本越用越慢，没人看得出原因）。
+// 现在把迁移文件合成一个 JSON 一起塞进去，server/d1.mjs 读不到目录就用这份。
+const MIG_DIR = path.join(ROOT, 'backend/migrations')
+const migList = fs.existsSync(MIG_DIR)
+  ? fs.readdirSync(MIG_DIR).filter((f) => f.endsWith('.sql')).sort()
+    .map((f) => ({ name: f, sql: fs.readFileSync(path.join(MIG_DIR, f), 'utf8') }))
+  : []
+const migJsonPath = path.join(BUILD, 'migrations.json')
+fs.writeFileSync(migJsonPath, JSON.stringify(migList))
+console.log(`  migrations.json  ${migList.length} 个迁移文件`)
 fs.writeFileSync(cfgPath, JSON.stringify({
   main: cjs,
   output: path.join(BUILD, 'sea-prep.blob'),
   disableExperimentalSEAWarning: true,
   useSnapshot: false,
   useCodeCache: false,
-  assets: { 'schema.sql': SCHEMA },
+  assets: { 'schema.sql': SCHEMA, 'migrations.json': migJsonPath },
 }, null, 2))
 sh(process.execPath, ['--experimental-sea-config', cfgPath])
 const blob = path.join(BUILD, 'sea-prep.blob')
@@ -155,6 +166,22 @@ if (!flag('no-test')) {
     const sz = fs.readdirSync(dataDir).filter((f) => f.startsWith('book1.db'))
       .reduce((n, f) => n + fs.statSync(path.join(dataDir, f)).size, 0)
     if (sz < 100 * 1024) throw new Error('主库文件太小（' + sz + ' 字节），schema.sql 可能没跑起来')
+    // 第 13 轮 E2：确认迁移真的在 exe 上跑了 —— 以前只塞 schema.sql，迁移在 exe 上永远不跑，
+    // 这几个索引就永久缺失，大账本一年后慢得没法用，而自测一直是绿的。
+    try {
+      const { DatabaseSync } = await import('node:sqlite')
+      const db = new DatabaseSync(path.join(dataDir, 'book1.db'))
+      const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map((r) => String(r.name)))
+      db.close()
+      const need = ['idx_ledger_ref_dir', 'idx_orders_paid', 'idx_payables_paid']
+      const miss = need.filter((n) => !names.has(n))
+      if (miss.length) throw new Error('打包出来的程序没跑迁移，缺索引：' + miss.join('、') + '（build 的 assets 里要带 migrations.json）')
+      console.log('  ✅ 迁移在 exe 上跑过了（' + need.join(' / ') + ' 都在）')
+    } catch (e) {
+      // 本机 Node 太老没有 node:sqlite 时只提示，不判定失败（CI 的 Node 24 一定有）
+      if (/node:sqlite|Cannot find|ERR_UNKNOWN_BUILTIN/.test(String(e && e.message))) console.log('  ⚠️ 这台机器的 Node 没有 node:sqlite，跳过索引自检')
+      else throw e
+    }
     console.log(`  ✅ 跑通了：/version=200，落地页正常，建出 ${BOOKS} 个库（主库 ${(sz / 1024).toFixed(0)} KB）`)
   } catch (e) {
     console.log('  ❌ 自测失败：' + String(e && e.message || e))

@@ -24,8 +24,12 @@ services:
       FACTORY_DATA: /data
       # 时间口径统一按北京时间（月结、账龄、对账单都按这个算）
       TZ: Asia/Shanghai
-      # 想给线上这台起个版本号，部署后 /version 能看到
-      FACTORY_VERSION: compose-${FACTORY_VERSION:-v1.3.0}
+      # 第 13 轮 F2：这一行会**盖掉**镜像里自带的版本号。
+      # 镜像构建时已经把 FACTORY_VERSION 烧进去了（Dockerfile ENV FACTORY_VERSION=<tag>），
+      # 而这里写死 v1.3.0 的默认值，意味着「pulled :latest 的新镜像」在 /version 里仍然报 v1.3.0 ——
+      # 升级完看不出到底跑的是哪版，回滚时也没法判断线上是哪个 commit。
+      # 所以默认不设（用镜像自带版本）。真要给这台机起个别名，再取消下面这行的注释。
+      # FACTORY_VERSION: compose-自定义标记
     volumes:
       # 账本本体。左边是你机器上的目录，绝对路径最省心（相对路径会落在 compose 项目目录里）
       - ./data:/data

@@ -125,22 +125,29 @@ jobs:
         # 审计接口本身挂了（网络/镜像源不支持）不当成漏洞，只提示。
         run: |
           set +e
-          npm audit --audit-level=high --omit=dev > /tmp/audit.txt 2>&1
-          rc=$?
-          cat /tmp/audit.txt
-          if grep -q "found [1-9][0-9]* vulnerabilit" /tmp/audit.txt; then
-            echo "::error title=依赖有漏洞::high 以上漏洞，拦下不部署"
-            exit 1
-          fi
-          if [ $rc -ne 0 ] && ! grep -qi "vulnerabilit" /tmp/audit.txt; then
-            echo "::warning title=依赖审计没跑成::审计接口不可用（不是发现漏洞），这次**没有**做漏洞检查"
-            {
-              echo "## ⚠️ 依赖审计没跑成"
-              echo ""
-              echo "\`npm audit\` 审计接口不可用（网络/镜像源不支持），这次**没有**验证依赖漏洞。这不等于「没有漏洞」。"
-              echo "审计输出见本次运行日志。"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          # 第 13 轮 E10：以前靠 `grep "found [1-9][0-9]* vulnerabilit"` 认结果 ——
+          # npm 改一次措辞（或换个镜像源换套文案）就永远匹配不上，等于又变回不拦。
+          # 现在读 --json 的结构化字段 metadata.vulnerabilities.high/critical。
+          npm audit --audit-level=high --omit=dev --json > /tmp/audit.json 2>/tmp/audit.err
+          cat /tmp/audit.err
+          node -e '
+            const fs = require("fs");
+            let d = null;
+            try { d = JSON.parse(fs.readFileSync("/tmp/audit.json", "utf8")) } catch (e) { d = null }
+            const meta = d && d.metadata && d.metadata.vulnerabilities;
+            const sum = (m) => "high=" + Number(m.high || 0) + " critical=" + Number(m.critical || 0) + " moderate=" + Number(m.moderate || 0) + " low=" + Number(m.low || 0);
+            if (!meta) {
+              console.log("::warning title=依赖审计没跑成::审计接口不可用（不是发现漏洞），这次没有做漏洞检查");
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+                "## ⚠️ 依赖审计没跑成\n\n`npm audit` 审计接口不可用（网络/镜像源不支持），这次**没有**验证依赖漏洞。这不等于「没有漏洞」。\n");
+              process.exit(0);
+            }
+            const bad = Number(meta.high || 0) + Number(meta.critical || 0);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              "## 依赖体检\n\n" + sum(meta) + "\n\n" + (bad ? "❌ 有 high/critical，拦住部署" : "✅ 没有 high/critical") + "\n");
+            if (bad > 0) { console.log("::error title=依赖有漏洞::high 以上漏洞 " + sum(meta)); process.exit(1) }
+            console.log("✅ 依赖没有 high/critical 漏洞（" + sum(meta) + "）");
+          '
         working-directory: backend
       - name: 用 schema.sql 灌本地库（顺便验证新装能用）
         # 三本账都灌：内置演示入口进的是第 3 本账，只灌主账套的话演示账套是空库，
@@ -418,16 +425,41 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
 
+      # 第 13 轮 E4：回滚以后要能证明「退回去的那一版是好的」。
+      # 以前只判「线上 commit 不再是这次的坏 sha」—— 退回另一个同样坏的旧版本也算通过。
+      # 这里在部署前把当前线上 commit 记下来，回滚后必须正好回到这一版。
+      - name: 记下回滚目标版本
+        id: prever
+        if: steps.token.outputs.can == 'true'
+        run: |
+          node -e '
+            fetch("https://jz.qy663.de5.net/version", { headers: { "User-Agent": "factory-accounting-ci/prever" } })
+              .then((r) => r.json())
+              .then((d) => {
+                const c = String((d && d.commit) || "");
+                console.log("部署前线上 commit：" + (c || "（空）"));
+                console.log("pre_sha=" + c);
+              })
+              .catch((e) => { console.log("问不到 /version（那就只用「不等于坏版本」这一条判回滚）：" + e.message); console.log("pre_sha=") });
+          ' >> "$GITHUB_OUTPUT"
+
       - name: 部署到 Cloudflare
         id: deploy
         if: steps.token.outputs.can == 'true'
         # 版本号必须带上去：wrangler.toml 里写的是 APP_VERSION="dev"，
         # 以前光跑 `wrangler deploy`，线上 /version 永远是 dev，出了事分不清哪次部署。
-        run: >-
-          npx wrangler deploy
-          --var APP_VERSION:"$(date -u +%Y%m%d-%H%M)"
-          --var APP_BUILT:"$(date -u +%FT%TZ)"
-          --var APP_COMMIT:"${{ github.sha }}"
+        # 第 13 轮 F3：以前两次 `date` 各取一次 —— 正好在 12:59:59 → 13:00:00 之间跑就是
+        # APP_VERSION 报 1259、APP_BUILT 报 13:00，对不上；排查时按版本号找不到那次构建。
+        # 现在先取一次时间放进变量，两个 --var 共用同一个时间点。
+        run: |
+          set -e
+          # 只取一次时间，再由它格式化成两个值 —— 两次调用 date 在整分钟边界上会差一分钟。
+          BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          STAMP="$(date -u -d "$BUILT" +%Y%m%d-%H%M)"
+          npx wrangler deploy \
+            --var APP_VERSION:"$STAMP" \
+            --var APP_BUILT:"$BUILT" \
+            --var APP_COMMIT:"${{ github.sha }}"
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -520,24 +552,16 @@ jobs:
             exit 0
           fi
           echo "bad=false" >> "$GITHUB_OUTPUT"
-          if node scripts/smoke.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"; then
-            node -e '
-              const k = process.env.PROD_KEY;
-              fetch("https://jz.qy663.de5.net/schema-check", { headers: { "x-access-key": k } })
-                .then((r) => r.json())
-                .then((d) => {
-                  // 以前只判 ok===false，而 /schema-check 的 ok 恒为 true —— 线上真缺列也绿。
-                  // 现在两样都判：ok 必须真的 true，bad_count 必须是 0。
-                  if (!d || d.ok !== true || Number(d.bad_count || 0) > 0) {
-                    console.error("线上表结构有问题：" + JSON.stringify((d && (d.text || d.books)) || d));
-                    process.exit(1);
-                  }
-                  console.log("线上表结构对得上：" + JSON.stringify(d.books || "ok"));
-                })
-                .catch((e) => { console.error("问不到 /schema-check：" + e.message); process.exit(1) });
-            ' || { echo "::error title=线上体检没过::线上表结构/接口体检失败"; echo "bad=true" >> "$GITHUB_OUTPUT"; exit 1; }
+          # 第 13 轮 E3：以前这里跑的是 scripts/smoke.mjs —— 它第一步就 POST /auth/setup，
+          # 而且注释里写明「少数 GET 会顺手补建表、写默认值」，那是给本机/测试库用的脚本。
+          # 拿它打生产等于每次部署都往线上写一遍，自愈分支一旦有 bug 就是改坏线上数据。
+          # 现在换成 scripts/check-live.mjs：只发 GET，表结构判定（ok===true 且 bad_count===0）也在里面。
+          if node scripts/check-live.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"; then
+            echo "线上只读体检通过（含表结构）"
           else
-            echo "::error title=线上体检没过::smoke.mjs 跑不过"; echo "bad=true" >> "$GITHUB_OUTPUT"; exit 1
+            echo "::error title=线上体检没过::线上只读体检（check-live.mjs）失败，详见上面的失败清单"
+            echo "bad=true" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
           echo "bad=false" >> "$GITHUB_OUTPUT"
 
@@ -610,19 +634,26 @@ jobs:
           # 回错了版本（或 eventual consistency 还没生效）CI 仍然绿，坏版本留在线上。
           # 现在回滚后轮询 /version，确认线上 commit 不再是这次部署的坏 sha，最多 60s。
           ROLLBACK_SHA="${{ github.sha }}"
+          PRE_SHA="${{ steps.prever.outputs.pre_sha }}"
           node -e "
           const base='https://jz.qy663.de5.net/version';
+          const bad='${ROLLBACK_SHA}';
+          const pre=String('${PRE_SHA}'||'').trim();
           (async()=>{
+            let last='';
             for(let i=0;i<30;i++){
               try{
-                const r=await fetch(base,{headers:{'User-Agent':'curl/8'}});
+                const r=await fetch(base,{headers:{'User-Agent':'factory-accounting-ci/rollback'}});
                 const d=await r.json();
                 const c=String((d&&d.commit)||'');
-                if(c && c!=='${ROLLBACK_SHA}'){console.log('回滚复核：线上 commit 已是 '+c+'，不再是 '+'${ROLLBACK_SHA}');process.exit(0)}
+                last=c;
+                // 只要部署前记下了线上那一版，回滚就必须正好回到它 —— 退到别的旧版本同样是坏结果。
+                const good = pre ? (c && c===pre) : (c && c!==bad);
+                if(good){console.log('回滚复核：线上 commit='+c+'（部署前是 '+pre+'），已回到部署前那一版');process.exit(0)}
               }catch(e){}
               await new Promise(z=>setTimeout(z,2000));
             }
-            console.error('::error title=回滚后复核没通过::线上 commit 仍为 ${ROLLBACK_SHA}，回滚没生效或被覆盖');
+            console.error('::error title=回滚后复核没通过::线上 commit='+(last||'问不到')+'，部署前是 '+(pre||'未记录')+' —— 回滚没生效，或退到了另一个版本');
             process.exit(1);
           })();
           " || exit 1

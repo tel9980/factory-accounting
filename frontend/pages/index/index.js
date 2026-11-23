@@ -576,8 +576,11 @@ Page({
       opts.data = opts.data || {}
       if (opts.once) {
         // 同一笔写重发时共用一个 client_id（30 秒内），后端按它去重。
+        // 第 13 轮 B1/B2：okKey 必须带上「这笔写是谁」—— 只用 once 串时，写了固定 once
+        // （比如 'receive-batch'）的批量接口在 30 秒内两次不同收款会共用 client_id，
+        // 后端判成重复直接回 dup_ok，第二笔钱静默丢掉。现在 okKey = once + 内容指纹。
         this._cid = this._cid || {}
-        const okKey = opts.once
+        const okKey = opts.once + '|' + this._writeIdent(opts.data)
         if (!this._cid[okKey]) this._cid[okKey] = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
         if (!opts.data.client_id) opts.data.client_id = this._cid[okKey]
         const done0 = () => { if (this._cid) delete this._cid[okKey] }
@@ -1374,11 +1377,15 @@ Page({
   // 报多少合适：按成本+想赚的毛利算，再对照这家以前给过什么价
   quoteHint() {
     const party = String(this.data.qt_party || '').trim()
-    const cost = Number(this.data.qt_cost) || 0
+    // 第 13 轮 D1：这里以前还是 Number(qt_cost)||0 —— 成本填「8,000」算成 NaN→0，
+    // 明明填了却提示「填一下成本」；毛利填「15%」也算成 0→退回默认 15，档位价跟着错。
+    // saveQuote 早就改成 toAmount 了，提示这条链路必须一致。
+    const cost = this.toAmount(this.data.qt_cost) || 0
+    const margin = this.toAmount(this.data.qt_margin)
     if (!party) return wx.showToast({ title: '先填报给谁', icon: 'none' })
-    if (!cost) return wx.showToast({ title: '填一下成本，才好算价', icon: 'none' })
+    if (!cost) return wx.showToast({ title: '填一下成本，才好算价（比如 8000 或 8,000）', icon: 'none' })
     this.req({
-      url: API_BASE + '/quote-hint?party=' + encodeURIComponent(party) + '&item=' + encodeURIComponent(this.data.qt_item || '') + '&cost=' + cost + '&margin=' + (Number(this.data.qt_margin) || 15),
+      url: API_BASE + '/quote-hint?party=' + encodeURIComponent(party) + '&item=' + encodeURIComponent(this.data.qt_item || '') + '&cost=' + cost + '&margin=' + (margin === null ? 15 : margin),
       success: (res) => {
         const d = res.data || {}
         if (!d.ok) return wx.showToast({ title: d.error || '算不出来', icon: 'none' })
@@ -1402,7 +1409,8 @@ Page({
       party: party, item: this.data.qt_item || '', // 第 12 轮 D4：报价数量以前 Number(qt_qty)||1 —— 填「1,000 件」会变成 1 件（成本/单价早已走 toAmount）。
       qty: this.toAmount(this.data.qt_qty) || 1,
       cost: this.toAmount(this.data.qt_cost) || 0, price: this.toAmount(this.data.qt_price) || 0,
-      margin: Number(this.data.qt_margin) || 15, valid_days: Number(this.data.qt_days) || 15
+      // 第 13 轮 D1：毛利/有效期也走 toAmount（「15%」这种写法认成 15）
+      margin: (this.toAmount(this.data.qt_margin) === null ? 15 : this.toAmount(this.data.qt_margin)), valid_days: (this.toAmount(this.data.qt_days) === null ? 15 : this.toAmount(this.data.qt_days))
     }
     if (!body.price && !body.cost) return wx.showToast({ title: '单价和成本至少填一个', icon: 'none' })
     this.req({
@@ -2527,15 +2535,20 @@ Page({
         const gpAmt = this.toAmount(ds.amt)
         if (gpAmt === null || !(gpAmt > 0)) return wx.showToast({ title: '这一户的未付金额读不出来，请到应付列表里逐笔付', icon: 'none' })
         this.req({
-          url: API_BASE + '/pay-batch', method: 'POST', once: 'pay-batch|' + ds.n,
+          // 第 13 轮 B2：once 以前只按供应商名分键，同一家 30 秒内付两笔不同金额会共用
+          // 同一个 client_id → 后端 /pay-batch 判成重复、第二笔静默丢掉。现在键带上金额与账户。
+          url: API_BASE + '/pay-batch', method: 'POST',
+          once: 'pay-batch|' + ds.n + '|' + gpAmt + '|' + (this.data.acc_id || ''),
           data: { supplier: ds.n, amount: gpAmt, account_id: this.data.acc_id },
           success: (res) => {
             const d = res.data || {}
+            if (d.ok && d.dup_ok) return wx.showToast({ title: '这笔已经付过了，别重复点', icon: 'none', duration: 2000 })
             if (d.ok) {
               wx.showModal({ title: '付款成功', content: '共冲 ¥' + d.total + '，' + (d.used || []).length + ' 笔' + (d.rest > 0 ? '\n还剩 ¥' + d.rest + ' 没抵完' : ''), showCancel: false })
               this.refresh({ lite: true })
             } else wx.showToast({ title: d.error || '失败', icon: 'none' })
-          }
+          },
+          fail: () => wx.showToast({ title: '没提交成功，请检查网络再点一次', icon: 'none', duration: 2000 })
         })
       }
     })
@@ -3438,8 +3451,10 @@ Page({
   },
   // 算给用户看一眼：这张单里含多少税、不含税是多少
   _taxCalc(kind, rate, total) {
-    const t = Number(total) || 0
-    const r = Number(rate) || 0
+    // 第 13 轮 D2：以前 Number(total) —— 开单金额填「8,000」时是 NaN→0，提示税额一片空白，
+    // 但提交走 toAmount 记的是正确金额，用户看到「没税」实际有税。统一用 toAmount。
+    const t = this.toAmount(total) || 0
+    const r = this.toAmount(rate) || 0
     if (!t || !r) return null
     // F13：口径必须和后端一致 —— 对应 backend/index.js 的 taxOf()（约 128 行）
     // 和 taxNet()（约 138 行）：含税 → round2(t - t/(1+r/100))；不含税 → round2(t*r/100)；
@@ -3812,10 +3827,16 @@ Page({
       success: (r) => {
         if (!r.confirm) return
         this.req({
-          url: API_BASE + '/receive-batch', method: 'POST', once: 'receive-batch',
+          // 第 13 轮 B1：once 以前是固定串 'receive-batch'，30 秒内第二笔批量收款复用了
+          // 同一个 client_id，后端按它判成重复请求直接回 dup_ok、一张单都没核销，前端还弹
+          // 「核销成功」—— 钱其实没收。现在键带上这笔收款的身份，不同客户/金额各算各的。
+          url: API_BASE + '/receive-batch', method: 'POST',
+          once: 'receive-batch|' + customer + '|' + amount + '|' + (rbDate.value || ''),
           data: { customer, amount, date: rbDate.value, account_id: this.data.acc_id },
           success: (res) => {
             const d = res.data || {}
+            // 后端回 dup_ok 说明同一笔已经记过了（重试/连点），不能当成「核销成功」再报一遍。
+            if (d.ok && d.dup_ok) return wx.showToast({ title: '这笔已经收过了，别重复点', icon: 'none', duration: 2000 })
             if (d.ok) {
               const detail = (d.used || []).map((x) => `· ${x.item} 抵 ¥${x.use}（原欠¥${x.unpaid}）`).join('\n')
               wx.showModal({
@@ -3828,7 +3849,8 @@ Page({
             } else {
               wx.showToast({ title: d.error || '核销失败', icon: 'none' })
             }
-          }
+          },
+          fail: () => wx.showToast({ title: '没提交成功，请检查网络再点一次', icon: 'none', duration: 2000 })
         })
       }
     })
@@ -5400,8 +5422,10 @@ Page({
     })
   },
   priceWarn(val) {
-    const last = Number(this.data.price_last || 0)
-    const v = Number(val || 0)
+    // 第 13 轮 D3：以前 Number(val) —— 价格敲成「8,000」就是 NaN→0，异常提醒静默消失，
+    // 低价接单那一下警告就没了。金额输入一律 toAmount。
+    const last = this.toAmount(this.data.price_last) || 0
+    const v = this.toAmount(val) || 0
     if (!last || !v) return this.setData({ price_warn: '' })
     const pct = Math.round(((v - last) / last) * 1000) / 10
     this.setData({ price_warn: Math.abs(pct) >= 10 ? (pct > 0 ? '比上次高 ' + pct + '%（上次 ' + last + ' 元）' : '比上次低 ' + Math.abs(pct) + '%（上次 ' + last + ' 元）') : '' })
@@ -7259,9 +7283,12 @@ Page({
     const dRate = this.amountOrToast(d.d_rate, '年利率', 0)
     const dTerm = this.amountOrToast(d.d_term, '期限', 0)
     if (dRate === null || dTerm === null) return
+    // 第 13 轮 D4：借款起算日以前是纯文本框，写成「下个月」后端 toIsoDate 认不出就落今天 ——
+    // 起算日一错，利息从哪天开始算、每月该还多少全漂了，而用户看不出哪里错了。
+    const dStart = checkDate(d.d_start); if (!dStart.ok) return
     this.req({
       url: API_BASE + '/debts', method: 'POST',
-      data: { lender: d.d_lender, kind: kinds[d.d_kind], principal: dPrin, rate: dRate, start_date: d.d_start || '', term_months: dTerm, pay_kind: pays[d.d_paykind], remark: d.d_remark },
+      data: { lender: d.d_lender, kind: kinds[d.d_kind], principal: dPrin, rate: dRate, start_date: dStart.value || '', term_months: dTerm, pay_kind: pays[d.d_paykind], remark: d.d_remark },
       success: () => {
         wx.showToast({ title: '已记上，钱已入账户', icon: 'none' })
         this.setData({ d_lender: '', d_principal: '', d_remark: '', d_start: '' })
@@ -7365,12 +7392,16 @@ Page({
     const ppTotal = this.amtOf(d.pp_total, 0)
     if (!(ppTotal > 0)) return wx.showToast({ title: '总金额要大于 0（比如 36000 或 3.6万）', icon: 'none' })
     // 月数 0 = 押金这类不摊的（钱付了但不算成本，退租时收回），所以只拦负数
-    if (!(Number(d.pp_months) >= 0) || d.pp_months === '') return wx.showToast({ title: '摊几个月要填（押金填 0）', icon: 'none' })
+    const ppM = this.amountOrToast(d.pp_months, '摊几个月', 1)
+    if (ppM === null) return
+    if (!(ppM >= 0)) return wx.showToast({ title: '摊几个月要填 0 或正数（押金填 0）', icon: 'none' })
     this.req({
       url: API_BASE + '/prepaids', method: 'POST',
-      data: { name: d.pp_name || d.pp_cat, total: ppTotal, months: Math.max(1, Math.round(this.amtOf(d.pp_months, 1))), category: d.pp_cat || '厂房租金', start_date: d.pp_start || '' },
+      // 第 13 轮 B3：以前 Math.max(1, …) 把「押金填 0」强改成 1 —— 后端以 months===0 判押金、
+      // 不摊销，于是押金按月摊进成本、月成本虚增，押金也不再一直挂着。0 必须原样传。
+      data: { name: d.pp_name || d.pp_cat, total: ppTotal, months: Math.round(ppM), category: d.pp_cat || '厂房租金', start_date: d.pp_start || '' },
       success: () => {
-        wx.showToast({ title: '已记上，按月摊销', icon: 'none' })
+        wx.showToast({ title: Math.round(ppM) === 0 ? '已记上，押金不摊销' : '已记上，按月摊销', icon: 'none' })
         this.setData({ pp_name: '', pp_total: '', pp_start: '' })
         this.loadPrepaids(); this.refresh()
       }
@@ -9335,6 +9366,10 @@ Page({
     const assetRes = d.asset_res === '' ? 5 : this.amountOrToast(d.asset_res, '残值率', 5)
     const assetMaint = this.amountOrToast(d.asset_maint, '保养月数', 0)
     if (assetLife === null || assetRes === null || assetMaint === null) return
+    // 第 13 轮 D6：残值率是百分数（0–100），以前不校验范围 —— 手滑填成 800 或 -5，
+    // 后端 cost*(rate/100) 直接算出残值 8 倍原值 / 负残值，每月摊销额跟着离谱，账上看不出原因。
+    if (!(assetRes >= 0 && assetRes <= 100)) return wx.showToast({ title: '残值率填 0–100 之间的数（一般是 5）', icon: 'none', duration: 2000 })
+    if (!(assetLife > 0 && assetLife <= 50)) return wx.showToast({ title: '使用年限填 1–50 年', icon: 'none', duration: 2000 })
     this.req({
       url: API_BASE + '/assets', method: 'POST',
       data: { name: d.asset_name, cost: assetCost, buy_date: assetBuy.value, life_years: assetLife || 5, residual_rate: assetRes, maint_months: assetMaint },
@@ -9381,7 +9416,10 @@ Page({
             editable: true, placeholderText: '例如 2026-11-16',
             success: (m) => {
               if (!m.confirm) return
-              this.doDispose(id, amount, String(m.content || '').trim())
+              // 第 13 轮 D5：以前这里手输什么就发什么，后端 toIsoDate 认不出就静默落今天 ——
+              // 设备是上个月卖的，处置损益记进了这个月，和摊销停在哪个月就对不上。
+              const d5 = checkDate(String(m.content || '').trim()); if (!d5.ok) return
+              this.doDispose(id, amount, d5.value)
             }
           })
           return
@@ -9819,18 +9857,27 @@ Page({
     const { id, unpaid } = e.currentTarget.dataset
     const accs = this.data.accounts || []
     const isAr = type === 'ar'
+    // 第 13 轮 B4：unpaid 是 wxml dataset 里的字符串，以前直接当金额发出去 ——
+    // 列表里显示「1,200」时后端收到的是带千分位的串（被解析成 0 或 NaN），
+    // 而且这条 POST 没有 once 键，跨 8 秒连点会重复收清。现在先解析、再加防重键。
+    const settleAmt = this.toAmount(unpaid)
+    if (settleAmt === null || !(settleAmt > 0)) return wx.showToast({ title: '这一单的未结金额读不出来，请到单据里手动收款', icon: 'none', duration: 2000 })
     const go = (acc) => {
       wx.showModal({
         title: isAr ? '收清这一单' : '付清这一笔',
-        content: (isAr ? '收 ' : '付 ') + '¥' + unpaid + (acc ? '，走「' + acc.name + '」' : '') + '，确认？',
+        content: (isAr ? '收 ' : '付 ') + '¥' + settleAmt + (acc ? '，走「' + acc.name + '」' : '') + '，确认？',
         success: (r) => {
           if (!r.confirm) return
           const url = API_BASE + (isAr ? '/orders/' : '/payables/') + id + (isAr ? '/receive' : '/pay')
-          this.req({ url, method: 'POST', data: { amount: unpaid, account_id: acc ? acc.id : 0 },
+          this.req({ url, method: 'POST', once: 'settle-' + type + '-' + id + '-' + settleAmt,
+            data: { amount: settleAmt, account_id: acc ? acc.id : 0 },
             success: (res) => {
-              if (res.data && res.data.ok) { this.refresh(); wx.showToast({ title: isAr ? '已收清' : '已付清', icon: 'success' }) }
-              else wx.showToast({ title: (res.data && res.data.error) || '失败', icon: 'none' })
-            } })
+              const d = res.data || {}
+              if (d.ok && d.dup_ok) return wx.showToast({ title: '这笔已经收过了，别重复点', icon: 'none', duration: 2000 })
+              if (d.ok) { this.refresh(); wx.showToast({ title: isAr ? '已收清' : '已付清', icon: 'success' }) }
+              else wx.showToast({ title: d.error || '失败', icon: 'none' })
+            },
+            fail: () => wx.showToast({ title: '没提交成功，请检查网络再点一次', icon: 'none', duration: 2000 }) })
         }
       })
     }

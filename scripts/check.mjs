@@ -515,8 +515,23 @@ console.log('\n[4.12] 迁移在老库上干跑')
           old.exec(`ALTER TABLE ${t} RENAME COLUMN ${col} TO old_${col}`)
           renamed.push(t + '.' + col)
         } catch (e) {
-          // 被索引/触发器引用时 SQLite 不许改名 —— 跳过并说明，不假装测过
-          addColsSkipped.push(t + '.' + col)
+          // 第 13 轮 E6：被索引引用时 SQLite 不许改名（writeoffs.month 就被 idx_writeoffs_m 挡着）。
+          // 以前这时把列塞进 addColsSkipped，然后照样 say(!err) 打绿 —— 等于这条迁移
+          // 从来没被真跑过一次（「新库本来就有这列」和「迁移能补上这列」是两回事）。
+          // 现在先把挡路的索引删掉（模拟真正的老库：老库里连索引都还没有），再改名重试。
+          let retried = false
+          try {
+            const idxs = old.prepare(`SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name=?`).all(t)
+            for (const ix of idxs) {
+              if (!ix.name || !ix.sql) continue
+              if (!new RegExp('\\b' + col + '\\b').test(String(ix.sql))) continue
+              old.exec(`DROP INDEX IF EXISTS ${ix.name}`)
+            }
+            old.exec(`ALTER TABLE ${t} RENAME COLUMN ${col} TO old_${col}`)
+            renamed.push(t + '.' + col)
+            retried = true
+          } catch (e2) { retried = false }
+          if (!retried) addColsSkipped.push(t + '.' + col)
         }
       }
       for (const f of listMigrations(migDir)) {
@@ -547,8 +562,11 @@ console.log('\n[4.12] 迁移在老库上干跑')
       err = e
     }
     const extra = renamed.length ? `，另模拟了 ${renamed.length} 个新增列（${renamed.join('、')}）` : ''
-    const skipNote = addColsSkipped.length ? `（${addColsSkipped.join('、')} 被索引/触发器引用，没法改名模拟）` : ''
-    say(!err, `${migFiles.length} 个迁移文件在老库上跑通（含第二遍幂等复跑）${extra}${skipNote}`, `迁移在老库上跑挂了：${err ? err.message : ''}`)
+    // 第 13 轮 E6：还有列没法模拟成「老库没有」时，不能打绿 —— 那等于这条迁移没被测过。
+    const skipNote = addColsSkipped.length ? `；⚠️ 这些列没法模拟成老库缺列，迁移没被真测过：${addColsSkipped.join('、')}` : ''
+    say(!err && !addColsSkipped.length,
+      `${migFiles.length} 个迁移文件在老库上跑通（含第二遍幂等复跑）${extra}${skipNote}`,
+      err ? `迁移在老库上跑挂了：${err.message}` : `有 ${addColsSkipped.length} 个 ADD COLUMN 没能模拟成「老库缺列」：${addColsSkipped.join('、')} —— 这几列到底补得上没补上，这次没验证`)
   }
 }
 
@@ -563,11 +581,61 @@ console.log('\n[4.13] d1 绑定与迁移')
     const name = (blk.match(/^\s*database_name\s*=\s*"([^"]+)"/m) || [])[1]
     if (name) bindings.push({ binding: binding || name, database_name: name })
   }
+  // 第 13 轮 E5：以前这一条是 `migSrc.includes(name) || /readD1Bindings/.test(migSrc)` ——
+  // 只要 d1-migrate.mjs 里出现过 readD1Bindings 这个词就恒真，等于什么都没查（写死库名也绿）。
+  // 现在真去调 readD1Bindings()，把它读出来的库名跟 wrangler.toml 对一遍，
+  // 并确认它确实读了 wrangler.toml（而不是别的路径）。
+  let read = []
+  let readErr = null
+  try {
+    const mod = await import(path.join(ROOT, 'scripts/d1-migrate.mjs').replace(/\\/g, '/'))
+    read = mod.readD1Bindings(tomlPath) || []
+  } catch (e) { readErr = e }
+  const wantNames = bindings.map((b) => b.database_name).sort().join(',')
+  const gotNames = read.map((b) => b.database_name).sort().join(',')
   const migSrc = fs.readFileSync(path.join(ROOT, 'scripts/d1-migrate.mjs'), 'utf8')
-  const covers = bindings.every((b) => migSrc.includes(b.database_name) || /readD1Bindings/.test(migSrc))
+  // 必须真的遍历绑定（bindings.map / for (const b of bindings)），不能只 import 不调用
+  const reallyLoops = /readD1Bindings\s*\(/.test(migSrc) && /for\s*\(\s*const\s+\w+\s+of\s+(bindings|rows|dbs)\b|\bbindings\.(map|forEach|filter)/.test(migSrc)
+  const covers = !readErr && wantNames === gotNames && reallyLoops
   say(bindings.length > 0 && covers,
-    `${bindings.length} 个 d1 绑定（${bindings.map((b) => b.database_name).join('、')}）都由 scripts/d1-migrate.mjs 按 wrangler.toml 读出来统一迁移`,
-    `wrangler.toml 有 ${bindings.length} 个 d1 绑定，但迁移没覆盖到（迁移必须读 wrangler.toml，不能写死库名）`)
+    `${bindings.length} 个 d1 绑定（${bindings.map((b) => b.database_name).join('、')}）由 scripts/d1-migrate.mjs 逐个跑迁移（实测 readD1Bindings 读出的库名与 wrangler.toml 一致）`,
+    readErr
+      ? `跑不起来 readD1Bindings：${readErr.message}`
+      : `迁移没真覆盖所有绑定：wrangler.toml 是 [${wantNames}]，readD1Bindings 读出 [${gotNames}]，真遍历=${reallyLoops}`)
+}
+
+// ── 4.15 schema.sql 与迁移里的同名索引必须定义一致 ──
+// 第 13 轮 E7：同一个索引名在两个地方定义成不同的列，新库和老库就会拿到不同的索引，
+// 而 `CREATE INDEX IF NOT EXISTS` 会静默保留先建好的那个 —— 之后谁再改都不生效，
+// 排查性能问题时看 schema 和看迁移会得出两个结论。这里直接对一遍定义。
+console.log('\n[4.15] 索引定义一致（schema.sql vs 迁移）')
+{
+  const idxOf = (src) => {
+    const m = new Map()
+    for (const x of src.matchAll(/CREATE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(\w+)\s*\(([^)]*)\)/gi)) {
+      const cols = x[3].split(',').map((c) => c.trim().replace(/\s+/g, ' ').toLowerCase()).filter(Boolean).join(',')
+      m.set(x[1], { table: x[2], cols })
+    }
+    return m
+  }
+  const inSchema = idxOf(schemaSrc)
+  const migDir = path.join(ROOT, 'backend/migrations')
+  const migFiles = fs.existsSync(migDir) ? fs.readdirSync(migDir).filter((f) => f.endsWith('.sql')).sort() : []
+  const clashes = []
+  for (const f of migFiles) {
+    const inMig = idxOf(fs.readFileSync(path.join(migDir, f), 'utf8'))
+    for (const [name, def] of inMig) {
+      const s0 = inSchema.get(name)
+      if (!s0) continue // 只在迁移里出现的索引（schema.sql 没建）不算冲突
+      if (s0.table !== def.table || s0.cols !== def.cols) {
+        clashes.push(`${name}：schema.sql 是 ${def2s(s0)}，${f} 是 ${def2s(def)}`)
+      }
+    }
+  }
+  function def2s(d) { return d.table + '(' + d.cols + ')' }
+  say(!clashes.length,
+    `schema.sql 与 ${migFiles.length} 个迁移里的同名索引定义一致`,
+    `索引同名但定义不同（新库老库会长得不一样）：${clashes.join('；')}`)
 }
 
 // ── 4.14 后端引用的 D1 绑定都要在 wrangler.toml 里声明（先报不拦）──

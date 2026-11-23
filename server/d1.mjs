@@ -230,6 +230,35 @@ function listMigrationFiles(dir) {
   } catch (e) { return [] }
 }
 
+// 第 13 轮 E2：打成单文件 exe（Node SEA）以后，程序里没有 backend/migrations 目录，
+// 于是 exe 上永远不跑迁移 —— 0001 建的那几个索引（idx_ledger_ref_dir / idx_orders_paid /
+// idx_payables_paid）在 exe 上永久缺失，大账本越用越慢，而且没人看得出来。
+// 现在打包时把迁移文件作为资源塞进二进制（migrations.json），这里读不到目录就退回读资源。
+function seaAssetText(name) {
+  try {
+    // 打包成 CJS 时有 require；直接跑 ESM 时没有 require，就当作不是 SEA
+    // eslint-disable-next-line no-undef
+    const req = typeof require === 'function' ? require : null
+    if (!req) return ''
+    const sea = req('node:sea')
+    if (!sea || !sea.isSea || !sea.isSea() || !sea.getAsset) return ''
+    const buf = sea.getAsset(name)
+    return buf && buf.length ? Buffer.from(buf).toString('utf8') : ''
+  } catch (e) { return '' }
+}
+
+// 迁移清单：优先磁盘目录，读不到就用打包进二进制的资源
+function migrationList(dir) {
+  const files = listMigrationFiles(dir)
+  if (files.length) return files.map((f) => ({ name: f, sql: () => fs.readFileSync(path.join(dir, f), 'utf8') }))
+  const raw = seaAssetText('migrations.json')
+  if (!raw) return []
+  try {
+    const arr = JSON.parse(raw)
+    return (Array.isArray(arr) ? arr : []).map((x) => ({ name: String(x.name || ''), sql: () => String(x.sql || '') }))
+  } catch (e) { return [] }
+}
+
 // 把迁移文件拆成一条条语句（去掉整行 -- 注释，按 ';' 切）
 function splitMigrationStatements(sql) {
   const clean = sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n')
@@ -237,13 +266,14 @@ function splitMigrationStatements(sql) {
 }
 
 export async function applyMigrations(db, dir = MIG_DIR) {
-  const files = listMigrationFiles(dir)
+  const files = migrationList(dir)
   const applied = []
   const skipped = []
   const failed = []
-  for (const f of files) {
+  for (const m of files) {
+    const f = m.name
     let sql = ''
-    try { sql = fs.readFileSync(path.join(dir, f), 'utf8') } catch (e) { failed.push(f + ': ' + String(e.message || e)); continue }
+    try { sql = m.sql() } catch (e) { failed.push(f + ': ' + String(e.message || e)); continue }
     for (const stmt of splitMigrationStatements(sql)) {
       try {
         await db.exec(stmt)

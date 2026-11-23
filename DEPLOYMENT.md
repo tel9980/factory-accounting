@@ -12,7 +12,7 @@ node scripts/check.mjs
 ```
 
 要 **Node 24**（自检用内置 `node:sqlite` 在内存里真建一遍库，Node 20 没有这个模块）。
-它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 687 条 SQL 在新库上跑不跑得通、
+它会检查：路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 677 条 SQL 在新库上跑不跑得通、
 前端 265 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。红了就先修，别急着装。
 
 GitHub Actions 里也是这个顺序：`.github/workflows/deploy.yml` 先跑自检，绿了才 `wrangler deploy`。
@@ -1291,6 +1291,16 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **`ref_type NOT IN` 的排除名单只有两种标准**：`('transfer','tax_ar','tax_ap')`（排除内部转账和代垫税）和 `('loan','transfer')`（借支口径）。`check.mjs` [4.10] 会拦第三种名单。**改排除项要三处一起想**：语义上到底排谁、跟其它 66 处一不一致、check.mjs 会不会红。
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
+
+### 4.43 第 13 轮的七条硬规矩（「两头没对齐」那类）
+
+1. **签名必须「生成端和校验端用同一个串」**。`sigBook`/`sigOf` 的第 5 参 `exp` 和账套号前缀是签名串的一部分，**生成处和校验处必须一字不差**：生成传了 exp，校验就要读 `&x=` 传进去；生成用 `sigBook(mainDb,book,…)`（带 `|bN`），校验就不能用 `sigOf(db,…)`（不带）。第 13 轮一次扒出四个已瘫的公开功能（`/statement-ack`、`/year-open-print`、`/health-print`、`/recon-calendar`），全是这条没对齐，而且**测试都测不出来**（脚本直接调内部函数，不走链接）。改任何带签名的路由后，用真实 URL 打一次再说「好了」。
+2. **HTTP 层的一次性键不能只用固定串**。`req()` 的 `client_id` 以前 = `opts.once`，而 `once:'receive-batch'` 是常量 → 30 秒内两笔不同收款共用同一个 id，后端判重返回 `dup_ok:true` 一分钱不核销，前端照弹「成功」。现在 `okKey = opts.once + '|' + this._writeIdent(data)`。**新增任何写操作，`once` 只是「语义前缀」，内容必须参与键。**
+3. **「0」是有意义的值，不许用 `Math.max(1,x)` 兜底**。押金的 `pp_months=0`（不摊销）被 `Math.max(1,…)` 改成 1 → 押金按月摊进费用，利润每月虚减。**数字字段先 `amountOrToast`/`numStrict` 解析，再按业务允许的范围校验；不要用 `||默认值` 或者 `Math.max` 悄悄改用户填的值。**
+4. **后端口径一律走 `SUM_MONEY(col)` / `centsSum`，不写裸 `SUM()`**。REAL 累加在几百行以后会跑出 0.30000000000000004 这种尾差，「本月利润 5 处等值」这类断言就会抖。`SUM_MONEY` 的表达式**必须带括号**（`(col)*100`，少了括号会变成只对最后一项乘 100，整列缩 100 倍——第 10 轮踩过）。
+5. **CI 里「空检查」比没有检查更坏**。第 13 轮扒出三条恒真的门禁：`[4.13]` 只要文件里出现 `readD1Bindings` 这个**词**就绿（现在真调它比对 wrangler.toml）、`[4.12]` 没模拟成功的 `ADD COLUMN` 塞进 skipped 照样绿（现在删挡路索引重试，还有跳过就红）、`[4.15]`（新增）schema.sql 与迁移的同名索引必须同定义。**加检查时先故意把它写坏一次，确认它真的会红。**
+6. **线上体检只许发 GET**。`scripts/check-live.mjs` 是给生产用的（部署后体检）；`scripts/smoke.mjs` 是给本机/测试库用的（第一步就 `POST /auth/setup`，注释里自承少数 GET 会补建表写默认值）。**别拿本地冒烟脚本打生产**，`/tmp` 上的方便会变成线上的数据风险。
+7. **回滚要能证明「退回去的是好的」**。只判「线上 commit ≠ 这次坏 sha」不够——退到另一个旧坏版本也算「成功」。部署前先记 `pre_sha`（`steps.prever.outputs.pre_sha`），回滚后必须**正好回到它**；记不到时才退回「不等于坏版本」的弱判据。同理，单次部署的时间戳只取一次（`BUILT` 格式化出 `STAMP`），两次 `date` 会在整分钟边界上打架。
 
 ### 4.42 第 12 轮的六条硬规矩（「旧机制只补了一半」那类）
 

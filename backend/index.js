@@ -819,12 +819,16 @@ async function verifyKey(db, given, saved0) {
 // 缓存必须按库分开：以前是一个变量，多账套下 A 库的密钥会顶掉 B 库的，
 // 于是「同一个客户链接有时好、有时说已失效」。用 WeakMap，库对象本身当键。
 const _signCache = new WeakMap()
+// 第 13 轮 F1：换了签名密钥（导入别人的备份、改库、恢复）之后，缓存里还是旧密钥，
+// 最长 5 分钟内会「一半链接用新密钥签、一半用旧密钥签」，同一条链接时好时说已失效。
+// 两件事：①把缓存压到 60 秒；②凡是写 sign_secret 的地方都显式清一次。
+function invalidateSignSecret(db) { try { _signCache.delete(db) } catch (e) {} }
 async function seedSignSecret(db, v) {
   try { await db.prepare("INSERT OR IGNORE INTO settings (key,value) VALUES ('sign_secret',?)").bind(String(v)).run() } catch (e) {}
 }
 async function signSecret(db) {
   const hit = _signCache.get(db)
-  if (hit && Date.now() - hit.at < 300000) return hit.v
+  if (hit && Date.now() - hit.at < 60000) return hit.v
   let v = ''
   try { const r = await db.prepare("SELECT value FROM settings WHERE key='sign_secret'").first(); v = r ? String(r.value) : '' } catch (e) { v = '' }
   if (!v) {
@@ -1224,6 +1228,8 @@ const setSettingRaw = async (db, k, v) => {
   else await db.prepare('INSERT INTO settings (key, value) VALUES (?,?)').bind(k, String(v)).run()
   // 改了口令要把缓存作废，不然改完 15 秒内还用旧口令校验
   if (k === 'access_key') invalidateKey(db)
+  // 第 13 轮 F1：签名密钥换了同理（恢复备份 / 导入别家账本时会走到这里）
+  if (k === 'sign_secret') invalidateSignSecret(db)
 }
 const delSettingRaw = async (db, k) => { await db.prepare('DELETE FROM settings WHERE key=?').bind(k).run().catch(() => {}) }
 const saveRecoverCode = async (db) => {
@@ -3045,10 +3051,11 @@ app.delete('/wage-records/:id', async (c) => {
 async function payrollOf(db, mm) {
   // 四条互不依赖，一起发（串行在 D1 上每条多等 80–120ms）
   const [recs, pays, loans, dds] = await Promise.all([
-    db.prepare('SELECT worker, SUM(qty) q, SUM(amount) a, COUNT(*) n FROM wage_records WHERE month=? GROUP BY worker ORDER BY a DESC').bind(mm).all(),
-    db.prepare('SELECT worker, SUM(amount) a FROM wage_pays WHERE month=? GROUP BY worker').bind(mm).all(),
+    // 第 13 轮 C6：金额列统一 SUM_MONEY（按分累加）。qty 是件数，不是钱，保持原样。
+    db.prepare(`SELECT worker, SUM(qty) q, ${SUM_MONEY('amount')} a, COUNT(*) n FROM wage_records WHERE month=? GROUP BY worker ORDER BY a DESC`).bind(mm).all(),
+    db.prepare(`SELECT worker, ${SUM_MONEY('amount')} a FROM wage_pays WHERE month=? GROUP BY worker`).bind(mm).all(),
     db.prepare('SELECT staff, SUM(amount-COALESCE(used,0)-COALESCE(returned,0)) a FROM loans GROUP BY staff').all(),
-    db.prepare('SELECT worker, SUM(amount) a FROM wage_deduct WHERE month=? GROUP BY worker').bind(mm).all().catch(() => ({ results: [] }))
+    db.prepare(`SELECT worker, ${SUM_MONEY('amount')} a FROM wage_deduct WHERE month=? GROUP BY worker`).bind(mm).all().catch(() => ({ results: [] }))
   ])
   const recRows = recs.results || []
   const payMap = {}
@@ -3122,9 +3129,9 @@ app.post('/payroll/pay', async (c) => {
   for (const part of chunkIds(workers)) {
     const ph = part.map(() => '?').join(',')
     const [recs, pays, dds] = await Promise.all([
-      db.prepare(`SELECT worker, SUM(amount) a FROM wage_records WHERE month=? AND worker IN (${ph}) GROUP BY worker`).bind(mm, ...part).all(),
-      db.prepare(`SELECT worker, SUM(amount) a FROM wage_pays WHERE month=? AND worker IN (${ph}) GROUP BY worker`).bind(mm, ...part).all(),
-      db.prepare(`SELECT worker, SUM(amount) a FROM wage_deduct WHERE month=? AND worker IN (${ph}) GROUP BY worker`).bind(mm, ...part).all().catch(() => ({ results: [] }))
+      db.prepare(`SELECT worker, ${SUM_MONEY('amount')} a FROM wage_records WHERE month=? AND worker IN (${ph}) GROUP BY worker`).bind(mm, ...part).all(),
+      db.prepare(`SELECT worker, ${SUM_MONEY('amount')} a FROM wage_pays WHERE month=? AND worker IN (${ph}) GROUP BY worker`).bind(mm, ...part).all(),
+      db.prepare(`SELECT worker, ${SUM_MONEY('amount')} a FROM wage_deduct WHERE month=? AND worker IN (${ph}) GROUP BY worker`).bind(mm, ...part).all().catch(() => ({ results: [] }))
     ])
     for (const x of recs.results || []) dueMap.set(x.worker, num(x.a))
     for (const x of pays.results || []) paidMap.set(x.worker, num(x.a))
@@ -3345,11 +3352,14 @@ app.get('/churn-risk', async (c) => {
   const db = c.env.DB
   const days = Math.min(365, Math.max(15, Math.round(num(c.req.query('days'), 60))))
   const today = todayIso()
-  const list = (await db.prepare(`SELECT customer party, COUNT(*) cnt, COALESCE(SUM(price),0) income,
+  // 第 13 轮 C4：以前查询失败就当成空表，最后照旧 ok:true —— 老板看到的是
+  // 「老客户都在正常节奏里」，其实是根本没查出来。现在失败就 ok:false 说清楚。
+  const qFail = []
+  const list = (await db.prepare(`SELECT customer party, COUNT(*) cnt, ${SUM_MONEY('price')} income,
       MIN(substr(created_at,1,10)) first_day, MAX(substr(created_at,1,10)) last_day
-    FROM orders GROUP BY customer`).all().catch((e) => { noteFail(e, '流失预警'); return { results: [] } })).results || []
+    FROM orders GROUP BY customer`).all().catch((e) => { noteFail(e, '流失预警'); qFail.push(String((e && e.message) || e).slice(0, 160)); return { results: [] } })).results || []
   const lastItems = {}
-  const li = (await db.prepare(`SELECT customer, item_name, price, substr(created_at,1,10) d FROM orders ORDER BY id DESC LIMIT 600`).all().catch(() => ({ results: [] }))).results || []
+  const li = (await db.prepare(`SELECT customer, item_name, price, substr(created_at,1,10) d FROM orders ORDER BY id DESC LIMIT 600`).all().catch((e) => { noteFail(e, '流失预警·最近单'); qFail.push(String((e && e.message) || e).slice(0, 160)); return { results: [] } })).results || []
   for (const r of li) if (!lastItems[r.customer]) lastItems[r.customer] = r
   const rows = []
   for (const r of list) {
@@ -3372,14 +3382,21 @@ app.get('/churn-risk', async (c) => {
   rows.sort((a, b) => b.days_since - a.days_since)
   const high = rows.filter((r) => r.level === 'high').length
   const incomeAtRisk = round2(rows.reduce((a, r) => a + r.income, 0))
+  const bad = qFail.length > 0
   return c.json({
-    ok: true, days, count: rows.length, high, income_at_risk: incomeAtRisk, rows: rows.slice(0, 40),
-    advice: rows.length
-      ? '有 ' + rows.length + ' 家老客户超过他们自己的下单间隔没再来（其中 ' + high + ' 家拖得最久），累计做过 ' + incomeAtRisk + ' 元的活。挑最久的那两三个，用下面的话术问一句就行——不催钱，只问下批什么时候要。'
-      : '老客户都在正常下单节奏里，没有需要特别问的。',
-    text: rows.length
-      ? '【老客户提醒】' + rows.length + ' 家超过自己下单间隔没来：' + rows.slice(0, 5).map((r) => r.party + '（' + r.days_since + ' 天）').join('、') + '。'
-      : '【老客户提醒】都在正常节奏里，没有该问的。'
+    ok: !bad, failed: bad, qfail: qFail,
+    days, count: rows.length, high, income_at_risk: incomeAtRisk, rows: rows.slice(0, 40),
+    error: bad ? '这次没算出来（查账时出错了），下面的名单不可信 —— 过一会儿再点一次' : undefined,
+    advice: bad
+      ? '这次没算出来，别照着下面的名单打电话。过一会儿再点一次刷新。'
+      : (rows.length
+        ? '有 ' + rows.length + ' 家老客户超过他们自己的下单间隔没再来（其中 ' + high + ' 家拖得最久），累计做过 ' + incomeAtRisk + ' 元的活。挑最久的那两三个，用下面的话术问一句就行——不催钱，只问下批什么时候要。'
+        : '老客户都在正常下单节奏里，没有需要特别问的。'),
+    text: bad
+      ? '【老客户提醒】这次没算出来（查账出错），先别拿这份名单去问客户。'
+      : (rows.length
+        ? '【老客户提醒】' + rows.length + ' 家超过自己下单间隔没来：' + rows.slice(0, 5).map((r) => r.party + '（' + r.days_since + ' 天）').join('、') + '。'
+        : '【老客户提醒】都在正常节奏里，没有该问的。')
   })
 })
 
@@ -3956,8 +3973,14 @@ app.get('/debts', async (c) => {
 app.post('/debts', async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const db = c.env.DB
-  const principal = num(b.principal)
+  // 第 13 轮 D4：金额与起算日都要认得出才落库。以前认不出的日期被静默换成今天，
+  // 利息起算日就错了，而且账上看不出任何异常。
+  const principalN = numStrict(b.principal)
+  if (principalN === null) return c.json({ error: '本金要是正常数字（比如 50000 或 5万）' }, 400)
+  const principal = round2(principalN)
   if (!(principal > 0)) return c.json({ error: '借进来多少要大于 0' }, 400)
+  const badDS = badDate(b.start_date)
+  if (badDS) return c.json({ error: '起算日' + badDateMsg(badDS), code: 'bad_date' }, 400)
   const startD = String(b.start_date || now()).slice(0, 10)
   if (await isMonthLocked(db, startD.slice(0, 7))) return c.json({ error: `${startD.slice(0, 7)} 已结账锁定，这笔借款记不进去（先解锁）`, code: 'month_locked' }, 403)
   const acc = num(b.account_id) || (await defaultAccountId(db))
@@ -5101,8 +5124,10 @@ const reconcileCore = async (db, type, rows) => {
   return {
     type, month: now().slice(0, 7), count: out.length, match_count: matchN, diff_count: diffN,
     new_count: newN, add_count: diffN + newN,
-    imported_total: round2(out.reduce((a, x) => a + x.imported, 0)),
-    system_total: round2(out.reduce((a, x) => a + x.system, 0)),
+    // 第 13 轮 C6：以前 reduce 直接浮点累加（0.1+0.2 那类尾差会进合计），
+    // 对账单上的「合计」跟逐笔加出来的差一分钱，客户就会揪着问。按分累加再回落。
+    imported_total: centsSum(out, (x) => x.imported),
+    system_total: centsSum(out, (x) => x.system),
     rows: out
   }
 }
@@ -6397,6 +6422,8 @@ const getSetting = async (db, k) => {
 }
 const putSetting = async (db, k, v) => {
   await db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').bind(k, String(v)).run()
+  // 第 13 轮 F1：签名密钥换了，缓存必须立刻作废，否则这 60 秒内签出来的链接一半无效
+  if (k === 'sign_secret') invalidateSignSecret(db)
 }
 const wxCfg = async (db) => ({
   appid: await getSetting(db, 'wx_appid'),
@@ -6625,7 +6652,8 @@ const accountBalances = async (db) => {
   await ensureAccounts(db)
   const accs = (await db.prepare('SELECT * FROM accounts ORDER BY id').all()).results || []
   // 一次分组查完所有账户的收支（原来每个账户查 2 次，账户多就慢）
-  const sums = (await db.prepare("SELECT account_id, direction, COALESCE(SUM(amount),0) AS t FROM ledger WHERE cash=1 GROUP BY account_id, direction").all()).results || []
+  // 第 13 轮 C2：裸 SUM 是 REAL 逐笔浮点累加，账户合计会和逐笔按分累加差 0.01。
+  const sums = (await db.prepare(`SELECT account_id, direction, ${SUM_MONEY('amount')} AS t FROM ledger WHERE cash=1 GROUP BY account_id, direction`).all()).results || []
   const map = {}
   for (const r of sums) {
     const k = num(r.account_id) || 0
@@ -12670,11 +12698,16 @@ app.post('/budgets', async (c) => {
   const { category, amount } = await c.req.json().catch(() => ({}))
   const cat = String(category || '').trim()
   if (!cat) return c.json({ error: '请选分类' }, 400)
-  if (num(amount) <= 0) return c.json({ error: '额度要大于 0' }, 400)
+  // 第 13 轮 C7：以前 num(amount) 直接落库，「1.005」这种三位小数会原样存进去，
+  // 预算和实际支出的比较就永远差几分。现在认不出就 400，认得出就按分取整。
+  const amtN = numStrict(amount)
+  if (amtN === null) return c.json({ error: '额度要是正常数字（比如 3000 或 3,000）' }, 400)
+  const amtR = round2(amtN)
+  if (!(amtR > 0)) return c.json({ error: '额度要大于 0' }, 400)
   const db = c.env.DB
   const ex = await db.prepare('SELECT * FROM budgets WHERE category=?').bind(cat).first()
-  if (ex) await db.prepare('UPDATE budgets SET amount=? WHERE id=?').bind(num(amount), ex.id).run()
-  else await db.prepare('INSERT INTO budgets (category, amount, created_at) VALUES (?,?,?)').bind(cat, num(amount), now()).run()
+  if (ex) await db.prepare('UPDATE budgets SET amount=? WHERE id=?').bind(amtR, ex.id).run()
+  else await db.prepare('INSERT INTO budgets (category, amount, created_at) VALUES (?,?,?)').bind(cat, amtR, now()).run()
   return c.json({ ok: true })
 })
 
@@ -13133,11 +13166,13 @@ app.get('/cashbook', async (c) => {
   const { results: cats } = await db.prepare(
     "SELECT COALESCE(NULLIF(category,''), remark, '其他') AS k, SUM(amount) AS s FROM ledger WHERE cash=1 AND direction='out' AND month=? GROUP BY k ORDER BY s DESC LIMIT 8"
   ).bind(m).all()
+  // 第 13 轮 C3：裸 SUM 在空集时返回 NULL（num(null) 当 0 勉强没事），而且 REAL 累加有分差；
+  // 更要紧的是它和上面那张按账户表的累加口径不一致。统一 SUM_MONEY。
   const { results: paidAgg } = await db.prepare(
-    "SELECT SUM(paid) AS s FROM orders WHERE month<=?"
+    `SELECT ${SUM_MONEY('paid')} AS s FROM orders WHERE month<=?`
   ).bind(m).all()
   const { results: ledAgg } = await db.prepare(
-    "SELECT SUM(amount) AS s FROM ledger WHERE cash=1 AND direction='in' AND ref_type='order' AND month<=?"
+    `SELECT ${SUM_MONEY('amount')} AS s FROM ledger WHERE cash=1 AND direction='in' AND ref_type='order' AND month<=?`
   ).bind(m).all()
   const paidSum = round2(num(paidAgg[0] && paidAgg[0].s)), ledSum = round2(num(ledAgg[0] && ledAgg[0].s))
   const issues = []
@@ -14226,15 +14261,18 @@ app.get('/recon-calendar', async (c) => {
   const cntMap = {}
   for (const x of ((await db.prepare("SELECT customer party, COUNT(*) n FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0) > 0 GROUP BY customer").all()).results || [])) cntMap['ar|' + norm(x.party)] = num(x.n)
   for (const x of ((await db.prepare("SELECT supplier party, COUNT(*) n FROM payables WHERE amount-COALESCE(paid,0)-COALESCE(written_off,0) > 0 GROUP BY supplier").all()).results || [])) cntMap['ap|' + norm(x.party)] = num(x.n)
+  // 第 13 轮 A4：/statement-print 的校验要求签名带 exp 且 URL 带 &x=，
+  // 这里以前签名不带 exp、URL 也不带 x → 从对账日历点「发对账单」给的链接客户打开恒为「已失效」。
+  const expRec = linkExpOf(LINK_TTL.statement)
   for (const r of rows) {
     const n = num(cntMap[r.kind + '|' + norm(r.party)])
     r.open_cnt = n
     r.send_text = r.left > 0
       ? `${r.party}，对一下账：到 ${today}，还有 ${n} 笔${r.kind === 'ap' ? '货款' : '加工费'}没结，共 ${r.left} 元。明细我发你对账单，方便的话今天核一下，有出入随时说。`
       : `${r.party}，${today} 对一下账：这边账上你这边的款都结清了，你看有没有对不上的地方。`
-    const t = saved ? await sigBook(mainDb, c.env.BOOK, r.party, r.kind) : ''
+    const t = saved ? await sigBook(mainDb, c.env.BOOK, r.party, r.kind, expRec) : ''
     // book 必须带：签名里绑了账套号，链接丢了这个参数就打不开（多账套下默认会落到第 1 本）
-    r.url = t ? `${base}/statement-print?type=${r.kind}&party=${encodeURIComponent(r.party)}&t=${t}&book=${num(c.env.BOOK) || 1}` : ''
+    r.url = t ? `${base}/statement-print?type=${r.kind}&party=${encodeURIComponent(r.party)}&t=${t}&book=${num(c.env.BOOK) || 1}&x=${expRec}` : ''
   }
   const pick = (st) => rows.filter((r) => r.state === st)
   const todayList = pick('today'), over = pick('overdue'), soon = pick('upcoming')
@@ -15259,8 +15297,11 @@ app.get('/statement-ack', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
   const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month) : ''
-  if (!good || want !== good || linkExpired(String(c.req.query('x') || ''))) return c.html(ackPage('<div class="card"><h3>链接已失效或已过期</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
+  // 第 13 轮 A1：生成侧用 sigBook(..., exp) 把 |x<exp> 写进签名，校验侧以前不带 exp
+  // → 签名恒不匹配，这条链接打开永远「已失效」。校验必须用链接里的 x。
+  const xq = String(c.req.query('x') || '')
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, num(xq)) : ''
+  if (!good || want !== good || linkExpired(xq)) return c.html(ackPage('<div class="card"><h3>链接已失效或已过期</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
   const t = await getTitle(db)
   const d = await conclusionOf(db, type, party, month)
   const docs = ((await db.prepare(type === 'ar'
@@ -15284,11 +15325,11 @@ app.get('/statement-ack', async (c) => {
     + `<input class="inp" id="note" placeholder="哪一笔不对（选填，比如 6 月那笔 3000 应是 3800）"/>`
     + `<button class="btn red" onclick="ack('doubt')">提交</button></div>`
     + `<div id="res"></div><div class="tip">这是只读页面，只能看您自己这一家。点完老板那边就能看到结果。</div></div>`
-  const script = `var P=${JSON.stringify({ type, party, month, t: want })};`
+  const script = `var P=${JSON.stringify({ type, party, month, t: want, x: xq })};`
     + `function showDoubt(){document.getElementById('doubt').style.display='block'}`
     + `function ack(kind){var amt=0,note='';if(kind==='doubt'){amt=Number(document.getElementById('amt').value||0);note=String(document.getElementById('note').value||'')}`
     + `if(kind==='doubt'&&!amt&&!note){alert('写一下差多少，或者说明哪一笔不对');return}`
-    + `fetch('/statement-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:P.type,party:P.party,month:P.month,t:P.t,ack:kind,amount:amt,note:note})})`
+    + `fetch('/statement-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:P.type,party:P.party,month:P.month,t:P.t,x:P.x,ack:kind,amount:amt,note:note})})`
     + `.then(function(r){return r.json()}).then(function(d){document.getElementById('res').innerHTML='<div class="ok">'+(d.text||'收到了，谢谢！')+'</div>';document.getElementById('doubt').style.display='none'})`
     + `.catch(function(){alert('没提交成功，请检查网络再点一次')})}`
   return c.html(ackPage(inner, script))
@@ -15302,14 +15343,17 @@ app.post('/statement-ack', async (c) => {
   const type = b.type === 'ap' ? 'ap' : 'ar'
   const party = String(b.party || '').trim()
   const month = String(b.month || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month) : ''
-  if (!good || String(b.t || '') !== good || linkExpired(String(b.x || ''))) return c.json({ error: '链接已失效或已过期，请让老板重新发一次' }, 403)
+  // 第 13 轮 A1：POST 以前校验不带 exp，且前端提交的 body 里没有 x → linkExpired('') 恒真，
+  // 确认永远 403。现在按页面带上来的 x 校验。
+  const bx = String(b.x || '')
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, num(bx)) : ''
+  if (!good || String(b.t || '') !== good || linkExpired(bx)) return c.json({ error: '链接已失效或已过期，请让老板重新发一次' }, 403)
+  const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
   // 第 12 轮 A5：POST 以前不防重放——同一条链接可以反复提交，每次都插一条 statement_log，
   // 「对方确认了 3 次」的假记录堆起来。现在同 party+month+type 的确认链接只能提交一次（提交后令牌作废）。
   const cid = 'ack:' + party + '#' + type + '#' + month
   if (await opSeen(db, cid, 'statement-ack')) return c.json({ ok: true, dup_ok: true, ack, text: '这条已经确认过了，不用再点了' })
   if (!(await opClaim(db, cid, 'statement-ack'))) return c.json({ ok: true, dup_ok: true, ack, text: '这条已经确认过了，不用再点了' })
-  const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
   const amt = round2(num(b.amount))
   const note = String(b.note || '').slice(0, 120)
   const memo = ack === 'ok' ? '对方确认：对得上' : ('对方说对不上' + (amt ? '，差 ¥' + amt : '') + (note ? '（' + note + '）' : ''))
@@ -16450,6 +16494,14 @@ app.get('/report-view', async (c) => {
 })
 
 // ===== 异常自动盯：某类费用突然冒尖 / 某家欠款突然翻倍 =====
+// 第 13 轮 C5：异常提醒的阈值以前散在代码里（1.5×+200 / 2×+1000），口径也没走 SUM_MONEY。
+// 抽成常量，说明每个数是什么意思，改的时候一处就够。
+const ANOM_CAT_RATIO = 1.5      // 某类支出超过「前几个月平均」的 1.5 倍
+const ANOM_CAT_MIN = 200        // 且至少多花了 200 元才算异常（小钱别打扰）
+const ANOM_PARTY_RATIO = 2      // 某客户接单额超过平均的 2 倍
+const ANOM_PARTY_MIN = 1000     // 且至少多出 1000 元
+const ANOM_NOCOST_MIN = 1000    // 没填成本的单合计过 1000 才提醒
+
 app.get('/anomaly', async (c) => {
   const db = c.env.DB
   const months = []
@@ -16457,7 +16509,7 @@ app.get('/anomaly', async (c) => {
   for (let i = 0; i < 7; i++) { const dd = new Date(d); dd.setUTCMonth(dd.getUTCMonth() - i); months.push(dd.toISOString().slice(0, 7)) }
   const cur = months[0]
   const list = []
-  const catRows = (await db.prepare("SELECT month AS m, category, COALESCE(SUM(amount),0) AS amt FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND month>=? GROUP BY m, category").bind(months[6]).all()).results || []
+  const catRows = (await db.prepare(`SELECT month AS m, category, ${SUM_MONEY('amount')} AS amt FROM ledger WHERE direction='out' AND cash=1 AND ref_type='expense' AND month>=? GROUP BY m, category`).bind(months[6]).all()).results || []
   const map = {}
   catRows.forEach((r) => { const k = r.category || '其他'; (map[k] = map[k] || {})[r.m] = num(r.amt) })
   Object.keys(map).forEach((k) => {
@@ -16465,9 +16517,9 @@ app.get('/anomaly', async (c) => {
     const prev = months.slice(1, 7).map((m) => map[k][m] || 0).filter((x) => x > 0)
     if (!prev.length || curAmt <= 0) return
     const avg = prev.reduce((a, x) => a + x, 0) / prev.length
-    if (curAmt > avg * 1.5 && curAmt - avg >= 200) list.push({ tone: 'bad', kind: 'cat', party: '', text: '「' + k + '」这个月花了 ' + round2(curAmt) + ' 元，平时平均 ' + round2(avg) + ' 元，多出 ' + round2(curAmt - avg) + ' 元。', cur: round2(curAmt), avg: round2(avg) })
+    if (curAmt > avg * ANOM_CAT_RATIO && curAmt - avg >= ANOM_CAT_MIN) list.push({ tone: 'bad', kind: 'cat', party: '', text: '「' + k + '」这个月花了 ' + round2(curAmt) + ' 元，平时平均 ' + round2(avg) + ' 元，多出 ' + round2(curAmt - avg) + ' 元。', cur: round2(curAmt), avg: round2(avg) })
   })
-  const arRows = (await db.prepare("SELECT month AS m, customer, COALESCE(SUM(price),0) AS amt FROM orders WHERE month>=? GROUP BY m, customer").bind(months[6]).all()).results || []
+  const arRows = (await db.prepare(`SELECT month AS m, customer, ${SUM_MONEY('price')} AS amt FROM orders WHERE month>=? GROUP BY m, customer`).bind(months[6]).all()).results || []
   const amap = {}
   arRows.forEach((r) => { const k = r.customer || ''; (amap[k] = amap[k] || {})[r.m] = num(r.amt) })
   Object.keys(amap).forEach((k) => {
@@ -16475,10 +16527,10 @@ app.get('/anomaly', async (c) => {
     const prev = months.slice(1, 7).map((m) => amap[k][m] || 0).filter((x) => x > 0)
     if (!prev.length || curAmt <= 0) return
     const avg = prev.reduce((a, x) => a + x, 0) / prev.length
-    if (curAmt > avg * 2 && curAmt - avg >= 1000) list.push({ tone: 'warn', kind: 'party', party: k, text: k + ' 这个月接单 ' + round2(curAmt) + ' 元，平时平均 ' + round2(avg) + ' 元，翻了一倍多 —— 别忘了留够产能、也留意他的信用额度。', cur: round2(curAmt), avg: round2(avg) })
+    if (curAmt > avg * ANOM_PARTY_RATIO && curAmt - avg >= ANOM_PARTY_MIN) list.push({ tone: 'warn', kind: 'party', party: k, text: k + ' 这个月接单 ' + round2(curAmt) + ' 元，平时平均 ' + round2(avg) + ' 元，翻了一倍多 —— 别忘了留够产能、也留意他的信用额度。', cur: round2(curAmt), avg: round2(avg) })
   })
-  const uncovered = (await db.prepare('SELECT COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) AS t, COUNT(*) AS c FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0) > 0 AND COALESCE(cost,0)=0').first()) || {}
-  if (num(uncovered.c) > 0 && num(uncovered.t) >= 1000) list.push({ tone: 'warn', kind: 'nocost', party: '', text: '有 ' + num(uncovered.c) + ' 张单（合计 ' + round2(num(uncovered.t)) + ' 元）没填成本，毛利算不准 —— 补上成本才知道到底赚没赚。', cur: round2(num(uncovered.t)), avg: 0 })
+  const uncovered = (await db.prepare(`SELECT ${SUM_MONEY('price-COALESCE(paid,0)-COALESCE(written_off,0)')} AS t, COUNT(*) AS c FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0) > 0 AND COALESCE(cost,0)=0`).first()) || {}
+  if (num(uncovered.c) > 0 && num(uncovered.t) >= ANOM_NOCOST_MIN) list.push({ tone: 'warn', kind: 'nocost', party: '', text: '有 ' + num(uncovered.c) + ' 张单（合计 ' + round2(num(uncovered.t)) + ' 元）没填成本，毛利算不准 —— 补上成本才知道到底赚没赚。', cur: round2(num(uncovered.t)), avg: 0 })
   list.sort((a, b) => (a.tone === 'bad' ? -1 : 1) - (b.tone === 'bad' ? -1 : 1))
   return c.json({ ok: true, month: cur, list, count: list.length })
 })
@@ -16494,33 +16546,36 @@ async function yearBook(db, y) {
     db.prepare(`SELECT month mk, ${SUM_MONEY('price')} inc, ${SUM_MONEY('COALESCE(cost,0)')} mat, COUNT(*) n
       FROM orders WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all(),
     // 现金：收 / 付 / 费用 / 折旧摊销预提，按月
+    // 第 13 轮 C1：这几列以前是裸 SUM（REAL 逐笔浮点累加），与 plOf 的「按分累加」差 0.01 级。
+    // 年度口径必须统一，全部走 SUM_MONEY。
     db.prepare(`SELECT substr(created_at,1,7) mk,
-      COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) recv,
-      COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) pay,
-      COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
-      COALESCE(SUM(CASE WHEN ${ADJ_EXP_WHERE} THEN amount ELSE 0 END),0) adj
+      ${SUM_MONEY("CASE WHEN direction='in' AND cash=1 AND " + CASH_EXCLUDE + " THEN amount ELSE 0 END")} recv,
+      ${SUM_MONEY("CASE WHEN direction='out' AND cash=1 AND " + CASH_EXCLUDE + " THEN amount ELSE 0 END")} pay,
+      ${SUM_MONEY('CASE WHEN ' + CASH_EXP_WHERE + ' THEN amount ELSE 0 END')} exp,
+      ${SUM_MONEY('CASE WHEN ' + ADJ_EXP_WHERE + ' THEN amount ELSE 0 END')} adj
       FROM ledger WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all(),
     // 现金余额：期初（账户期初 + 该年之前的流水）
-    db.prepare(`SELECT COALESCE((SELECT SUM(COALESCE(opening,0)) FROM accounts),0) AS opening,
-      COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM ledger WHERE cash=1 AND substr(created_at,1,10)<?),0) AS before_flow,
-      COALESCE((SELECT SUM(CASE WHEN direction='in' THEN amount ELSE -amount END) FROM ledger WHERE cash=1 AND substr(created_at,1,10)<=?),0) AS upto_flow`).bind(y0, y1).first(),
+    db.prepare(`SELECT ${SUM_MONEY('COALESCE(opening,0)')} AS opening,
+      (SELECT ${SUM_MONEY("CASE WHEN direction='in' THEN amount ELSE -amount END")} FROM ledger WHERE cash=1 AND substr(created_at,1,10)<?) AS before_flow,
+      (SELECT ${SUM_MONEY("CASE WHEN direction='in' THEN amount ELSE -amount END")} FROM ledger WHERE cash=1 AND substr(created_at,1,10)<=?) AS upto_flow
+      FROM accounts`).bind(y0, y1).first(),
     // 年底应收 / 应付（按「截至年底收付了多少」算，不能用现在的 paid）
-    db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.price - COALESCE(p.s,0) - COALESCE(w.s,0) > 0 THEN t.price - COALESCE(p.s,0) - COALESCE(w.s,0) ELSE 0 END),0) AS v, COUNT(*) AS c
+    db.prepare(`SELECT ${SUM_MONEY('CASE WHEN t.price - COALESCE(p.s,0) - COALESCE(w.s,0) > 0 THEN t.price - COALESCE(p.s,0) - COALESCE(w.s,0) ELSE 0 END')} AS v, COUNT(*) AS c
       FROM orders t
-      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM ledger WHERE ref_type='order' AND direction='in' AND substr(created_at,1,10)<=? GROUP BY ref_id) p ON p.ref_id=t.id
-      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,10)<=? GROUP BY ref_id) w ON w.ref_id=t.id
+      LEFT JOIN (SELECT ref_id, ${SUM_MONEY('amount')} s FROM ledger WHERE ref_type='order' AND direction='in' AND substr(created_at,1,10)<=? GROUP BY ref_id) p ON p.ref_id=t.id
+      LEFT JOIN (SELECT ref_id, ${SUM_MONEY('amount')} s FROM writeoffs WHERE ref_type='order' AND substr(created_at,1,10)<=? GROUP BY ref_id) w ON w.ref_id=t.id
       WHERE substr(t.created_at,1,10)<=?`).bind(y1, y1, y1).first(),
-    db.prepare(`SELECT COALESCE(SUM(CASE WHEN t.amount - COALESCE(p.s,0) - COALESCE(w.s,0) > 0 THEN t.amount - COALESCE(p.s,0) - COALESCE(w.s,0) ELSE 0 END),0) AS v, COUNT(*) AS c
+    db.prepare(`SELECT ${SUM_MONEY('CASE WHEN t.amount - COALESCE(p.s,0) - COALESCE(w.s,0) > 0 THEN t.amount - COALESCE(p.s,0) - COALESCE(w.s,0) ELSE 0 END')} AS v, COUNT(*) AS c
       FROM payables t
-      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM ledger WHERE ref_type='payable' AND direction='out' AND substr(created_at,1,10)<=? GROUP BY ref_id) p ON p.ref_id=t.id
-      LEFT JOIN (SELECT ref_id, SUM(amount) s FROM writeoffs WHERE ref_type='payable' AND substr(created_at,1,10)<=? GROUP BY ref_id) w ON w.ref_id=t.id
+      LEFT JOIN (SELECT ref_id, ${SUM_MONEY('amount')} s FROM ledger WHERE ref_type='payable' AND direction='out' AND substr(created_at,1,10)<=? GROUP BY ref_id) p ON p.ref_id=t.id
+      LEFT JOIN (SELECT ref_id, ${SUM_MONEY('amount')} s FROM writeoffs WHERE ref_type='payable' AND substr(created_at,1,10)<=? GROUP BY ref_id) w ON w.ref_id=t.id
       WHERE substr(t.created_at,1,10)<=?`).bind(y1, y1, y1).first(),
     // 年底还欠多少钱（借款本金 − 已还本金）
-    db.prepare(`SELECT COALESCE(SUM(d.principal),0) - COALESCE((SELECT SUM(r.amount) FROM debt_repays r WHERE r.kind='principal' AND substr(r.rdate,1,10)<=?),0) AS v
+    db.prepare(`SELECT ${SUM_MONEY('d.principal')} - (SELECT ${SUM_MONEY('r.amount')} FROM debt_repays r WHERE r.kind='principal' AND substr(r.rdate,1,10)<=?) AS v
       FROM debts d WHERE substr(d.start_date,1,10)<=?`).bind(y1, y1).first(),
     // 去年对比
     db.prepare(`SELECT ${SUM_MONEY('price')} inc, ${SUM_MONEY('COALESCE(cost,0)')} mat FROM orders WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
-    db.prepare(`SELECT COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp FROM ledger WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
+    db.prepare(`SELECT ${SUM_MONEY('CASE WHEN ' + CASH_EXP_WHERE + ' THEN amount ELSE 0 END')} exp FROM ledger WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
     // 第 12 轮 B2：核销（坏账）从来不计入利润 —— 以前 profit=接单-成本-费用-摊销，把核销掉的坏账漏了，
     // 实际净利比纸面低。核销按 month 列归属（没有 month 的按 created_at），按月取出来扣。
     db.prepare(`SELECT substr(COALESCE(month, substr(created_at,1,7)),1,7) mk, ${SUM_MONEY('amount')} v FROM writeoffs WHERE substr(COALESCE(month, substr(created_at,1,7)),1,4)=? GROUP BY mk`).bind(y).all()
@@ -16584,7 +16639,8 @@ async function yearBook(db, y) {
     `年底还没收回来 ${arEnd} 元，欠供应商 ${apEnd} 元，欠借款 ${debtEnd} 元，家底 ${netEnd} 元`
   ].join('\n')
   return {
-    ok: true, year: y, months, totals: { income, mat, exp, adj, profit, margin, recv: T('recv'), pay: T('pay'), cnt: months.reduce((a, x) => a + x.cnt, 0), avg_month: active.length ? round2(profit / active.length) : 0 },
+    // 注意：ok 只在下面那一处（yqFail.length === 0）赋值，别在这里再写一次（重复键会让上面那行失效）
+    year: y, months, totals: { income, mat, exp, adj, profit, margin, recv: T('recv'), pay: T('pay'), cnt: months.reduce((a, x) => a + x.cnt, 0), avg_month: active.length ? round2(profit / active.length) : 0 },
     best: { label: best.label, profit: best.profit }, worst: { label: worst.label, profit: worst.profit },
     active_months: active.length,
     cash: { start: cashStart, end: cashEnd, net: round2(cashEnd - cashStart) },
@@ -17192,9 +17248,12 @@ app.get('/year-open-print-link', async (c) => {
   // 现在签名带 exp（7 天）+ 把期初快照存进签名串（快照变则链接失效），打印页用存好的快照渲染。
   const recRow = await mainDb.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first()
   const snap = recRow && recRow.value ? recRow.value : ''
-  const t = await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), linkExpOf(LINK_TTL.statement))
+  // 第 13 轮 A2：exp 只算一次（以前签名和 URL 各调一次 linkExpOf，跨毫秒就会签名/URL 对不上），
+  // 校验侧也补上 exp —— 以前生成带 exp、校验不带，凭据链接打开恒为「已失效」。
+  const expYo = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), expYo)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) + '&x=' + linkExpOf(LINK_TTL.statement) })
+  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) + '&x=' + expYo })
 })
 
 app.get('/year-open-print', async (c) => {
@@ -17205,8 +17264,9 @@ app.get('/year-open-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const recRow = await db.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first()
   const snap = recRow && recRow.value ? recRow.value : ''
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100)) : ''
-  if (!good || want !== good || linkExpired(String(c.req.query('x') || ''))) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成结转凭据。</h3>')
+  const xYo = String(c.req.query('x') || '')
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), num(xYo)) : ''
+  if (!good || want !== good || linkExpired(xYo)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成结转凭据。</h3>')
   const d = await yearOpenData(db, y)
   const t = await getTitle(db)
   const rec = d.record || { ...d.opening, ar_cnt: d.ar_cnt, ap_cnt: d.ap_cnt, created_at: now() }
@@ -17244,13 +17304,14 @@ app.get('/tax-pack', async (c) => {
     // 第 12 轮 B3：以前这里写 `WHERE cash=1`，但 amort/dep/accrual 记的都是 cash=0（见 ADJ_EXP_WHERE），
     // 于是这三项永远查不到、报税材料里恒为 0，和 yearBook 的净利对不上。改用 ADJ_EXP_WHERE。
     // 预提利息既有 accrual 也有 debt_int 两种记法，都算进来。
-    db.prepare(`SELECT COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) am,
-      COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) dp,
-      COALESCE(SUM(CASE WHEN ref_type IN ('accrual','debt_int') THEN amount ELSE 0 END),0) ac
+    // 第 13 轮 C1：报税材料要和年度总账同一口径（按分累加），这里也走 SUM_MONEY。
+    db.prepare(`SELECT ${SUM_MONEY("CASE WHEN ref_type='amort' THEN amount ELSE 0 END")} am,
+      ${SUM_MONEY("CASE WHEN ref_type='dep' THEN amount ELSE 0 END")} dp,
+      ${SUM_MONEY("CASE WHEN ref_type IN ('accrual','debt_int') THEN amount ELSE 0 END")} ac
       FROM ledger WHERE ${ADJ_EXP_WHERE} AND substr(created_at,1,4)=?`).bind(y).all(),
     // 各账户年底余额 = 期初 + 截至年底流水
     db.prepare(`SELECT a.id, a.name, COALESCE(a.opening,0) op,
-      COALESCE((SELECT SUM(CASE WHEN l.direction='in' THEN l.amount ELSE -l.amount END) FROM ledger l WHERE l.cash=1 AND (l.account_id=a.id) AND substr(l.created_at,1,10)<=?),0) flow
+      (SELECT ${SUM_MONEY("CASE WHEN l.direction='in' THEN l.amount ELSE -l.amount END")} FROM ledger l WHERE l.cash=1 AND (l.account_id=a.id) AND substr(l.created_at,1,10)<=?) flow
       FROM accounts a ORDER BY a.id`).bind(y1).all(),
     db.prepare(`SELECT l.*, COALESCE(a.name,'') acc FROM ledger l LEFT JOIN accounts a ON a.id=l.account_id
       WHERE l.cash=1 AND substr(l.created_at,1,4)=? ORDER BY l.id`).bind(y).all(),
@@ -17845,6 +17906,8 @@ app.post('/book-reset', async (c) => {
     return c.json({ error: '清空的时候出错了：' + String((e && e.message) || e).slice(0, 120) + '（清空前已自动备份，可在「报表 → 备份列表」里退回去）' + (stmts.length > D1_MAX_STMTS ? '。这次清空没能一次做完，账本可能只清了一部分，请从备份列表恢复后再试。' : ''), code: 'reset_failed', pending: true }, 500)
   }
   try { await db.prepare("DELETE FROM settings WHERE key='book_reset_pending'").run() } catch (e) { /* 标记删不掉不影响账 */ }
+  // 第 13 轮 F1：清空后账户余额全变了，30 秒余额缓存必须作废（否则首页还显示清空前的老数）
+  invalidateBalances(db)
   // 回到刚建库的样子：默认账户 + 默认分类
   try { await ensureAccounts(db) } catch (e) { noteFail(e, '清空后建账户') }
   try { await ensureCats(db) } catch (e) { noteFail(e, '清空后建分类') }
@@ -18401,7 +18464,7 @@ app.get('/health-check', async (c) => {
 
 // 体检报告单：分数曲线 + 每项问题的发现/修好日期 + 一句结论（可打印）
 const HB_BLK = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
-async function healthReport(db, days) {
+async function healthReport(db, days, mainDb, book) {
   const s = await healthScan(db)
   const pts = (s.hist || []).filter((x) => x && x.d).slice(-days).map((x) => ({ d: x.d, s: num(x.s) }))
   const first = pts[0] || null
@@ -18427,8 +18490,10 @@ async function healthReport(db, days) {
   }
   if (!s.empty && !open.length) sentences.push('该改的都改完了，账本现在是干净的。')
   // 第 12 轮 A4：体检报告单链接 7 天失效。
+  // 第 13 轮 A3：以前生成用 sigOf（数据串没有 |bN 账套段）、校验用 sigBook（有 |bN）
+  // → 两边签名串结构不同，体检报告单打开恒为「已失效」。现在两边都用 sigBook。
   const expH = linkExpOf(LINK_TTL.statement)
-  const url = '/health-print?days=' + days + '&t=' + (await sigOf(db, 'health', 'hr:' + days, expH)) + '&x=' + expH
+  const url = '/health-print?days=' + days + '&t=' + (await sigBook(mainDb || db, book, 'health', 'hr:' + days, expH)) + '&x=' + expH
   return {
     ok: true, at: now(), days, score: s.score, grade: s.grade, empty: s.empty, clean: s.clean, count: s.count,
     delta, first, last: lastP, best, worst, points: pts, spark,
@@ -18443,7 +18508,7 @@ app.get('/health-report', async (c) => {
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
-  return c.json(await healthReport(c.env.DB, days))
+  return c.json(await healthReport(c.env.DB, days, mainDb, c.env.BOOK))
 })
 
 app.get('/health-print', async (c) => {
@@ -18455,7 +18520,7 @@ app.get('/health-print', async (c) => {
   const expH = num(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'health', 'hr:' + days, expH) : ''
   if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成体检报告单。</h3>')
-  const r = await healthReport(db, days)
+  const r = await healthReport(db, days, mainDb, c.env.BOOK)
   const t = await getTitle(db)
   const tr = (x) => `<tr><td>${escHtml(x.label)}</td><td class="n">${x.count > 0 ? '还有 ' + x.count + ' 处' : '正常'}</td><td>${escHtml(x.since || '')}</td><td>${x.count > 0 ? daysTxtPrint(x.days_open) : (x.fixed ? '已修好' : '')}</td><td>${escHtml(x.fixed || '')}</td><td>${escHtml(x.count > 0 ? (x.tip || '') : '')}</td></tr>`
   const rows = r.items.map(tr).join('')
@@ -20231,6 +20296,12 @@ async function restoreCore(db, data, opts) {
       await runBatch(db, allStmts)      // 超过一批上限：分批（每批仍是事务），失败靠快照回滚
     }
   } catch (e) { throw fail(e) }
+  // 第 13 轮 F1：恢复会把 settings 整份换掉（含 sign_secret / access_key），
+  // 内存缓存里还是恢复前那份 —— 不清掉的话，接下来 15 秒/60 秒内签的链接、校验的口令
+  // 都用的是「已经被覆盖掉的旧值」，表现是恢复完链接一半能开一半说已失效。
+  invalidateKey(db)
+  invalidateSignSecret(db)
+  invalidateBalances(db)
   if (!isRollback) await logAudit(db, '数据恢复', '', `恢复 应收${orders.length - skipped.orders} 应付${payables.length - skipped.payables} 流水${ledger.length - skipped.ledger} 家底${Object.keys(extra).length}类`)
   // 员工口令不随备份走（怕 PIN 跟着文件流传出去）。所以恢复完要说清这本账现在有几个员工：
   // 在老库上恢复人还在；换电脑 / 换库恢复就是 0 个，得在「设置 → 员工账号」重新加一次。
@@ -21191,9 +21262,18 @@ app.post('/assets', async (c) => {
   // 购入日期填错不能悄悄落今天（折旧从哪天开始提全看这个日期）
   const badDA = badDate(buy_date)
   if (badDA) return c.json({ error: badDateMsg(badDA), code: 'bad_date' }, 400)
+  // 第 13 轮 D6：残值率是百分数（0–100），使用年限有下限 —— 以前不校验，
+  // 传 800 就让残值超过原值、每月摊销算成负数，账上完全看不出是怎么变成这样的。
+  const resRate = residual_rate === undefined || residual_rate === '' ? 5 : numStrict(residual_rate)
+  if (resRate === null) return c.json({ error: '残值率要是正常数字（0–100，一般填 5）' }, 400)
+  const resR = round2(resRate)
+  if (resR < 0 || resR > 100) return c.json({ error: '残值率要填 0–100 之间的百分数（一般填 5 表示 5%）' }, 400)
+  const lifeN = life_years === undefined || life_years === '' ? 5 : numStrict(life_years)
+  if (lifeN === null) return c.json({ error: '使用年限要是正常数字' }, 400)
+  const lifeY = Math.round(lifeN)
+  if (!(lifeY >= 1 && lifeY <= 50)) return c.json({ error: '使用年限要填 1–50 年' }, 400)
   await db.prepare('INSERT INTO assets (name, cost, buy_date, life_years, residual_rate, maint_months, maint_last, created_at) VALUES (?,?,?,?,?,?,?,?)')
-    .bind(nm, num(cost), toIsoDate(buy_date) || now().slice(0, 10), num(life_years) || 5,
-      residual_rate === undefined ? 5 : num(residual_rate),
+    .bind(nm, round2(num(cost)), toIsoDate(buy_date) || now().slice(0, 10), lifeY, resR,
       Math.max(0, Math.round(num(maint_months))), toIsoDate(maint_last) || null, now()).run()
   await logAudit(db, '新增固定资产', nm, `${nm} 原值 ¥${num(cost)}`)
   return c.json({ ok: true })
@@ -21270,6 +21350,10 @@ app.post('/assets/:id/dispose', async (c) => {
   if (a.disposed_at) { await adRelease(); return c.json({ error: `这台已经在 ${String(a.disposed_at).slice(0, 10)} 处置过了` }, 400) }
   const amount = round2(num(b.amount))
   if (!(amount >= 0)) { await adRelease(); return c.json({ error: '卖了多少钱要填（报废就填 0）' }, 400) }
+  // 第 13 轮 D5：以前 toIsoDate 认不出就 `|| now()` —— 手输的怪日期静默变成今天，
+  // 处置损益记进错月份（摊销停在错的月份）。现在认不出就 400，让用户看清楚。
+  const badDD = badDate(b.date)
+  if (badDD) { await adRelease(); return c.json({ error: '处置日期' + badDateMsg(badDD), code: 'bad_date' }, 400) }
   const date = toIsoDate(b.date) || now().slice(0, 10)
   const m = date.slice(0, 7)
   if (await isMonthLocked(db, m)) { await adRelease(); return c.json({ error: `${m} 已结账锁定，先解锁再记处置` }, 403) }

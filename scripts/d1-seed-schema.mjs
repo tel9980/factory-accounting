@@ -39,7 +39,10 @@ if (!fs.existsSync(SCHEMA)) {
   process.exit(1)
 }
 const bindings = readD1Bindings(path.join(BACKEND, 'wrangler.toml'))
-const targets = only ? bindings.filter((b) => b.database_name === only) : bindings
+// 第 13 轮 E9：--db 以前只认 database_name，而 scripts/d1-migrate.mjs 同时认 binding ——
+// 同一个参数在两个脚本里行为不同，照 A 脚本的习惯用 B 脚本就「找不到库」。
+// 现在两处都按「database_name 或 binding」匹配。
+const targets = only ? bindings.filter((b) => b.database_name === only || b.binding === only) : bindings
 if (!targets.length) {
   console.error('❌ wrangler.toml 里没有' + (only ? '名为 ' + only + ' 的' : '任何') + ' d1 绑定')
   process.exit(1)

@@ -97,7 +97,7 @@ docs/               文档
 ## 快速开始
 
 1. **后端**：`cd backend && npm install`，把 `wrangler.toml` 里的 `database_id` 换成你的 D1 库，然后把 `schema.sql` 灌进库（**新装只用这一个文件就能建全 60 张表**）：`npx wrangler d1 execute factory-db --remote --file=schema.sql`，再 `npx wrangler deploy`。
-   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 687 条 SQL 在这种新库上跑不跑得通、前端的 265 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
+   - 灌之前先跑一次自检：`node scripts/check.mjs`（不需要联网、不碰数据）。它会检查路由有没有重名、`schema.sql` 能不能一次建出新库、代码里写死的 677 条 SQL 在这种新库上跑不跑得通、前端的 265 个接口调用后台有没有、页面 wxml 绑的方法在 js 里存不存在。CI 里部署前也会先跑这一遍。
 2. **前端**：微信开发者工具导入 `frontend` 目录，把 `frontend/pages/index/index.js` 顶部 `API_BASE` 改成你的 Worker 地址。
 3. **上线**：微信公众平台把该域名加进 `request` 合法域名；本地调试勾选「不校验合法域名」。
 
@@ -1729,6 +1729,17 @@ node scripts/build-exe.mjs --out dist
    - **新增 `scripts/test-arcat.mjs`（33 项，已挂 CI，在 `test-apcat` 之后）**：模板第 5 列有下拉 / 日常台账包有应收对账页 / 粘贴认出分类并且金额不串位 / 老格式金额对分类空 / 四种宽松写法 / 手工建单带分类 / 改分类回 `changed` 且落库变了 / 按分类筛时别的类不出现 / `/ar-by-category` 的开单·已收·还欠对得上。
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
+
+353. ✅ **第 13 轮查漏补缺（三路审计 30 条，A–F 六组全落）**：用户「查漏补缺，给出具体优化方案」→ 方案落 `docs/优化方案-20261123-第13轮.md`（A 签名链路 / B 前端丢钱 / C 后端口径 / D 前端残留 / E CI 门禁 / F 低危清理）→ 用户「查看具体优化方案，全部由你来完成」。题眼两条：**「生成端改了、校验端没改」的自伤**、**「上一轮说修好了其实还是空检查」的门禁**。
+   - **4 个公开功能其实已经瘫了**（生成签名时带了过期时间、校验时没带，或两边用的密钥串不一样）：`/statement-ack` 前端 body 里压根没传 `x` → `linkExpired('')` 恒真，**客户点「确认无误」永远 403**；`/year-open-print` 生成带 exp、校验不带；`/health-print` 生成用 `sigOf(db,…)`（无账套号）、校验用 `sigBook(mainDb,BOOK,…)`（有账套号）→ 恒不匹配；`/recon-calendar` 签名无 exp、URL 无 `&x=`。现在 31 处生成/校验全部对齐 exp 与账套号，并顺手修了 `/statement-ack` 重复提交时的 `const ack` TDZ 500。
+   - **批量收付 30 秒内第二笔被静默丢掉**：`once:'receive-batch'` 是个固定串，`req()` 只用它当 client_id，两笔不同客户/不同金额的收款在 30 秒内共用同一个 id → 后端 `opClaim` 判重后返回 `dup_ok:true`、一分钱没核销，前端却照弹「核销成功」。现在 `okKey = once + '|' + _writeIdent(data)`（不同内容必不同键），并按 `dup_ok` 明确提示「这笔已经收过了」。
+   - **押金被当成月摊费用**：`pickPPCat` 填 `pp_months='0'`（押金不摊销），提交时 `Math.max(1, …)` 又把 0 改成 1 → 押金被按月摊进费用，利润每月虚减。现在 `amountOrToast` 解析 + 允许 0 + 文案分「押金不摊销 / 按月摊销」。
+   - **前端四个静默吞**：报价提示、税额试算、比价提醒、借款起算日/设备处置日/残值率全都用裸 `Number()` 或完全不校验 → 「8,000」变 8、「1.2万」变 NaN、残值率填 200% 也照收。统一走 `toAmount()`/`checkDate()`/范围校验，解析不出就 toast 拦住。
+   - **后端口头径统一到分**：`yearBook`、`tax-pack`、`accountBalances`、现金对账、`/churn-risk`、`/anomaly`、`reconcileCore`、`payrollOf` 里裸 `SUM()` 全部换 `SUM_MONEY()`；`/churn-risk` 查询失败不再「空名单 + ok:true」，改成 `failed:true` + 明确文案；`/anomaly` 的 1.5×/2× 阈值提成具名常量。
+   - **CI 门禁真修**（上一轮说修了但仍是空检查的）：`check.mjs [4.13]` 以前只要文件里出现 `readD1Bindings` 这个词就恒真 → 现在真调它比对 wrangler.toml；`[4.12]` 迁移干跑里被索引挡住的 `ADD COLUMN` 以前塞进 skipped 照样打绿（`writeoffs.month` 从没被真测过）→ 现在先删挡路索引再重试，仍有跳过就直接红；新增 `[4.15]` schema.sql 与迁移的同名索引必须定义一致（`idx_statement_log_party` 原来一边 `(party)` 一边 `(party,type)`，专门补了 `0003` 迁移统一）。
+   - **发布会咬人的几处**：手动触发 `release.yml` 时 `github.ref_name` 是 `main`，跟 `v1.3.0` 比必然红 → 只有推 tag 才比对 tag；单文件 exe 只嵌了 `schema.sql`、没嵌迁移（索引在 exe 上永久缺失）→ build 时把 `backend/migrations/*.sql` 合成 SEA 资源 `migrations.json`，自测直接开库断言三个索引在；线上体检以前跑 `smoke.mjs`（第一步 `POST /auth/setup`，注释自承少数 GET 会补建表写默认值）→ 换成新的 `scripts/check-live.mjs`（**只发 GET**，表结构判定也在里面）；回滚复核以前只判「线上 commit ≠ 坏 sha」（退回另一个旧坏版本也算成功）→ 部署前先记下 `pre_sha`，回滚后必须正好回到它；依赖体检从 `grep "found N vulnerabilit"` 改成读 `npm audit --json` 的 `metadata.vulnerabilities`。
+   - **验证**：`run-all.mjs` 42/42（87s）、`test-cron` 70 项、`check-backup`、`gen-api-list --check`（434 接口 / 63 组）、`gen-guide --check`、`check-manifest` 三处一致；`check.mjs` 全绿（434 路由 / 60 表 / 265 调用 / 800 绑定 + [4.8]–[5.8]）。
+   - ⚠️ 动了前端（批量收付判重、押金摊销、报价/税额/比价、借款与设备日期、残值率）→ 小程序要重新上传发布。
 
 352. ✅ **第 12 轮查漏补缺（三路审计 45 条，A–F 六组全落）**：用户「查漏补缺，给出具体优化方案」→ 方案落 `docs/优化方案-20261123-第12轮.md`（A 鉴权越权 / B 账务正确性 / C 越权少算 / D 前端记错账 / E 弱网竞态 / F CI 门禁）→ 用户「按优化方案，全部由你来完成」。题眼两条：**「返回 ok 但什么都没做」的假成功**、**「旧机制只补了一半」的残留**。
    - **公开链接全部加过期时间**：`sigBook` 第 5 参 `exp` + `LINK_TTL`，此前只有 statement/track/payroll 三类带 exp，其余 11 类公开打印页（含毛利的 `/report-print`、含成本的 `/order-print`、`/quote`、`/ack`、`/year-*`、`/health`、`/handover`、`/recon`）的链接**永久有效**——拿到一次链接可永久看含毛利的月报。现在生成处统一加 `linkExpOf(LINK_TTL.statement)`（7 天）+ `&x=<exp>`，校验处 `linkExpired(x)`，旧链接立即失效。

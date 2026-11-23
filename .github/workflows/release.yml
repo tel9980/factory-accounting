@@ -106,7 +106,16 @@ jobs:
       - run: node scripts/gen-guide.mjs --check
       # 镜像标签钉在 compose / README / DEPLOYMENT 三处，发版时必须与这个 tag 一致，
       # 否则「照文档 docker compose up」拉到的还是上一版（v1.1.0 就发生过）。
-      - run: node scripts/check-version.mjs "${{ github.ref_name }}"
+      # 第 13 轮 E1：手动触发（workflow_dispatch）时 github.ref_name 是分支名（main），
+      # 拿它跟 v1.3.0 比必然不等 —— 手动跑一次发布就红一次，其实什么都没错。
+      # 现在只有「推 tag」的那个入口才把 tag 名传进去做比对；手动触发只校验三处文档彼此一致。
+      - run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "${{ github.ref_name }}" ]; then
+            node scripts/check-version.mjs "${{ github.ref_name }}"
+          else
+            echo "手动触发：只校验 compose / README / DEPLOYMENT 三处版本号一致（不拿分支名当版本号比）"
+            node scripts/check-version.mjs
+          fi
 
   exe:
     name: 打包 ${{ matrix.name }}

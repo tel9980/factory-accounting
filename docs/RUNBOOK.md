@@ -153,7 +153,9 @@ node scripts/cli.mjs clean --days 180     # 删 180 天前的日志
 docker compose down
 docker compose up -d
 # 备份（整个 data 目录就是账本）
-docker compose exec app tar czf /data/backup-$(date +%F).tar.gz -C /data .
+# 第 13 轮 E8：服务名是 compose 里写的 factory-accounting，以前写成 app —— 照抄报
+# "service \"app\" is not running"，最需要备份的时候卡在这一步。
+docker compose exec factory-accounting tar czf /data/backup-$(date +%F).tar.gz -C /data .
 ```
 
 **本机版**：`data/book1..book9.db` 就是九本账，备份 = 拷这个目录；旧的 `.tar.gz` 可以自己删。
