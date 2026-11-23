@@ -432,16 +432,17 @@ jobs:
         id: prever
         if: steps.token.outputs.can == 'true'
         run: |
-          node -e '
+          # 注意：stdout 只能有 `key=value` 这种行，否则 GitHub 会判 "Invalid format" 让整步失败
+          # （第一次写就是把「部署前线上 commit：xxx」也一起重定向进 $GITHUB_OUTPUT，CI 直接红）。
+          # 所以这里只把 commit 本身从 node 里取出来，人看的话另起一行 echo。
+          PRE="$(node -e '
             fetch("https://jz.qy663.de5.net/version", { headers: { "User-Agent": "factory-accounting-ci/prever" } })
               .then((r) => r.json())
-              .then((d) => {
-                const c = String((d && d.commit) || "");
-                console.log("部署前线上 commit：" + (c || "（空）"));
-                console.log("pre_sha=" + c);
-              })
-              .catch((e) => { console.log("问不到 /version（那就只用「不等于坏版本」这一条判回滚）：" + e.message); console.log("pre_sha=") });
-          ' >> "$GITHUB_OUTPUT"
+              .then((d) => { process.stdout.write(String((d && d.commit) || "")) })
+              .catch(() => { process.stdout.write("") });
+          ')"
+          echo "部署前线上 commit：${PRE:-（问不到，回滚时只用「不等于坏版本」这条弱判据）}"
+          echo "pre_sha=$PRE" >> "$GITHUB_OUTPUT"
 
       - name: 部署到 Cloudflare
         id: deploy
