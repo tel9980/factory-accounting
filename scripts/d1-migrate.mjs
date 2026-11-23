@@ -40,7 +40,10 @@ export function readD1Bindings(tomlPath) {
   for (const b of blocks) {
     const binding = (b.match(/^\s*binding\s*=\s*"([^"]+)"/m) || [])[1]
     const name = (b.match(/^\s*database_name\s*=\s*"([^"]+)"/m) || [])[1]
-    if (name) out.push({ binding: binding || name, database_name: name })
+    // 第 14 轮：scripts/book-add.mjs 要拿 database_id 做「这号账套建了没」的判断，
+    // 顺手带出来（迁移本身不用它，别的调用方不受影响）
+    const id = (b.match(/^\s*database_id\s*=\s*"([^"]+)"/m) || [])[1]
+    if (name) out.push({ binding: binding || name, database_name: name, database_id: id || '' })
   }
   return out
 }

@@ -1875,6 +1875,8 @@
       <view class="tip" wx:if="{{role!='owner'}}">导出、备份、改口令这些只有老板能点（现在用的是{{role=='demo'?'演示':'员工'}}身份）。</view>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="copyWeekText">📋 复制上周经营速览</button>
       <button class="btn" size="mini" wx:if="{{role!='staff'}}" bindtap="changeKey">改口令</button>
+      <view class="tip" wx:if="{{role=='owner'}}">发出去的打印链接（对账单、报价单、体检报告）用一把单独的「链接密钥」签名，改口令不会让客户手里的对账单失效。</view>
+      <button class="btn ghost" size="mini" wx:if="{{role=='owner'}}" bindtap="rotateLinks">🔗 作废所有已发出的打印链接</button>
       <view class="tip" wx:if="{{role!='staff' && !demo_book}}">给员工用的口令（员工能记账、收款付款，但看不到毛利、不能删改单据）：{{staff_enabled?'已开启，可修改或清空关闭':'未设置'}}</view>
       <button class="btn" size="mini" wx:if="{{role!='staff' && !demo_book}}" bindtap="setStaffKey">{{staff_enabled?'改员工口令':'设员工口令'}}</button>
       <button class="btn warn" size="mini" wx:if="{{role!='staff' && !demo_book && staff_enabled}}" bindtap="staffOff">🚫 一键停用员工口令</button>

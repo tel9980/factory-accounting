@@ -765,6 +765,33 @@ console.log('\n[5.8] 员工看不到成本')
   say(bad.length === 0, `${rows.length} 个带成本/利润字段的 GET 路由全部在员工拦截/脱敏名单里（denyStaff 内联规则 ${extra.length} 条 + 三张名单）`)
 }
 
+// ── 5.9 链接有效期的时间戳不许用 num() ──
+// num() 是为了挡「1e300 这种越界金额」，它把 |v| > 1e12 归 0。
+// 但毫秒时间戳是 1.7e12 —— 第 10/12/13 轮给公开链接加有效期时，
+// 签名里的有效期和 linkExpired() 都用了 num()，于是签名恒为 '|x0'、过期判断恒真：
+// 对账单/工资单/进度/报价/体检/年度那些打印链接一点开就「链接已失效」，
+// 但接口返回 200、测试里也没人真去打开链接，一直没被发现。
+console.log('\n[5.9] 链接有效期用时间戳解析器（numTs），不用金额解析器 num')
+{
+  const badTs = []
+  // ① linkExpired 内部必须走 numTs
+  const leM = beSrc.match(/const linkExpired = \(exp\) => \{([\s\S]{0,200}?)\n\}/)
+  if (!leM) badTs.push('找不到 linkExpired 的实现')
+  else if (!/numTs\(exp\)/.test(leM[1])) badTs.push('linkExpired() 里没用 numTs(exp)')
+  // ② 签名里拼有效期必须走 numTs
+  const expPartM = beSrc.matchAll(/const expPart = exp \? '\|x' \+ String\(num(\w*)\(/g)
+  const expParts = [...beSrc.matchAll(/const expPart = exp \? '\|x' \+ String\((\w+)\(/g)].map((m) => m[1])
+  if (!expParts.length) badTs.push('找不到签名里拼 expPart 的地方')
+  for (const f of expParts) if (f !== 'numTs') badTs.push(`签名里的有效期用了 ${f}()，应为 numTs()`)
+  // ③ 从 ?x= 读出来的有效期不许再用 num()
+  for (const m of beSrc.matchAll(/=\s*num\(c\.req\.query\('x'\)\)/g)) badTs.push('有地方用 num() 解析 ?x= 的有效期')
+  void expPartM
+  // ④ numTs 必须真的存在且上限够（> 1e12）
+  if (!/const numTs = /.test(beSrc)) badTs.push('缺少 numTs() 定义')
+  else if (!/n > 1e15/.test(beSrc)) badTs.push('numTs() 的上限没放到 1e15，毫秒时间戳会被挡')
+  say(badTs.length === 0, '链接有效期全部走 numTs（时间戳），没有误用金额解析器 num', badTs.join('；'))
+}
+
 // ── 6. 页面绑定和方法重名（README 227/229 两个 bug 都出在这）──
 console.log('\n[6] 页面绑定')
 const dupFn = []

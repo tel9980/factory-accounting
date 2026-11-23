@@ -140,6 +140,7 @@ Intel 芯片的 Mac 没有现成包（GitHub 的 macOS 机器都是 arm64，交�
 - **Linux / macOS**：`chmod +x factory-accounting-linux-x64` 后直接跑；macOS 第一次打开如果提示
   「无法验证开发者」，右键 → 打开，或 `xattr -d com.apple.quarantine <文件>`。
 - 数据在**程序旁边的 `data/` 目录**（`book1.db` … `book9.db`，一本账一份文件）。程序**支持最多 9 本**账，**线上（Cloudflare D1）目前只配了 3 本**（DB / DB2 / DB3），本机版启动时**默认建 9 个库文件**，多开的空库不占什么地方。
+  - **想在线上开第 4 本（或第 5…9 本）**：`node scripts/book-add.mjs` 看一眼计划，再加 `--yes` 真跑——它建库、把绑定写进 `backend/wrangler.toml`、灌表结构一步做完，跑完 commit + push，CI 部署后小程序「设置 → 账套切换」里就出现新账套。**别手工抄 `database_id`**：抄错一位或忘灌表结构，切过去就是一片 500。
   把整个 `data/` 拷走就是备份；换电脑时拷回来接着用。
 - 命令行参数：`--port 8787`（换端口）、`--host 127.0.0.1`（只允许本机访问）、
   `--data <目录>`（换数据位置）、`--no-cron`（不跑每日维护）、`--no-open`（不自动开浏览器）。
@@ -1741,6 +1742,20 @@ node scripts/build-exe.mjs --out dist
    - **验证**：`run-all.mjs` 42/42（87s）、`test-cron` 70 项、`check-backup`、`gen-api-list --check`（434 接口 / 63 组）、`gen-guide --check`、`check-manifest` 三处一致；`check.mjs` 全绿（434 路由 / 60 表 / 265 调用 / 800 绑定 + [4.8]–[5.8]）。
    - ⚠️ 动了前端（批量收付判重、押金摊销、报价/税额/比价、借款与设备日期、残值率）→ 小程序要重新上传发布。
 
+355. ✅ **修掉一个「所有打印链接都打不开」的老 bug**（第 14 轮新加的测试撞出来的）：给公开链接加有效期时，签名里的到期时刻和过期判断都用了 `num()`。而 `num()` 的本职是「挡 1e300 这种越界金额」，它把 **|v| > 1e12 的数一律归 0** —— 2026 年的毫秒时间戳是 1.7e12，于是签名里恒拼成 `|x0`、`linkExpired()` 拿到 0 就判「已过期」。结果是：对账单打印版、工资单、客户进度、加工单、报价、对账确认、年度回顾/封账/期初、体检报告、交接包这些**公开链接一点开就显示「链接已失效或已过期」**（从前几轮加有效期那次上线起就坏了）。为什么一直没发现：接口本身返回 200，签名也对得上（生成和校验用的是同一个错值），测试里没人真的去打开那张链接。
+   - 修法：新增**时间戳专用解析器 `numTs()`**（上限放到 `1e15`，负数/0/超界归 0），`sigBook()` / `sigOf()` 拼 `expPart`、`linkExpired()`、以及 12 处从 `?x=` 读有效期的校验全部改走它。
+   - 防回潮：`check.mjs` 新增 **[5.9] 链接有效期用时间戳解析器（numTs），不用金额解析器 num** —— 静态查 `linkExpired()` 实现、签名里拼 `expPart` 用的解析器、`num(c.req.query('x'))` 这三处，写错就红。
+   - 回归测试补 [12]「作废所有已发出的打印链接」：生成链接 → 真打开（必须 200 且不是失效页）→ 不带 `confirm` 被挡（400 `need_confirm`）→ 带 `confirm` 作废 → 旧链接打不开、新生成的照常能打开；作废接口只有老板能用（无口令 401）。
+   - 教训记进 DEPLOYMENT 4.44 第 7 条：**凡是「签进签名的标量」，写进去和比出来必须走同一个解析器，并且要有一个真去用它的测试**。
+
+354. ✅ **补齐上一轮列的 5 条「已知限制」**（用户「好的，继续，全部由你来完成」）：这 5 条是我在第 13 轮收尾时明确交代「还没排期修」的，按我建议的优先级（线上账套 > 导出封顶 > Excel 下拉 > 签名密钥两条）全部做完。
+   - **线上第 4–9 本账：从「手工三步」变成一条命令**。代码从第 10 轮起就按绑定枚举认账套（`bookDbs()`，`BOOK_MAX=9`），但线上只有 3 个 D1 绑定，想开新厂得手工 `wrangler d1 create` → 抄 `database_id` 进 `wrangler.toml` → 灌 `schema.sql`。抄错一位、忘了灌表结构、绑定名大小写写错，都变成「切过去一片 500」而且现场看不出是哪步错的。新增 **`scripts/book-add.mjs`**：自动挑下一个空号（现在会挑第 4 本）、跑 `wrangler d1 create` 并从输出里认 `database_id`（认不出就明确报错让你贴出来，绝不猜）、把 `[[d1_databases]]` 段写进 `backend/wrangler.toml`（写前查重名）、接着灌表结构；不传 `--yes` 只打印计划。`scripts/d1-migrate.mjs` 的 `readD1Bindings()` 顺带返回 `database_id`（迁移本身不用，`check.mjs [4.13]` 不受影响）。`backend/wrangler.toml` 的注释改成「先跑脚本，别手工抄 id」。
+   - **导出/到期表封顶后不再假装是全量**：`dueRows()` 取到 6 万行封顶时，以前只回一个前端不显示的 `truncated` 标记，合计被当成全量。现在回 `rows_fetched` + 人话 `warn` + `code:'truncated'`；`/due-schedule-xlsx` 在表末多打一行「【注意】账本太大，这份只按前 N 行算，上面的合计不是全量」，并在下载前弹「这份不是全量」；`dumpAll()`（整库备份/`/export-all`）的 `truncated` 也配了一句人话 `warn`。
+   - **Excel 下拉截断不再静默丢掉名字**：`fitDvList()` 返回 `{list, rest}`（以前只回数组、超出的直接扔），导入模板导出时把没放进下拉的候选**另开一页「下拉没列全的名字」**原样列出来（能直接复制粘贴），接口回 `dv_dropped` + `warn`，前端在下发前弹「下拉没列全」。以前员工多到装不下，用户以为「下拉里没有 = 系统里没有」，于是手敲名字，敲错一个字就成另一个人。
+   - **签名密钥与口令的两种坏情况**：①`/auth/change` 改口令时，如果 `sign_secret` 恰好还是「拿旧明文口令当种子」种进去的那个值，顺手换成一串随机值（知道过旧口令的人本来能一直伪造打印链接），并在响应里说明「以前发出去的链接都失效了要重发」；新库（随机 `sign_secret`）一行都不动 —— 客户手里那张对账单不该因为老板改密码就打不开。②新增老板专属 **`POST /sign-secret-rotate`**（要 `confirm:true`，落审计）：链接被转发、员工离职带走记录时，一条命令作废所有已发出的对账单/报价/体检报告链接；设置页多一个「🔗 作废所有已发出的打印链接」按钮。
+   - **验证**：`check.mjs` 全绿（435 路由 / 60 表 / 677 SQL / 265 调用 / 800 绑定，接口清单已同步）；`book-add.mjs` 干跑实测认出 3 本账、挑出第 4 本；全套回归 42 件 + `test-cron` 70 项见下条部署记录。
+   - ⚠️ 动了前端（设置页多一个作废链接按钮、模板/到期表下载前的提示）→ 小程序要重新上传发布。
+
 352. ✅ **第 12 轮查漏补缺（三路审计 45 条，A–F 六组全落）**：用户「查漏补缺，给出具体优化方案」→ 方案落 `docs/优化方案-20261123-第12轮.md`（A 鉴权越权 / B 账务正确性 / C 越权少算 / D 前端记错账 / E 弱网竞态 / F CI 门禁）→ 用户「按优化方案，全部由你来完成」。题眼两条：**「返回 ok 但什么都没做」的假成功**、**「旧机制只补了一半」的残留**。
    - **公开链接全部加过期时间**：`sigBook` 第 5 参 `exp` + `LINK_TTL`，此前只有 statement/track/payroll 三类带 exp，其余 11 类公开打印页（含毛利的 `/report-print`、含成本的 `/order-print`、`/quote`、`/ack`、`/year-*`、`/health`、`/handover`、`/recon`）的链接**永久有效**——拿到一次链接可永久看含毛利的月报。现在生成处统一加 `linkExpOf(LINK_TTL.statement)`（7 天）+ `&x=<exp>`，校验处 `linkExpired(x)`，旧链接立即失效。
    - **员工能猜 id 改别人的单**：`/orders/:id/receive`、`/orders/:id/status`、`/payables/:id/pay` 三条员工可写的按 id 路由，以前只 SELECT 就操作，没接归属闸 → `staff_scope='own'` 下员工猜 id 能给别人的单收款/改状态/付款。现在查出行后加 `orderVisible`/`payableVisible` 闸门，不满足返 404（文案与「不存在」一致）。
@@ -2101,7 +2116,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 434 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 435 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2492,7 +2507,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（231）
+**其它（单个接口）**（232）
 
 - `GET /`
 - `GET /access-guide`
@@ -2678,6 +2693,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /search`
 - `GET /selfcheck`
 - `GET /settled`
+- `POST /sign-secret-rotate`
 - `GET /staff-activity`
 - `GET /statement`
 - `GET /statement-ack-link`

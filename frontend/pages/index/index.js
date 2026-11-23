@@ -1531,12 +1531,17 @@ Page({
         const r = res.data || {}
         if (!r.b64) { wx.hideLoading(); return wx.showToast({ title: '生成失败', icon: 'error', duration: 2000 }) }
         const p = wx.env.USER_DATA_PATH + '/' + (r.name || '到期表.xlsx')
+        const afterSave = () => {
+          if (wx.shareFileMessage) wx.shareFileMessage({ filePath: p, fileName: r.name || '到期表.xlsx', fail: () => wx.showToast({ title: '已生成', icon: 'none' }) })
+          else wx.showToast({ title: '已生成', icon: 'success' })
+        }
         wx.getFileSystemManager().writeFile({
           filePath: p, data: r.b64, encoding: 'base64',
           success: () => {
             wx.hideLoading()
-            if (wx.shareFileMessage) wx.shareFileMessage({ filePath: p, fileName: r.name || '到期表.xlsx', fail: () => wx.showToast({ title: '已生成', icon: 'none' }) })
-            else wx.showToast({ title: '已生成', icon: 'success' })
+            // 第 14 轮：账本太大时后端只按前几万行算，合计不是全量 —— 得让人在打印前就知道
+            if (r.warn) wx.showModal({ title: '这份不是全量', content: r.warn, showCancel: false, confirmText: '知道了', success: afterSave })
+            else afterSave()
           },
           fail: () => { wx.hideLoading(); wx.showToast({ title: '保存失败', icon: 'error', duration: 2000 }) }
         })
@@ -1956,23 +1961,31 @@ Page({
         const d = res.data || {}
         if (!d.b64) return wx.showToast({ title: '生成失败', icon: 'error', duration: 2000 })
         const dst = wx.env.USER_DATA_PATH + '/' + (d.name || '导入模板.xlsx')
+        const doShareTpl = () => {
+          if (wx.shareFileMessage) {
+            wx.shareFileMessage({
+              filePath: dst, fileName: d.name || '导入模板.xlsx',
+              fail: () => {
+                wx.openDocument({
+                  filePath: dst, showMenu: true,
+                  fail: () => wx.showToast({ title: '可先转发到文件传输助手', icon: 'none' })
+                })
+              }
+            })
+          } else {
+            wx.openDocument({ filePath: dst, showMenu: true, fail: () => {} })
+          }
+        }
         wx.getFileSystemManager().writeFile({
           filePath: dst, data: d.b64, encoding: 'base64',
           success: () => {
-            wx.showToast({ title: '模板已生成', icon: 'success' })
-            if (wx.shareFileMessage) {
-              wx.shareFileMessage({
-                filePath: dst, fileName: d.name || '导入模板.xlsx',
-                fail: () => {
-                  wx.openDocument({
-                    filePath: dst, showMenu: true,
-                    fail: () => wx.showToast({ title: '可先转发到文件传输助手', icon: 'none' })
-                  })
-                }
-              })
-            } else {
-              wx.openDocument({ filePath: dst, showMenu: true, fail: () => {} })
+            // 第 14 轮：Excel 一次最多装 255 个字符的下拉，名字多了会列不全（都在最后那页里）
+            if (d.warn) {
+              wx.showModal({ title: '下拉没列全', content: String(d.warn), showCancel: false, confirmText: '知道了', success: doShareTpl })
+              return
             }
+            wx.showToast({ title: '模板已生成', icon: 'success' })
+            doShareTpl()
           },
           fail: () => wx.showToast({ title: '保存失败', icon: 'error', duration: 2000 })
         })
@@ -6993,6 +7006,31 @@ Page({
   // 第 11 轮 D1：以前是「旧口令,新口令」一句话拆逗号 ——
   // 口令里本身带逗号（「abc,123」）就会被劈成两半、或者被截断成别的口令，改完自己都登不进去。
   // 现在改成两次弹窗，口令里有什么字符都不会错。
+  // 作废所有已发出的打印链接：换一把签名密钥，旧链接立刻打不开。
+  // 用在「链接被转发到群里了」「员工离职带走了对账单记录」这种时候。
+  rotateLinks() {
+    wx.showModal({
+      title: '作废所有已发出的打印链接',
+      content: '客户手里的对账单、报价单、体检报告链接会全部打不开（要用得重新发一次）。确定吗？',
+      confirmText: '作废',
+      confirmColor: '#c0392b',
+      success: (r) => {
+        if (!r.confirm) return
+        wx.showLoading({ title: '处理中' })
+        this.req({
+          url: API_BASE + '/sign-secret-rotate', method: 'POST',
+          data: { confirm: true },
+          success: (res) => {
+            wx.hideLoading()
+            const d = res.data || {}
+            wx.showToast({ title: d.ok ? (d.text || '旧链接已作废') : (d.error || '没成功'), icon: 'none', duration: 2000 })
+          },
+          fail: () => { wx.hideLoading(); wx.showToast({ title: '没连上，再点一次', icon: 'none' }) },
+        })
+      }
+    })
+  },
+
   changeKey() {
     wx.showModal({
       title: '修改访问口令（1/2）', content: '先输现在的口令', editable: true, placeholderText: '当前口令',

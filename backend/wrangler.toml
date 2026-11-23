@@ -19,12 +19,16 @@ database_id = "7d00bd33-0ff9-45f9-9af9-adec053f4e82"
 #   然后把下面这行取消注释（本地 dev 也用得上）：
 # read_replication = { mode = "auto" }
 
-# 想多开一本账（最多 9 本，代码不用改）：复制上面 [[d1_databases]] 那一段，把 binding 改成 DB4、
-# database_name 改成 factory-db4、database_id 换成新建库的 id：
+# 想多开一本账（最多 9 本，代码不用改）：**先跑脚本，别手工抄 id** ——
+#   node scripts/book-add.mjs              # 只打印计划（建哪个库、加哪段绑定）
+#   node scripts/book-add.mjs --yes        # 真建库 + 把 binding 写进本文件 + 灌表结构
+# 它会自动挑下一个空号（现在是第 4 本）、用 wrangler 返回的 database_id，不会抄错；
+# 跑完 commit + push，CI 部署后小程序和 /pc 里就出现第 4 本账（DB5…DB9 同理）。
+# 手工做法（脚本不可用时）：
 #   npx wrangler d1 create factory-db4
 #   npx wrangler d1 execute factory-db4 --remote --file=schema.sql
 #   ./node_modules/.bin/wrangler deploy
-# 部署后小程序和 /pc 里就会出现第 4 本账（DB5…DB9 同理）。
+# 注意：库里没灌表结构就切过去，首页是一片 500（CI 部署时会补，手工建库时别忘）。
 
 [triggers]
 crons = ["0 16 * * *", "0 1 * * *", "0 1 * * 1", "0 2 1 * *"]

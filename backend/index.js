@@ -107,6 +107,15 @@ const num = (v, d = 0) => {
 // 第 10 轮 E2：Math.round 是「朝 +∞ 四舍五入」，所以 -1.005 舍成 -1.00、+1.005 舍成 1.01 ——
 // 同样的绝对值，正负两边差一分钱。现在改成「远离零」四舍五入（负数先取绝对值再舍再取回符号），
 // 顺便把 -0 归成 0（-0 会让 JSON 变成 "-0"，界面上显示「-0 元」）。
+// 时间戳（毫秒）解析：num() 会把 |v| > 1e12 的数当成「越界的金额」归 0，
+// 而 2026 年的毫秒时间戳是 1.7e12 —— 于是链接有效期签名恒为 '|x0'、linkExpired() 恒真，
+// 所有带 exp 的公开打印链接一生成就被判「已失效」。时间戳单独一个解析器，上限放到 1e15。
+const numTs = (v) => {
+  if (v === null || v === undefined || v === '') return 0
+  const n = typeof v === 'number' ? v : Number(String(v).replace(/[,，\s]/g, ''))
+  if (!Number.isFinite(n) || n <= 0 || n > 1e15) return 0
+  return Math.floor(n)
+}
 const round2 = (x) => {
   const v = Number(x)
   if (!Number.isFinite(v)) return 0
@@ -1158,8 +1167,26 @@ app.post('/auth/change', async (c) => {
   if (await verifySetting(mainDb, 'demo_key', nk)) return c.json({ error: '这个新口令跟演示口令一样，换一个' }, 400)
   await target.prepare("INSERT INTO settings (key,value) VALUES ('access_key',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(await makeKeyRecord(nk)).run()
   invalidateKey(target)
-  try { _signCache.delete(target) } catch (e) {}
-  return c.json({ ok: true, book: which === 'main' ? 1 : num(c.env.BOOK) || 1, text: which === 'main' ? '主账套的口令改好了' : ('第 ' + (num(c.env.BOOK) || 1) + ' 本账的口令改好了') })
+  // 第 14 轮（原文第 13 轮 F1 的遗留）：老账本的签名密钥是拿「明文口令」当种子种进去的，
+  // 于是「知道过旧口令的人」能一直伪造打印链接 —— 改口令也拦不住。
+  // 这里只处理这一种情况：sign_secret 恰好等于刚换下去的旧口令，就顺手换成一串随机值。
+  // 已经发出去的链接会失效（这正是要的效果）；如果 sign_secret 是随机值（新库都是），
+  // 一行都不动 —— 客户手里那张对账单不该因为老板改密码就打不开。
+  let signRotated = false
+  try {
+    const ss = await target.prepare("SELECT value FROM settings WHERE key='sign_secret'").first()
+    if (ss && String(ss.value) && safeEq(String(ss.value), String(old_key || ''))) {
+      await target.prepare("INSERT INTO settings (key,value) VALUES ('sign_secret',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(randHex(24)).run()
+      signRotated = true
+    }
+  } catch (e) { noteFail(e, '改口令·签名密钥') }
+  invalidateSignSecret(target)
+  return c.json({
+    ok: true, book: which === 'main' ? 1 : num(c.env.BOOK) || 1,
+    text: which === 'main' ? '主账套的口令改好了' : ('第 ' + (num(c.env.BOOK) || 1) + ' 本账的口令改好了'),
+    sign_rotated: signRotated || undefined,
+    sign_note: signRotated ? '以前发出去的打印链接（对账单、报价、体检报告）都失效了，要用请重新发一次' : undefined
+  })
 })
 
 // 忘了先切哪一本？拿口令挨本试一下，告诉前端该切到哪一本。
@@ -1311,7 +1338,7 @@ app.post('/auth/recover', async (c) => {
   if (pw.length < 8) return c.json({ error: '新口令至少 8 位', code: 'bad_password' }, 400)
   await authOk(db, ip)
   await setSettingRaw(db, 'access_key', await makeKeyRecord(pw))
-  try { _signCache.delete(db) } catch (e) {}
+  invalidateSignSecret(db)
   await delSettingRaw(db, 'recover_fail')
   await delSettingRaw(db, 'recover_lock')
   // 第 11 轮 A3：恢复码用一次就换新的。以前用成功只清试错计数、recover_hash 不动，
@@ -1587,7 +1614,7 @@ const sigBook = async (keyOrDb, bk, party, type, exp) => {
   // 以前签名只覆盖 (密钥, 账套, 对象, 类型)，链接一旦发出去就永久有效：
   // 转发给第三方、被截图存进群、对方离职以后都还能看那个客户的全部历史单据和公司收款账户。
   // 现在公开链接带一个到期时刻，签名覆盖它，过期后校验必然对不上。
-  const expPart = exp ? '|x' + String(num(exp)) : ''
+  const expPart = exp ? '|x' + String(numTs(exp)) : ''
   const data = new TextEncoder().encode(String(key) + '|b' + String(num(bk) || 1) + '|' + String(party) + '|' + String(type) + expPart)
   const buf = await crypto.subtle.digest('SHA-256', data)
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20)
@@ -1596,7 +1623,7 @@ const sigBook = async (keyOrDb, bk, party, type, exp) => {
 const LINK_TTL = { statement: 7 * 24 * 3600 * 1000, payroll: 24 * 3600 * 1000, track: 30 * 24 * 3600 * 1000 }
 // 校验公开链接：签名对得上 + 还没过期
 const linkExpired = (exp) => {
-  const e = num(exp)
+  const e = numTs(exp)
   if (!e) return true
   return Date.now() > e
 }
@@ -1604,7 +1631,7 @@ const linkExpOf = (ttl) => Date.now() + num(ttl)
 const sigOf = async (keyOrDb, party, type, exp) => {
   // 传 db 就自己取签名密钥（sign_secret），传字符串就按老办法直接用
   const key = keyOrDb && typeof keyOrDb === 'object' ? await signSecret(keyOrDb) : String(keyOrDb || '')
-  const expPart = exp ? '|x' + String(num(exp)) : ''
+  const expPart = exp ? '|x' + String(numTs(exp)) : ''
   const data = new TextEncoder().encode(String(key) + '|' + String(party) + '|' + String(type) + expPart)
   const buf = await crypto.subtle.digest('SHA-256', data)
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20)
@@ -3257,7 +3284,7 @@ app.get('/payroll-print', async (c) => {
   await wageTable(db)
   const mm = String(c.req.query('month') || now().slice(0, 7))
   const t = String(c.req.query('t') || '')
-  const expP = num(c.req.query('x'))
+  const expP = numTs(c.req.query('x'))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const good = t && t === (await sigBook(mainDb, c.env.BOOK, 'payroll', 'wage:' + mm, expP))
@@ -3506,7 +3533,7 @@ app.get('/track', async (c) => {
   const saved = await getKey(mainDb)
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
-  const expT = num(c.req.query('x'))
+  const expT = numTs(c.req.query('x'))
   const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'track', expT) : ''
   if (!good || want !== good || linkExpired(expT)) return c.html('<meta name="viewport" content="width=device-width,initial-scale=1"><div style="padding:24px;font-size:16px;line-height:1.8">链接已失效或已过期：请让对方在小程序里重新发一次进度链接。</div>')
   const t = await getTitle(db)
@@ -3726,7 +3753,7 @@ app.get('/handover-print', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const want = String(c.req.query('t') || '')
-  const expH = num(c.req.query('x'))
+  const expH = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'handover', 'ho', expH) : ''
   if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成交接包。</h3>')
   const d = await handoverData(db, c.env)
@@ -3791,7 +3818,7 @@ app.get('/statement-print', async (c) => {
   const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
   // 链接里带签名，不含口令本身（口令泄露风险）
   const want = String(c.req.query('t') || '')
-  const expS = num(c.req.query('x'))
+  const expS = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, party, type, expS) : ''
   if (!good || want !== good || linkExpired(expS)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印版」生成新链接。</h3>')
   if (!party) return c.html('<h3>缺少对账单位。</h3>')
@@ -4788,7 +4815,7 @@ app.get('/order-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const expO = num(c.req.query('x'))
+  const expO = numTs(c.req.query('x'))
   const good = saved && id ? await sigBook(mainDb, c.env.BOOK, String(id), 'order', expO) : ''
   if (!good || want !== good || linkExpired(expO)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印加工单」生成新链接。</h3>')
   const d = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
@@ -4831,7 +4858,7 @@ app.get('/report-print', async (c) => {
   const mm = String(c.req.query('month') || month()).slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.html('<h3>月份格式不对（应为 2026-11）</h3>')
   const want = String(c.req.query('t') || '')
-  const expR = num(c.req.query('x'))
+  const expR = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp', expR) : ''
   if (!good || want !== good || linkExpired(expR)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印报表」生成新链接。</h3>')
   const head = await getTitle(db)
@@ -5508,7 +5535,7 @@ app.get('/recon-print', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   const want = String(c.req.query('t') || '')
-  const expN = num(c.req.query('x'))
+  const expN = numTs(c.req.query('x'))
   const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type, expN) : ''
   if (!good || want !== good || linkExpired(expN)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成对账确认单。</h3>')
   const o = await conclusionOf(db, type, party, month)
@@ -7649,18 +7676,23 @@ async function zipMake(entries) {
 
 // Excel 的下拉候选值写在 formula1 里，整串不能超过 255 个字符（超了 Excel 直接报文件损坏）。
 // 分类和员工名都是用户自己一点点攒出来的，攒多了就会超 —— 截断比打不开强，剩下的照旧能手打。
+// 第 14 轮：以前超了是静默丢弃，用户以为「下拉里没有这个人 = 系统里没这个人」，
+// 于是手工敲名字（敲错一个字就成了另一个人）。现在把没放进下拉的候选原样带回去
+// （rest），导出时另开一页列出来，能直接复制粘贴。
 function fitDvList(list, max = 250) {
   const out = []
+  const rest = []
   let len = 0
+  let full = false
   for (const x of list || []) {
     const s = String(x == null ? '' : x).trim()
     if (!s || s.indexOf(',') >= 0) continue
     const add = s.length + (out.length ? 1 : 0)
-    if (len + add > max) break
+    if (full || len + add > max) { full = true; rest.push(s); continue }
     out.push(s)
     len += add
   }
-  return out
+  return { list: out, rest: rest }
 }
 
 function sheetXml(rows, dv) {
@@ -7970,12 +8002,14 @@ app.get('/import-template-pack', async (c) => {
       staffs = staffs.slice(0, 200).sort()
     } catch (e) { noteFail(e, '模板预填员工名') }
   }
+  const dvDropped = []
   const sheets = P.sheets.map((s) => {
     const dv = []
     // Excel 下拉整串有 255 字符上限，统一过一遍 fitDvList（列表为空就不挂下拉，别生成空 formula1）
     const addDv = (sq, list) => {
       const l = fitDvList(list)
-      if (l.length) dv.push({ sq, list: l })
+      if (l.list.length) dv.push({ sq, list: l.list })
+      if (l.rest.length) dvDropped.push({ sheet: s.sheet, sq: sq, rest: l.rest })
     }
     if (s.dv) addDv(s.dv[0], s.dv[1])
     else if (s.type === 'expense') addDv('B2:B200', cats)
@@ -7995,8 +8029,28 @@ app.get('/import-template-pack', async (c) => {
     }
     return { name: s.sheet, rows, dv }
   })
+  // 下拉没列全的候选另开一页，让人能看见、能复制 —— 静默丢弃等于让人手敲名字，敲错就成另一个人
+  if (dvDropped.length) {
+    const extra = [['下拉里没列全的名字（Excel 下拉最多 255 个字符，装不下）', '']]
+    extra.push(['这些名字在下拉里选不到，直接复制粘贴到表格里就行', ''])
+    dvDropped.forEach((d) => {
+      extra.push([])
+      extra.push(['表页', d.sheet])
+      extra.push(['填在哪', d.sq])
+      extra.push(['候选', d.rest.join('、')])
+      d.rest.forEach((n) => extra.push([n]))
+    })
+    sheets.push({ name: '下拉没列全的名字', rows: extra, dv: [] })
+  }
   const xlsx = await makeXlsxSheets(sheets)
-  return c.json({ ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc, sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })), fills: { customers: custs.length, suppliers: sups.length, staffs: staffs.length }, b64: toB64(xlsx) })
+  return c.json({
+    ok: true, tpl: p, name: P.name + '.xlsx', desc: P.desc,
+    sheets: P.sheets.map((s) => ({ sheet: s.sheet, type: s.type })),
+    fills: { customers: custs.length, suppliers: sups.length, staffs: staffs.length },
+    dv_dropped: dvDropped.length ? dvDropped.map((d) => ({ sheet: d.sheet, sq: d.sq, count: d.rest.length })) : undefined,
+    warn: dvDropped.length ? ('有 ' + dvDropped.reduce((n, d) => n + d.rest.length, 0) + ' 个名字没放进下拉（Excel 一次最多装 255 个字符），都在最后那页「下拉没列全的名字」里，复制粘贴就行') : undefined,
+    b64: toB64(xlsx)
+  })
 })
 
 // 使用教程（网页版）：内容来自 docs/新手教程.md，由 scripts/gen-guide.mjs 编译成 backend/guide.js。
@@ -9937,8 +9991,25 @@ app.post('/book-name', async (c) => {
   return c.json({ ok: true })
 })
 
-// 电脑上管理账套：一次看到所有账套的名称/单数/应收/有没有设口令（老板口令即可，不用逐本切）
-// 超级管理员：一个口令管所有账套（存在主账套 settings.super_key，哈希存，不回明文）
+// 作废所有已经发出去的打印链接（对账单、报价、体检报告、期初凭据、对账日历…）。
+// 为什么要单独一个按钮：sign_secret 跟口令是解耦的 —— 改口令不会让客户手里那张对账单失效
+// （这是故意的，否则老板一改密码，几十个客户的对账单全打不开，得挨个重发）。
+// 但「链接被转发出去了」「员工离职带走了记录」时得有一条明路把它们一次全废掉。
+// 换完密钥，所有旧链接立刻显示「链接已失效或已过期」，要用请重新发一次。
+app.post('/sign-secret-rotate', async (c) => {
+  if (c.get('role') !== 'owner') return c.json({ error: '只有老板口令能作废链接', code: 'owner_only' }, 403)
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  if (!(b.confirm === true || String(b.confirm || '') === '1')) {
+    return c.json({ error: '这一步会让所有已经发出去的链接失效（客户手里的对账单、报价单都打不开了），确认请传 confirm:true', code: 'need_confirm' }, 400)
+  }
+  await db.prepare("INSERT INTO settings (key,value) VALUES ('sign_secret',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(randHex(24)).run()
+  invalidateSignSecret(db)
+  try { await logAudit(db, '作废所有打印链接', '链接密钥', '换了签名密钥：之前发出去的对账单/报价/体检报告链接全部失效', '', act(c)) } catch (e) { noteFail(e, '作废链接·审计') }
+  return c.json({ ok: true, text: '旧链接全失效了，要用请重新发一次' })
+})
+
+// 电脑上管理账套：一次看到所有账套的名称/单数/应收/有没有设口令（老板口令即可，不用逐本切）// 超级管理员：一个口令管所有账套（存在主账套 settings.super_key，哈希存，不回明文）
 async function superKeyOn(db) {
   const r = await db.prepare("SELECT value FROM settings WHERE key='super_key'").first().catch(() => null)
   return !!(r && String(r.value || '').trim())
@@ -11827,7 +11898,7 @@ app.get('/quote-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const expQ = num(c.req.query('x'))
+  const expQ = numTs(c.req.query('x'))
   const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id, expQ) : ''
   if (!good || want !== good || linkExpired(expQ)) return c.html('<h3>链接已失效或已过期：请让对方重新发一次报价。</h3>')
   const r = await qGet(db, id)
@@ -15300,7 +15371,7 @@ app.get('/statement-ack', async (c) => {
   // 第 13 轮 A1：生成侧用 sigBook(..., exp) 把 |x<exp> 写进签名，校验侧以前不带 exp
   // → 签名恒不匹配，这条链接打开永远「已失效」。校验必须用链接里的 x。
   const xq = String(c.req.query('x') || '')
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, num(xq)) : ''
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, numTs(xq)) : ''
   if (!good || want !== good || linkExpired(xq)) return c.html(ackPage('<div class="card"><h3>链接已失效或已过期</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
   const t = await getTitle(db)
   const d = await conclusionOf(db, type, party, month)
@@ -15346,7 +15417,7 @@ app.post('/statement-ack', async (c) => {
   // 第 13 轮 A1：POST 以前校验不带 exp，且前端提交的 body 里没有 x → linkExpired('') 恒真，
   // 确认永远 403。现在按页面带上来的 x 校验。
   const bx = String(b.x || '')
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, num(bx)) : ''
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, numTs(bx)) : ''
   if (!good || String(b.t || '') !== good || linkExpired(bx)) return c.json({ error: '链接已失效或已过期，请让老板重新发一次' }, 403)
   const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
   // 第 12 轮 A5：POST 以前不防重放——同一条链接可以反复提交，每次都插一条 statement_log，
@@ -15603,7 +15674,12 @@ async function dueRows(db, type, months, party, limit, offset, scope) {
     future_total: centsSum(future, (x) => x.left),
     no_due_total: centsSum(out.filter((x) => !x.due), (x) => x.left),
     count: out.length, overdue_count: overdue.length,
-    truncated: truncated || undefined
+    rows_fetched: raw.length,
+    // 第 14 轮：以前只回一个 truncated 标记，前端不显示，于是「合计」被当成全量。
+    // 6 万行封顶之后，下面的 total/overdue_total 只是「取到的这些行之和」，真实总额更大。
+    truncated: truncated || undefined,
+    warn: truncated ? ('账本太大：这份只按前 ' + raw.length + ' 行算，下面的合计只是这 ' + raw.length + ' 行之和，真实总额会比这个大。要全量请用备份包') : undefined,
+    code: truncated ? 'truncated' : undefined
   }
 }
 
@@ -15631,8 +15707,13 @@ app.get('/due-schedule-xlsx', async (c) => {
   const rows = [head].concat(r.rows.map((x) => [x.id, x.party, x.item, x.amount, x.left, x.created_at, x.due || '', x.state + (x.guess ? '（按账期推算）' : '')]))
   rows.push([])
   rows.push(['合计未结', r.total, '已逾期', r.overdue_total, '7天内', r.soon_total, '没到期日', r.no_due_total])
+  if (r.truncated) {
+    // 表里就写着「这份不全」，免得打印出来当全量用
+    rows.push([])
+    rows.push(['【注意】账本太大，这份只按前 ' + num(r.rows_fetched) + ' 行算，上面的合计不是全量'])
+  }
   const b64 = toB64(await makeXlsxSheets([{ name: type === 'ap' ? '应付到期表' : '应收到期表', rows }]))
-  return c.json({ ok: true, name: (type === 'ap' ? '应付到期表_' : '应收到期表_') + now().slice(0, 10) + '.xlsx', b64 })
+  return c.json({ ok: true, name: (type === 'ap' ? '应付到期表_' : '应收到期表_') + now().slice(0, 10) + '.xlsx', b64, truncated: r.truncated, warn: r.warn })
 })
 
 // ===== 超期分级：30/60/90 天三档，拖太久的单独圈出来 =====
@@ -16753,7 +16834,7 @@ app.get('/year-review-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const expY = num(c.req.query('x'))
+  const expY = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearreview', 'yr:' + y, expY) : ''
   if (!good || want !== good || linkExpired(expY)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度回顾。</h3>')
   const d = await yearReview(db, y)
@@ -17057,7 +17138,7 @@ app.get('/year-close-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const expC = num(c.req.query('x'))
+  const expC = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y, expC) : ''
   if (!good || want !== good || linkExpired(expC)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度封账单。</h3>')
   const d = await yearBook(db, y)
@@ -17103,7 +17184,7 @@ app.get('/year-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const expB = num(c.req.query('x'))
+  const expB = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y, expB) : ''
   if (!good || want !== good || linkExpired(expB)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度总账打印页。</h3>')
   const d = await yearBook(db, y)
@@ -17265,7 +17346,7 @@ app.get('/year-open-print', async (c) => {
   const recRow = await db.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first()
   const snap = recRow && recRow.value ? recRow.value : ''
   const xYo = String(c.req.query('x') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), num(xYo)) : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), numTs(xYo)) : ''
   if (!good || want !== good || linkExpired(xYo)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成结转凭据。</h3>')
   const d = await yearOpenData(db, y)
   const t = await getTitle(db)
@@ -17809,6 +17890,11 @@ async function dumpAll(db) {
   }
   return { ok: true, kind: 'factory-accounting-full', v: 1, at: now(), book: null, tables, counts,
     truncated: Object.keys(truncated).length ? truncated : undefined,
+    // 第 14 轮：截断只写进 JSON 里没人看得见，导出的人以为「拿到全部了」。
+    // 现在同时给一句人话，前端直接弹出来。
+    warn: Object.keys(truncated).length
+      ? ('有 ' + Object.keys(truncated).length + ' 张表超过 30 万行，这份包里每张只带了前 30 万行（' + Object.keys(truncated).slice(0, 5).join('、') + (Object.keys(truncated).length > 5 ? ' 等' : '') + '），不是全量')
+      : undefined,
     table_count: tabs.length, rows_total: Object.values(counts).reduce((a, b) => a + b, 0) }
 }
 app.get('/export-all', async (c) => {
@@ -18517,7 +18603,7 @@ app.get('/health-print', async (c) => {
   const saved = await getKey(mainDb)
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
   const want = String(c.req.query('t') || '')
-  const expH = num(c.req.query('x'))
+  const expH = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'health', 'hr:' + days, expH) : ''
   if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成体检报告单。</h3>')
   const r = await healthReport(db, days, mainDb, c.env.BOOK)

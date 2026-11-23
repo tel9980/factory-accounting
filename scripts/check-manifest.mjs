@@ -60,7 +60,9 @@ for (const [label, set] of [['deploy.yml', deployScripts], ['release.yml', relea
 //    永远不红，腐烂到发布/回滚才炸。现在全量枚举 scripts/*.mjs，非下划线开头的必须
 //    出现在 workflow，或在显式 MANUAL 白名单里（注明用途）。
 //    MANUAL：只给本地用、不需要进 CI 的工具脚本。
-const MANUAL = new Set(['cli', 'diag', 'migrations-lib', 'prof']) // 本地工具，不进 CI
+// 第 14 轮：book-add 是「本机加一本线上账套」的一次性工具 —— 建库要真 CF 凭证、
+// 还要往 wrangler.toml 写绑定，放进 CI 只会变成「每次部署都试一次建库」，所以留在本地。
+const MANUAL = new Set(['cli', 'diag', 'migrations-lib', 'prof', 'book-add']) // 本地工具，不进 CI
 {
   const dir = path.join(ROOT, 'scripts')
   const all = fs.readdirSync(dir).filter((f) => f.endsWith('.mjs') && !f.startsWith('_'))

@@ -282,6 +282,41 @@ console.log('\n[11] 备份没变化就跳过、付款承诺只算这一家')
   eq('同一家两侧的统计一致', !!inAll && JSON.stringify(inAll) === JSON.stringify((one.d.parties || [])[0]), true)
 }
 
+// ── 12. 作废所有打印链接（第 14 轮）：签名密钥一换，旧链接立刻打不开，新链接照常 ──
+console.log('\n[12] 作废所有已发出的打印链接')
+{
+  const party = TAG + '链接客户'
+  // 先造一条链接（这一步就是客户手里那张对账单）
+  const l1 = await call('GET', '/statement-link?type=ar&party=' + encodeURIComponent(party))
+  eq('能生成对账单链接', !!(l1.d && l1.d.url), true)
+  const oldUrl = String((l1.d || {}).url || '')
+  const oldPath = oldUrl.replace(/^https?:\/\/[^/]+/, '')
+  const o1 = await fetch(BASE + oldPath).then((r) => r.text()).catch(() => '')
+  eq('刚生成的链接能打开', o1.indexOf('链接已失效或已过期') < 0, true)
+
+  // 不带确认不许作废（防误点）
+  const bad = await call('POST', '/sign-secret-rotate', {})
+  eq('不作废：没传 confirm 要被挡', bad.status, 400)
+  eq('不作废：返回 need_confirm', (bad.d || {}).code, 'need_confirm')
+
+  const rot = await call('POST', '/sign-secret-rotate', { confirm: true })
+  eq('作废接口状态码', rot.status, 200)
+  eq('作废接口回 ok', !!(rot.d && rot.d.ok), true)
+
+  const o2 = await fetch(BASE + oldPath).then((r) => r.text()).catch(() => '')
+  eq('作废之后旧链接打不开', o2.indexOf('链接已失效或已过期') >= 0, true)
+
+  // 新生成的链接必须照常能用（别一把锁把功能全关死）
+  const l2 = await call('GET', '/statement-link?type=ar&party=' + encodeURIComponent(party))
+  const newPath = String((l2.d || {}).url || '').replace(/^https?:\/\/[^/]+/, '')
+  const o3 = newPath ? await fetch(BASE + newPath).then((r) => r.text()).catch(() => '') : ''
+  eq('换完密钥新链接能打开', !!newPath && o3.indexOf('链接已失效或已过期') < 0, true)
+
+  // 员工口令不许作废链接（只有老板能）
+  const staffTry = await call('POST', '/sign-secret-rotate', { confirm: true }, null)
+  eq('没口令/员工口令不能作废链接', staffTry.status === 401 || staffTry.status === 403, true)
+}
+
 console.log('')
 if (bad.length) {
   console.log(`❌ 守卫测试失败：${bad.length} 项`)
