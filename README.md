@@ -1730,6 +1730,16 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+352. ✅ **第 12 轮查漏补缺（三路审计 45 条，A–F 六组全落）**：用户「查漏补缺，给出具体优化方案」→ 方案落 `docs/优化方案-20261123-第12轮.md`（A 鉴权越权 / B 账务正确性 / C 越权少算 / D 前端记错账 / E 弱网竞态 / F CI 门禁）→ 用户「按优化方案，全部由你来完成」。题眼两条：**「返回 ok 但什么都没做」的假成功**、**「旧机制只补了一半」的残留**。
+   - **公开链接全部加过期时间**：`sigBook` 第 5 参 `exp` + `LINK_TTL`，此前只有 statement/track/payroll 三类带 exp，其余 11 类公开打印页（含毛利的 `/report-print`、含成本的 `/order-print`、`/quote`、`/ack`、`/year-*`、`/health`、`/handover`、`/recon`）的链接**永久有效**——拿到一次链接可永久看含毛利的月报。现在生成处统一加 `linkExpOf(LINK_TTL.statement)`（7 天）+ `&x=<exp>`，校验处 `linkExpired(x)`，旧链接立即失效。
+   - **员工能猜 id 改别人的单**：`/orders/:id/receive`、`/orders/:id/status`、`/payables/:id/pay` 三条员工可写的按 id 路由，以前只 SELECT 就操作，没接归属闸 → `staff_scope='own'` 下员工猜 id 能给别人的单收款/改状态/付款。现在查出行后加 `orderVisible`/`payableVisible` 闸门，不满足返 404（文案与「不存在」一致）。
+   - **5 个公开 auth 接口无限流**：`/auth/staff`、`/auth/staff-off`、`/auth/demo`、`/auth/demo-state`、`/auth/demo-builtin` 走公开早退，用 verifyKey 校验老板口令但无 IP 限流 → 可无限猜。新增 `withAuthProbe(c,db,fn)` helper，全部包进它（查锁 + 403 计数 + 成功清零）。演示账判定也从 fail-open 改 fail-closed（判断失败即拦）。
+   - **`ok:true` 假安心系列**：`/selfCheck` 查询失败照样 ok、`/yearBook` 吞错报 0、`/tax-pack` 摊销/折旧/预提查询条件写错（`cash=1` 查永远为 0 的记录）导致恒 0、`/dunning-year` 首次催款后所有回款算「催完收回」虚高。现在查询失败即 `ok:false` + 错误说明，口径对齐。
+   - **前端记错账**：还款弹窗「8,000,本金」逗号拆成 8 元、期初余额 `Number(x)||0` 静默清零、开票金额 `Number(amt)` NaN、报价数量「1,000」变 1 件。统一改 `toAmount()`，解析不出 toast 拦截，不许静默取默认。
+   - **CI 门禁**：回滚后不复核（`wrangler rollback` 退 0 就宣称成功，不 fetch /version 复核）、INSTALL_TOKEN 写入失败静默降级、schema-baseline 解析器不识引号（`DEFAULT 'ar,ap,…'` 被切成假列）、d1-migrate 文本匹配 migrations 记录误判 skip、写接口覆盖只证明「不 5xx」（400/404 也算过）。全部改真断言。
+   - **验证**：`run-all.mjs` 42/42（99s）、`test-cron` 70 项、`test-write-methods` 96 项、`test-write-coverage` 63 项、`test-fixes3` 30 项全过；`check.mjs` 全绿（434 路由 / 60 表 / 265 调用 / 798 绑定 + [4.8]-[5.8]）；`check-manifest` 三处一致。
+   - ⚠️ 动了前端（还款弹窗、期初余额、开票、报价数量、分组错误态、设口令防重）→ 小程序要重新上传发布。
+
 351. ✅ **第 11 轮查漏补缺（三路审计 55 条，高危 15 条，A–F 六组全落）**：用户「查漏补缺，给出具体优化方案」→ 方案落 `docs/优化方案-20261123-第11轮.md`（A 鉴权夺权 / B 账务正确性 / C 前端串账与金额 / D 前端弱网与错误态 / E 备份恢复 / F 迁移与 CI）→ 用户「整批做，全部由你来优化整合」。题眼两条：**「还没设口令那个窗口」的鉴权软肋**、**`ok:true` 式的假安心**。
    - **还回来的第一件事是「谁能抢先把口令设成自己的」**：`/auth/setup` 走的是 `path.startsWith('/auth/')` 的公开早退，函数里只有 `if (existing) return 400`，**没有限流、没有安装令牌** → 库还没口令时任何知道地址的人 POST 一下就成了老板。现在：`clientIp + authLocked` 限流 + 可选 `INSTALL_TOKEN`（部署时配 secret 才生效，前端登录卡多一栏「安装令牌」）+ 首设改 `INSERT ... ON CONFLICT DO NOTHING` 再判 `changesOf`（两个人同时首设不再 500 也不会互相顶掉）。
    - **恢复码是万能钥匙，以前用一次还照样能用**：`/auth/recover` 重设成功只删 `recover_fail`/`recover_lock`，**没作废 `recover_hash`** → 拿到纸条/截图的人可以反复改口令把老板锁在外面。现在重设成功立刻换新码（响应里带回纯文本新码，只显示这一次，前端 `showRecoverCode` 弹出来让人抄）。试错计数也从「全局一个值」改成**按 IP**（`authFail/authOk`），否则陌生人连猜 8 次就能把真主人锁 10 分钟；`/auth/super`、`/auth/super-state` 一并补限流 + 审计。

@@ -113,7 +113,8 @@ const main = async () => {
   const left0 = num0((before.d || {}).left)
   // mode=ignore：只把这个差异标记掉，不动账
   const rf = await post('/recon-fix', { type: 'ar', party, month: monthNow(), mode: 'ignore' })
-  eq('[3] 差异处理（忽略）', rf.status === 200 || rf.status === 400, true)
+  // 第 12 轮 F8：以前 400 也算过（业务失败被当成功），recon 真失败不红。改严格 200。
+  eq('[3] 差异处理（忽略）', rf.status, 200)
   const after = await get('/party-balance?type=ar&party=' + encodeURIComponent(party))
   near('[3] 「忽略」不动客户欠款', num0((after.d || {}).left), left0)
   const rfBad = await post('/recon-fix', { type: 'zzz', party, month: monthNow(), mode: 'ignore' })
@@ -136,7 +137,9 @@ const main = async () => {
   eq('[4.5] /backup 带 notice 字段', typeof (bk.d || {}).notice === 'string' && (bk.d.notice || '').length > 5, true)
   eq('[4.5] notice 里点名了照片', /照片/.test(String((bk.d || {}).notice || '')), true)
   const bv = await get('/backup-verify')
-  eq('[4.5] /backup-verify 也把 skip 名单列出来', Array.isArray((bv.d || {}).skipped) || bv.status >= 400, true)
+  // 第 12 轮 F8：以前 status>=400 也算过，备份校验真失败不红。改严格 200 + 必须真有 skipped 数组。
+  eq('[4.5] /backup-verify 正常返回', bv.status, 200)
+  eq('[4.5] /backup-verify 也把 skip 名单列出来', Array.isArray((bv.d || {}).skipped), true)
 
   // ===== 5. 找账本（免口令入口，不能 500，不能泄露别的账本名）=====
   console.log('\n[5] 找账本入口')

@@ -737,7 +737,8 @@
             </view>
           </view>
           <view class="tip" wx:if="{{item.items_more}}">列表最多 100 笔（先早后晚），要全的可以看对账单</view>
-          <view class="row2" wx:if="{{!item.items.length}}">正在取这家单据…</view>
+          <view class="row2" wx:if="{{item.items_err}}">没拉出来这家单据（网不太好），点「整户收款」或重开这家</view>
+          <view class="row2" wx:elif="{{!item.items.length}}">正在取这家单据…</view>
           <view class="btns">
             <button size="mini" bindtap="groupReceive" data-n="{{item.name}}" data-amt="{{item.unpaid}}">整户收款</button>
             <button size="mini" bindtap="statement" data-type="ar" data-name="{{item.name}}">对账单</button>
@@ -745,7 +746,8 @@
           </view>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ar_groups.length}}">按{{ar_filter=='overdue'?'已逾期':'未结清'}}没有客户欠款</view>
+      <view class="empty" wx:if="{{errs.ar_grp}}">⚠️ 分组没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadGroups" data-t="ar">　重试</text></view>
+      <view class="empty" wx:elif="{{!ar_groups.length}}">按{{ar_filter=='overdue'?'已逾期':'未结清'}}没有客户欠款</view>
     </view>
     <view class="list" wx:if="{{ar_view=='order'}}">
       <view class="item" wx:for="{{ar_list}}" wx:key="id">
@@ -945,14 +947,16 @@
             </view>
           </view>
           <view class="tip" wx:if="{{item.items_more}}">列表最多 100 笔（先早后晚），要全的可以看对账单</view>
-          <view class="row2" wx:if="{{!item.items.length}}">正在取这家单据…</view>
+          <view class="row2" wx:if="{{item.items_err}}">没拉出来这家单据（网不太好），点「整户付款」或重开这家</view>
+          <view class="row2" wx:elif="{{!item.items.length}}">正在取这家单据…</view>
           <view class="btns">
             <button size="mini" bindtap="groupPay" data-n="{{item.name}}" data-amt="{{item.unpaid}}">整户付款</button>
             <button size="mini" bindtap="statement" data-type="ap" data-name="{{item.name}}">对账单</button>
           </view>
         </view>
       </view>
-      <view class="empty" wx:if="{{!ap_groups.length}}">按{{ap_filter=='overdue'?'已逾期':'未结清'}}没有供应商欠款</view>
+      <view class="empty" wx:if="{{errs.ap_grp}}">⚠️ 分组没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadGroups" data-t="ap">　重试</text></view>
+      <view class="empty" wx:elif="{{!ap_groups.length}}">按{{ap_filter=='overdue'?'已逾期':'未结清'}}没有供应商欠款</view>
     </view>
     <view class="list" wx:if="{{ap_view=='order'}}">
       <view class="item" wx:for="{{ap_list}}" wx:key="id">
@@ -1721,8 +1725,8 @@
         <view class="pc-row">
           <view class="pc-t">这个月活干得值不值？<text class="pc-s">（经营口径）</text></view>
           <view class="pc-n {{pc.accrual_profit>=0?'ok':'bad'}}">{{pc.accrual_profit}} 元</view>
-          <view class="pc-sub">本月接单 {{pc.order_add}} − 本月赊购 {{pc.payable_add}} − 现金成本 {{pc.cost_cash}}</view>
-          <view class="pc-sub">看的是干活挣的，钱还没收到也算。</view>
+          <view class="pc-sub">本月接单 {{pc.order_add}} − 本月赊购 {{pc.payable_add}} − 经营成本 {{pc.cost_cash}}</view>
+          <view class="pc-sub">看的是干活挣的，钱还没收到也算；成本按「这个月该算的」记，不是只看现金。</view>
         </view>
         <view class="pc-gap">两者差 {{pc.gap}} 元：差在「活干了钱还没收」和「钱收了活还没干」。</view>
       </view>

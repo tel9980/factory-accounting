@@ -206,17 +206,42 @@ try {
 // ── 4. 代码要用的表和列，schema 里得有（线上是老库所以不报错，新装就空）──
 console.log('\n[4] 表结构')
 const declared = new Map() // 表 -> Set(列)
+const colMeta = new Map() // 表 -> Map(列 -> {type,notnull,dflt})
 for (const m of schemaSrc.replace(/--[^\n]*/g, '').matchAll(/CREATE TABLE IF NOT EXISTS\s+(\w+)\s*\(([\s\S]*?)\);/g)) {
+  // 第 12 轮 F3：切列定义要躲开单引号字符串里的逗号，否则
+  // `modules TEXT DEFAULT 'ar,ap,exp,…'` 会被切成 ap/exp 等假列，
+  // 数据库里凭空多出几列，check 和 baseline 一起错所以一直绿。
+  // 复用 server/d1.mjs completeColumns 的同一套逻辑（引号 + 括号 + 注释）。
   const parts = []
   let depth = 0
   let cur = ''
+  let quote = false
   for (const ch of m[2]) {
+    if (quote) { cur += ch; if (ch === "'") quote = false; continue }
+    if (ch === "'") { quote = true; cur += ch; continue }
     if (ch === '(') depth++
     if (ch === ')') depth--
-    if (ch === ',' && depth === 0) { parts.push(cur); cur = '' } else cur += ch
+    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue }
+    cur += ch
   }
   parts.push(cur)
-  const cols = parts.map((s) => s.trim().split(/\s+/)[0]).filter((c) => c && !/^(PRIMARY|FOREIGN|UNIQUE|CHECK|CONSTRAINT)$/i.test(c))
+  const cols = []
+  const meta = colMeta.get(m[1]) || new Map()
+  for (const raw of parts) {
+    const s = raw.trim()
+    if (!s) continue
+    const name = (s.match(/^([A-Za-z_][\w]*)/) || [])[1]
+    if (!name) continue
+    const low = s.toLowerCase()
+    if (low.startsWith('primary ') || low.startsWith('unique') || low.startsWith('foreign') || low.startsWith('check') || low.startsWith('constraint')) continue
+    cols.push(name)
+    const type = (s.match(/^[A-Za-z_][\w]*\s+([A-Za-z]+)/) || [])[1] || ''
+    const notnull = /\bNOT\s+NULL\b/i.test(s) ? 1 : 0
+    const dm = s.match(/DEFAULT\s+('([^']*)'|[^\s,]+)/i)
+    const dflt = dm ? dm[1] : ''
+    meta.set(name, { type, notnull, dflt })
+  }
+  colMeta.set(m[1], meta)
   declared.set(m[1], new Set([...(declared.get(m[1]) || []), ...cols]))
 }
 // 运行时兜底建的表（ensureBaseTables 里那批）也算已声明
@@ -279,19 +304,37 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
   // 基线对比：现在的列 - 基线里的列 = 这次新加的，必须已经在 EXTRA_COLS 里
   const baselineFile = path.join(ROOT, 'scripts/schema-baseline.json')
   const snapshot = {}
-  for (const [t, cols] of declared) if (cols.size) snapshot[t] = [...cols].sort()
+  // 第 12 轮 F3：snapshot 升级为带类型/默认值的对象，不再只存列名。
+  for (const [t, cols] of declared) if (cols.size) {
+    const meta = colMeta.get(t) || new Map()
+    snapshot[t] = [...cols].sort().map((c) => Object.assign({ name: c }, meta.get(c) || { type: '', notnull: 0, dflt: '' }))
+  }
   const wantWrite = process.argv.includes('--update-baseline')
   if (wantWrite) {
     fs.writeFileSync(baselineFile, JSON.stringify(snapshot, null, 2) + '\n')
-    console.log('  📝 已把当前列结构写进 scripts/schema-baseline.json（下次发布后的新列才算「新增」）')
+    console.log('  📝 已把当前列结构（含类型/默认值）写进 scripts/schema-baseline.json（下次发布后的新列才算「新增」）')
   } else if (!fs.existsSync(baselineFile)) {
     warn.push('没有 scripts/schema-baseline.json，老库补列 drift 查不了（跑 node scripts/check.mjs --update-baseline 生成）')
   } else {
     const base = JSON.parse(fs.readFileSync(baselineFile, 'utf8'))
-    for (const [t, cols] of Object.entries(snapshot)) {
-      const old = new Set(base[t] || [])
-      if (!old.size) continue // 新表：整张表都不在老库，不需要逐列补
-      const fresh = cols.filter((c) => !old.has(c))
+    // 兼容老格式（base[t] 是字符串数组）：升级成对象数组
+    const normBase = {}
+    for (const [t, cols] of Object.entries(base)) {
+      normBase[t] = (cols || []).map((c) => (typeof c === 'string' ? { name: c, type: '', notnull: 0, dflt: '' } : c))
+    }
+    // 第 12 轮 F3：类型等价的写法（SQLite 会规范化 VARCHAR→TEXT 等）放过，避免误红。
+    const TYPE_EQ = ['TEXT', 'VARCHAR', 'CHAR', 'CLOB', 'STRING']
+    const typeEq = (a, b) => {
+      const na = String(a || '').toUpperCase(), nb = String(b || '').toUpperCase()
+      if (!na || !nb) return true
+      if (TYPE_EQ.includes(na) && TYPE_EQ.includes(nb)) return true
+      return na === nb
+    }
+    for (const [t, colList] of Object.entries(snapshot)) {
+      const old = normBase[t] || []
+      if (!old.length) continue // 新表：整张表都不在老库，不需要逐列补
+      const oldNames = new Set(old.map((c) => c.name))
+      const fresh = colList.filter((c) => !oldNames.has(c.name)).map((c) => c.name)
       // 新列有两种合法的补法：
       //   ① 进 EXTRA_COLS（后端启动时补列）；
       //   ② 写进 backend/migrations/*.sql 的 ALTER TABLE ... ADD COLUMN（迁移时补）。
@@ -301,15 +344,28 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
         fail(`表 ${t} 新加的列没进 EXTRA_COLS 也没有迁移补：${miss.join(', ')}（老库升级后一查就 500；补进 EXTRA_COLS 或 backend/migrations/*.sql 再跑 --update-baseline）`)
         bad47++
       }
+      // 第 12 轮 F3：列的类型/默认值变了也要查（以前只比列名，改类型/改默认永远发现不了）。
+      for (const oc of old) {
+        const now = colList.find((c) => c.name === oc.name)
+        if (!now) continue
+        if (oc.type && now.type && !typeEq(oc.type, now.type)) {
+          fail(`表 ${t}.${oc.name} 类型变了：${oc.type} → ${now.type}（老库用旧类型，新库用新类型，同一份代码两台机器表现不一样；要么改回，要么确认无害后跑 --update-baseline）`)
+          bad47++
+        }
+        if (String(oc.dflt || '') !== String(now.dflt || '')) {
+          fail(`表 ${t}.${oc.name} 默认值变了：${oc.dflt || '(无)'} → ${now.dflt || '(无)'}（老库用旧默认，新库用新默认，新装的表初始值不同；确认无害后跑 --update-baseline）`)
+          bad47++
+        }
+      }
     }
     // 反向对比：基线里有、现在 schema.sql 里没有的列 = 这列被删了。
     // 以前只算「新增」，删列永远发现不了 —— 老库还留着那列，新库没有，
     // 于是同一份代码在两台机器上表现不一样（新库一查就 500，老库正常）。
     // 现在双向都查：删列要么补回 schema.sql，要么确认「老库这列留着也无害」后跑 --update-baseline。
-    for (const [t, oldCols] of Object.entries(base)) {
+    for (const [t, oldCols] of Object.entries(normBase)) {
       const now = declared.get(t)
       if (!now) continue // 整张表删了：另说，不在列级检查范围
-      const gone = (oldCols || []).filter((c) => !now.has(c))
+      const gone = (oldCols || []).map((c) => c.name).filter((c) => !now.has(c))
       if (gone.length) {
         fail(`表 ${t} 的列被删了但基线里还在：${gone.join(', ')}（老库还留着这几列，新库没有 → 同一份代码两台机器表现不一样）。要么把列加回 schema.sql，要么确认无害后跑 node scripts/check.mjs --update-baseline`)
         bad47++
@@ -512,6 +568,35 @@ console.log('\n[4.13] d1 绑定与迁移')
   say(bindings.length > 0 && covers,
     `${bindings.length} 个 d1 绑定（${bindings.map((b) => b.database_name).join('、')}）都由 scripts/d1-migrate.mjs 按 wrangler.toml 读出来统一迁移`,
     `wrangler.toml 有 ${bindings.length} 个 d1 绑定，但迁移没覆盖到（迁移必须读 wrangler.toml，不能写死库名）`)
+}
+
+// ── 4.14 后端引用的 D1 绑定都要在 wrangler.toml 里声明（先报不拦）──
+// 第 12 轮 F5：本地 server/main.mjs 会自动建 9 本账、自动 ensureSchema，
+// 本地跑得过不代表线上能跑 —— 线上只绑 wrangler.toml 里声明的库，引用没声明的
+// D1 绑定本地绿、线上 500。这里只盯 D1 数据库类绑定（DB/DB2/DB3…），
+// BOOK（按请求注入）、ENV_ALL（聚合对象）、INSTALL_TOKEN（secret）、ATTACH（KV）
+// 这些运行时注入的不算 D1 绑定，不查，避免误报。
+// 先报不拦：历史上有宽松 SQL，一次性全修要分批，先让漂移可见。
+console.log('\n[4.14] D1 绑定引用')
+{
+  const tomlSrc = fs.readFileSync(path.join(ROOT, 'backend/wrangler.toml'), 'utf8')
+  const d1Bindings = []
+  for (const blk of tomlSrc.split('[[d1_databases]]').slice(1)) {
+    const b = (blk.match(/^\s*binding\s*=\s*"([^"]+)"/m) || [])[1]
+    if (b) d1Bindings.push(b)
+  }
+  const declared = new Set(d1Bindings)
+  const idxSrc = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  // 只收 D1 数据库类绑定：名字形如 DB / DB2 / DB3 …（后端建库习惯）
+  const used = new Set()
+  for (const m of idxSrc.matchAll(/c\.env\.(DB[0-9]*)/g)) used.add(m[1])
+  const orphan = [...used].filter((n) => !declared.has(n))
+  if (orphan.length) {
+    warn.push(`后端引用了 wrangler.toml 里没声明的 D1 绑定：${orphan.join('、')}（本地能跑、线上 500；要么在 wrangler.toml 补 [[d1_databases]]，要么去掉这段引用）`)
+  }
+  say(orphan.length === 0,
+    `后端引用的 ${used.size} 个 D1 绑定（${[...used].join('、') || '无'}）都在 wrangler.toml 里声明了`,
+    `有 ${orphan.length} 个 D1 绑定没在 wrangler.toml 声明（见上，先报不拦）`)
 }
 
 // ── 4.10 SQL 排除口径一致（ref_type NOT IN 的名单，改一处漏一处会静默串账）──

@@ -14,8 +14,9 @@ const { BASE, TAG, TODAY, MONTH, YEAR, yes, no, call, get, post, wait, finish } 
 
 // 没崩就是过（<500）；后面再按需追加更严的断言
 const no500 = (label, res) => yes(`${label} 不 5xx（HTTP ${res.status}）`, res.status < 500, res)
-// 状态码 400/404 也算「接口活着」，只要不是 5xx
-const alive = (label, res) => yes(`${label} 活着（HTTP ${res.status}）`, res.status < 500 && !!res.d, res)
+// 第 12 轮 F6：以前 400/404 也算「活着」（假安心），现在按路由断言精确状态码。
+// expected 传 200 表示该操作应成功；400/403/404 表示负例（业务拒绝/找不到）。
+const alive = (label, res, expected = 200) => yes(`${label}（HTTP ${res.status}，期望 ${expected}）`, res.status === expected && !!res.d, res)
 
 const run = async () => {
   if (!(await wait())) { no('连不上服务 ' + BASE); finish('写接口方法覆盖'); return }
@@ -87,8 +88,8 @@ const run = async () => {
   ids.dunning = await firstId('/dunning-log')
   yes('拿到催款记录 id', Number(ids.dunning) > 0, { dunning: ids.dunning })
 
-  // 对账日志（不返回 id，从 /recon-log 找）
-  await post('/recon-log', { party: cust, type: 'ar', month: MONTH, imported: 100, system: 0 })
+  // 对账日志（不返回 id，从 /recon-log 找）。POST /recon-log 不存在，用 /recon-save 创建。
+  await post('/recon-save', { type: 'ar', month: MONTH, rows: [{ party: cust, state: 'match' }] })
   ids.recon = await firstId('/recon-log')
   yes('拿到对账日志 id', Number(ids.recon) > 0, { recon: ids.recon })
 
@@ -196,8 +197,13 @@ const run = async () => {
   yes('拿到额度 id', Number(ids.credit) > 0, { credit: ids.credit })
 
   // 支出流水（ledger 里 ref_type=expense 的那条，PATCH/DELETE /ledger/:id 要用）
-  const ex = await post('/expenses', { amount: 33, category: TAG + '支出类', remark: '方法覆盖', account_id: ids.account, date: TODAY, confirm_dup: true })
-  ids.expense = (ex.d && ex.d.id) || 0
+  await post('/expenses', { amount: 33, category: TAG + '支出类', remark: '方法覆盖', account_id: ids.account, date: TODAY, confirm_dup: true })
+  // 第 12 轮 F6：POST /expenses 不返回 id，从 /expenses 列表按备注找（以前 id=0 → PATCH/DELETE /ledger/:id 全 404）
+  const exListR = (await get('/expenses?limit=50')).d
+  const exListArr = Array.isArray(exListR) ? exListR : ((exListR && (exListR.rows || exListR.list)) || [])
+  const expFind = exListArr.find((r) => String(r.remark || '') === '方法覆盖')
+  ids.expense = (expFind && expFind.id) || 0
+  yes('拿到支出流水 id', Number(ids.expense) > 0, { expense: ids.expense })
 
   // 附件（挂在一个存在的应收单上）
   await post('/attachments', { ref_type: 'order', ref_id: ids.order, b64: 'aGVsbG8=', name: TAG + '.png' })
@@ -239,97 +245,97 @@ const run = async () => {
   // 所以这里的路由必须写成后端注册时的样子（参数写 :id / :month 这种占位）。
   const cases = [
     // —— 认证类：口令找回 / 员工口令 ——
-    ['POST /auth/recover-code', '/auth/recover-code', { key: '8888' }],
-    ['POST /auth/recover', '/auth/recover', { code: 'ABCD-EFGH-JKLM-NPQR', password: 'newpass1234' }],
-    ['POST /auth/staff', '/auth/staff', { key: '8888', password: '8888' }],
-    ['POST /auth/staff-off', '/auth/staff-off', { key: '8888' }],
+    ['POST /auth/recover-code', '/auth/recover-code', { key: '8888' }, 200],
+    ['POST /auth/recover', '/auth/recover', { code: 'ABCD-EFGH-JKLM-NPQR', password: 'newpass1234' }, 403],
+    ['POST /auth/staff', '/auth/staff', { key: '8888', password: TAG + 'staff8888' }, 200],
+    ['POST /auth/staff-off', '/auth/staff-off', { key: '8888' }, 200],
 
     // —— 挂件 / 材料 / 价格 ——
-    ['DELETE /attachment/:id', '/attachment/' + ids.attachment, null],
-    ['DELETE /materials/:id', '/materials/' + ids.material, null],
-    ['DELETE /material-moves/:id', '/material-moves/' + ids.move, null],
-    ['DELETE /frame-prices/:id', '/frame-prices/' + ids.frame, null],
-    ['DELETE /outsource/:id', '/outsource/' + ids.outsource, null],
-    ['DELETE /rework/:id', '/rework/' + ids.rework, null],
+    ['DELETE /attachment/:id', '/attachment/' + ids.attachment, null, 200],
+    ['DELETE /materials/:id', '/materials/' + ids.material, null, 200],
+    ['DELETE /material-moves/:id', '/material-moves/' + ids.move, null, 200],
+    ['DELETE /frame-prices/:id', '/frame-prices/' + ids.frame, null, 200],
+    ['DELETE /outsource/:id', '/outsource/' + ids.outsource, null, 200],
+    ['DELETE /rework/:id', '/rework/' + ids.rework, null, 200],
 
     // —— 工价 / 记工 / 扣款 ——
-    ['DELETE /wage-rates/:id', '/wage-rates/' + ids.wageRate, null],
-    ['DELETE /wage-records/:id', '/wage-records/' + ids.wageRecord, null],
-    ['DELETE /wage-deducts/:id', '/wage-deducts/' + ids.wageDeduct, null],
+    ['DELETE /wage-rates/:id', '/wage-rates/' + ids.wageRate, null, 200],
+    ['DELETE /wage-records/:id', '/wage-records/' + ids.wageRecord, null, 200],
+    ['DELETE /wage-deducts/:id', '/wage-deducts/' + ids.wageDeduct, null, 200],
 
     // —— 欠款 / 额度 / 预付 ——
-    ['PATCH /debts/:id', '/debts/' + ids.debt, { principal: 450 }],
-    ['DELETE /debts/:id', '/debts/' + ids.debt, null],
-    ['POST /debts/:id/repay', '/debts/' + ids.debt + '/repay', { amount: 10 }],
-    ['DELETE /credit-limits/:id', '/credit-limits/' + ids.credit, null],
-    ['PATCH /prepaids/:id', '/prepaids/' + ids.prepaid, { active: 'closed' }],
-    ['DELETE /prepaids/:id', '/prepaids/' + ids.prepaid, null],
+    ['PATCH /debts/:id', '/debts/' + ids.debt, { principal: 450 }, 200],
+    ['POST /debts/:id/repay', '/debts/' + ids.debt + '/repay', { amount: 10 }, 200],
+    ['DELETE /debts/:id', '/debts/' + ids.debt, null, 200],
+    ['DELETE /credit-limits/:id', '/credit-limits/' + ids.credit, null, 200],
+    ['PATCH /prepaids/:id', '/prepaids/' + ids.prepaid, { active: 'closed' }, 200],
+    ['DELETE /prepaids/:id', '/prepaids/' + ids.prepaid, null, 200],
 
     // —— 对账 / 账户 ——
-    ['PATCH /recon-log/:id', '/recon-log/' + ids.recon, { done: 1, note: TAG }],
-    ['DELETE /recon-log/:id', '/recon-log/' + ids.recon, null],
-    ['DELETE /recon-log', '/recon-log', null],
-    ['PATCH /accounts/:id', '/accounts/' + ids.account, { name: TAG + '户改', opening: 1000 }],
-    ['DELETE /accounts/:id', '/accounts/' + ids.account, null],
+    ['PATCH /recon-log/:id', '/recon-log/' + ids.recon, { done: 1, note: TAG }, 200],
+    ['DELETE /recon-log/:id', '/recon-log/' + ids.recon, null, 200],
+    ['DELETE /recon-log', '/recon-log', null, 400],
+    ['PATCH /accounts/:id', '/accounts/' + ids.account, { name: TAG + '户改', opening: 1000 }, 200],
+    ['DELETE /accounts/:id', '/accounts/' + ids.account, null, 400],
 
     // —— 模板 / 分类 / 预付 / 借支 ——
-    ['POST /book-template/apply', '/book-template/apply', { tpl: 'cash_only', confirm: true }],
-    ['DELETE /categories/:id', '/categories/' + ids.category, null],
-    ['DELETE /advances/:id', '/advances/' + ids.advance, null],
-    ['DELETE /loans/:id', '/loans/' + ids.loan, null],
+    ['POST /book-template/apply', '/book-template/apply', { tpl: 'cash_only', confirm: true }, 200],
+    ['DELETE /categories/:id', '/categories/' + ids.category, null, 200],
+    ['DELETE /advances/:id', '/advances/' + ids.advance, null, 200],
+    ['DELETE /loans/:id', '/loans/' + ids.loan, null, 200],
 
     // —— 报价 ——
-    ['PATCH /quotes/:id', '/quotes/' + ids.quote, { price: 520 }],
-    ['POST /quotes/:id/send', '/quotes/' + ids.quote + '/send', {}],
-    ['POST /quotes/:id/to-order', '/quotes/' + ids.quote + '/to-order', {}],
-    ['DELETE /quotes/:id', '/quotes/' + ids.quote, null],
+    ['PATCH /quotes/:id', '/quotes/' + ids.quote, { price: 520 }, 200],
+    ['POST /quotes/:id/send', '/quotes/' + ids.quote + '/send', {}, 200],
+    ['POST /quotes/:id/to-order', '/quotes/' + ids.quote + '/to-order', {}, 200],
+    ['DELETE /quotes/:id', '/quotes/' + ids.quote, null, 400],
 
     // —— 应收 / 应付 ——
-    ['PATCH /orders/:id', '/orders/' + ids.order, { price: 1100 }],
-    ['PATCH /orders/:id/progress', '/orders/' + ids.order + '/progress', { progress: 50, operator: TAG }],
-    ['PATCH /payables/:id', '/payables/' + ids.payable, { amount: 600 }],
-    ['POST /payables/:id/writeoff', '/payables/' + ids.payable + '/writeoff', { amount: 10, reason: TAG }],
-    ['DELETE /payables/:id', '/payables/' + ids.payable, null],
+    ['PATCH /orders/:id', '/orders/' + ids.order, { price: 1100 }, 200],
+    ['PATCH /orders/:id/progress', '/orders/' + ids.order + '/progress', { progress: 50, operator: TAG }, 200],
+    ['PATCH /payables/:id', '/payables/' + ids.payable, { amount: 600 }, 200],
+    ['POST /payables/:id/writeoff', '/payables/' + ids.payable + '/writeoff', { amount: 10, reason: TAG }, 200],
+    ['DELETE /payables/:id', '/payables/' + ids.payable, null, 200],
 
     // —— 流水 / 固定 / 预算 ——
-    ['PATCH /ledger/:id', '/ledger/' + ids.expense, { amount: 35, category: TAG + '支出类', remark: '改过' }],
-    ['DELETE /ledger/:id', '/ledger/' + ids.expense, null],
-    ['DELETE /fixed/:id', '/fixed/' + ids.fixed, null],
-    ['DELETE /budgets/:id', '/budgets/' + ids.budget, null],
+    ['PATCH /ledger/:id', '/ledger/' + ids.expense, { amount: 35, category: TAG + '支出类', remark: '改过' }, 200],
+    ['DELETE /ledger/:id', '/ledger/' + ids.expense, null, 200],
+    ['DELETE /fixed/:id', '/fixed/' + ids.fixed, null, 200],
+    ['DELETE /budgets/:id', '/budgets/' + ids.budget, null, 200],
 
     // —— 账期 / 催款 / 对账单 / 开账 ——
-    ['DELETE /party-terms/:id', '/party-terms/' + ids.partyTerm, null],
-    ['DELETE /dunning-log/:id', '/dunning-log/' + ids.dunning, null],
-    ['DELETE /statement-log/:id', '/statement-log/' + ids.statement, null],
-    ['DELETE /year-open/:year', '/year-open/' + YEAR, null],
+    ['DELETE /party-terms/:id', '/party-terms/' + ids.partyTerm, null, 200],
+    ['DELETE /dunning-log/:id', '/dunning-log/' + ids.dunning, null, 200],
+    ['DELETE /statement-log/:id', '/statement-log/' + ids.statement, null, 200],
+    ['DELETE /year-open/:year', '/year-open/' + YEAR, null, 200],
 
     // —— 导入 / 回收站 / 档案 ——
-    ['DELETE /import-log/:id', '/import-log/' + ids.importLog, null],
-    ['POST /trash/:id/restore', '/trash/' + ids.trash + '/restore', {}],
-    ['DELETE /trash/:id', '/trash/' + ids.trash, null],
-    ['DELETE /profiles/:id', '/profiles/' + ids.profile, null],
+    ['DELETE /import-log/:id', '/import-log/' + ids.importLog, null, 200],
+    ['DELETE /trash/:id', '/trash/' + ids.trash, null, 200],
+    ['POST /trash/:id/restore', '/trash/' + ids.trash + '/restore', {}, 404],
+    ['DELETE /profiles/:id', '/profiles/' + ids.profile, null, 200],
 
     // —— 净资产 / 发票 / 设备 ——
-    ['DELETE /networth-snapshot/:month', '/networth-snapshot/' + MONTH, null],
-    ['PATCH /invoices/:id', '/invoices/' + ids.invoice, { amount: 120 }],
-    ['DELETE /invoices/:id', '/invoices/' + ids.invoice, null],
-    ['DELETE /assets/:id', '/assets/' + ids.asset, null],
+    ['DELETE /networth-snapshot/:month', '/networth-snapshot/' + MONTH, null, 200],
+    ['PATCH /invoices/:id', '/invoices/' + ids.invoice, { amount: 120 }, 200],
+    ['DELETE /invoices/:id', '/invoices/' + ids.invoice, null, 200],
+    ['DELETE /assets/:id', '/assets/' + ids.asset, null, 200],
 
     // —— 银行流水认领 ——
-    ['POST /bank-flows/:id/match', '/bank-flows/' + ids.bankFlow + '/match', { target_type: 'order', target_id: ids.order, category: TAG + '归类', account_id: ids.account }],
-    ['POST /bank-flows/:id/unmatch', '/bank-flows/' + ids.bankFlow + '/unmatch', {}],
-    ['DELETE /bank-flows/:id', '/bank-flows/' + ids.bankFlow, null],
+    ['POST /bank-flows/:id/match', '/bank-flows/' + ids.bankFlow + '/match', { target_type: 'order', target_id: ids.order, category: TAG + '归类', account_id: ids.account }, 200],
+    ['POST /bank-flows/:id/unmatch', '/bank-flows/' + ids.bankFlow + '/unmatch', {}, 200],
+    ['DELETE /bank-flows/:id', '/bank-flows/' + ids.bankFlow, null, 200],
 
     // —— 工资 / 转账 ——
-    ['POST /payroll/pay', '/payroll/pay', { month: MONTH, worker: stf }],
-    ['DELETE /transfers/:id', '/transfers/' + ids.transfer, null],
+    ['POST /payroll/pay', '/payroll/pay', { month: MONTH, worker: stf }, 400],
+    ['DELETE /transfers/:id', '/transfers/' + ids.transfer, null, 200],
   ]
 
   console.log('\n—— ' + cases.length + ' 条写接口，逐条真调 ——')
-  for (const [lit, path, body] of cases) {
+  for (const [lit, path, body, expected] of cases) {
     const m = lit.slice(0, lit.indexOf(' '))
     const res = await call(m, path, body || undefined)
-    alive(`${lit} → ${path}`, res)
+    alive(`${lit} → ${path}`, res, expected)
   }
 
   console.log('\n—— 补两条：写接口但不一定有 id 的 ——')

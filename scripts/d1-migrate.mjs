@@ -45,14 +45,31 @@ export function readD1Bindings(tomlPath) {
   return out
 }
 
+// 单条远程命令的超时（毫秒）：第 12 轮 F4。以前 spawnSync 没有 timeout，
+// 一条卡住的 wrangler 命令能把整个迁移拖满 6 小时，CI 看着像在跑其实已经死了。
+const CM_TIMEOUT_MS = Number(process.env.D1_MIGRATE_TIMEOUT_MS || 120000)
+// 整个迁移的总 deadline：所有库 + 所有文件加起来最多跑这么久，超过就判定卡死。
+const RUN_DEADLINE_MS = Number(process.env.D1_MIGRATE_DEADLINE_MS || 900000)
+
 function wrangler(db, sql, cwd) {
   const r = spawnSync('npx', ['wrangler', 'd1', 'execute', db, '--remote', '--command', sql], {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: CM_TIMEOUT_MS,
   })
   const text = ((r.stdout || '') + '\n' + (r.stderr || '')).trim()
   return { code: r.status, text }
+}
+
+// 第 12 轮 F4：以前用 `q.text.includes(f.name)` 判「跑过了」，wrangler 的输出里
+// 只要回显含文件名就误判 skip（比如建表语句的报错里带文件名），老库缺列缺索引、上线 500。
+// 现在精确匹配表格里的单元格：行必须含 `│`，且某格 trim 后正好等于文件名。
+function rowExists(text, name) {
+  return String(text || '').split('\n').some((line) => {
+    if (!line.includes('│')) return false
+    return line.split('│').some((cell) => cell.trim() === name)
+  })
 }
 
 function main() {
@@ -79,7 +96,12 @@ function main() {
   }
 
   let failed = 0
+  const runStart = Date.now()
   for (const t of targets) {
+    if (Date.now() - runStart > RUN_DEADLINE_MS) {
+      console.error('❌ 迁移总时长超过 ' + Math.round(RUN_DEADLINE_MS / 1000) + 's，判定卡死，中止（可调 D1_MIGRATE_DEADLINE_MS）')
+      process.exit(1)
+    }
     // 先保证 migrations 表在
     let r = wrangler(t.database_name, "CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)", backendDir)
     if (r.code !== 0) {
@@ -91,7 +113,7 @@ function main() {
       const esc = f.name.replace(/'/g, "''")
       if (!force) {
         const q = wrangler(t.database_name, `SELECT name FROM migrations WHERE name = '${esc}'`, backendDir)
-        if (q.code === 0 && /^\s*\S/m.test(q.text) && q.text.includes(f.name)) {
+        if (q.code === 0 && rowExists(q.text, f.name)) {
           console.log(`· ${t.database_name} ${f.name} 跑过了，跳过`)
           continue
         }

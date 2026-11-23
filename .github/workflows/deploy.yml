@@ -449,8 +449,11 @@ jobs:
             echo "· 没配 INSTALL_TOKEN secret：跳过（第一次设口令只受 IP 限流保护）"
             exit 0
           fi
+          # 第 12 轮 F2：以前这里 `|| exit 0` 把 secret 写入失败静默降级，
+          # 配了 secret 却没写上去，后端只留 IP 限流 —— 安全门假开。现在真失败（job 红）。
           printf '%s' "$INSTALL_TOKEN_VALUE" | npx wrangler secret put INSTALL_TOKEN || {
-            echo "::warning title=安装令牌没设上::wrangler secret put 失败，第一次设口令仍只受 IP 限流保护"; exit 0; }
+            echo "::error title=安装令牌没设上::配了 INSTALL_TOKEN secret 但 wrangler secret put 失败，"
+            echo "::error::第一次设口令只受 IP 限流保护，不够安全。请检查 CF_API_TOKEN 权限后重跑。"; exit 1; }
           echo "✅ 安装令牌已设：第一次设口令时要填 GitHub 里那个 INSTALL_TOKEN"
 
       # 迁移已经在「部署到 Cloudflare」之前跑完了（迁移失败 → 直接红，线上不上线）。
@@ -603,3 +606,23 @@ jobs:
             echo "本次迁移文件：\`$(ls backend/migrations/*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')\`"
             echo "已跑过的迁移记录：\`npx --prefix backend wrangler d1 execute factory-db --remote --command \"SELECT name, applied_at FROM migrations\"\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          # 第 12 轮 F1：以前 wrangler rollback 退出 0 就宣称成功，之后不复核，
+          # 回错了版本（或 eventual consistency 还没生效）CI 仍然绿，坏版本留在线上。
+          # 现在回滚后轮询 /version，确认线上 commit 不再是这次部署的坏 sha，最多 60s。
+          ROLLBACK_SHA="${{ github.sha }}"
+          node -e "
+          const base='https://jz.qy663.de5.net/version';
+          (async()=>{
+            for(let i=0;i<30;i++){
+              try{
+                const r=await fetch(base,{headers:{'User-Agent':'curl/8'}});
+                const d=await r.json();
+                const c=String((d&&d.commit)||'');
+                if(c && c!=='${ROLLBACK_SHA}'){console.log('回滚复核：线上 commit 已是 '+c+'，不再是 '+'${ROLLBACK_SHA}');process.exit(0)}
+              }catch(e){}
+              await new Promise(z=>setTimeout(z,2000));
+            }
+            console.error('::error title=回滚后复核没通过::线上 commit 仍为 ${ROLLBACK_SHA}，回滚没生效或被覆盖');
+            process.exit(1);
+          })();
+          " || exit 1

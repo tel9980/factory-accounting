@@ -1292,6 +1292,15 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.42 第 12 轮的六条硬规矩（「旧机制只补了一半」那类）
+
+1. **公开打印链接必须带过期时间**。`sigBook` 第 5 参 `exp`、`LINK_TTL`、`linkExpired`、`linkExpOf` 这四件是一套，**生成处必须传 exp 并拼 `&x=<exp>`，校验处必须读 `x` 并判过期**。只加生成不加校验 = 链接永久有效；只加校验不加生成 = 所有链接全失效。此前只有 statement/track/payroll 三类带 exp，其余 11 类（含毛利的 `/report-print`）链接永久有效。**新增任何带签名的公开页，生成和校验两端都要改。**
+2. **员工可写的按 id 路由，查出行后必须过归属闸**。`orderVisible`/`payableVisible`（第 9 轮加的）要接到 `/orders/:id/receive`、`/orders/:id/status`、`/payables/:id/pay` 这三条——它们在员工写白名单里，以前只 SELECT 就操作，`staff_scope='own'` 下员工猜 id 能改别人的单。**新增任何「员工可写 + 按 id 操作」的路由，都要接归属闸，不满足返 404（文案与「不存在」一致，别暴露「存在但你没权限」）。**
+3. **公开 auth 接口必须自己限流**。`path.startsWith('/auth/')` 走公开早退，`/auth/staff`、`/auth/staff-off`、`/auth/demo` 这些用 verifyKey 校验老板口令，但没有 IP 限流 = 可无限猜。统一用 `withAuthProbe(c,db,fn)`（查锁 + 403 计数 + 成功清零）。**演示账判定必须 fail-closed**（`isDemoBook` 判断失败时默认拦，不是默认放）。
+4. **「验证/体检/汇总」类接口的 `ok` 必须由实际查询结果推出来**。`/selfCheck`、`/yearBook`、`/tax-pack`、`/dunning-year` 以前查询失败吞成 0/空继续算，照样 `ok:true`。**查询失败必须 `ok:false` + 错误说明，不许把「查不到」当「是 0」。**
+5. **前端金额/数量一律 `toAmount()`，禁止 `Number(x)||默认值`**。「8,000,本金」逗号拆成 8 元、「1,000」报价变 1 件、期初余额「1.2万」清零——都是 `Number()` 静默吞错。**解析不出来必须 toast 拦下，不许静默取默认。**
+6. **写接口覆盖测试必须断言精确状态码，不许「不 5xx 就算过」**。`test-write-methods.mjs` 的 `alive(label,res,expected=200)`、`test-write-coverage.mjs` 的 `assertStatus`——400/404 算「接口活着」是假安心，业务失败、路径拼错、事务部分写入后返回错误都算过。**负例单独标 expected（400/403/404），正例断言 200，再配 `assertPersisted` 写后读回。**
+
 ### 4.41 第 11 轮的八条硬规矩（都是「看着没问题、出事才发现」那类）
 
 这些都是踩过的坑，写下来是因为**下次很容易顺手改回去**：

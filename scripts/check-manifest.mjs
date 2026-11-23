@@ -56,6 +56,23 @@ for (const [label, set] of [['deploy.yml', deployScripts], ['release.yml', relea
   }
 }
 
+// 4) 第 12 轮 F7：以前反向只查 test-*，d1-*/gen-*/check-*/cli/diag 等非 test 脚本漏登记
+//    永远不红，腐烂到发布/回滚才炸。现在全量枚举 scripts/*.mjs，非下划线开头的必须
+//    出现在 workflow，或在显式 MANUAL 白名单里（注明用途）。
+//    MANUAL：只给本地用、不需要进 CI 的工具脚本。
+const MANUAL = new Set(['cli', 'diag', 'migrations-lib', 'prof']) // 本地工具，不进 CI
+{
+  const dir = path.join(ROOT, 'scripts')
+  const all = fs.readdirSync(dir).filter((f) => f.endsWith('.mjs') && !f.startsWith('_'))
+  const known = new Set([...deployScripts, ...releaseScripts].map((x) => x.replace(/\.mjs$/, '')))
+  for (const f of all) {
+    const base = f.replace(/\.mjs$/, '')
+    if (known.has(base)) continue
+    if (MANUAL.has(base)) continue
+    fail(`scripts/${base}.mjs 既没被 workflow 引用，也不在 MANUAL 白名单里（要么登记进 workflow，要么确认它只本地用后加进 check-manifest.mjs 的 MANUAL）`)
+  }
+}
+
 console.log(`\n[check-manifest] run-all.mjs：离线 ${OFFLINE.length} 件 + 联网 ${ONLINE.length} 件 = ${CASES.length} 件`)
 console.log(`  deploy.yml 引用了 ${deployScripts.size} 个 node scripts/*.mjs，release.yml 引用了 ${releaseScripts.size} 个`)
 if (bad.length) {

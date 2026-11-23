@@ -1,609 +1,3032 @@
 {
   "orders": [
-    "ar_cat",
-    "cost",
-    "created_at",
-    "created_by",
-    "customer",
-    "deliver_date",
-    "delivered_at",
-    "due_date",
-    "id",
-    "import_batch",
-    "item_name",
-    "month",
-    "no_invoice",
-    "operator",
-    "paid",
-    "price",
-    "progress",
-    "rev",
-    "status",
-    "tax_amt",
-    "tax_kind",
-    "tax_rate",
-    "written_off"
+    {
+      "name": "ar_cat",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "cost",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "created_by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "customer",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "deliver_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "delivered_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "due_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "import_batch",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item_name",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "no_invoice",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "operator",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "paid",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "price",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "progress",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "rev",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "status",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "tax_amt",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "tax_kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "tax_rate",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "written_off",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "process_log": [
-    "created_at",
-    "id",
-    "operator",
-    "order_id",
-    "progress"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "operator",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "progress",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "payables": [
-    "amount",
-    "category",
-    "created_at",
-    "created_by",
-    "due_date",
-    "id",
-    "import_batch",
-    "month",
-    "operator",
-    "paid",
-    "remark",
-    "rev",
-    "supplier",
-    "tax_amt",
-    "tax_kind",
-    "tax_rate",
-    "written_off"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "category",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "created_by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "due_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "import_batch",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "operator",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "paid",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "rev",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "supplier",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "tax_amt",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "tax_kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "tax_rate",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "written_off",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "ledger": [
-    "account_id",
-    "amount",
-    "cash",
-    "category",
-    "created_at",
-    "direction",
-    "id",
-    "import_batch",
-    "inv_no",
-    "inv_state",
-    "month",
-    "operator",
-    "ref_id",
-    "ref_type",
-    "remark",
-    "tax"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "cash",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "1"
+    },
+    {
+      "name": "category",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "direction",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "import_batch",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "inv_no",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "inv_state",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "operator",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "tax",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "settings": [
-    "key",
-    "value"
+    {
+      "name": "key",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "value",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "migrations": [
-    "applied_at",
-    "name"
+    {
+      "name": "applied_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "backups": [
-    "content",
-    "created_at",
-    "id",
-    "size",
-    "stat"
+    {
+      "name": "content",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "parts",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "sha256",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "size",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "stat",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    }
   ],
   "backup_parts": [
-    "bid",
-    "data",
-    "seq"
+    {
+      "name": "bid",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "data",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "seq",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "fixed_expenses": [
-    "amount",
-    "category",
-    "created_at",
-    "day",
-    "id",
-    "remark"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "category",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "day",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "1"
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "month_lock": [
-    "locked_at",
-    "month"
+    {
+      "name": "locked_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "audit_log": [
-    "action",
-    "by",
-    "created_at",
-    "detail",
-    "id",
-    "ref_id",
-    "ref_type",
-    "target"
+    {
+      "name": "action",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "detail",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_id",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "target",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "trash": [
-    "batch",
-    "data",
-    "deleted_at",
-    "id",
-    "ref_id",
-    "type"
+    {
+      "name": "batch",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "data",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "deleted_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_id",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "budgets": [
-    "amount",
-    "category",
-    "created_at",
-    "id"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "category",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "phrases": [
-    "created_at",
-    "id",
-    "kind",
-    "text"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "text",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "accounts": [
-    "created_at",
-    "id",
-    "inv_default",
-    "kind",
-    "name",
-    "opening"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "inv_default",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "TEXT"
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'cash'"
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "opening",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "categories": [
-    "created_at",
-    "id",
-    "name",
-    "sort",
-    "type"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "sort",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "advances": [
-    "account_id",
-    "amount",
-    "created_at",
-    "id",
-    "party",
-    "remark",
-    "type",
-    "used"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "used",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    }
   ],
   "loans": [
-    "account_id",
-    "amount",
-    "created_at",
-    "id",
-    "import_batch",
-    "remark",
-    "returned",
-    "staff",
-    "used"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "import_batch",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "returned",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "staff",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "used",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    }
   ],
   "month_archive": [
-    "created_at",
-    "data",
-    "id",
-    "month"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "data",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "recon_log": [
-    "created_at",
-    "diff",
-    "done",
-    "id",
-    "imported",
-    "month",
-    "note",
-    "party",
-    "state",
-    "system",
-    "type"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "diff",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "done",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "imported",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "state",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "system",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "import_log": [
-    "batch",
-    "cnt",
-    "created_at",
-    "dup_count",
-    "id",
-    "ids",
-    "skipped_locked",
-    "src",
-    "total",
-    "type",
-    "undone"
+    {
+      "name": "batch",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "cnt",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "dup_count",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ids",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "skipped_locked",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "src",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "total",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "undone",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "party_terms": [
-    "created_at",
-    "id",
-    "kind",
-    "note",
-    "party",
-    "recon_cycle",
-    "recon_day",
-    "term_days"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'ar'"
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "recon_cycle",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "recon_day",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "term_days",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "party_profiles": [
-    "addr",
-    "contact",
-    "created_at",
-    "id",
-    "kind",
-    "note",
-    "party",
-    "phone"
+    {
+      "name": "addr",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "contact",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "phone",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "dunning_log": [
-    "channel",
-    "created_at",
-    "id",
-    "note",
-    "party",
-    "promise_date",
-    "type"
+    {
+      "name": "channel",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "promise_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "statement_log": [
-    "ack",
-    "ack_at",
-    "channel",
-    "created_at",
-    "id",
-    "month",
-    "note",
-    "party",
-    "resolved_at",
-    "type"
+    {
+      "name": "ack",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ack_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "channel",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "resolved_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "error_log": [
-    "book",
-    "created_at",
-    "id",
-    "method",
-    "ms",
-    "msg",
-    "params",
-    "path",
-    "ray",
-    "ref",
-    "status"
+    {
+      "name": "book",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "method",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ms",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "msg",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "params",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "path",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ray",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "ref",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "status",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "slow_log": [
-    "book",
-    "created_at",
-    "dur",
-    "id",
-    "method",
-    "path"
+    {
+      "name": "book",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "dur",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "method",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "path",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "track_log": [
-    "created_at",
-    "id",
-    "party",
-    "ua"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "ua",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "op_dedupe": [
-    "client_id",
-    "created_at",
-    "id",
-    "kind",
-    "ref_id"
+    {
+      "name": "client_id",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "uploads": [
-    "created_at",
-    "done",
-    "id",
-    "name",
-    "parts",
-    "size"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "done",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "id",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "parts",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "size",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "upload_parts": [
-    "data",
-    "id",
-    "seq"
+    {
+      "name": "data",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "seq",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "net_snapshots": [
-    "ap",
-    "ar",
-    "cash",
-    "created_at",
-    "debt",
-    "month",
-    "net",
-    "note"
+    {
+      "name": "ap",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "ar",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "cash",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "debt",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "net",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "assets": [
-    "buy_date",
-    "cost",
-    "created_at",
-    "dispose_amount",
-    "disposed_at",
-    "id",
-    "life_years",
-    "maint_last",
-    "maint_months",
-    "name",
-    "residual_rate"
+    {
+      "name": "buy_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "cost",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "dispose_amount",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "disposed_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "life_years",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "5"
+    },
+    {
+      "name": "maint_last",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "maint_months",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "residual_rate",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "5"
+    }
   ],
   "attachments": [
-    "b64",
-    "created_at",
-    "id",
-    "mime",
-    "name",
-    "r2_key",
-    "ref_id",
-    "ref_type",
-    "size"
+    {
+      "name": "b64",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "mime",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "r2_key",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_id",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "ref_type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "size",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "staff_users": [
-    "active",
-    "ap",
-    "asset'",
-    "contact",
-    "created_at",
-    "exp",
-    "id",
-    "import",
-    "modules",
-    "name",
-    "pin",
-    "pin_hash"
+    {
+      "name": "active",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "1"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "modules",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "'ar,ap,exp,import,contact,asset'"
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "pin",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "pin_hash",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "edit_requests": [
-    "by",
-    "changes",
-    "created_at",
-    "done_at",
-    "done_by",
-    "id",
-    "kind",
-    "note",
-    "reason",
-    "ref_id",
-    "status"
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "changes",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "done_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "done_by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "reason",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "ref_id",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "status",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'pending'"
+    }
   ],
   "recon_confirm": [
-    "amount",
-    "by",
-    "created_at",
-    "diff",
-    "id",
-    "imported",
-    "month",
-    "note",
-    "party",
-    "system",
-    "type"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "diff",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "imported",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "system",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "quotes": [
-    "cost",
-    "created_at",
-    "decided_at",
-    "id",
-    "item",
-    "margin",
-    "no",
-    "note",
-    "order_id",
-    "party",
-    "price",
-    "qty",
-    "sent_at",
-    "status",
-    "token",
-    "valid_days"
+    {
+      "name": "cost",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "decided_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "margin",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "no",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "price",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "qty",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "1"
+    },
+    {
+      "name": "sent_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "status",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'draft'"
+    },
+    {
+      "name": "token",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "valid_days",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "15"
+    }
   ],
   "wage_rates": [
-    "active",
-    "created_at",
-    "id",
-    "item",
-    "process",
-    "rate",
-    "unit",
-    "worker"
+    {
+      "name": "active",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "1"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "process",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "rate",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "unit",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'件'"
+    },
+    {
+      "name": "worker",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    }
   ],
   "wage_records": [
-    "amount",
-    "by",
-    "created_at",
-    "date",
-    "id",
-    "item",
-    "month",
-    "note",
-    "order_id",
-    "process",
-    "qty",
-    "rate",
-    "worker"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "date",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "process",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "qty",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "rate",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "worker",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    }
   ],
   "wage_pays": [
-    "account_id",
-    "amount",
-    "by",
-    "created_at",
-    "id",
-    "month",
-    "note",
-    "worker"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "worker",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    }
   ],
   "wage_deduct": [
-    "amount",
-    "by",
-    "created_at",
-    "id",
-    "kind",
-    "month",
-    "remark",
-    "worker"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "worker",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    }
   ],
   "materials": [
-    "active",
-    "created_at",
-    "id",
-    "min_qty",
-    "name",
-    "note",
-    "unit"
+    {
+      "name": "active",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "1"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "min_qty",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "unit",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'个'"
+    }
   ],
   "material_moves": [
-    "amount",
-    "by",
-    "created_at",
-    "date",
-    "id",
-    "kind",
-    "material",
-    "month",
-    "note",
-    "order_id",
-    "party",
-    "price",
-    "qty"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "'in'"
+    },
+    {
+      "name": "material",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "price",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "qty",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    }
   ],
   "party_staff": [
-    "party",
-    "staff",
-    "updated_at"
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "staff",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    },
+    {
+      "name": "updated_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "frame_prices": [
-    "active",
-    "created_at",
-    "end_date",
-    "id",
-    "item",
-    "note",
-    "party",
-    "price",
-    "start_date",
-    "unit"
+    {
+      "name": "active",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "1"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "end_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    },
+    {
+      "name": "price",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "start_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "unit",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'件'"
+    }
   ],
   "outsourcing": [
-    "back_date",
-    "by",
-    "created_at",
-    "due_date",
-    "id",
-    "item",
-    "note",
-    "order_id",
-    "party",
-    "price",
-    "qty",
-    "sent_date",
-    "status"
+    {
+      "name": "back_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "due_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "''"
+    },
+    {
+      "name": "price",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "qty",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "sent_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "status",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "'open'"
+    }
   ],
   "reworks": [
-    "by",
-    "cost",
-    "created_at",
-    "date",
-    "fault",
-    "fix",
-    "id",
-    "item",
-    "kind",
-    "month",
-    "note",
-    "order_id",
-    "party",
-    "qty",
-    "reason"
+    {
+      "name": "by",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "cost",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "date",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "fault",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "fix",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "item",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "'rework'"
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "qty",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "reason",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    }
   ],
   "debts": [
-    "account_id",
-    "created_at",
-    "id",
-    "kind",
-    "lender",
-    "pay_kind",
-    "principal",
-    "rate",
-    "remark",
-    "start_date",
-    "status",
-    "term_months"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'bank'"
+    },
+    {
+      "name": "lender",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "pay_kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'interest'"
+    },
+    {
+      "name": "principal",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "rate",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "start_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "status",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'open'"
+    },
+    {
+      "name": "term_months",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "debt_repays": [
-    "account_id",
-    "amount",
-    "created_at",
-    "debt_id",
-    "id",
-    "kind",
-    "rdate",
-    "remark"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "debt_id",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "kind",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'interest'"
+    },
+    {
+      "name": "rdate",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    }
   ],
   "invoices": [
-    "amount",
-    "created_at",
-    "date",
-    "id",
-    "no",
-    "order_id",
-    "party",
-    "remark",
-    "tax",
-    "type"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "no",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "order_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "tax",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": "'out'"
+    }
   ],
   "transfers": [
-    "amount",
-    "created_at",
-    "from_id",
-    "id",
-    "remark",
-    "to_id"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "from_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "to_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "writeoffs": [
-    "amount",
-    "created_at",
-    "id",
-    "party",
-    "reason",
-    "ref_id",
-    "ref_type"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "reason",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "ref_id",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "ref_type",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    }
   ],
   "targets": [
-    "created_at",
-    "month",
-    "order_add",
-    "receive"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "order_add",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "receive",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "credit_limits": [
-    "created_at",
-    "id",
-    "limit_amount",
-    "note",
-    "party"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "limit_amount",
+      "type": "REAL",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "note",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "party",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    }
   ],
   "prepaids": [
-    "account_id",
-    "active",
-    "category",
-    "created_at",
-    "id",
-    "months",
-    "name",
-    "remark",
-    "start_date",
-    "total"
+    {
+      "name": "account_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "active",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "1"
+    },
+    {
+      "name": "category",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "'房租'"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "months",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "1"
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "remark",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "start_date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "total",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    }
   ],
   "wx_users": [
-    "created_at",
-    "id",
-    "last_at",
-    "nickname",
-    "openid",
-    "quota"
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "last_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "nickname",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    },
+    {
+      "name": "openid",
+      "type": "TEXT",
+      "notnull": 1,
+      "dflt": ""
+    },
+    {
+      "name": "quota",
+      "type": "INTEGER",
+      "notnull": 1,
+      "dflt": "0"
+    }
   ],
   "bank_flows": [
-    "amount",
-    "created_at",
-    "date",
-    "direction",
-    "id",
-    "matched_id",
-    "matched_type",
-    "memo"
+    {
+      "name": "amount",
+      "type": "REAL",
+      "notnull": 1,
+      "dflt": "0"
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "date",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "direction",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "matched_id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "matched_type",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "memo",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": "''"
+    }
   ],
   "month_report": [
-    "b64",
-    "created_at",
-    "id",
-    "month",
-    "name",
-    "size"
+    {
+      "name": "b64",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "created_at",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "id",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "month",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "name",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "size",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ],
   "auth_fails": [
-    "first_at",
-    "ip",
-    "locked_until",
-    "n"
+    {
+      "name": "first_at",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "ip",
+      "type": "TEXT",
+      "notnull": 0,
+      "dflt": ""
+    },
+    {
+      "name": "locked_until",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    },
+    {
+      "name": "n",
+      "type": "INTEGER",
+      "notnull": 0,
+      "dflt": "0"
+    }
   ]
 }

@@ -215,7 +215,9 @@ console.log('\n[9] 撤销核销受月结锁保护')
   const id = await newOrder(cust, 600, { date: mm + '-10' })
   await call('POST', '/orders/' + id + '/writeoff', { amount: 600, reason: '守卫测试' })
   await call('POST', '/month-close', { month: mm, confirm: true })
-  const list = await call('GET', '/writeoffs')
+  // 第 12 轮 B7：核销按「单据所在月份」归属（month 列），不是按记录时间。
+  // 这单是 2083-07 的，所以要去 2083-07 的列表里找，默认月（当月）看不到。
+  const list = await call('GET', '/writeoffs?month=' + mm)
   const rows = (list.d && (list.d.rows || list.d)) || []
   const hit = rows.filter((x) => num0(x.ref_id) === num0(id))[0]
   if (!hit) no('找不到刚建的核销记录', rows.length)

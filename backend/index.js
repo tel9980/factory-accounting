@@ -1110,7 +1110,7 @@ app.post('/auth/setup', async (c) => {
   if (needTok && !safeEq(String(body.install_token || '').trim(), needTok)) {
     const f = await authFail(db, ip)
     if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
-    return c.json({ error: '安装令牌不对。这是部署时 GitHub Actions 摘要里那串 INSTALL_TOKEN，不是访问口令', code: 'bad_install_token', left: f.left }, 403)
+    return c.json({ error: '安装令牌不对。这个 INSTALL_TOKEN 是 GitHub 仓库 Settings → Secrets 里配置的，不是访问口令', code: 'bad_install_token', left: f.left }, 403)
   }
   // 第 11 轮 A2：并发首设两个请求都可能读到「没口令」，以前裸 INSERT 会撞主键给 500。
   // 改成 ON CONFLICT DO NOTHING + 看 changes，抢输的那个老老实实报「已存在」。
@@ -1330,10 +1330,32 @@ const getStaffKey = async (db) => {
   } catch (e) { return '' }
 }
 
+// 第 12 轮 A1：公开 auth 接口（/auth/* 走公开早退，没有鉴权中间件）共用这一道爆破限流。
+// 以前只给 setup/change/find-book/recover-code/recover/super/super-state 补了 authLocked/authFail，
+// /auth/staff /auth/staff-off /auth/demo /auth/demo-state /auth/demo-builtin 没有：
+// 5 条路由都用 verifyKey(mainDb, key) 校验老板口令，文案是标准「口令错误」→ 既能无限试，又是口令 oracle。
+// 这里把「查锁 → 跑 → 失败计数 / 成功清零」收成一个，调用方不会再漏。
+async function withAuthProbe(c, db, fn) {
+  const ip = clientIp(c)
+  const wait = await authLocked(db, ip)
+  if (wait) return c.json(tooMany(wait), 429)
+  const out = await fn()
+  if (out && out.status === 403) {
+    const f = await authFail(db, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return out
+  }
+  await authOk(db, ip)
+  return out
+}
+
 // 员工口令（老板设一个给员工用，权限受限：能记账收款，看不到毛利、不能删改单）
 app.post('/auth/staff', async (c) => {
+  return withAuthProbe(c, (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, async () => {
   // 演示账套里不设权限（这个路由在公开分支里，走不到鉴权中间件的闸门，得自己判一次）
-  try { if (await isDemoBook(c)) return denyDemoPerm(c) } catch (e) { /* 判断不出来就不拦 */ }
+  // 第 12 轮 A2：判断不出来（isDemoBook 抛错）就当演示账拦 —— 以前 catch 里「判断不出来就不拦」，
+  // 等于演示账禁权限的闸门可以被打掉（和 attRefVisible 改了的 fail-closed 口径一致）。
+  try { if (await isDemoBook(c)) return denyDemoPerm(c) } catch (e) { noteFail(e, '演示账判定'); return denyDemoPerm(c) }
   const { key, password } = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const db = c.env.DB || mainDb
@@ -1352,11 +1374,14 @@ app.post('/auth/staff', async (c) => {
   if (old) await db.prepare("UPDATE settings SET value=? WHERE key='staff_key'").bind(rec).run()
   else await db.prepare("INSERT INTO settings (key, value) VALUES ('staff_key', ?)").bind(rec).run()
   return c.json({ ok: true, enabled: !!pw, book: String(c.env.BOOK || '1') })
+  })
 })
 
 // 一键停用员工口令（离职/换人时立刻止损，不用先「改成空」）
 app.post('/auth/staff-off', async (c) => {
-  try { if (await isDemoBook(c)) return denyDemoPerm(c) } catch (e) { /* 判断不出来就不拦 */ }
+  return withAuthProbe(c, (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, async () => {
+  // 第 12 轮 A2：判定不了就当演示账拦（以前判断不出来就不拦，演示账禁权限的闸门可被打掉）
+  try { if (await isDemoBook(c)) return denyDemoPerm(c) } catch (e) { noteFail(e, '演示账判定'); return denyDemoPerm(c) }
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const db = c.env.DB || mainDb
@@ -1371,11 +1396,13 @@ app.post('/auth/staff-off', async (c) => {
   await db.prepare("DELETE FROM settings WHERE key='staff_key'").run()
   await logAudit(db, '停用员工口令', '员工口令', (b.note || '离职/换人'), '', '老板')
   return c.json({ ok: true, enabled: false, note: '已停用：他手机上那个口令现在进不去了' })
+  })
 })
 
 // 演示口令：给微信审核、给想先看看的人。只读（GET），改不了账、导不走数据。
 // 微信审核 3.3「登录受限」就是因为审核员拿不到口令进不去，有了这个就能自己进去看。
 app.post('/auth/demo', async (c) => {
+  return withAuthProbe(c, (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, async () => {
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
@@ -1396,18 +1423,22 @@ app.post('/auth/demo', async (c) => {
   else await mainDb.prepare("INSERT INTO settings (key, value) VALUES ('demo_key', ?)").bind(rec).run()
   await logAudit(mainDb, '设演示口令', '演示口令', '只读，给审核/试用用', '', '老板')
   return c.json({ ok: true, enabled: true })
+  })
 })
 
 // 演示口令开着没有（老板才看得到；不回明文，明文只在设置时显示一次）
 app.post('/auth/demo-state', async (c) => {
+  return withAuthProbe(c, (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, async () => {
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板能看' }, 403)
   return c.json({ ok: true, enabled: await demoKeyOn(mainDb) })
+  })
 })
 
 // 内置演示入口开着没有（老板可关。关掉之后前端那个「先看看演示」直接消失）
 app.post('/auth/demo-builtin', async (c) => {
+  return withAuthProbe(c, (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, async () => {
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   if (!(await verifyKey(mainDb, b.key))) return c.json({ error: '只有老板能改' }, 403)
@@ -1416,6 +1447,7 @@ app.post('/auth/demo-builtin', async (c) => {
   else await mainDb.prepare("DELETE FROM settings WHERE key='demo_builtin_off'").run()
   await logAudit(mainDb, off ? '关掉内置演示入口' : '打开内置演示入口', '演示模式', '微信审核 / 试用用', '', '老板')
   return c.json({ ok: true, builtin: !off })
+  })
 })
 
 // 按账户对账：今天/这个月，钱到底进了哪个口袋，有没有对不上
@@ -1563,10 +1595,11 @@ const linkExpired = (exp) => {
   return Date.now() > e
 }
 const linkExpOf = (ttl) => Date.now() + num(ttl)
-const sigOf = async (keyOrDb, party, type) => {
+const sigOf = async (keyOrDb, party, type, exp) => {
   // 传 db 就自己取签名密钥（sign_secret），传字符串就按老办法直接用
   const key = keyOrDb && typeof keyOrDb === 'object' ? await signSecret(keyOrDb) : String(keyOrDb || '')
-  const data = new TextEncoder().encode(String(key) + '|' + String(party) + '|' + String(type))
+  const expPart = exp ? '|x' + String(num(exp)) : ''
+  const data = new TextEncoder().encode(String(key) + '|' + String(party) + '|' + String(type) + expPart)
   const buf = await crypto.subtle.digest('SHA-256', data)
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 20)
 }
@@ -3649,9 +3682,11 @@ async function handoverData(db, env) {
 app.get('/handover', async (c) => {
   const d = await handoverData(c.env.DB, c.env)
   const saved = await getKey((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB)
-  const t = saved ? await sigBook((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, c.env.BOOK, 'handover', 'ho') : ''
+  // 第 12 轮 A4：交接包链接 7 天失效（以前永久有效，谁拿到都能一直看全本账）。
+  const expH = linkExpOf(LINK_TTL.statement)
+  const t = saved ? await sigBook((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, c.env.BOOK, 'handover', 'ho', expH) : ''
   const base = new URL(c.req.url).origin
-  return c.json({ ...d, url: t ? base + '/handover-print?t=' + t + '&book=' + (num(c.env.BOOK) || 1) : '' })
+  return c.json({ ...d, url: t ? base + '/handover-print?t=' + t + '&x=' + expH + '&book=' + (num(c.env.BOOK) || 1) : '' })
 })
 
 app.post('/handover-note', async (c) => {
@@ -3674,8 +3709,9 @@ app.get('/handover-print', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'handover', 'ho') : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成交接包。</h3>')
+  const expH = num(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'handover', 'ho', expH) : ''
+  if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成交接包。</h3>')
   const d = await handoverData(db, c.env)
   const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   const body = d.sections.map((s) => `<h2>${esc(s.title)}</h2><ul>${s.lines.map((l) => '<li>' + esc(l) + '</li>').join('')}</ul>`).join('')
@@ -4699,9 +4735,11 @@ app.get('/report-link', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const mm = String(c.req.query('month') || month()).slice(0, 7)
-  const t = await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp')
+  // 第 12 轮 A4：含成本/毛利的月报链接 7 天失效，防止转发出去被长期看底价。
+  const expR = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp', expR)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/report-print?month=' + mm + '&t=' + t + '&x=' + expR + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 // 单张加工单 / 送货单：老板或车间直接打印，客户签字带回
@@ -4714,9 +4752,11 @@ app.get('/order-print-link', async (c) => {
   const row = await db.prepare('SELECT id FROM orders WHERE id=?').bind(id).first()
   if (!row) return c.json({ error: '没找到这张单' }, 404)
   if (!saved) return c.json({ error: '先设访问口令才能生成打印页' }, 400)
-  const t = await sigBook(mainDb, c.env.BOOK, String(id), 'order')
+  // 第 12 轮 A4：加工单链接 7 天失效。
+  const expO = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, String(id), 'order', expO)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/order-print?id=' + id + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/order-print?id=' + id + '&t=' + t + '&x=' + expO + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/order-print', async (c) => {
@@ -4725,8 +4765,9 @@ app.get('/order-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, String(id), 'order') : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印加工单」生成新链接。</h3>')
+  const expO = num(c.req.query('x'))
+  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, String(id), 'order', expO) : ''
+  if (!good || want !== good || linkExpired(expO)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印加工单」生成新链接。</h3>')
   const d = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!d) return c.html('<h3>没找到这张单。</h3>')
   const t = await getTitle(db)
@@ -4767,8 +4808,9 @@ app.get('/report-print', async (c) => {
   const mm = String(c.req.query('month') || month()).slice(0, 7)
   if (!/^\d{4}-\d{2}$/.test(mm)) return c.html('<h3>月份格式不对（应为 2026-11）</h3>')
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp') : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新点「打印报表」生成新链接。</h3>')
+  const expR = num(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp', expR) : ''
+  if (!good || want !== good || linkExpired(expR)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印报表」生成新链接。</h3>')
   const head = await getTitle(db)
   const snap = await snapOf(db, mm)
   const yr = mm.slice(0, 4)
@@ -5425,9 +5467,11 @@ app.get('/recon-print-link', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   if (!party) return c.json({ error: '缺少对账单位' }, 400)
-  const t = await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type)
+  // 第 12 轮 A4：对账确认单链接 7 天失效。
+  const expN = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type, expN)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/recon-print?type=' + type + '&month=' + month + '&party=' + encodeURIComponent(party) + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/recon-print?type=' + type + '&month=' + month + '&party=' + encodeURIComponent(party) + '&t=' + t + '&x=' + expN + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 // A4 对账确认单（双方签字用）
@@ -5439,8 +5483,9 @@ app.get('/recon-print', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const month = (String(c.req.query('month') || '').slice(0, 7)) || now().slice(0, 7)
   const want = String(c.req.query('t') || '')
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成对账确认单。</h3>')
+  const expN = num(c.req.query('x'))
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type, expN) : ''
+  if (!good || want !== good || linkExpired(expN)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成对账确认单。</h3>')
   const o = await conclusionOf(db, type, party, month)
   const title = await getTitle(db)
   const prof = await profLine(db, party)
@@ -6994,7 +7039,10 @@ app.post('/advances', async (c) => {
     const done = await db.batch([
       db.prepare('INSERT INTO advances (type, party, amount, used, remark, account_id, created_at) VALUES (?,?,?,0,?,?,?)')
         .bind(t, nm, a, remark || '', acc, created),
-      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES (?,?,(SELECT MAX(id) FROM advances),?,?,?,?,1,?)")
+      // 第 12 轮 B6：流水的 ref_id 以前用 (SELECT MAX(id) FROM advances)，两个 isolate 并发各插一条时
+      // MAX(id) 会拿到对方那条，流水挂到错的预收/预付单上 → 抵扣、家底全错。
+      // 同一条 batch 里顺序执行，last_insert_rowid() 就是本连接刚插进去的那条，不会串。
+      db.prepare("INSERT INTO ledger (direction, ref_type, ref_id, amount, category, remark, account_id, cash, created_at) VALUES (?,?,last_insert_rowid(),?,?,?,?,1,?)")
         .bind(t === 'in' ? 'in' : 'out', 'advance', a, t === 'in' ? '预收款' : '预付款', `${t === 'in' ? '收预收' : '付预付'} ${nm}${remark ? ' ' + remark : ''}`, acc, created)
     ])
     aid = (done && done[0] && done[0].meta && done[0].meta.last_row_id) || 0
@@ -11732,15 +11780,17 @@ app.post('/quotes/:id/send', async (c) => {
   const r = await qGet(db, id)
   if (!r) return c.json({ error: '报价单不存在' }, 404)
   const saved = await getKey(mainDb)
-  const t = saved ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id) : ''
+  // 第 12 轮 A4：报价单链接 7 天失效。
+  const expQ = linkExpOf(LINK_TTL.statement)
+  const t = saved ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id, expQ) : ''
   const at = now()
   await db.prepare("UPDATE quotes SET status='sent', token=?, sent_at=? WHERE id=?").bind(t, at, id).run()
   const base = c.req.url.split('/quotes/')[0]
   const q = qSlim(Object.assign({}, r, { status: 'sent', sent_at: at }))
   const text = [`${q.party}，${q.item || '这个活'}的报价：${q.amount} 元（${q.qty > 1 ? q.qty + ' × ' + q.price + ' 元，' : ''}含税不含运费），报价 ${q.valid_days} 天内有效。`,
-    '您点开看一眼，行就说一声，我这边排产：' + (t ? `${base}/quote-print?id=${id}&t=${t}&book=${num(c.env.BOOK) || 1}` : '（链接生成失败，请在电脑上重试）')].join('\n')
+    '您点开看一眼，行就说一声，我这边排产：' + (t ? `${base}/quote-print?id=${id}&t=${t}&x=${expQ}&book=${num(c.env.BOOK) || 1}` : '（链接生成失败，请在电脑上重试）')].join('\n')
   await logAudit(db, '发报价', q.party, `${q.no || ''} ${q.party} ¥${q.amount}`, '', act(c))
-  return c.json({ ok: true, url: t ? `${base}/quote-print?id=${id}&t=${t}&book=${num(c.env.BOOK) || 1}` : '', text, quote: q })
+  return c.json({ ok: true, url: t ? `${base}/quote-print?id=${id}&t=${t}&x=${expQ}&book=${num(c.env.BOOK) || 1}` : '', text, quote: q })
 })
 
 app.get('/quote-print', async (c) => {
@@ -11749,8 +11799,9 @@ app.get('/quote-print', async (c) => {
   const saved = await getKey(mainDb)
   const id = num(c.req.query('id'))
   const want = String(c.req.query('t') || '')
-  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请让对方重新发一次报价。</h3>')
+  const expQ = num(c.req.query('x'))
+  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id, expQ) : ''
+  if (!good || want !== good || linkExpired(expQ)) return c.html('<h3>链接已失效或已过期：请让对方重新发一次报价。</h3>')
   const r = await qGet(db, id)
   if (!r) return c.html('<h3>这份报价已经不在了。</h3>')
   const t = await getTitle(db)
@@ -11768,7 +11819,7 @@ ${q.note ? `<h2>说明</h2><div class="sub" style="text-align:left">${escHtml(q.
 <script>
 function decide(ok){
   document.querySelectorAll('.pick button').forEach(function(b){b.disabled=true});
-  fetch('/quote-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:${q.id},t:'${want}',ok:!!ok})})
+  fetch('/quote-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:${q.id},t:'${want}',x:'${expQ}',ok:!!ok})})
     .then(function(r){return r.json()}).then(function(d){
       document.getElementById('tip2').textContent = d.ok ? (ok?'已回复「接受」，老板会尽快跟您确认排产。':'已回复「再谈谈」，老板会联系您。') : (d.error||'没提交成功，请再点一次');
       document.getElementById('tip2').className = 'tip2 done';
@@ -11796,8 +11847,9 @@ app.post('/quote-ack', async (c) => {
   const id = num(b.id)
   const want = String(b.t || '')
   const saved = await getKey(mainDb)
-  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id) : ''
-  if (!good || want !== good) return c.json({ error: '链接已失效，请让老板重发' }, 403)
+  const expQ = num(b.x)
+  const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id, expQ) : ''
+  if (!good || want !== good || linkExpired(expQ)) return c.json({ error: '链接已失效或已过期，请让老板重发' }, 403)
   const r = await qGet(db, id)
   if (!r) return c.json({ error: '这份报价已经不在了' }, 404)
   if (r.status === 'ordered') return c.json({ ok: true, already: true })
@@ -11915,6 +11967,9 @@ app.post('/orders/:id/receive', async (c) => {
   const cid = String(body.client_id || '')
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
+  // 第 12 轮 A3：员工凭猜 id 就能给别人的单收款。GET detail 已过 orderVisible，这条写路径以前没补。
+  // 不在归属范围里就按「不存在」返回，不泄露单据存在性。
+  if (!(await orderVisible(c, db, o))) return c.json({ error: '订单不存在' }, 404)
   const badDR = badDate(date)
   if (badDR) return c.json({ error: badDateMsg(badDR), code: 'bad_date' }, 400)
   // 锁「这笔收款是哪个月的」，不是「这张单是哪个月的」——跨月收上月的尾款是最常见的事
@@ -11926,6 +11981,9 @@ app.post('/orders/:id/receive', async (c) => {
   //   · 少收 + settle → 差额记一条「尾差抹零」核销，这单算结清（钱没进来，不进现金流）
   //   · 含税/不含税、税多税少都不在这里算，收到多少就记多少
   const settle = !!body.settle
+  // 第 12 轮 B4：settle 模式下负数以前不被拦（`a <= 0 && !settle`），但负数没有「少收结清」的意义——
+  // 守卫会把超额核销挡住，结果返回 ok 却什么都没记，用户以为结清了、账上没变。
+  if (a < 0) return c.json({ error: '金额无效' }, 400)
   if (a <= 0 && !settle) return c.json({ error: '金额无效' }, 400)
   // 参数都验完了，才占坑：占坑失败说明这一笔已经在处理/已经记过
   if (!(await opClaim(db, cid, 'receive'))) return c.json({ ok: true, dup_ok: true })
@@ -11955,6 +12013,8 @@ app.post('/orders/:id/receive', async (c) => {
   const takeIn = a > leftOrder + 0.005 ? leftOrder : a
   const overAmt = a > leftOrder + 0.005 ? round2(a - leftOrder) : 0
   const woAdd = settle ? round2(leftOrder - Math.min(a, leftOrder)) : 0
+  // 第 12 轮 B4：settle 的「实收 + 尾差核销」不能超过还欠的（多收的部分走多收转预收，不进尾差）。
+  if (settle && a > 0 && round2(a + woAdd) > leftOrder + 0.005) { await opRelease(db, cid, 'receive'); return c.json({ error: '结清金额不能超过还欠的' }, 400) }
   // 收款、税点、多收转预收、尾差核销，全部攒进**一个** db.batch 一次提交（D1 的 batch 是事务）。
   // 以前是「先改单提交、再单独写流水」：第二条一失败（超时/连接断）→ 单据显示已收，账上没有这笔钱，
   // 现金余额、月收入全少一笔，用户只看到 500。流水现在**写在改单前面、条件与改单完全一致**，
@@ -12278,6 +12338,8 @@ app.post('/orders/:id/status', async (c) => {
   const db = c.env.DB
   const o = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
   if (!o) return c.json({ error: '订单不存在' }, 404)
+  // 第 12 轮 A3：员工改自己不归属的单据状态（改成「已交付」影响准时率统计）
+  if (!(await orderVisible(c, db, o))) return c.json({ error: '订单不存在' }, 404)
   if (await isMonthLocked(db, (o.created_at || '').slice(0, 7))) return c.json({ error: '该订单所在月份已结账锁定' }, 403)
   const st = num(status)
   // 第一次标"已交付"时记下交付日期（算准时率用），之后改来改去不覆盖
@@ -12348,6 +12410,8 @@ app.post('/payables/:id/pay', async (c) => {
   if (await opSeen(db, cid, "pay")) return c.json({ ok: true, dup_ok: true })
   const p = await db.prepare('SELECT * FROM payables WHERE id=?').bind(id).first()
   if (!p) return c.json({ error: '应付单不存在' }, 404)
+  // 第 12 轮 A3：员工给不归属的供应商付款
+  if (!(await payableVisible(c, db, p))) return c.json({ error: '应付单不存在' }, 404)
   const badDPay = badDate(date)
   if (badDPay) return c.json({ error: badDateMsg(badDPay), code: 'bad_date' }, 400)
   // 同上：锁的是这笔付款的月份，不是应付单开在哪个月
@@ -12360,6 +12424,8 @@ app.post('/payables/:id/pay', async (c) => {
   const payRelease = async () => { if (cid) await opRelease(db, cid, 'pay') }
   // 同收款：多付记成这家的预付，少付想结清就 settle（差额记尾差核销）
   const settle = !!body.settle
+  // 第 12 轮 B4：同收款，settle 模式下负数不再被放过（否则返回 ok 但账上没动）
+  if (a < 0) { await payRelease(); return c.json({ error: '金额无效' }, 400) }
   if (a <= 0 && !settle) { await payRelease(); return c.json({ error: '金额无效' }, 400) }
   const accP = num(account_id) || (await defaultAccountId(db))
   const dP = String(normDate(date)).slice(0, 10)
@@ -12387,6 +12453,8 @@ app.post('/payables/:id/pay', async (c) => {
   const paidOut = a > leftPay + 0.005 ? leftPay : a
   const overAmt = a > leftPay + 0.005 ? round2(a - leftPay) : 0
   const woAdd = settle ? round2(leftPay - Math.min(a, leftPay)) : 0
+  // 第 12 轮 B4：同收款，settle 的「实付 + 尾差核销」不能超过还欠的
+  if (settle && a > 0 && round2(a + woAdd) > leftPay + 0.005) { await payRelease(); return c.json({ error: '结清金额不能超过还欠的' }, 400) }
   // 同收款：付款、税点、多付转预付、尾差核销攒进一个 batch，流水写在改单前面且条件一致
   const stP = []
   const atP = {}
@@ -14968,16 +15036,35 @@ app.get('/dunning-year', async (c) => {
   const firstDun = (await db.prepare('SELECT party, MIN(created_at) f FROM dunning_log GROUP BY party').all()).results || []
   const fmap = {}
   for (const r of firstDun) fmap[norm(r.party)] = String(r.f || '').slice(0, 10)
+  // 第 12 轮 B2：以前「首次催款后该客户所有回款都算催完收回」，一个月催过的人，
+  // 之后大半年的回款全算进来，avg=收回/催款次数 严重虚高。
+  // 现在按「回款必须落在某次催款之后 30 天内」才算催后收回（拿不到单据级催款记录，
+  // 用时间窗做最保守的近似；窗口外那笔是正常回款，不算催款成绩）。
+  const dunAll = (await db.prepare('SELECT party, created_at FROM dunning_log WHERE substr(created_at,1,4)=?').bind(y).all()).results || []
+  const dunBy = {}
+  for (const r of dunAll) {
+    const k = norm(r.party)
+    ;(dunBy[k] = dunBy[k] || []).push(String(r.created_at || '').slice(0, 10))
+  }
+  for (const k in dunBy) dunBy[k].sort()
   const flows = (await db.prepare("SELECT o.customer party, l.created_at d, l.amount a FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND substr(l.created_at,1,4)=? UNION ALL SELECT p.supplier party, l.created_at d, l.amount a FROM ledger l JOIN payables p ON l.ref_id=p.id WHERE l.direction='out' AND l.ref_type='payable' AND substr(l.created_at,1,4)=?").bind(y, y).all()).results || []
   const stl = (await db.prepare("SELECT substr(created_at,1,7) m, COUNT(*) n, SUM(CASE WHEN ack='doubt' THEN 1 ELSE 0 END) bad FROM statement_log WHERE substr(created_at,1,4)=? GROUP BY substr(created_at,1,7)").bind(y).all()).results || []
   const bro = (await db.prepare("SELECT substr(promise_date,1,7) m, COUNT(*) n FROM dunning_log WHERE promise_date IS NOT NULL AND substr(promise_date,1,4)=? AND substr(promise_date,1,10) < ? GROUP BY substr(promise_date,1,7)").bind(y, now().slice(0, 10)).all()).results || []
   const rec = {}
   for (const f of flows) {
     const k = norm(f.party)
-    const start = fmap[k]
-    if (!start) continue
-    if (String(f.d).slice(0, 10) < start) continue
-    const mm = String(f.d).slice(0, 7)
+    const pd = String(f.d).slice(0, 10)
+    const duns = dunBy[k] || []
+    // 找「不超过回款日」的最近一次催款
+    let lastDun = ''
+    for (let i = duns.length - 1; i >= 0; i--) {
+      if (duns[i] <= pd) { lastDun = duns[i]; break }
+    }
+    if (!lastDun) continue
+    // 回款必须落在催款之后 30 天内，否则是普通回款，不算催款成绩
+    const days = Math.round((Date.parse(pd + 'T00:00:00Z') - Date.parse(lastDun + 'T00:00:00Z')) / 86400000)
+    if (days < 0 || days > 30) continue
+    const mm = pd.slice(0, 7)
     rec[mm] = round2(num(rec[mm]) + num(f.a))
   }
   const g = (arr, m, key) => { const hit = arr.find((x) => x.m === m); return num(hit && hit[key]) }
@@ -15154,10 +15241,14 @@ app.get('/statement-ack-link', async (c) => {
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
   const party = String(c.req.query('party') || '').trim()
   if (!party) return c.json({ error: '要指定是哪一家' }, 400)
-  const t = await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type)
+  // 第 12 轮 A5：以前签名是 'ack:'+type 不带 month 也不带 exp —— 拿到一次链接，
+  // 改 month 就能看该客户任意月份的对账，转发后永远有效。
+  // 现在签名串带 month + exp（30 天），改 month 的链接自动失效。
+  const m = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
+  const exp = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + m, exp)
   const base = new URL(c.req.url).origin
-  const m = String(c.req.query('month') || '').slice(0, 7)
-  return c.json({ ok: true, url: base + '/statement-ack?type=' + type + '&party=' + encodeURIComponent(party) + (m ? '&month=' + m : '') + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/statement-ack?type=' + type + '&party=' + encodeURIComponent(party) + (m ? '&month=' + m : '') + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) + '&x=' + exp })
 })
 
 app.get('/statement-ack', async (c) => {
@@ -15168,8 +15259,8 @@ app.get('/statement-ack', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   const want = String(c.req.query('t') || '')
   const month = String(c.req.query('month') || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type) : ''
-  if (!good || want !== good) return c.html(ackPage('<div class="card"><h3>链接已失效</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month) : ''
+  if (!good || want !== good || linkExpired(String(c.req.query('x') || ''))) return c.html(ackPage('<div class="card"><h3>链接已失效或已过期</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
   const t = await getTitle(db)
   const d = await conclusionOf(db, type, party, month)
   const docs = ((await db.prepare(type === 'ar'
@@ -15211,14 +15302,25 @@ app.post('/statement-ack', async (c) => {
   const type = b.type === 'ap' ? 'ap' : 'ar'
   const party = String(b.party || '').trim()
   const month = String(b.month || '').slice(0, 7) || now().slice(0, 7)
-  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type) : ''
-  if (!good || String(b.t || '') !== good) return c.json({ error: '链接已失效，请让老板重新发一次' }, 403)
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month) : ''
+  if (!good || String(b.t || '') !== good || linkExpired(String(b.x || ''))) return c.json({ error: '链接已失效或已过期，请让老板重新发一次' }, 403)
+  // 第 12 轮 A5：POST 以前不防重放——同一条链接可以反复提交，每次都插一条 statement_log，
+  // 「对方确认了 3 次」的假记录堆起来。现在同 party+month+type 的确认链接只能提交一次（提交后令牌作废）。
+  const cid = 'ack:' + party + '#' + type + '#' + month
+  if (await opSeen(db, cid, 'statement-ack')) return c.json({ ok: true, dup_ok: true, ack, text: '这条已经确认过了，不用再点了' })
+  if (!(await opClaim(db, cid, 'statement-ack'))) return c.json({ ok: true, dup_ok: true, ack, text: '这条已经确认过了，不用再点了' })
   const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
   const amt = round2(num(b.amount))
   const note = String(b.note || '').slice(0, 120)
   const memo = ack === 'ok' ? '对方确认：对得上' : ('对方说对不上' + (amt ? '，差 ¥' + amt : '') + (note ? '（' + note + '）' : ''))
-  await db.prepare('INSERT INTO statement_log (party,type,month,channel,note,ack,ack_at,created_at) VALUES (?,?,?,?,?,?,?,?)')
-    .bind(party, type, month, '自助确认', memo.slice(0, 200), ack, now(), now()).run()
+  try {
+    await db.prepare('INSERT INTO statement_log (party,type,month,channel,note,ack,ack_at,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(party, type, month, '自助确认', memo.slice(0, 200), ack, now(), now()).run()
+    await opMark(db, cid, 'statement-ack', 1)
+  } catch (e) {
+    await opRelease(db, cid, 'statement-ack')
+    throw e
+  }
   await logAudit(db, 'statement_ack', party, memo)
   return c.json({
     ok: true, ack,
@@ -15392,7 +15494,7 @@ app.post('/collect-config', async (c) => {
 })
 
 // ===== 到期表：按账期排出「哪张单哪天到期」，能导 Excel 发客户 =====
-async function dueRows(db, type, months, party, limit, offset) {
+async function dueRows(db, type, months, party, limit, offset, scope) {
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
@@ -15402,11 +15504,14 @@ async function dueRows(db, type, months, party, limit, offset) {
   terms.forEach((t) => { tmap[norm(t.party)] = num(t.term_days) })
   const binds = []
   if (party) binds.push(String(party))
+  // 第 12 轮 C1：员工（scopeOwn）只能看分给自己的客户/供应商，SQL 里加归属条件。
+  const scopeF = (scope && scope.on) ? ` AND ${scope.sql}` : ''
+  if (scope && scope.on) binds.push(...scope.binds)
   // 以前一次 LIMIT 3000：单子超过 3000 张时，最老的一批被静默丢掉，
   // 汇总的「总欠款」也跟着少算，用户以为全账都在表里。
   // 改成按 rowid 分页取完（每页 3000），再统计总数。
   const raw = []
-  let pageSql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-COALESCE(paid,0)-COALESCE(written_off,0) > 0`
+  let pageSql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-COALESCE(paid,0)-COALESCE(written_off,0) > 0${scopeF}`
   if (party) pageSql += ` AND ${col} = ?`
   pageSql += ' ORDER BY id ASC LIMIT 3000 OFFSET ?'
   for (let off = 0; off < 60000; off += 3000) {
@@ -15459,14 +15564,25 @@ async function dueRows(db, type, months, party, limit, offset) {
 }
 
 app.get('/due-schedule', async (c) => {
+  const db = c.env.DB
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
-  const r = await dueRows(c.env.DB, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim(), c.req.query('limit'), c.req.query('offset'))
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  // 第 12 轮 C1：以前这个路由不接 scope，有「联系」模块的员工能拉全客户到期表。
+  const sc = await scopeOwn(c)
+  if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '·到期表客户归属') } }
+  const scope = sc.on ? { on: true, sql: `${col} IN (SELECT party FROM party_staff WHERE staff=?)`, binds: [sc.name] } : null
+  const r = await dueRows(db, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim(), c.req.query('limit'), c.req.query('offset'), scope)
   return c.json(Object.assign({ ok: true, type }, r))
 })
 
 app.get('/due-schedule-xlsx', async (c) => {
+  const db = c.env.DB
   const type = c.req.query('type') === 'ap' ? 'ap' : 'ar'
-  const r = await dueRows(c.env.DB, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim())
+  const col = type === 'ap' ? 'supplier' : 'customer'
+  const sc = await scopeOwn(c)
+  if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '·到期表客户归属') } }
+  const scope = sc.on ? { on: true, sql: `${col} IN (SELECT party FROM party_staff WHERE staff=?)`, binds: [sc.name] } : null
+  const r = await dueRows(db, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim(), undefined, undefined, scope)
   const head = ['单号', '单位', '产品/说明', '金额', '未结', '开单日', '到期日', '状态']
   const rows = [head].concat(r.rows.map((x) => [x.id, x.party, x.item, x.amount, x.left, x.created_at, x.due || '', x.state + (x.guess ? '（按账期推算）' : '')]))
   rows.push([])
@@ -15482,7 +15598,12 @@ app.get('/risk-list', async (c) => {
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
-  const raw = (await db.prepare(`SELECT id, ${col} AS party, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-COALESCE(paid,0)-COALESCE(written_off,0) > 0`).all()).results || []
+  // 第 12 轮 C2：以前全表扫，员工（有「联系」模块）能拿到所有客户的欠款分档。加归属条件。
+  const sc = await scopeOwn(c)
+  if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '·风险名单归属') } }
+  const scopeF = sc.on ? ` AND ${col} IN (SELECT party FROM party_staff WHERE staff=?)` : ''
+  const scopeB = sc.on ? [sc.name] : []
+  const raw = (await db.prepare(`SELECT id, ${col} AS party, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-COALESCE(paid,0)-COALESCE(written_off,0) > 0${scopeF}`).bind(...scopeB).all()).results || []
   const b = { d0: { label: '没到期 / 7天内', amount: 0, cnt: 0 }, d30: { label: '超 1-30 天', amount: 0, cnt: 0 }, d60: { label: '超 31-60 天', amount: 0, cnt: 0 }, d90: { label: '超 61-90 天', amount: 0, cnt: 0 }, dx: { label: '超 90 天（疑似坏账）', amount: 0, cnt: 0 } }
   const pmap = {}
   raw.forEach((r) => {
@@ -16369,8 +16490,8 @@ async function yearBook(db, y) {
   const y1 = y + '-12-31'
   const prevY = String(num(y) - 1)
   const jobs = [
-    // 接单额 / 成本 / 笔数，按月
-    db.prepare(`SELECT month mk, COALESCE(SUM(price),0) inc, COALESCE(SUM(COALESCE(cost,0)),0) mat, COUNT(*) n
+    // 接单额 / 成本 / 笔数，按月（第 12 轮 B2：REAL 裸 SUM 与 SUM_MONEY 整数分有微小差，年度口径统一用 SUM_MONEY）
+    db.prepare(`SELECT month mk, ${SUM_MONEY('price')} inc, ${SUM_MONEY('COALESCE(cost,0)')} mat, COUNT(*) n
       FROM orders WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all(),
     // 现金：收 / 付 / 费用 / 折旧摊销预提，按月
     db.prepare(`SELECT substr(created_at,1,7) mk,
@@ -16398,15 +16519,20 @@ async function yearBook(db, y) {
     db.prepare(`SELECT COALESCE(SUM(d.principal),0) - COALESCE((SELECT SUM(r.amount) FROM debt_repays r WHERE r.kind='principal' AND substr(r.rdate,1,10)<=?),0) AS v
       FROM debts d WHERE substr(d.start_date,1,10)<=?`).bind(y1, y1).first(),
     // 去年对比
-    db.prepare(`SELECT COALESCE(SUM(price),0) inc, COALESCE(SUM(COALESCE(cost,0)),0) mat FROM orders WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
-    db.prepare(`SELECT COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp FROM ledger WHERE substr(created_at,1,4)=?`).bind(prevY).first()
+    db.prepare(`SELECT ${SUM_MONEY('price')} inc, ${SUM_MONEY('COALESCE(cost,0)')} mat FROM orders WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
+    db.prepare(`SELECT COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp FROM ledger WHERE substr(created_at,1,4)=?`).bind(prevY).first(),
+    // 第 12 轮 B2：核销（坏账）从来不计入利润 —— 以前 profit=接单-成本-费用-摊销，把核销掉的坏账漏了，
+    // 实际净利比纸面低。核销按 month 列归属（没有 month 的按 created_at），按月取出来扣。
+    db.prepare(`SELECT substr(COALESCE(month, substr(created_at,1,7)),1,7) mk, ${SUM_MONEY('amount')} v FROM writeoffs WHERE substr(COALESCE(month, substr(created_at,1,7)),1,4)=? GROUP BY mk`).bind(y).all()
   ]
-  const [oR, lR, cashR, arR, apR, debtR, pOrdR, pExpR] = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e, '年度总账'); return null })))
+  const yqFail = []   // 第 12 轮 B2：查询失败不得静默报 0 还 ok:true
+  const [oR, lR, cashR, arR, apR, debtR, pOrdR, pExpR, woR] = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e, '年度总账'); yqFail.push(String((e && e.message) || e).slice(0, 180)); return null })))
   const orows = (oR && oR.results) || []
   const lrows = (lR && lR.results) || []
-  const oMap = {}, lMap = {}
+  const oMap = {}, lMap = {}, woMap = {}
   for (const r of orows) oMap[r.mk] = r
   for (const r of lrows) lMap[r.mk] = r
+  for (const r of ((woR && woR.results) || [])) woMap[String(r.mk)] = round2(num(r.v))
   const months = []
   let maxP = 1
   for (let i = 1; i <= 12; i++) {
@@ -16416,7 +16542,8 @@ async function yearBook(db, y) {
     const mat = round2(num(o.mat))
     const exp = round2(num(l.exp))
     const adj = round2(num(l.adj))
-    const profit = round2(income - mat - exp - adj)
+    const wo = woMap[mk] || 0
+    const profit = round2(income - mat - exp - adj - wo)
     if (Math.abs(profit) > maxP) maxP = Math.abs(profit)
     months.push({ m: mk, label: String(i) + '月', income, mat, exp, adj, profit, cnt: num(o.n), recv: round2(num(l.recv)), pay: round2(num(l.pay)) })
   }
@@ -16430,7 +16557,7 @@ async function yearBook(db, y) {
   const cashStart = round2(num(cash.opening) + num(cash.before_flow))
   const cashEnd = round2(num(cash.opening) + num(cash.upto_flow))
   const arEnd = round2(num(arR && arR.v)), apEnd = round2(num(apR && apR.v)), debtEnd = round2(num(debtR && debtR.v))
-  const advYr = await advLeftAt(db, y + '-12-31').catch((e) => { noteFail(e, '年报·预收预付'); return { in: 0, out: 0 } })
+  const advYr = await advLeftAt(db, y + '-12-31').catch((e) => { noteFail(e, '年报·预收预付'); yqFail.push(String((e && e.message) || e).slice(0, 180)); return { in: 0, out: 0 } })
   const advInEnd = round2(num(advYr.in)), advOutEnd = round2(num(advYr.out))
   const netEnd = round2(cashEnd + arEnd - apEnd - debtEnd - advInEnd + advOutEnd)
   const prevIncome = round2(num(pOrdR && pOrdR.inc)), prevMat = round2(num(pOrdR && pOrdR.mat)), prevExp = round2(num(pExpR && pExpR.exp))
@@ -16463,7 +16590,11 @@ async function yearBook(db, y) {
     cash: { start: cashStart, end: cashEnd, net: round2(cashEnd - cashStart) },
     ar_end: arEnd, ap_end: apEnd, debt_end: debtEnd, adv_in_end: advInEnd, adv_out_end: advOutEnd, net_worth: netEnd,
     prev: { year: prevY, income: prevIncome, profit: prevProfit },
-    tips, text
+    tips, text,
+    // 第 12 轮 B2：查询失败时 ok=false（数字是按「失败即 0」算的，不可信），但仍然返回完整结构，
+    // 免得调用方（yearReview / year-summary / year-close）拿到 undefined 崩掉。
+    ok: yqFail.length === 0,
+    qfail: yqFail
   }
 }
 
@@ -16555,8 +16686,9 @@ app.get('/year-review-print-link', async (c) => {
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
   const saved = await getKey(c.env.DB)
-  const t = saved ? await sigBook((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, c.env.BOOK, 'yearreview', 'yr:' + y) : ''
-  return c.json({ ok: true, url: `${c.req.url.split('/year-review-print-link')[0]}/year-review-print?year=${encodeURIComponent(y)}&t=${encodeURIComponent(t)}&book=${num(c.env.BOOK) || 1}`, year: y })
+  const expY = linkExpOf(LINK_TTL.statement)
+  const t = saved ? await sigBook((c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB, c.env.BOOK, 'yearreview', 'yr:' + y, expY) : ''
+  return c.json({ ok: true, url: `${c.req.url.split('/year-review-print-link')[0]}/year-review-print?year=${encodeURIComponent(y)}&t=${encodeURIComponent(t)}&x=${expY}&book=${num(c.env.BOOK) || 1}`, year: y })
 })
 
 app.get('/year-review-print', async (c) => {
@@ -16565,8 +16697,9 @@ app.get('/year-review-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearreview', 'yr:' + y) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度回顾。</h3>')
+  const expY = num(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearreview', 'yr:' + y, expY) : ''
+  if (!good || want !== good || linkExpired(expY)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度回顾。</h3>')
   const d = await yearReview(db, y)
   const t = await getTitle(db)
   const bars = d.months.map((m) => `<div class="bc"><div class="bv">${m.profit || ''}</div><div class="bb" style="height:${Math.max(2, Math.round(Math.abs(m.profit) / Math.max(1, ...d.months.map((x) => Math.abs(x.profit))) * 90))}px"></div><div class="bl">${escHtml(m.label)}</div></div>`).join('')
@@ -16856,9 +16989,10 @@ app.get('/year-close-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y)
+  const expC = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y, expC)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-close-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/year-close-print?year=' + y + '&t=' + t + '&x=' + expC + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/year-close-print', async (c) => {
@@ -16867,8 +17001,9 @@ app.get('/year-close-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度封账单。</h3>')
+  const expC = num(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y, expC) : ''
+  if (!good || want !== good || linkExpired(expC)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度封账单。</h3>')
   const d = await yearBook(db, y)
   const s = await yearCloseScan(db, y)
   const t = await getTitle(db)
@@ -16900,9 +17035,10 @@ app.get('/year-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y)
+  const expB = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y, expB)
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/year-print?year=' + y + '&t=' + t + '&x=' + expB + '&book=' + (num(c.env.BOOK) || 1) })
 })
 
 app.get('/year-print', async (c) => {
@@ -16911,8 +17047,9 @@ app.get('/year-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成年度总账打印页。</h3>')
+  const expB = num(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y, expB) : ''
+  if (!good || want !== good || linkExpired(expB)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度总账打印页。</h3>')
   const d = await yearBook(db, y)
   const t = await getTitle(db)
   const rows = d.months.map((m) => `<tr><td>${escHtml(m.label)}</td><td class="n">${m.cnt || ''}</td><td class="n">${m.income || ''}</td><td class="n">${m.mat || ''}</td><td class="n">${m.exp || ''}</td><td class="n b ${m.profit < 0 ? 'red' : ''}">${m.profit || ''}</td><td class="n">${m.recv || ''}</td><td class="n">${m.pay || ''}</td></tr>`).join('')
@@ -17006,16 +17143,30 @@ app.post('/year-open', async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const y = String(body.year || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const d = await yearOpenData(db, y)
-  if (!d.has_prev) return c.json({ error: `${d.prev} 年没有账，不用开账，直接在 ${y} 年记账就行` }, 400)
-  if (d.opened && !body.confirm) {
-    return c.json({ error: `${y} 年已经开过账了（${String((d.record || {}).created_at || '').slice(0, 10)}），要重新定一次期初就带 confirm:true`, code: 'already_open', record: d.record }, 409)
+  // 第 12 轮 B8：开账以前没有幂等键，弱网点两下就是两次 INSERT OR REPLACE 覆盖同一份期初。
+  // 理论上结果一样，但两次审计日志 + 两次响应，审核现场看到两遍「开账了」会以为重复结转了。
+  const cid = String(body.client_id || '')
+  let d_seen = null
+  let rec = null
+  if (await opSeen(db, cid, 'year-open:' + y)) return c.json({ ok: true, dup_ok: true, record: d_seen })
+  if (!(await opClaim(db, cid, 'year-open:' + y))) return c.json({ ok: true, dup_ok: true, record: d_seen })
+  try {
+    d_seen = await yearOpenData(db, y)
+    if (!d_seen.has_prev) return c.json({ error: `${d_seen.prev} 年没有账，不用开账，直接在 ${y} 年记账就行` }, 400)
+    if (d_seen.opened && !body.confirm) {
+      return c.json({ error: `${y} 年已经开过账了（${String((d_seen.record || {}).created_at || '').slice(0, 10)}），要重新定一次期初就带 confirm:true`, code: 'already_open', record: d_seen.record }, 409)
+    }
+    rec = { year: y, from: d_seen.prev, ...d_seen.opening, ar_cnt: d_seen.ar_cnt, ap_cnt: d_seen.ap_cnt,
+      note: String(body.note || '').slice(0, 200), created_at: now() }
+    await db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .bind('year_open_' + y, JSON.stringify(rec)).run()
+    await logAudit(db, '开新年度', y, `结转 ${d_seen.prev} 年：现金 ${rec.cash}，应收 ${rec.ar}（${rec.ar_cnt} 单），应付 ${rec.ap}，借款 ${rec.debt}，家底 ${rec.net}`)
+    d_seen.record = rec
+  } catch (e) {
+    await opRelease(db, cid, 'year-open:' + y)
+    throw e
   }
-  const rec = { year: y, from: d.prev, ...d.opening, ar_cnt: d.ar_cnt, ap_cnt: d.ap_cnt,
-    note: String(body.note || '').slice(0, 200), created_at: now() }
-  await db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-    .bind('year_open_' + y, JSON.stringify(rec)).run()
-  await logAudit(db, '开新年度', y, `结转 ${d.prev} 年：现金 ${rec.cash}，应收 ${rec.ar}（${rec.ar_cnt} 单），应付 ${rec.ap}，借款 ${rec.debt}，家底 ${rec.net}`)
+  await opMark(db, cid, 'year-open:' + y, rec.year)
   return c.json({ ok: true, record: rec,
     text: `${y} 年开账了：年初现金 ${rec.cash} 元、应收 ${rec.ar} 元（${rec.ar_cnt} 单）、应付 ${rec.ap} 元（${rec.ap_cnt} 单）、借款 ${rec.debt} 元、家底 ${rec.net} 元。` +
       `\n（这些数都是 ${rec.from}-12-31 那天的口径，不是今天的）` +
@@ -17037,9 +17188,13 @@ app.get('/year-open-print-link', async (c) => {
   if (!saved) return c.json({ error: '还没设访问口令' }, 400)
   const y = String(c.req.query('year') || now().slice(0, 4))
   if (!/^\d{4}$/.test(y)) return c.json({ error: '年份格式应为 YYYY' }, 400)
-  const t = await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y)
+  // 第 12 轮 B8：以前签名串是 'yo:'+y 不带 exp，拿到一次链接永久有效；而且打印页每次实时重算 yearOpenData。
+  // 现在签名带 exp（7 天）+ 把期初快照存进签名串（快照变则链接失效），打印页用存好的快照渲染。
+  const recRow = await mainDb.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first()
+  const snap = recRow && recRow.value ? recRow.value : ''
+  const t = await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), linkExpOf(LINK_TTL.statement))
   const base = new URL(c.req.url).origin
-  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) })
+  return c.json({ ok: true, url: base + '/year-open-print?year=' + y + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) + '&x=' + linkExpOf(LINK_TTL.statement) })
 })
 
 app.get('/year-open-print', async (c) => {
@@ -17048,8 +17203,10 @@ app.get('/year-open-print', async (c) => {
   const saved = await getKey(mainDb)
   const y = String(c.req.query('year') || now().slice(0, 4))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成结转凭据。</h3>')
+  const recRow = await db.prepare('SELECT value FROM settings WHERE key=?').bind('year_open_' + y).first()
+  const snap = recRow && recRow.value ? recRow.value : ''
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100)) : ''
+  if (!good || want !== good || linkExpired(String(c.req.query('x') || ''))) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成结转凭据。</h3>')
   const d = await yearOpenData(db, y)
   const t = await getTitle(db)
   const rec = d.record || { ...d.opening, ar_cnt: d.ar_cnt, ap_cnt: d.ap_cnt, created_at: now() }
@@ -17084,10 +17241,13 @@ app.get('/tax-pack', async (c) => {
   const t = await getTitle(db)
   const [adjR, accR, ledR, invR, asR, debtR, repR, loanR] = await Promise.all([
     // 摊销/折旧/预提分开
+    // 第 12 轮 B3：以前这里写 `WHERE cash=1`，但 amort/dep/accrual 记的都是 cash=0（见 ADJ_EXP_WHERE），
+    // 于是这三项永远查不到、报税材料里恒为 0，和 yearBook 的净利对不上。改用 ADJ_EXP_WHERE。
+    // 预提利息既有 accrual 也有 debt_int 两种记法，都算进来。
     db.prepare(`SELECT COALESCE(SUM(CASE WHEN ref_type='amort' THEN amount ELSE 0 END),0) am,
       COALESCE(SUM(CASE WHEN ref_type='dep' THEN amount ELSE 0 END),0) dp,
-      COALESCE(SUM(CASE WHEN ref_type='accrual' THEN amount ELSE 0 END),0) ac
-      FROM ledger WHERE cash=1 AND substr(created_at,1,4)=?`).bind(y).all(),
+      COALESCE(SUM(CASE WHEN ref_type IN ('accrual','debt_int') THEN amount ELSE 0 END),0) ac
+      FROM ledger WHERE ${ADJ_EXP_WHERE} AND substr(created_at,1,4)=?`).bind(y).all(),
     // 各账户年底余额 = 期初 + 截至年底流水
     db.prepare(`SELECT a.id, a.name, COALESCE(a.opening,0) op,
       COALESCE((SELECT SUM(CASE WHEN l.direction='in' THEN l.amount ELSE -l.amount END) FROM ledger l WHERE l.cash=1 AND (l.account_id=a.id) AND substr(l.created_at,1,10)<=?),0) flow
@@ -17125,11 +17285,13 @@ app.get('/tax-pack', async (c) => {
     ['三、净利（权责口径）', T.profit, '毛利 − 各项费用'], [],
     ['备查：现金口径收 − 付', round2(T.recv - T.pay), '只看到账的钱，不等于净利']
   ] })
+  // 第 12 轮 B3：资产负债表以前漏了预收（收进来还没交付，是负债）和预付（付了还没收货，是资产）。
+  const advIn = yb.adv_in_end || 0, advOut = yb.adv_out_end || 0
   const bs = [['资产', '金额'], ['货币资金', cashEnd]]
   accs.forEach((a) => bs.push(['　' + a.name, a.balance]))
-  bs.push(['应收未收', yb.ar_end], ['资产合计', round2(cashEnd + yb.ar_end)], [])
-  bs.push(['负债', '金额'], ['应付未付', yb.ap_end], ['借款余额', yb.debt_end], ['负债合计', round2(yb.ap_end + yb.debt_end)], [])
-  bs.push(['所有者权益（资产 − 负债）', round2(cashEnd + yb.ar_end - yb.ap_end - yb.debt_end)], ['负债 + 权益', round2(yb.ap_end + yb.debt_end + (cashEnd + yb.ar_end - yb.ap_end - yb.debt_end))])
+  bs.push(['应收未收', yb.ar_end], ['预付（付了还没收货）', advOut], ['资产合计', round2(cashEnd + yb.ar_end + advOut)], [])
+  bs.push(['负债', '金额'], ['应付未付', yb.ap_end], ['借款余额', yb.debt_end], ['预收（收了还没交付）', advIn], ['负债合计', round2(yb.ap_end + yb.debt_end + advIn)], [])
+  bs.push(['所有者权益（资产 − 负债）', round2(cashEnd + yb.ar_end + advOut - yb.ap_end - yb.debt_end - advIn)], ['负债 + 权益', round2(yb.ap_end + yb.debt_end + advIn + (cashEnd + yb.ar_end + advOut - yb.ap_end - yb.debt_end - advIn))])
   sheets.push({ name: '资产负债表', rows: bs })
   const ords = (await db.prepare("SELECT * FROM orders WHERE substr(created_at,1,4)=? ORDER BY id").bind(y).all()).results || []
   sheets.push({ name: '应收明细', rows: [['单号', '客户', '产品', '金额', '成本', '毛利', '已收', '核销', '未收', '开单日', '到期日', '经手人']].concat(
@@ -17962,6 +18124,7 @@ app.get('/compare', async (c) => {
 // 数据自检：账实是否对得上
 async function selfCheck(db) {
   const issues = []
+  const qFail = []   // 第 12 轮 B1：查询失败要记下来，不能吞成 null 当 0 算
   // 性能：7 条查询改成一次并发
   const jobs = [
     // 只取对账要用的 4 列（原来 SELECT * 把 6000 单的十几列全读回来，每天 ×3 账套跑一次）
@@ -17982,8 +18145,14 @@ async function selfCheck(db) {
     db.prepare("SELECT COUNT(*) AS c FROM advances WHERE COALESCE(used,0) > amount + 0.005").first(),
     db.prepare('SELECT COUNT(*) AS c FROM ledger WHERE cash=1 AND COALESCE(account_id,0) > 0 AND account_id NOT IN (SELECT id FROM accounts)').first(),
     db.prepare("SELECT (SELECT COUNT(*) FROM orders WHERE month IS NULL OR month='') + (SELECT COUNT(*) FROM payables WHERE month IS NULL OR month='') + (SELECT COUNT(*) FROM ledger WHERE month IS NULL OR month='') AS c").first()
-  ].map((x) => x.catch((e) => { noteFail(e); return null }))
+  ].map((x) => x.catch((e) => { noteFail(e, '账实自检'); qFail.push(String((e && e.message) || e).slice(0, 180)); return null }))
   const [oR, inR, pR, outR, arRow, arFlow, flR, apRow, woO, woP, orphanRow, stockRow, advRow, accRow, monRow] = await Promise.all(jobs)
+  // 第 12 轮 B1：以前每条查询失败都被吞成 null，然后当作「合计 0」继续算，15 条对账网
+  // 任一条 D1 超时/锁错，结果都报 ok:true、0 个问题 —— 「账是好的」假安心，坏账/孤儿流水全溜过去。
+  // 现在查询失败必须让整次自检失败。
+  if (qFail.length) {
+    return { ok: false, error: '自检查询失败（数据库抖动，没查全，别当成「账没问题」）', qfail: qFail, issues: issues.slice(0, 12), bad: -1 }
+  }
   const orders = (oR && oR.results) || []
   const inSum = (inR && inR.results) || []
   const payables = (pR && pR.results) || []
@@ -18257,7 +18426,9 @@ async function healthReport(db, days) {
     sentences.push(`还剩 ${open.length} 处没改，最老的是「${worst1.label}」，${daysTxt(worst1.days_open)}${worst1.tip ? '（' + worst1.tip + '）' : ''}。`)
   }
   if (!s.empty && !open.length) sentences.push('该改的都改完了，账本现在是干净的。')
-  const url = '/health-print?days=' + days + '&t=' + (await sigOf(db, 'health', 'hr:' + days))
+  // 第 12 轮 A4：体检报告单链接 7 天失效。
+  const expH = linkExpOf(LINK_TTL.statement)
+  const url = '/health-print?days=' + days + '&t=' + (await sigOf(db, 'health', 'hr:' + days, expH)) + '&x=' + expH
   return {
     ok: true, at: now(), days, score: s.score, grade: s.grade, empty: s.empty, clean: s.clean, count: s.count,
     delta, first, last: lastP, best, worst, points: pts, spark,
@@ -18281,8 +18452,9 @@ app.get('/health-print', async (c) => {
   const saved = await getKey(mainDb)
   const days = Math.min(365, Math.max(7, num(c.req.query('days'), 180)))
   const want = String(c.req.query('t') || '')
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'health', 'hr:' + days) : ''
-  if (!good || want !== good) return c.html('<h3>链接已失效：请在小程序里重新生成体检报告单。</h3>')
+  const expH = num(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, 'health', 'hr:' + days, expH) : ''
+  if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成体检报告单。</h3>')
   const r = await healthReport(db, days)
   const t = await getTitle(db)
   const tr = (x) => `<tr><td>${escHtml(x.label)}</td><td class="n">${x.count > 0 ? '还有 ' + x.count + ' 处' : '正常'}</td><td>${escHtml(x.since || '')}</td><td>${x.count > 0 ? daysTxtPrint(x.days_open) : (x.fixed ? '已修好' : '')}</td><td>${escHtml(x.fixed || '')}</td><td>${escHtml(x.count > 0 ? (x.tip || '') : '')}</td></tr>`
@@ -18513,14 +18685,37 @@ app.post('/edit-requests/:id/approve', async (c) => {
   const binds = []
   for (const f of Object.keys(ch)) {
     if (spec.fields.indexOf(f) < 0) continue
+    // 第 12 轮 B5：金额字段以前直接 bind 进 SET —— 改单申请里填「abc」，
+    // 写进 REAL 列就是 0/NaN，后面求和全错。金额类字段先按严格数字校验。
+    if (f === 'price' || f === 'amount' || f === 'cost') {
+      const vn = numStrict(ch[f])
+      if (vn === null) return c.json({ ok: false, error: `${ER_LABEL[f] || f}要填正常数字` }, 400)
+      sets.push(f + '=?')
+      binds.push(vn)
+      continue
+    }
     sets.push(f + '=?')
     binds.push(ch[f])
   }
   if (!sets.length) return c.json({ ok: false, error: '这条申请里的字段都不认识了（可能是旧版本）' }, 400)
   if (er.kind !== 'expense') sets.push('rev=COALESCE(rev,0)+1')
-  await db.prepare('UPDATE ' + spec.table + ' SET ' + sets.join(', ') + ' WHERE id=?').bind(...binds, er.ref_id).run()
+  // 第 12 轮 B5：审批是双 TOCTOU —— 先查 status==='pending'，再 UPDATE。
+  // 两个并发审批（或审批+驳回）都能过预查，各写一遍业务表、审计记两条「同意」。
+  // 现在改成「一条 db.batch 里带 CAS」：先把 edit_requests 从 pending 改 ok（带 status 守卫），
+  // 同时改业务表。CAS 不中（已被别人处理）就整批不生效，直接 409。
   const d = diffText(Object.keys(ch).filter((f) => spec.fields.indexOf(f) >= 0).map((f) => [ER_LABEL[f] || f, erSlim(row[f]), erSlim(ch[f])]))
-  await db.prepare("UPDATE edit_requests SET status='ok', done_at=?, done_by='老板', note=? WHERE id=?").bind(now(), String(er.reason || ''), id).run()
+  let casR
+  try {
+    const res = await db.batch([
+      db.prepare("UPDATE edit_requests SET status='ok', done_at=?, done_by='老板', note=? WHERE id=? AND status='pending'").bind(now(), String(er.reason || ''), id),
+      db.prepare('UPDATE ' + spec.table + ' SET ' + sets.join(', ') + ' WHERE id=?').bind(...binds, er.ref_id)
+    ])
+    casR = res && res[0]
+  } catch (e) {
+    noteFail(e, '同意修改申请')
+    return c.json({ ok: false, error: '同意没记上（数据库抖动，请重试）' }, 500)
+  }
+  if (!changesOf(casR)) return c.json({ ok: false, error: '这条已经处理过了' }, 409)
   await logAudit(db, '同意修改申请', er.kind + ':' + er.ref_id, (d || '（没改动）') + (er.by ? `（${er.by}提的）` : ''), `${er.kind}:${er.ref_id}`, '老板')
   return c.json({ ok: true, changed: d })
 })
@@ -18532,7 +18727,9 @@ app.post('/edit-requests/:id/reject', async (c) => {
   if (!er) return c.json({ ok: false, error: '这条申请不在了' }, 404)
   if (er.status !== 'pending') return c.json({ ok: false, error: '这条已经处理过了' }, 409)
   const note = String(b.note || '').trim().slice(0, 120)
-  await db.prepare("UPDATE edit_requests SET status='no', done_at=?, done_by='老板', note=? WHERE id=?").bind(now(), note, id).run()
+  // 第 12 轮 B5：驳回同样带 CAS，避免和同意并发时「同意写了业务表、驳回把状态改成 no」互相打架
+  const casR = await db.prepare("UPDATE edit_requests SET status='no', done_at=?, done_by='老板', note=? WHERE id=? AND status='pending'").bind(now(), note, id).run()
+  if (!changesOf(casR)) return c.json({ ok: false, error: '这条已经处理过了' }, 409)
   await logAudit(db, '驳回修改申请', er.kind + ':' + er.ref_id, note || '（没写原因）', `${er.kind}:${er.ref_id}`, '老板')
   return c.json({ ok: true })
 })
@@ -21877,7 +22074,9 @@ app.post('/payables/:id/writeoff', async (c) => {
 app.get('/writeoffs', async (c) => {
   const db = c.env.DB
   const month = c.req.query('month') || now().slice(0, 7)
-  const rows = (await db.prepare("SELECT * FROM writeoffs WHERE substr(created_at,1,7)=? ORDER BY id DESC").bind(month).all()).results
+  // 第 12 轮 B7：写核销时已经把 month 列写上了（第 10 轮 C2），这里却还按 created_at 筛，
+  // 补录/改月的核销进错月份的报表，坏账/豁免合计对不上。统一走 COALESCE(month, created_at)。
+  const rows = (await db.prepare("SELECT * FROM writeoffs WHERE substr(COALESCE(month, substr(created_at,1,7)),1,7)=? ORDER BY id DESC").bind(month).all()).results
   const bad = round2(rows.filter((r) => r.ref_type === 'order').reduce((s2, r) => s2 + num(r.amount), 0))
   const waived = round2(rows.filter((r) => r.ref_type === 'payable').reduce((s2, r) => s2 + num(r.amount), 0))
   return c.json({ month, rows, bad_debt: bad, payable_waived: waived })
