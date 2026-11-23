@@ -1734,6 +1734,11 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+358. ✅ **CI 首跑红在「迁移」那步：`env:` 被前一个 step 吃掉了**（第 16 轮 C3 自己带出来的伤）。第 16 轮把「灌表结构」改成跑两遍（建表 → 迁移 → 再补索引），我新插的「第 2 遍」步骤正好插在「跑远程数据库迁移」的 `run` 与它的 `env:` 之间 —— YAML 里 `env:` 属于**它前面那个 step**，于是 `CLOUDFLARE_API_TOKEN` 被新步骤吃走，迁移裸跑、2 秒就 `exit 1`，GitHub 只报「Process completed with exit code 1.」，看不出是没 token；后续 9 个步骤全 skipped，线上还是上一版（所以那一次 push 等于没发出去）。
+   - **修法**：给迁移步骤补上自己的 `env:`（`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`），并把这段踩坑写进注释，提醒下一个人「删除/插入 step 时先看 `env:` 归谁」。
+   - **防回潮**：`scripts/check.mjs` 新增 **[4.17] 动 Cloudflare 的 step 都带 token 环境变量** —— 按 `- name:` 切块，凡是 `run` 里真去执行 `node scripts/d1-migrate.mjs` / `node scripts/d1-seed-schema.mjs` / `npx wrangler deploy|rollback|secret` 的步骤，块内必须自己出现 `CLOUDFLARE_API_TOKEN:` 与 `CLOUDFLARE_ACCOUNT_ID:`（不是「job 里有」，是「这个 step 里有」）。写完后故意把这段 `env` 删掉重跑，确认它真会红并点名「跑远程数据库迁移（缺 CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID）」。
+   - 验证：`node scripts/check.mjs` 全绿（[4.17] ✅）；python `yaml.safe_load(deploy.yml)` 通过，且逐个打印出 6 个动 Cloudflare 的步骤都带两个环境变量。
+
 357. ✅ **第 16 轮审计：把「口径分叉」和「假安心」一起清掉**（用户「好的，继续」）。这一轮不是加功能，是把前十几轮留下的两类毛病一次收干净：一是**同一个概念在不同页面用不同算法**（核销、费用、现金），二是**失败被写成成功**（报表全 0、链接失效、按钮永远转圈、体检打绿）。三路只读审计（后端/前端/运维）报上来的 35 条，逐条回代码核实后全部属实，按 A/B/C/D 四组做完。
    - **A1 核销只算损失（9 处）**：`writeoffs` 有两个方向——客户坏账核销（损失）、供应商豁免应付（**收益**，少付的钱）。`plOf` 早就拆成 `wo_ar`/`wo_ap` 两个数了，但另外 9 个地方还在 `SUM(amount)` 一把梭，于是**只要豁免过应付，那些页面的利润就少算一倍**。现在：`monthSnapshot`、报表打印的本年累计、首页 `/dashboard`、`/month-brief`、`/year-customers`、`monthSum`（月报包）、`/trend`、`yearBook`、`/year-summary` 全部拆两列，利润公式一律 `− 应收核销 + 应付核销`，页面多一行「豁免应付（少付供应商的钱，算收益）」。
    - **顺手抓到一个更狠的老 bug**：`/year-summary` 里三条查询的真实顺序是「订单 / 核销 / 流水」，解构却写成 `[oR, lR, wR]` —— 于是「费用」拿到的是核销结果、「核销」拿到的是流水结果，两个都取不到字段，`num(undefined)` 又是 0：**这一页的「费用」和「核销」永远是 0，年度净利被算成毛利**。改成 `[oR, wR, lR]` 后与 `/trend` 完全对齐。

@@ -702,6 +702,40 @@ console.log('\n[4.16] 灌表结构两遍（依赖迁移列的索引）')
     `索引与灌表结构顺序有问题（见上面逐条）`)
 }
 
+// ── 4.17 动 Cloudflare 的 step 必须自带 token 环境变量 ──
+// 第 16 轮事故：在「跑远程数据库迁移」前面插入了一个新 step，把原来属于它的
+// `env:` 段「吃掉」了（YAML 的 env 属于它前面那个 step）。结果迁移裸跑、
+// 没有 CLOUDFLARE_API_TOKEN，一启动就 exit 1，CI 直接红，而且报错只有
+// 「Process completed with exit code 1.」——看日志才知道是没 token。
+// 这种错误没法靠「有没有写 env」来防（写了，只是写给了别人），只能逐 step 核对。
+console.log('\n[4.17] 动 Cloudflare 的 step 都带 token 环境变量')
+{
+  const depYml = path.join(ROOT, '.github/workflows/deploy.yml')
+  const src = fs.existsSync(depYml) ? fs.readFileSync(depYml, 'utf8') : ''
+  const lines = src.split('\n')
+  const bad = []
+  let cur = null
+  const flush = () => {
+    if (!cur) return
+    const cmd = cur.body.some((l) => /^\s*(node\s+scripts\/d1-(migrate|seed-schema)\.mjs|npx\s+wrangler\s+(deploy|rollback|secret))\b/.test(l))
+    if (!cmd) return
+    const all = cur.body.join('\n')
+    const miss = []
+    if (!/CLOUDFLARE_API_TOKEN\s*:/.test(all)) miss.push('CLOUDFLARE_API_TOKEN')
+    if (!/CLOUDFLARE_ACCOUNT_ID\s*:/.test(all)) miss.push('CLOUDFLARE_ACCOUNT_ID')
+    if (miss.length) bad.push(`${cur.name}（缺 ${miss.join('、')}）`)
+  }
+  for (const l of lines) {
+    const m = l.match(/^(\s*)-\s+name:\s*(.+)$/)
+    if (m) { flush(); cur = { name: m[2].trim(), body: [] }; continue }
+    if (cur) cur.body.push(l)
+  }
+  flush()
+  say(bad.length === 0,
+    '跑迁移 / 补表结构 / wrangler 的 step 都自己带了 CLOUDFLARE_API_TOKEN 与 ACCOUNT_ID',
+    `这些 step 在动 Cloudflare 却没带 token 环境变量（YAML 里 env 可能被前一个 step 吃掉了）：${bad.join('；')}`)
+}
+
 console.log('\n[4.14] D1 绑定引用')
 {
   const tomlSrc = fs.readFileSync(path.join(ROOT, 'backend/wrangler.toml'), 'utf8')

@@ -436,6 +436,12 @@ jobs:
           #   · 每个文件跑完在 migrations 表记一行 INSERT OR IGNORE，跑过的不再跑。
           node scripts/d1-migrate.mjs
         working-directory: .
+        # 注意：这里必须自己带 env。以前这一段的 env 写在最后，第 16 轮 C3 在它前面插了
+        # 「补表结构（第 2 遍）」，结果 env 被新 step 吃掉、迁移裸跑 → 没有 token，
+        # 一启动就 exit 1（CI run 45205841579 就是这么红的，2 秒退出）。
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
 
       # 第 16 轮 C3：第二遍补表结构。迁移已经把新列加上了，这一遍才能把「引用新列」的索引建出来。
       # 这一遍**必须绿**：它绿了才说明「表齐了、索引齐了」，后面部署上去才不会 500。

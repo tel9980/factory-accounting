@@ -1299,7 +1299,7 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
-### 4.46 第 16 轮的八条硬规矩（「同一个概念两套算法」与「失败写成成功」）
+### 4.46 第 16 轮的九条硬规矩（「同一个概念两套算法」与「失败写成成功」）
 
 1. **同一个概念只能有一套算法**。这一轮最大的收获不是某条 bug，而是发现「核销」在不同页面有 9 套写法：`plOf` 早就知道「客户坏账核销是损失、供应商豁免应付是收益」，可另外 9 个地方还在 `SUM(amount)` 一把梭 —— 于是**只要豁免过应付，那些页面的利润就少算一倍**。规矩：①涉及「利润/成本/现金」的数只从 `plOf` / `monthSum` / `/cash-bridge` 这几个统一口径的地方取，别在页面里自己写 SQL 拼；②确实要自己写，`writeoffs` 必须按 `ref_type` 分成应收（损失）/应付（收益）两列；③费用口径分两种且只有两种 —— `CASH_EXP_WHERE`（只看现金）与 `COST_EXP_WHERE`（含报销冲借支等 `cash=0` 的费用），同一个页面上这两者不能混着用（`/year-book` 的年度费用以前就混了）。
 2. **聚合查询失败不许降级成 0**。`jobs.map(x => x.catch(()=>null))` + `const agg = x || {}` + `num(undefined)` = **一份 13 项全 0 的月报被归档、还推「报表已生成」**。规矩：失败就抛（统一 500），并且要额外检查「13 个关键字段在不在」—— 列名写错时 SQL 是**成功**的，字段变 `undefined`，光靠 try/catch 拦不住。`monthSum` 里 `aggMiss` 那道检查就是为此。
@@ -1309,6 +1309,7 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 6. **幂等键只能由 `req` 发号，调用方不许自己 `newCid`**。`req` 的键是「`once` + 写内容指纹」：同一笔重发（30 秒内）共用同一个 cid，后端按它判重。有 8 处调用自己塞 `client_id: this.newCid()`，每次重试都是新 cid → **判重永远不生效**。要幂等就传 `once:`，别传 `client_id`。
 7. **危险命令必须自报目标**。`cli.mjs` 的 `reset` / `restore` / `migrate` 现在先打印「动哪台机器的哪本账」；`FA_BASE` 与 `--base` 冲突时**直接拒绝**（以前静默取命令行那个）；`test-restore.mjs` / `test-oldbackup.mjs` 会清空账本，目标不是本机时必须显式 `--yes`。规矩：任何「不可逆 + 有目标地址」的脚本都要在动手前把目标打出来，配置冲突不许猜。
 8. **cron 里「一天一次的推送」必须有幂等键，失败必须留痕**。两条 cron（`0 16` / `0 1`）都调 `runWxReminder` → 一天发两遍；发不出去时 `catch {}` 吞掉，配额耗尽后**提醒永久失效也没人知道**。规矩：推送前查 `settings.wx_remind_day` 今天发过没有、发成功写回；失败 `noteFailDb` + 写 `wx_err_day` 让设置页显示出来。群发 10 条一批并发 + 每条 5 秒超时（串行时一条卡住整批停）。
+9. **`env:` 只属于它上面那一个 step，插步骤时先看归属**。第 16 轮把「灌表结构」改成两遍，新步骤插在「跑远程数据库迁移」的 `run` 与它的 `env:` 之间 —— `env:` 顺势归了新步骤，迁移裸跑没 token，2 秒 `exit 1`，日志只有「Process completed with exit code 1.」。规矩：①每个动 Cloudflare 的 step 都**自带** `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`，不靠继承（job 级 `env` 也别放这一类凭证）；②在 `deploy.yml` 里插入/删除 step 后，重新数一遍「哪些 step 有 env」；③`check.mjs [4.17]` 会逐个 step 核对，别靠肉眼。**同理适用于 `if:` / `continue-on-error:` / `id:` —— 它们都属于最近的那个 `- name:`。**
 
 ### 4.45 第 15 轮的六条硬规矩（「解释不了就塞进残差」那类）
 
