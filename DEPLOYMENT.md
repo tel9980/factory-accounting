@@ -342,9 +342,12 @@ docker run -d --name factory -p 8787:8787 -v "$PWD/data:/data" \
 ### 4.3 自己打一个（改了代码想立刻验证）
 
 ```bash
-cd backend && npm install       # 需要 Node 24（node:sqlite 是内置模块）
+cd backend && npm install && cd ..   # 需要 Node 24（node:sqlite 是内置模块）；装完回仓库根
 node scripts/build-exe.mjs --out dist
 ```
+
+> ⚠️ `scripts/` 在仓库根目录：`cd backend` 之后跑 `node scripts/build-exe.mjs` 必然
+> `Cannot find module`。以前这两处文档都是那样写的（第 16 轮 C4 修）。
 
 脚本会 esbuild 打包 → 生成 SEA blob（`schema.sql` 作为资源塞进去）→ postject 注入 →
 **自己跑一遍自测**（`/version` 版本号、落地页、建库 60 张表），不通就报错退出。
@@ -1127,9 +1130,12 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'x-access-key: 你的演示�
 这台机器上正确做法是**显式带上代理**（别用 `env -u` 去绕过）：
 
 ```bash
-P=http://192.168.2.22:20172
+P=http://<你的代理地址>:<端口>      # 例：http://192.168.2.22:20172（作者本机的代理，别照抄）
 git -c http.proxy=$P -c https.proxy=$P push origin main
 ```
+
+> 第 16 轮 C9：这里原来写死了作者本机的内网代理地址，别人照抄只会连不上、还以为是仓库问题。
+> 换成占位符；代理地址属于「每台机器自己的事」，不该进文档当命令。
 
 反例（别再用）：`env -u http_proxy ... git push` 走直连，经常要重试十几次、每次卡两分钟。
 
@@ -1292,6 +1298,17 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **`ref_type NOT IN` 的排除名单只有两种标准**：`('transfer','tax_ar','tax_ap')`（排除内部转账和代垫税）和 `('loan','transfer')`（借支口径）。`check.mjs` [4.10] 会拦第三种名单。**改排除项要三处一起想**：语义上到底排谁、跟其它 66 处一不一致、check.mjs 会不会红。
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
+
+### 4.46 第 16 轮的八条硬规矩（「同一个概念两套算法」与「失败写成成功」）
+
+1. **同一个概念只能有一套算法**。这一轮最大的收获不是某条 bug，而是发现「核销」在不同页面有 9 套写法：`plOf` 早就知道「客户坏账核销是损失、供应商豁免应付是收益」，可另外 9 个地方还在 `SUM(amount)` 一把梭 —— 于是**只要豁免过应付，那些页面的利润就少算一倍**。规矩：①涉及「利润/成本/现金」的数只从 `plOf` / `monthSum` / `/cash-bridge` 这几个统一口径的地方取，别在页面里自己写 SQL 拼；②确实要自己写，`writeoffs` 必须按 `ref_type` 分成应收（损失）/应付（收益）两列；③费用口径分两种且只有两种 —— `CASH_EXP_WHERE`（只看现金）与 `COST_EXP_WHERE`（含报销冲借支等 `cash=0` 的费用），同一个页面上这两者不能混着用（`/year-book` 的年度费用以前就混了）。
+2. **聚合查询失败不许降级成 0**。`jobs.map(x => x.catch(()=>null))` + `const agg = x || {}` + `num(undefined)` = **一份 13 项全 0 的月报被归档、还推「报表已生成」**。规矩：失败就抛（统一 500），并且要额外检查「13 个关键字段在不在」—— 列名写错时 SQL 是**成功**的，字段变 `undefined`，光靠 try/catch 拦不住。`monthSum` 里 `aggMiss` 那道检查就是为此。
+3. **灌表结构要跑两遍：建表 → 迁移 → 再补一遍**。`backend/schema.sql` 里有索引引用**迁移才加上的列**（`idx_writeoffs_m` 要 `writeoffs.month`）。老库里表早就存在、`CREATE TABLE IF NOT EXISTS` 整句跳过，所以第一遍一定建不出这类索引 —— 只跑一遍的结果二选一：整步红（像发布失败），或者被当「幂等跳过」而索引永久缺失。`check.mjs [4.16]` 会扫出这类索引，并检查 `deploy.yml` 与 `scripts/deploy.sh` 的顺序。**新增「引用新列的索引」时必须先确认迁移里有那一列。**
+4. **发布入口只有一套流程**。`deploy.yml` 与 `scripts/deploy.sh` 必须做同样的事：建表 → 迁移 → 补索引 → 部署 → 版本核对 → 线上体检。以前 `deploy.sh` 只跑迁移，照文档手工发布时新表没建也照样回 `Deployed`。**改发布流程要两个文件一起改**（`check.mjs [4.16]` 会盯着顺序）。
+5. **失败不许显示成正常**。这一轮清掉一串「假安心」：报表全 0、提醒拉失败显示「账都是清的 👍」、账龄切类型留着上一类的数、对账失败留着上一份文件的差异、恢复没成功却弹「已恢复」、按钮卡在 loading、`check-live` 把 400/422 算通过。规矩：前端每个 `load*` 都要有 `fail` 分支并写 `_err(key,true)`、wxml 要有对应错误块（「⚠️ 没拉出来（不是没有）」）；后端拒绝时给 **400 + 人话 + code**；体检脚本非 200 一律算坏。
+6. **幂等键只能由 `req` 发号，调用方不许自己 `newCid`**。`req` 的键是「`once` + 写内容指纹」：同一笔重发（30 秒内）共用同一个 cid，后端按它判重。有 8 处调用自己塞 `client_id: this.newCid()`，每次重试都是新 cid → **判重永远不生效**。要幂等就传 `once:`，别传 `client_id`。
+7. **危险命令必须自报目标**。`cli.mjs` 的 `reset` / `restore` / `migrate` 现在先打印「动哪台机器的哪本账」；`FA_BASE` 与 `--base` 冲突时**直接拒绝**（以前静默取命令行那个）；`test-restore.mjs` / `test-oldbackup.mjs` 会清空账本，目标不是本机时必须显式 `--yes`。规矩：任何「不可逆 + 有目标地址」的脚本都要在动手前把目标打出来，配置冲突不许猜。
+8. **cron 里「一天一次的推送」必须有幂等键，失败必须留痕**。两条 cron（`0 16` / `0 1`）都调 `runWxReminder` → 一天发两遍；发不出去时 `catch {}` 吞掉，配额耗尽后**提醒永久失效也没人知道**。规矩：推送前查 `settings.wx_remind_day` 今天发过没有、发成功写回；失败 `noteFailDb` + 写 `wx_err_day` 让设置页显示出来。群发 10 条一批并发 + 每条 5 秒超时（串行时一条卡住整批停）。
 
 ### 4.45 第 15 轮的六条硬规矩（「解释不了就塞进残差」那类）
 

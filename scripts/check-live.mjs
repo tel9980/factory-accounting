@@ -84,13 +84,15 @@ const main = async () => {
     process.exit(0)
   }
 
-  // 2) 逐个 GET：5xx 一律算坏；401/403 说明口令不对（那是配置问题，也要红）
+  // 2) 逐个 GET：只有 200 算过。
+  //    第 16 轮 C6：以前只把 0/401/403/404/≥500 当坏，400/409/422 一律算「通过」——
+  //    可这几个接口带的是合法参数（月份而已），回 400/422 恰恰说明参数校验或 SQL 写错了，
+  //    结果体检打绿、发布继续。现在要求严格 200，非 200 把状态码和响应头一段打出来。
   for (const p of PATHS.slice(1)) {
     const r = await hit(p)
     if (r.status === 0) { bad.push([p, '请求失败：' + r.text.slice(0, 120)]); continue }
     if (r.status === 401 || r.status === 403) { bad.push([p, '口令被拒（HTTP ' + r.status + '）——检查 PROD_KEY 是不是老板口令']); continue }
-    if (r.status >= 500) { bad.push([p, 'HTTP ' + r.status + '：' + r.text.slice(0, 160)]); continue }
-    if (r.status === 404) { bad.push([p, 'HTTP 404（路由没了？）']); continue }
+    if (r.status !== 200) { bad.push([p, 'HTTP ' + r.status + '（应 200）：' + String(r.text || '').slice(0, 160)]); continue }
     ok.push(p)
   }
 

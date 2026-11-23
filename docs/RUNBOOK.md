@@ -34,10 +34,17 @@ gh run view <run-id> --log-failed     # 只看失败那几步的日志
 # 第 11 轮 F6：以前这里写成 `cd backend && node scripts/d1-migrate.mjs`，照抄必然 No such file。
 cd <仓库根目录>
 npx --prefix backend wrangler d1 execute factory-db --remote --command "SELECT name FROM migrations"
-node scripts/d1-seed-schema.mjs        # 先补表结构（幂等：已存在的全部跳过）
-node scripts/d1-migrate.mjs            # 再跑迁移：读 wrangler.toml 里的全部 d1 绑定，逐条语句跑，已跑过的跳过
+node scripts/d1-seed-schema.mjs        # 第 1 遍：建表（老库缺新列时可能报错，正常）
+node scripts/d1-migrate.mjs            # 跑迁移：读 wrangler.toml 里的全部 d1 绑定，逐条语句跑，已跑过的跳过
+node scripts/d1-seed-schema.mjs        # 第 2 遍：迁移加完列以后补索引（这一遍必须过）
 node scripts/d1-migrate.mjs --force    # 忽略 migrations 记录重跑一遍（幂等）
 ```
+
+> ⚠️ 灌表结构是**两遍**：`backend/schema.sql` 里有几条索引引用「迁移才加上的列」
+> （例如 `idx_writeoffs_m` 要 `writeoffs.month`）。老库里表已存在、建表语句整句跳过，
+> 所以第一遍建不出这些索引，要等迁移加完列再补一遍（第 16 轮 C3）。
+> 下面那条 `npx wrangler` 也一样：`wrangler` 装在 `backend/` 里，根目录直接 `npx wrangler`
+> 会拉到另一个版本 —— 一律带 `--prefix backend`（第 16 轮 C5）。
 
 **成功判据**：`node scripts/d1-migrate.mjs` 打印「✅ 迁移全部跑完」，且
 `npx wrangler d1 execute factory-db --remote --command "SELECT name FROM migrations"` 能看到每个迁移文件名。
@@ -102,9 +109,16 @@ node scripts/cli.mjs restore <id> --yes
 **验证恢复链路本身是好的**（本机，不碰线上）：
 
 ```bash
-node scripts/test-restore.mjs
-node scripts/test-oldbackup.mjs     # 半年前的老包还能不能恢复
+# ⚠️ 这两个脚本会清空/覆盖账本数据，只在**本机测试库**上跑
+node scripts/test-restore.mjs --base http://127.0.0.1:8787 --key 8888
+node scripts/test-oldbackup.mjs --base http://127.0.0.1:8787 --key 8888   # 半年前的老包还能不能恢复
 ```
+
+> ⚠️ 三件事（第 16 轮 C5）：
+> ① 这两个脚本的默认 `--base` 是 `8791`（`wrangler dev` 那个），而本机版（`server/main.mjs`）
+>    是 `8787` —— 不显式给 `--base` 会连不上，或者更糟：连到你以为不是的那个库。
+> ② 它们会 **清空/覆盖账本**，别对线上跑。脚本现在会拒绝非本机地址（除非你加 `--yes`）。
+> ③ 跑完这本账就空了，别拿有真实数据的库去「验证一下」。
 
 **成功判据**：`node scripts/test-restore.mjs` 全绿；线上恢复后 `node scripts/cli.mjs status` 体检干净。
 

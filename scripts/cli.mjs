@@ -23,8 +23,28 @@ const cmd = process.argv[2]
 // 这样在 CI / 容器里不用把口令写进命令行历史。
 const envBase = process.env.FA_BASE || ''
 const envKey = process.env.FA_KEY || ''
+// 第 16 轮 C8：FA_BASE 和 --base 同时给、又不一样时，以前静默选命令行那个 ——
+// 结果「我以为在打测试库，其实打的是生产」，而 reset / restore / migrate 都是不可逆的。
+// 现在直接拒绝，让用户自己选一个。
+const cliBaseAt = process.argv.indexOf('--base')
+const cliBase = cliBaseAt > 0 && process.argv[cliBaseAt + 1] ? process.argv[cliBaseAt + 1] : ''
+const normB = (x) => String(x || '').replace(/\/+$/, '')
+if (envBase && cliBase && normB(envBase) !== normB(cliBase)) {
+  console.error('❌ FA_BASE=' + envBase + ' 和 --base ' + cliBase + ' 不一致：不知道你想动哪台机器。')
+  console.error('   两个只留一个（环境变量还是命令行参数，自己选）。')
+  process.exit(2)
+}
 const h = harness({ tag: 'cli', base: envBase || undefined, key: envKey || undefined })
 const { BASE, KEY, arg, get, post } = h
+
+// 危险动作（清空/覆盖/改库）之前，必须把「到底动哪台机器的哪本账」打在屏幕上，
+// 别让人凭记忆确认。
+const sayTarget = (book) => {
+  console.log('⚠️  目标：' + BASE + (book ? '（第 ' + book + ' 本账）' : ''))
+  if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(BASE)) {
+    console.log('⚠️  这不是本机地址 —— 确认一下是不是你要动的那台。')
+  }
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -78,6 +98,7 @@ async function main() {
       console.log('❌ 清空账本是不可逆操作（业务数据全删，只剩备份）。确认要清空就在命令末尾加 --yes。')
       process.exit(1)
     }
+    sayTarget(arg('book'))
     const r = await post('/book-reset', { confirm: '清空' })
     if (r.status >= 400) return fail('清空失败 HTTP ' + r.status, r.d)
     console.log('✅ 账本已清空')
@@ -121,6 +142,7 @@ async function main() {
         process.exit(1)
       }
     }
+    sayTarget(String(book))
     const r = await post('/backup-restore', { id, confirm: '覆盖', book: String(book) }, { book: String(book) })
     if (r.status >= 400) return fail('恢复失败 HTTP ' + r.status, r.d)
     console.log('✅ 已恢复第 ' + book + ' 本账到备份 #' + id)
@@ -142,6 +164,8 @@ async function main() {
       console.log('❌ 迁移会改线上数据库的结构（加列、加索引），确认要跑就在命令末尾加 --yes。')
       process.exit(1)
     }
+    // 这个命令打的不是 BASE，是 wrangler.toml 里的**远程** D1（跟线上是同一批库）
+    console.log('⚠️  目标：backend/wrangler.toml 里声明的远程 D1（线上那几本账）—— 不是 ' + BASE)
     const r = spawnSync('node', [path.join(here, 'd1-migrate.mjs')], { stdio: 'inherit' })
     process.exit(r.status || 0)
   }

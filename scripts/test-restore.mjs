@@ -14,6 +14,15 @@ const opt = (n, d) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : d
 }
 const BASE = opt('base', 'http://127.0.0.1:8791').replace(/\/+$/, '')
+// 第 16 轮 C5：这个脚本会**清空/覆盖账本**。以前没有任何提醒，默认又指 8791（wrangler dev），
+// 照 docs/RUNBOOK.md 在本机版（8787）上跑会连不上；有人顺手改成线上地址就真把生产账本清了。
+// 现在：目标不是本机时必须显式加 --yes，并且开头就把后果打在屏幕上。
+const IS_LOCAL = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(BASE)
+if (!IS_LOCAL && !argv.includes('--yes')) {
+  console.error('❌ 目标不是本机（' + BASE + '）：这个脚本会清空/覆盖账本。真要跑请加 --yes。')
+  process.exit(2)
+}
+console.log('⚠️  这个脚本会清空或覆盖账本数据（目标 ' + BASE + '）')
 const KEY = opt('key', '8888')
 const TAG = '恢复测' + Math.random().toString(36).slice(2, 6)
 const TODAY = new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)

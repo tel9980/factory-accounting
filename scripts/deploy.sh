@@ -78,11 +78,19 @@ EXTRA=""
 # 反过来（先部署再迁移）中间那几分钟老代码会撞新表结构。CI 里也是这个顺序（deploy.yml
 # 的「跑远程数据库迁移」在「部署到 Cloudflare」之前）。跑失败的迁移脚本会 exit 1，
 # 所以这里直接终止，不会「迁移没过还照样部署」。
+# 第 16 轮 C2：这个脚本以前只跑迁移、不灌表结构 —— 照 DEPLOYMENT 手工发布时，
+# 新开的账套（或者新加的表）根本没建，wrangler 照样回 "Deployed"，看着像成功。
+# 现在和 CI 做同一套：建表 → 迁移 → 再补一遍索引 → 部署后体检。
+# 顺序的道理见 deploy.yml 那段注释：schema.sql 里有索引引用迁移才加上的列，一遍过不了。
 if [ "$DRY" = "1" ]; then
-  echo "（--dry-run：跳过迁移）"
+  echo "（--dry-run：跳过建表与迁移）"
 else
+  echo "→ 补表结构（第 1 遍：建表；老库缺新列时可能报错，正常）"
+  node scripts/d1-seed-schema.mjs || echo "   （第 1 遍有报错，等迁移加完列再补）"
   echo "→ 跑远程数据库迁移"
   node scripts/d1-migrate.mjs
+  echo "→ 补表结构（第 2 遍：迁移之后补索引，这一遍必须过）"
+  node scripts/d1-seed-schema.mjs
 fi
 
 cd backend
@@ -102,3 +110,22 @@ fetch("https://jz.qy663.de5.net/version").then((r) => r.json()).then((d) => {
   console.log("✅ 线上已经是这次提交")
 }).catch((e) => { console.error("❌ 拿不到 /version：" + e.message); process.exit(1) })
 ' "$C" "$V"
+
+# ---- 部署后体检（第 16 轮 C2）----
+# 光验版本号不够：版本对了但库里缺表/缺列，接口一样 500。
+# check-live.mjs 只发 GET，逐项跑关键接口 + /schema-check，红了说明这次发布有问题。
+# 需要访问口令：本机发布用 FA_KEY（或 .env.local 里的 FA_KEY）；没给就只提示、不判失败。
+if [ "$DRY" = "1" ]; then
+  echo "（--dry-run：跳过部署后体检）"
+else
+  KEY_TRY="${FA_KEY:-${FACTORY_KEY:-}}"
+  if [ -z "$KEY_TRY" ]; then
+    echo "→ 部署后体检：跳过（没给 FA_KEY 访问口令；要跑就 FA_KEY=你的口令 bash scripts/deploy.sh）"
+  else
+    echo "→ 部署后体检（线上接口 + 表结构）"
+    node scripts/check-live.mjs --base https://jz.qy663.de5.net --key "$KEY_TRY" || {
+      echo "❌ 部署后体检没过：版本对了，但线上有接口/表结构不对。先看上面哪一项红。"
+      exit 1
+    }
+  fi
+fi

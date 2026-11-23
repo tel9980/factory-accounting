@@ -11,3 +11,25 @@ data
 docs
 scripts
 frontend
+
+# 第 16 轮 C7：现在镜像看着安全，只是因为 Dockerfile 恰好只 COPY backend/ 和 server/。
+# 哪天有人图省事改成 `COPY . .`，下面这些就会被一起打进镜像 —— token、备份包、SQLite 库全在里面。
+# 挡在这里，改 COPY 也不会漏。
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+backend/.wrangler
+.wrangler
+backups
+*.bak
+cf-token

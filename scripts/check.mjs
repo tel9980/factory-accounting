@@ -645,6 +645,63 @@ console.log('\n[4.15] 索引定义一致（schema.sql vs 迁移）')
 // BOOK（按请求注入）、ENV_ALL（聚合对象）、INSTALL_TOKEN（secret）、ATTACH（KV）
 // 这些运行时注入的不算 D1 绑定，不查，避免误报。
 // 先报不拦：历史上有宽松 SQL，一次性全修要分批，先让漂移可见。
+// ── 4.16 灌表结构要跑两遍：schema.sql 里有索引引用了「迁移才加上的列」──
+// 第 16 轮 C3。老库里 writeoffs 表早就存在（CREATE TABLE IF NOT EXISTS 整句跳过），
+// 而 month 列是 0002 迁移才加的 —— 所以 schema.sql 里的
+// `CREATE INDEX IF NOT EXISTS idx_writeoffs_m ON writeoffs(month)` 在老库上一定
+// `no such column: month`。只灌一遍的后果二选一：整步红（看着像发布失败），
+// 或者被当成「幂等跳过」而索引永久缺失（查询慢一辈子没人发现）。
+// 这里做两件事：① 把这类「依赖迁移列的索引」找出来并打印；
+// ② 要求 deploy.yml 与 scripts/deploy.sh 都是「建表 → 迁移 → 再补一遍」的顺序。
+console.log('\n[4.16] 灌表结构两遍（依赖迁移列的索引）')
+{
+  const migCols = new Set()
+  const migDir = path.join(ROOT, 'backend/migrations')
+  if (fs.existsSync(migDir)) {
+    for (const f of fs.readdirSync(migDir).filter((x) => x.endsWith('.sql'))) {
+      const ms = fs.readFileSync(path.join(migDir, f), 'utf8')
+      for (const m of ms.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi)) migCols.add(m[1] + '.' + m[2])
+    }
+  }
+  const dep = []
+  for (const m of schemaSrc.matchAll(/CREATE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+ON\s+(\w+)\s*\(([^)]*)\)/gi)) {
+    const name = m[1]; const t = m[2]
+    const cols = m[3].split(',').map((x) => x.trim())
+    for (const c of cols) {
+      if (!/^[a-z_][a-z0-9_]*$/i.test(c)) continue // 表达式（substr(...)）不算
+      // 注意：这里不能只比 declared（schema.sql 的建表语句）——
+      // writeoffs.month 在 schema.sql 里**有**，但老库的 writeoffs 表早就存在，
+      // `CREATE TABLE IF NOT EXISTS` 整句被跳过，所以老库照样没有 month。
+      // 真正的判据是「这一列由迁移补」：那种列在老库上都不存在。
+      if (migCols.has(t + '.' + c)) dep.push(name + ' → ' + t + '.' + c)
+    }
+  }
+  // 顺序检查：两个入口都必须「seed → migrate → seed」
+  const dep2 = path.join(ROOT, '.github/workflows/deploy.yml')
+  const yml = fs.existsSync(dep2) ? fs.readFileSync(dep2, 'utf8') : ''
+  const sh = fs.readFileSync(path.join(ROOT, 'scripts/deploy.sh'), 'utf8')
+  const seeds = (src) => [...src.matchAll(/d1-seed-schema\.mjs/g)].map((x) => x.index)
+  const migs = (src) => [...src.matchAll(/d1-migrate\.mjs/g)].map((x) => x.index)
+  const orderOK = (src, what) => {
+    const sd = seeds(src); const mg = migs(src)
+    if (!mg.length) { fail(`${what} 里没有跑迁移`); return false }
+    const before = sd.filter((i) => i < mg[0]).length
+    const after = sd.filter((i) => i > mg[0]).length
+    if (!before || !after) {
+      fail(`${what} 里灌表结构的顺序不对（迁移前 ${before} 遍、迁移后 ${after} 遍）：依赖迁移列的索引（${dep.join('、') || '暂无'}）会建不出来`)
+      return false
+    }
+    return true
+  }
+  const okY = yml ? orderOK(yml, 'deploy.yml') : (fail('找不到 .github/workflows/deploy.yml'), false)
+  const okS = orderOK(sh, 'scripts/deploy.sh')
+  say(okY && okS,
+    dep.length
+      ? `发现 ${dep.length} 个索引依赖迁移才加的列（${dep.join('、')}），两个发布入口都是「建表 → 迁移 → 再补一遍」`
+      : '没有索引依赖迁移才加的列（一遍也能过，但两遍仍然更稳）',
+    `索引与灌表结构顺序有问题（见上面逐条）`)
+}
+
 console.log('\n[4.14] D1 绑定引用')
 {
   const tomlSrc = fs.readFileSync(path.join(ROOT, 'backend/wrangler.toml'), 'utf8')

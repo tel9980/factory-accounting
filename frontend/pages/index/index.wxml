@@ -195,7 +195,8 @@
     </view>
     <view class="card" wx:if="{{!rem_items.length}}">
       <view class="card-h">今天要做的事</view>
-      <view class="tip">没有到期欠款、没有超预算，账都是清的 👍</view>
+      <view class="tip" wx:if="{{errs.rem}}">⚠️ 提醒没拉出来（不是没有）· <text class="lnk" bindtap="loadReminders">重试</text></view>
+      <view class="tip" wx:else>没有到期欠款、没有超预算，账都是清的 👍</view>
     </view>
 
     <view class="grid4">
@@ -1265,8 +1266,9 @@
         </view>
       </view>
 
+      <view class="tip" wx:if="{{errs.recon && !recon}}">⚠️ 这次没核对出来（不是没有差异）：网络或文件有问题，<text class="lnk" bindtap="doReconcile">重试</text></view>
       <view class="prev" wx:if="{{recon}}">
-        <view class="prev-h">对账结果：{{recon.count}} 家　一致 {{recon.match_count}}　有差异 {{recon.diff_count}}</view>
+        <view class="prev-h">对账结果：{{recon.count}} 家　一致 {{recon.match_count}}　有差异 {{recon.diff_count}}{{recon_file ? '　（' + recon_file + '）' : ''}}{{recon_at ? '　' + recon_at : ''}}</view>
         <view class="prev-row" wx:for="{{recon.rows}}" wx:key="party">
           <text class="prev-t">{{item.party}}</text>
           <text class="prev-n">单上 {{item.imported}} / 我这 {{item.system}}</text>
@@ -2435,6 +2437,7 @@
         <view class="box">
           <view class="row1"><text class="nm">{{cb.month}} 合计</text><text class="amt">月底 ¥{{cb.total_end}}</text></view>
           <view class="row2">月初 {{cb.total_open}} · 进 {{cb.total_in}} · 出 {{cb.total_out}}</view>
+          <view class="row2" wx:if="{{cb.transfer_in || cb.transfer_out || cb.tax_in || cb.tax_out}}">只算生意往来：进 {{cb.op_in}} · 出 {{cb.op_out}}（上面的「进/出」还含自己账户之间转账和代收代付税金，不然各账户余额对不上）</view>
           <view class="item" wx:for="{{cb.rows}}" wx:key="id">
             <view class="row1"><text class="nm">{{item.name}}</text><text class="amt {{item.neg?'red':''}}">¥{{item.end}}</text></view>
             <view class="row2">月初 {{item.opening}} · 进 {{item.income}} · 出 {{item.outgo}}</view>
@@ -2987,6 +2990,9 @@
         <view class="seg {{aging_type=='ar'?'on':''}}" bindtap="setAgingType" data-t="ar">别人欠我</view>
         <view class="seg {{aging_type=='ap'?'on':''}}" bindtap="setAgingType" data-t="ap">我欠别人</view>
       </view>
+      <view wx:if="{{errs.aging && !aging}}">
+        <view class="tip">⚠️ 账龄没拉出来（不是没有欠款）· <text class="lnk" bindtap="loadAging">重试</text></view>
+      </view>
       <view wx:if="{{aging}}">
         <view class="kpi-row" wx:for="{{aging.buckets}}" wx:key="key">
           <text>{{item.label}}</text><text class="kpi-n {{item.key=='d999'&&item.amount>0?'bad':''}}">{{item.amount}} 元 / {{item.cnt}} 笔 · 占 {{item.pct}}%</text>
@@ -3228,6 +3234,7 @@
       <button class="btn" size="mini" bindtap="enableWx">开启微信提醒（要我手机上点允许）</button>
       <button class="btn" size="mini" bindtap="testWx">发一条测试通知</button>
       <view class="tip" wx:if="{{wx_info}}">已登记 {{wx_info.users}} 个微信，剩余可推 {{wx_info.quota}} 条{{wx_info.has_secret?'':'（还没存 AppSecret）'}}</view>
+      <view class="tip red" wx:if="{{wx_info && wx_info.last_error}}">⚠️ 最近一次提醒没发出去：{{wx_info.last_error}}（配额用完就收不到了，让收到的人再点一次「允许接收提醒」）</view>
       <view wx:if="{{wx_info && wx_info.wx_guide}}">
         <view class="tip">{{wx_info.next}}</view>
         <view class="item" wx:for="{{wx_info.wx_guide}}" wx:key="k" wx:for-item="g">
@@ -3715,7 +3722,8 @@
           </view>
         </view>
         </block>
-        <view class="empty" wx:if="{{!contacts_ap.length}}">暂无供应商记录</view>
+        <view class="empty" wx:if="{{errs.contacts}}">⚠️ 没拉出来（不是没有）· 点这里重试<text class="cfl" bindtap="loadContacts">　重试</text></view>
+        <view class="empty" wx:elif="{{!contacts_ap.length}}">暂无供应商记录</view>
       </view>
     </block>
   </block>

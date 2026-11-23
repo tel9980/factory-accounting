@@ -40,10 +40,13 @@ on:
       - 'SECURITY.md'
   workflow_dispatch:
 
-# 同一分支上连续 push 时取消旧的部署，避免老版本后落地把生产回退。
+# 同一分支上连续 push 时排队，不取消正在跑的那个。
+# 第 16 轮 C1：以前是 cancel-in-progress: true —— 新 push 会把**正在部署/正在回滚**的那个 job 直接杀掉。
+# 部署杀在半路 = 线上可能只有半个版本（新代码 + 老迁移表），而回滚杀在半路 = 坏版本留在线上还不知道。
+# 排队多等几分钟，换来「要么跑完、要么没开始」。release.yml 一直是 false，现在两边一致。
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 # 默认给只读：部署和摘要都不需要写仓库内容，出了事也不会被自动化改坏东西
 permissions:
@@ -409,13 +412,19 @@ jobs:
       # 为什么要在 CI 里跑：线上是「每本账一个独立 D1」，新开一本账（尤其第 3 本演示账）
       # 如果没人手动灌过 schema，那本账就是空库 —— 演示口令进去会 503「演示账套还没准备好」，
       # 而微信审核员点「先看看演示」正好撞上它。这一步失败要红：演示进不去就等于审核过不了。
-      - name: 给远程库补表结构（幂等）
+      # 第 16 轮 C3：这一步只「建表」。schema.sql 里还有几条索引引用了**迁移才加上的列**
+      # （比如 idx_writeoffs_m 要 writeoffs.month，那是 0002 迁移加的）。所以灌表结构要跑两遍：
+      # 第一遍在老库上只建表（引用新列的索引会失败 → 这一步可能报错），第二遍在迁移之后补上。
+      # 做不到「一遍过」，那就老老实实跑两遍；只跑一遍的结果是「新表建了、索引缺了」或者「整体红」。
+      - name: 补表结构（第 1 遍：建表）
         if: steps.token.outputs.can == 'true'
+        continue-on-error: true
+        id: seed1
         run: node scripts/d1-seed-schema.mjs
         working-directory: .
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
 
       - name: 跑远程数据库迁移
         if: steps.token.outputs.can == 'true'
@@ -427,9 +436,22 @@ jobs:
           #   · 每个文件跑完在 migrations 表记一行 INSERT OR IGNORE，跑过的不再跑。
           node scripts/d1-migrate.mjs
         working-directory: .
+
+      # 第 16 轮 C3：第二遍补表结构。迁移已经把新列加上了，这一遍才能把「引用新列」的索引建出来。
+      # 这一遍**必须绿**：它绿了才说明「表齐了、索引齐了」，后面部署上去才不会 500。
+      - name: 补表结构（第 2 遍：迁移之后补索引）
+        if: steps.token.outputs.can == 'true'
+        run: |
+          set -euo pipefail
+          # 第一遍失败不算错（老库上引用新列的索引本来就建不出来），但这里要看得见
+          if [ "${{ steps.seed1.outcome }}" != "success" ]; then
+            echo "::notice::第 1 遍补表结构有报错（老库缺新列属正常），第 2 遍在迁移之后补齐"
+          fi
+          node scripts/d1-seed-schema.mjs
+        working-directory: .
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
 
       # 第 13 轮 E4：回滚以后要能证明「退回去的那一版是好的」。
       # 以前只判「线上 commit 不再是这次的坏 sha」—— 退回另一个同样坏的旧版本也算通过。
@@ -470,7 +492,7 @@ jobs:
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
 
       # 第 11 轮 A1：安装令牌。库里还没有 access_key 时，谁先打开这个地址、
       # 谁就能 POST /auth/setup 把口令设成自己的 —— 从「部署完成」到「老板第一次设口令」
@@ -481,7 +503,7 @@ jobs:
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
           INSTALL_TOKEN_VALUE: ${{ secrets.INSTALL_TOKEN }}
         run: |
           if [ -z "${INSTALL_TOKEN_VALUE:-}" ]; then
@@ -616,7 +638,7 @@ jobs:
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
         run: |
           echo "::error title=部署回滚::部署后体检没过，自动退回上一版"
           npx wrangler rollback --message "CI 自动回滚：部署后体检没过（${{ github.sha }}）" || {
