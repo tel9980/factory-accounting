@@ -202,7 +202,7 @@ Page({
     import_types: ['应收：客户,产品,金额', '应付：供应商,金额,备注', '支出：金额,分类,备注', '借支：员工,金额,备注', '报销：员工,金额,分类,备注', '期初应收：客户,金额', '期初应付：供应商,金额', '应收对账：客户,对账金额,月份', '应付对账：供应商,对账金额,分类,月份', '付房东：名称,金额,月数(0=押金),分类,起始日', '客户名单：名称,类型,联系人,电话'],
     role: 'owner', staff_enabled: false, demo: false, demo_book: false, demo_enabled: false, demo_builtin: true,
     super: false, super_enabled: false, book_admin: false, book_own_key: false,
-    key_open: false, key_input: '', key_mode: 'enter', key_err: '', cf: null, cfl: null, mw: null, md: null, sad: null, fund: null, help_open: false,
+    key_open: false, key_input: '', key_install: '', key_mode: 'enter', key_err: '', cf: null, cfl: null, mw: null, md: null, sad: null, fund: null, help_open: false,
     er_open: false, er_kind: '', er_id: 0, er_title: '', er_item: '', er_amount: '', er_cost: '', er_due: '',
     er_operator: '', er_remark: '', er_cat: '', er_reason: '', er_orig: {}, er_list_open: false, ers: [], er_pending: 0,
     feat_all: FEATS, feat_kw: '', feat_hits: [], feat_open: false, feat_recent: [],
@@ -335,12 +335,24 @@ Page({
     if (!Number.isFinite(n)) return null
     return Math.round(n * 100) / 100
   },
+  // 第 11 轮 C5：台账里的数量/单价/金额以前一律 `Number(x) || 0`：
+  // 「1,200」「8,000 元」这种写法在 Number 下是 NaN → 静默记成 0，
+  // 料价/加工价/返工成本就那样变 0 了，事后一列合计全错还查不出是谁输的。
+  // 现在统一走 toAmount（认千分位、认「元」，认不出返回 null），认不出就用默认值。
+  amtOf(v, dflt) {
+    const n = this.toAmount(v)
+    return n === null ? (dflt === undefined ? 0 : dflt) : n
+  },
   enqueueOp(op) {
     const q = wx.getStorageSync('pending_ops') || []
     op.data = op.data || {}
     if (!op.data.client_id) op.data.client_id = this.newCid()
     // uid 用来在补发时区分「这批里的」和「补发途中用户新记的」
     if (!op.uid) op.uid = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+    // 第 11 轮 C1：离线记的单子必须记住「是哪本账的」。
+    // 以前补发时读的是「当前」账套号 —— 在一厂记的账，切到二厂再联网，
+    // 那几笔就记进二厂了，两边账同时错，日志里还看不出来。
+    op.book = String(wx.getStorageSync('book') || 1)
     op.ts = Date.now()
     q.push(op)
     wx.setStorageSync('pending_ops', q)
@@ -368,6 +380,13 @@ Page({
     const slot = new Array(snap.length).fill(null)
     let done = 0
     let needKey = false
+    // 第 11 轮 C1：别的账套排队的单子不能拿这本账的口令发出去（会记进错账）。
+    // 老数据（升级前入队、没有 book 字段）按当前账套算，跟以前行为一致。
+    let otherBook = 0
+    const mine = (it) => {
+      const b = String((it && it.book) || bk)
+      return b === bk
+    }
     const finish = () => {
       this._flushing = false
       const left = slot.filter(Boolean)
@@ -378,7 +397,8 @@ Page({
       wx.setStorageSync('pending_ops', keep)
       this.setData({ pending_count: keep.length })
       const bad = keep.filter((x) => x && x._err)
-      if (done && !silent) wx.showToast({ title: '补上了 ' + done + ' 笔' + (bad.length ? '，' + bad.length + ' 笔没补上' : ''), icon: 'none' })
+      if (done && !silent) wx.showToast({ title: '补上了 ' + done + ' 笔' + (bad.length ? '，' + bad.length + ' 笔没补上' : '') + (otherBook ? '（另有 ' + otherBook + ' 笔是别的账套的，切回去再发）' : ''), icon: 'none' })
+      else if (!done && otherBook && !silent) wx.showToast({ title: '有 ' + otherBook + ' 笔是别的账套的，切回那本账就会自动补发', icon: 'none' })
       if (needKey) {
         // 口令过期：直接弹登录卡，输完自动接着补（submitKey 里会再调一次 flushPending）
         this._askingKey = false
@@ -403,6 +423,13 @@ Page({
     const step = (i) => {
       if (i >= snap.length) return finish()
       const it = snap[i]
+      if (!mine(it)) {
+        // 别的账套的：原样留着，等切回那本账再补发
+        slot[i] = Object.assign({}, it, { _err: '这是别的账套的单子，切回那本账才会补发' })
+        otherBook++
+        step(i + 1)
+        return
+      }
       // 参数错、单子已经删了这种，怎么重发都不会成。以前每次打开小程序都从头再发一遍
       // （永远是同一个错，还白占网络和转圈）。试满 3 次就留在「待补」里不再自动重发，
       // 人在「待补 N 笔」里还能手动重发或丢掉。
@@ -536,11 +563,23 @@ Page({
       if (opts.once) {
         // 同一笔写重发时共用一个 client_id（30 秒内），后端按它去重。
         this._cid = this._cid || {}
-        if (!this._cid[opts.once]) this._cid[opts.once] = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
-        if (!opts.data.client_id) opts.data.client_id = this._cid[opts.once]
-        const ok = opts.once
-        const done0 = () => { if (this._cid) delete this._cid[ok] }
+        const okKey = opts.once
+        if (!this._cid[okKey]) this._cid[okKey] = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+        if (!opts.data.client_id) opts.data.client_id = this._cid[okKey]
+        const done0 = () => { if (this._cid) delete this._cid[okKey] }
         setTimeout(done0, 30000)
+        // 第 11 轮 C3：服务端明确拒绝（4xx 或 body 里 ok:false）说明这一笔没成，
+        // 这个 client_id 必须立刻作废 —— 否则 30 秒内用户改完再点一次，
+        // 后端按同一个 client_id 判成「重复请求」直接返回 ok:true，界面像成功了，钱其实没记上。
+        const s1 = opts.success; const f1 = opts.fail
+        opts = Object.assign({}, opts, {
+          success: (res) => {
+            const d1 = (res && res.data) || {}
+            if ((res && res.statusCode >= 400) || d1.ok === false) done0()
+            s1 && s1(res)
+          },
+          fail: (err) => { done0(); f1 && f1(err) }
+        })
       }
       if (!opts.data.client_id) opts.data.client_id = this.newCid()
     }
@@ -937,6 +976,14 @@ Page({
         if (d.results.some((x) => x && (x.code === 'no_key' || x.code === 'bad_key'))) return fallback()
         d.results.forEach((val, i) => {
           const o = q[i].opts
+          // 第 11 轮 D6：合批里某一条后端回了 ok:false（这个接口这次没算出来），
+          // 以前一律按成功交给 success —— 界面就把「没拉出来」显示成「什么都没有」。
+          // 现在按失败走 fail 回调（各 loader 的 fail 会亮「没拉出来 + 重试」）。
+          if (val && val.ok === false) {
+            o.fail && o.fail({ data: val, statusCode: 200 })
+            o.complete && o.complete({ data: val, statusCode: 200 })
+            return
+          }
           // 合批前 caller 明确说了 cache:false（动态数据），这里也要遵守，不能无脑缓存。
           if ((o.cache !== false || q[i].wantCache) && !(o.method && o.method.toUpperCase() !== 'GET')) this._cachePut(q[i].path, val)
           o.success && o.success({ data: val, statusCode: 200 })
@@ -1002,7 +1049,9 @@ Page({
     // 不然先发的那批请求后到，就把新页签的数据盖成旧页签的。
     // 关键：序号对不上时直接 return，不许清空/改写 data（会把新数据擦了）。
     this._tabSeq = this._tabSeq || 0
-    this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).length })
+    // 第 11 轮 C1：「待补 N 笔」只数这本账的（别的账套排队的单子留在队列里等切回去）
+    const bkNow = String(this.data.book || 1)
+    this.setData({ pending_count: (wx.getStorageSync('pending_ops') || []).filter((x) => String((x && x.book) || bkNow) === bkNow).length })
     this.flushPending(true)
     this._cacheSweep()
     if (!this._modsLoaded) { this._modsLoaded = true; this.loadModules() }
@@ -1014,7 +1063,13 @@ Page({
     const gap = nowMs - (this._shownAt || 0)
     this._shownAt = nowMs
     this._pendAt = (wx.getStorageSync('pending_ops') || []).length
-    this.refresh(gap > 0 && gap < 20000 ? { lite: true } : undefined)
+    // 第 11 轮 D7：20 秒内回来只刷第一屏这件事，前提是「还是同一本账、同一个口令」。
+    // 换了账套/重新登录回来时如果也走 lite，屏幕上会留着上一本账的数字和列表。
+    // 现在按「账套 + 口令」的指纹判断，指纹变了就整轮重拉。
+    const fpNow = bkNow + '|' + (wx.getStorageSync('ak') || '')
+    const fpChanged = !!(this._lastFp && this._lastFp !== fpNow)
+    this._lastFp = fpNow
+    this.refresh(gap > 0 && gap < 20000 && !fpChanged ? { lite: true } : undefined)
     this.loadCloudBackupLazy()
   },
   // opts.lite === true：记完一笔账之后用。写完只需要把「数字 + 当前这一屏」刷新回来，
@@ -1354,8 +1409,9 @@ Page({
         const d = res.data || {}
         if (d.error) return wx.showToast({ title: d.error, icon: 'none' })
         this.setData({ qt: d, qt_n: d.count || 0 })
+        this._err('quotes', false)
       },
-      fail: () => wx.showToast({ title: '拿不到报价', icon: 'error', duration: 2000 })
+      fail: () => { this._err('quotes', true); wx.showToast({ title: '报价没拉出来（不是没有）', icon: 'error', duration: 2000 }) }
     })
   },
   sendQuote(e) {
@@ -1808,7 +1864,13 @@ Page({
       editable: true, placeholderText: String(remain),
       success: (r) => {
         if (!r.confirm) return
-        const a = Number((r.content || '').trim() || remain) || remain
+        // 第 11 轮 C2：以前 `Number(...) || remain` —— 填「1,200」「1.2万」「abc」都算不出数，
+        // 于是静默按「全部余款」退回。老板以为只登了一千，实际把整笔借支都平掉了。
+        // 现在认不出就明说，不许回落；超出余款也不许。
+        const typed = String(r.content == null ? '' : r.content).trim()
+        const a = typed ? this.toAmount(typed) : remain
+        if (a === null || !(a > 0)) return wx.showToast({ title: '金额填错了，比如 1200 或 1,200', icon: 'none' })
+        if (remain > 0.005 && a > remain + 0.005) return wx.showToast({ title: '最多退 ' + remain + ' 元（剩下的还没花完）', icon: 'none' })
         this.req({
           url: API_BASE + '/loans/' + id + '/return', method: 'POST',
           data: { amount: a, account_id: this.data.acc_id || 0 },
@@ -2424,9 +2486,12 @@ Page({
       content: '付给 ' + ds.n + ' ¥' + ds.amt + '，按「先老后新」抵掉未结清应付，确定吗？',
       success: (r) => {
         if (!r.confirm) return
+        // 第 11 轮 C4：以前 Number(ds.amt)，金额是「1,200.00」这种带千分位的字符串时算出 NaN → 记成 0 元。
+        const gpAmt = this.toAmount(ds.amt)
+        if (gpAmt === null || !(gpAmt > 0)) return wx.showToast({ title: '这一户的未付金额读不出来，请到应付列表里逐笔付', icon: 'none' })
         this.req({
-          url: API_BASE + '/pay-batch', method: 'POST', once: 'pay-batch',
-          data: { supplier: ds.n, amount: Number(ds.amt), account_id: this.data.acc_id },
+          url: API_BASE + '/pay-batch', method: 'POST', once: 'pay-batch|' + ds.n,
+          data: { supplier: ds.n, amount: gpAmt, account_id: this.data.acc_id },
           success: (res) => {
             const d = res.data || {}
             if (d.ok) {
@@ -2728,7 +2793,10 @@ Page({
         if (d.ok) {
           wx.setStorageSync('ak', d.key || pw)
           this.setData({ rec_show: false, rec_code: '', rec_pw: '' })
-          wx.showToast({ title: '口令已重设', icon: 'success' })
+          // 第 11 轮 A3：恢复码用过一次就作废，后端会返回一串新的。
+          // 以前这里不显示 → 老板以为「原来那串还能用」，下次忘了口令才发现它已经废了。
+          if (d.recover_code) this.showRecoverCode(d.recover_code)
+          else wx.showToast({ title: '口令已重设', icon: 'success' })
           this.refresh()
         } else {
           wx.showModal({ title: '没成功', content: d.error || '恢复码不对', showCancel: false })
@@ -2748,8 +2816,9 @@ Page({
     this.req({
       url: '/account-recon?mode=' + (mode || 'day'),
       success: (res) => {
-        if (res.data && res.data.ok) this.setData({ ar2: res.data })
+        if (res.data && res.data.ok) { this.setData({ ar2: res.data }); this._err('accrecon', false) }
       },
+      fail: () => this._err('accrecon', true),
     })
   },
   closeAccRecon() { this.setData({ ar2: null }) },
@@ -2956,7 +3025,9 @@ Page({
         if (!r.items) return
         this.setData({ health: r, health_done: true, hc: { score: r.score, grade: r.grade, clean: r.clean, count: r.count, delta: r.delta || 0, items: r.items } })
         wx.showToast({ title: r.clean ? '体检全部通过' : '有 ' + r.count + ' 项要补', icon: 'none' })
-      }
+        this._err('health2', false)
+      },
+      fail: () => { this._err('health2', true); wx.showToast({ title: '体检没跑完（别当成没问题）', icon: 'error', duration: 2000 }) }
     })
   },
   // 📋 体检报告单：分数曲线 + 每项问题哪天发现、哪天修好
@@ -4214,7 +4285,9 @@ Page({
       success: (res) => {
         const d = res.data || {}
         this.setData({ st_log: { party, count: d.count || 0, rows: d.rows || [] } })
-      }
+        this._err('stlog', false)
+      },
+      fail: () => { this._err('stlog', true); wx.showToast({ title: '对账单记录没拉出来（不代表没发过）', icon: 'none' }) }
     })
   },
   ackSt(e) {
@@ -4305,8 +4378,9 @@ Page({
       url: API_BASE + '/statement-acks?days=30',
       success: (res) => {
         const d = res.data || {}
-        if (d.ok) this.setData({ sacks: d })
-      }
+        if (d.ok) { this.setData({ sacks: d }); this._err('sacks', false) }
+      },
+      fail: () => { this._err('sacks', true); wx.showToast({ title: '客户确认情况没拉出来', icon: 'none' }) }
     })
   },
   closeStatementAcks() { this.setData({ sacks: null }) },
@@ -5085,8 +5159,8 @@ Page({
   onTgtReceive(e) { this.setData({ tgt_receive: e.detail.value }) },
   onTgtOrder(e) { this.setData({ tgt_order: e.detail.value }) },
   saveTarget() {
-    const r = Number(this.data.tgt_receive || 0)
-    const o = Number(this.data.tgt_order || 0)
+    const r = this.amtOf(this.data.tgt_receive, 0)
+    const o = this.amtOf(this.data.tgt_order, 0)
     if (!(r >= 0) || !(o >= 0)) return wx.showToast({ title: '填数字', icon: 'none' })
     this.req({
       url: API_BASE + '/target', method: 'POST', data: { receive: r, order_add: o },
@@ -5391,9 +5465,11 @@ Page({
     this.req({
       url: API_BASE + '/month-brief?month=' + encodeURIComponent(this.data.mb_month || this.data.today_month || ''),
       success: (r) => {
-        if (!r.data || !r.data.ok) return wx.showToast({ title: '取不出来', icon: 'none' })
+        if (!r.data || !r.data.ok) { this._err('mbr', true); return wx.showToast({ title: '这个月的简报取不出来（不是这个月没事）', icon: 'none' }) }
         this.setData({ mbr: r.data })
-      }
+        this._err('mbr', false)
+      },
+      fail: () => this._err('mbr', true)
     })
   },
   onEcMonth(e) { this.setData({ ec_month: e.detail.value }) },
@@ -5552,8 +5628,9 @@ Page({
       url: API_BASE + '/next-step',
       silent: true,
       success: (r) => {
-        if (r.data && r.data.ok) this.setData({ ns: r.data })
-      }
+        if (r.data && r.data.ok) { this.setData({ ns: r.data }); this._err('ns', false) }
+      },
+      fail: () => this._err('ns', true)
     })
   },
   goNext() {
@@ -5682,7 +5759,8 @@ Page({
   loadMyDay() {
     this.req({
       url: API_BASE + '/my-day',
-      success: (r) => { const d = r.data || {}; if (d.ok) this.setData({ md: d }) }
+      success: (r) => { const d = r.data || {}; if (d.ok) { this.setData({ md: d }); this._err('myd', false) } },
+      fail: () => { this._err('myd', true); wx.showToast({ title: '今天的清单没拉出来', icon: 'none' }) }
     })
   },
   copyMyDay() {
@@ -6723,12 +6801,15 @@ Page({
     })
   },
   loadKpi() {
-    this.req({ url: API_BASE + '/kpi', success: (res) => this.setData({ kpi: res.data || null }) })
+    this.req({ url: API_BASE + '/kpi',
+      success: (res) => { this.setData({ kpi: res.data || null }); this._err('kpi', false) },
+      fail: () => { this._err('kpi', true); wx.showToast({ title: 'KPI 没拉出来（不是全 0）', icon: 'none' }) } })
   },
   loadAging() {
     this.req({
       url: API_BASE + '/aging?type=' + this.data.aging_type,
-      success: (res) => this.setData({ aging: res.data || null })
+      success: (res) => { this.setData({ aging: res.data || null }); this._err('aging', false) },
+      fail: () => { this._err('aging', true); wx.showToast({ title: '账龄没拉出来（不是没有欠款）', icon: 'none' }) }
     })
   },
   setAgingType(e) { this.setData({ aging_type: e.currentTarget.dataset.t }, () => this.loadAging()) },
@@ -6774,7 +6855,7 @@ Page({
     })
   },
   saveCollectConfig() {
-    const v = Number(this.data.collect_min || 0)
+    const v = this.amtOf(this.data.collect_min, 0)
     if (!(v >= 0 && v <= 365)) return wx.showToast({ title: '填 0~365 之间的天数', icon: 'none' })
     this.req({
       url: API_BASE + '/collect-config', method: 'POST', data: { min_days: v },
@@ -6848,29 +6929,37 @@ Page({
       }
     })
   },
+  // 第 11 轮 D1：以前是「旧口令,新口令」一句话拆逗号 ——
+  // 口令里本身带逗号（「abc,123」）就会被劈成两半、或者被截断成别的口令，改完自己都登不进去。
+  // 现在改成两次弹窗，口令里有什么字符都不会错。
   changeKey() {
     wx.showModal({
-      title: '修改访问口令',
-      content: '格式：旧口令,新口令（逗号分隔）',
-      editable: true,
-      placeholderText: '旧口令,新口令',
-      success: (r) => {
-        if (r.confirm && r.content) {
-          const p = r.content.split(/[,，]/).map((s) => s.trim())
-          if (p.length < 2 || !p[0] || !p[1]) return wx.showToast({ title: '格式：旧口令,新口令', icon: 'none' })
-          wx.request({
-            url: API_BASE + '/auth/change', method: 'POST',
-            data: { old_key: p[0], new_key: p[1] },
-            success: (s) => {
-              if (s.data && s.data.ok) {
-                wx.setStorageSync('ak', p[1])
-                wx.showToast({ title: '口令已修改', icon: 'none' })
-              } else {
-                wx.showToast({ title: (s.data && s.data.error) || '修改失败', icon: 'none' })
-              }
-            }
-          })
-        }
+      title: '修改访问口令（1/2）', content: '先输现在的口令', editable: true, placeholderText: '当前口令',
+      success: (r1) => {
+        if (!r1.confirm) return
+        const oldK = String(r1.content || '').trim()
+        if (!oldK) return wx.showToast({ title: '要填现在的口令', icon: 'none' })
+        wx.showModal({
+          title: '修改访问口令（2/2）', content: '再输要改成的新口令（至少 8 位）', editable: true, placeholderText: '新口令',
+          success: (r2) => {
+            if (!r2.confirm) return
+            const newK = String(r2.content || '').trim()
+            if (newK.length < 8) return wx.showToast({ title: '新口令至少 8 位', icon: 'none' })
+            if (newK === oldK) return wx.showToast({ title: '新旧一样，不用改', icon: 'none' })
+            this.req({
+              url: API_BASE + '/auth/change', method: 'POST',
+              data: { old_key: oldK, new_key: newK },
+              success: (res) => {
+                const d = res.data || {}
+                if (d.ok) {
+                  wx.setStorageSync('ak', newK)
+                  wx.showToast({ title: '口令已修改', icon: 'none' })
+                  if (d.recover_code) this.showRecoverCode(d.recover_code)
+                } else wx.showToast({ title: d.error || '修改失败', icon: 'none' })
+              },
+            })
+          }
+        })
       }
     })
   },
@@ -6926,6 +7015,7 @@ Page({
     this.setData({ key_open: true, key_input: '', key_err: '', no_key: true })
   },
   // 输口令进（或者第一次用：设口令）
+  onKeyInstall(e) { this.setData({ key_install: e.detail.value }) },
   submitKey() {
     const k = String(this.data.key_input || '').trim()
     if (k.length < 4) return wx.showToast({ title: '口令至少 4 位', icon: 'none' })
@@ -6933,7 +7023,10 @@ Page({
     if (this.data.key_mode === 'set') {
       wx.showLoading({ title: '设置中' })
       wx.request({
-        url: API_BASE + '/auth/setup', method: 'POST', data: { key: k },
+        // 第 11 轮 A1：云上部署时后端配了 INSTALL_TOKEN，第一次设口令要带上它，
+        // 否则任何一个知道地址的人都能抢在老板前面把口令设成自己的。
+        url: API_BASE + '/auth/setup', method: 'POST',
+        data: { key: k, install_token: String(this.data.key_install || '').trim() },
         success: (s) => {
           wx.hideLoading()
           const d = s.data || {}
@@ -7116,12 +7209,13 @@ Page({
   addDebt() {
     const d = this.data
     if (!d.d_lender) return wx.showToast({ title: '写一下跟谁借的', icon: 'none' })
-    if (!(Number(d.d_principal) > 0)) return wx.showToast({ title: '本金要大于 0', icon: 'none' })
+    const dPrin = this.amtOf(d.d_principal, 0)
+    if (!(dPrin > 0)) return wx.showToast({ title: '本金要大于 0（比如 50000 或 5万）', icon: 'none' })
     const kinds = ['bank', 'person', 'other']
     const pays = ['interest', 'equal', 'end']
     this.req({
       url: API_BASE + '/debts', method: 'POST',
-      data: { lender: d.d_lender, kind: kinds[d.d_kind], principal: Number(d.d_principal), rate: Number(d.d_rate || 0), start_date: d.d_start || '', term_months: Number(d.d_term || 0), pay_kind: pays[d.d_paykind], remark: d.d_remark },
+      data: { lender: d.d_lender, kind: kinds[d.d_kind], principal: dPrin, rate: this.amtOf(d.d_rate, 0), start_date: d.d_start || '', term_months: this.amtOf(d.d_term, 0), pay_kind: pays[d.d_paykind], remark: d.d_remark },
       success: () => {
         wx.showToast({ title: '已记上，钱已入账户', icon: 'none' })
         this.setData({ d_lender: '', d_principal: '', d_remark: '', d_start: '' })
@@ -7218,12 +7312,13 @@ Page({
   onPPStart(e) { this.setData({ pp_start: e.detail.value }) },
   addPrepaid() {
     const d = this.data
-    if (!(Number(d.pp_total) > 0)) return wx.showToast({ title: '总金额要大于 0', icon: 'none' })
+    const ppTotal = this.amtOf(d.pp_total, 0)
+    if (!(ppTotal > 0)) return wx.showToast({ title: '总金额要大于 0（比如 36000 或 3.6万）', icon: 'none' })
     // 月数 0 = 押金这类不摊的（钱付了但不算成本，退租时收回），所以只拦负数
     if (!(Number(d.pp_months) >= 0) || d.pp_months === '') return wx.showToast({ title: '摊几个月要填（押金填 0）', icon: 'none' })
     this.req({
       url: API_BASE + '/prepaids', method: 'POST',
-      data: { name: d.pp_name || d.pp_cat, total: Number(d.pp_total), months: Number(d.pp_months), category: d.pp_cat || '厂房租金', start_date: d.pp_start || '' },
+      data: { name: d.pp_name || d.pp_cat, total: ppTotal, months: Math.max(1, Math.round(this.amtOf(d.pp_months, 1))), category: d.pp_cat || '厂房租金', start_date: d.pp_start || '' },
       success: () => {
         wx.showToast({ title: '已记上，按月摊销', icon: 'none' })
         this.setData({ pp_name: '', pp_total: '', pp_start: '' })
@@ -7975,6 +8070,13 @@ Page({
         this._pageSeqs = {}
         this._grpSeq = {}
         this._failStreak = 0
+        // 第 11 轮 C1：还有两样是「上一本账的余温」——
+        // ①tab 令牌不清，上一本账还在路上的响应会被当成本次的结果写进列表（串账）；
+        // ②排队等口令的请求（_keyQueue）和「正在问口令」标记不清，输完口令会把上一本账的请求重发到这一本。
+        this._tabSeq = (Number(this._tabSeq) || 0) + 1
+        this._tabReqSeq = {}
+        this._keyQueue = []
+        this._askingKey = false
         // F20：把上一本账的离线缓存清掉。以前留着，切回去/断网时会把上一本的单子
         // 当成这一本的显示出来（金额都是别的账的）。
         try {
@@ -7997,6 +8099,12 @@ Page({
         })
         wx.setStorageSync('book', id)
         if (nb.name) wx.setStorageSync('book_name', nb.name)
+        // 「待补 N 笔」只能数这本账的：上一本账没发出去的单子还留在队列里等切回去，
+        // 数进来会让老板以为这本账也欠着账没记。
+        try {
+          const pq = (wx.getStorageSync('pending_ops') || []).filter((x) => String((x && x.book) || id) === String(id))
+          this.setData({ pending_count: pq.length })
+        } catch (e) {}
         // F16：换账套后要回到顶部。原来停在上一个账套滚到的位置，
         // 用户以为还在看老账套的列表。
         try { wx.pageScrollTo({ scrollTop: 0, duration: 0 }) } catch (e) {}
@@ -8629,12 +8737,13 @@ Page({
   addInvoice() {
     const d = this.data
     if (!String(d.inv_party || '').trim()) return wx.showToast({ title: d.inv_type === 'out' ? '填客户名称' : '填供应商名称', icon: 'none' })
-    if (!Number(d.inv_amount)) return wx.showToast({ title: '填开票金额', icon: 'none' })
+    const invAmt = this.amtOf(d.inv_amount, 0)
+    if (!(invAmt > 0)) return wx.showToast({ title: '填开票金额（比如 12000 或 1.2万）', icon: 'none' })
     // 开票日期是纯文本框：非法日期直接拦住（后端 /invoices 解析失败会静默记成今天）。
     const invDate = checkDate(d.inv_date); if (!invDate.ok) return
     this.req({
       url: API_BASE + '/invoices', method: 'POST',
-      data: { type: d.inv_type, no: d.inv_no, party: d.inv_party, amount: Number(d.inv_amount), tax: Number(d.inv_tax) || 0, date: invDate.value, remark: d.inv_remark },
+      data: { type: d.inv_type, no: d.inv_no, party: d.inv_party, amount: invAmt, tax: this.amtOf(d.inv_tax, 0), date: invDate.value, remark: d.inv_remark },
       success: (res) => {
         if (res.data && res.data.ok) {
           this.setData({ inv_no: '', inv_party: '', inv_amount: '', inv_tax: '', inv_date: '', inv_remark: '' })
@@ -8734,7 +8843,7 @@ Page({
     const name = (this.data.mt_name || '').trim()
     if (!name) return wx.showToast({ title: '先写材料名（钢板 / 焊丝 / 砂轮）', icon: 'none' })
     this.req({ url: API_BASE + '/materials', method: 'POST', once: 'addMaterial',
-      data: { name, unit: this.data.mat_unit || '个', min_qty: Number(this.data.mat_min) || 0 },
+      data: { name, unit: this.data.mat_unit || '个', min_qty: this.amtOf(this.data.mat_min, 0) },
       success: (res) => {
         const d = res.data || {}
         if (!d.ok) return wx.showModal({ title: '没存上', content: d.error || '稍后再试', showCancel: false })
@@ -8747,7 +8856,7 @@ Page({
     const name = (this.data.mt_name || '').trim()
     if (!name) return wx.showToast({ title: '先写材料名（如 钢板）', icon: 'none' })
     const kind = this.data.mt_kind === 1 ? 'out' : 'in'
-    const qty = Number(this.data.mt_qty) || 0
+    const qty = this.amtOf(this.data.mt_qty, 0)
     if (!(qty > 0)) return wx.showToast({ title: '数量要大于 0', icon: 'none' })
     // 领料/进料日期（可空=今天）：填错就拦住，别默默记成今天。
     const mtDate = checkDate(this.data.mt_date); if (!mtDate.ok) return
@@ -8834,7 +8943,7 @@ Page({
     const d = this.data
     const body = {
       party: String(d.fr_party || '').trim(), item: String(d.fr_item || '').trim(),
-      price: Number(d.fr_price) || 0, unit: String(d.fr_unit || '件').trim(), note: String(d.fr_note || '').trim()
+      price: this.amtOf(d.fr_price, 0), unit: String(d.fr_unit || '件').trim(), note: String(d.fr_note || '').trim()
     }
     if (!body.party) return wx.showToast({ title: '填客户名', icon: 'none' })
     if (body.price <= 0) return wx.showToast({ title: '框架价要大于 0', icon: 'none' })
@@ -8872,7 +8981,7 @@ Page({
     const d = this.data
     const body = {
       party: String(d.os_party || '').trim(), item: String(d.os_item || '').trim(),
-      qty: Number(d.os_qty) || 0, price: Number(d.os_price) || 0, due_date: String(d.os_due || '').trim()
+      qty: this.amtOf(d.os_qty, 0), price: this.amtOf(d.os_price, 0), due_date: String(d.os_due || '').trim()
     }
     if (!body.party) return wx.showToast({ title: '填外协给谁', icon: 'none' })
     this.req({ url: API_BASE + '/outsource', method: 'POST', data: body, success: (r) => {
@@ -8976,8 +9085,8 @@ Page({
       kind: d.rw_kind || 'rework',
       party: String(d.rw_party || '').trim(),
       item: String(d.rw_item || '').trim(),
-      qty: Number(d.rw_qty) || 0,
-      cost: Number(d.rw_cost) || 0,
+      qty: this.amtOf(d.rw_qty, 0),
+      cost: this.amtOf(d.rw_cost, 0),
       reason: String(d.rw_reason || '').trim(),
       fault: faults[Number(d.rw_fault_idx) || 0],
       fix: String(d.rw_fix || '').trim(),
@@ -9030,7 +9139,7 @@ Page({
     const body = {
       worker, date: pwDate.value || dayOf(),
       item: String(d.pw_item || ''), process: String(d.pw_process || ''),
-      qty: Number(d.pw_qty) || 1, rate: Number(d.pw_rate) || 0
+      qty: this.amtOf(d.pw_qty, 1), rate: this.amtOf(d.pw_rate, 0)
     }
     this.req({ url: API_BASE + '/wage-records', method: 'POST', data: body, success: (r) => {
       const x = r.data || {}
@@ -9091,7 +9200,7 @@ Page({
     const d = this.data
     const mm = d.pw_month || dayOf().slice(0, 7)
     const workers = String(d.wd_workers || '').split(/[，,、\s]+/).map((x) => x.trim()).filter(Boolean)
-    const amount = Number(d.wd_amount) || 0
+    const amount = this.amtOf(d.wd_amount, 0)
     if (!workers.length) return wx.showToast({ title: '扣谁？填个名字', icon: 'none' })
     if (!(amount > 0)) return wx.showToast({ title: '每人扣多少', icon: 'none' })
     this.req({ url: API_BASE + '/wage-deducts', method: 'POST', once: 'addWd',
@@ -9133,7 +9242,7 @@ Page({
   addWageRate() {
     const d = this.data
     const worker = String(d.wr_worker || '').trim()
-    const rate = Number(d.wr_rate) || 0
+    const rate = this.amtOf(d.wr_rate, 0)
     if (!worker) return wx.showToast({ title: '填工人姓名（通用写 *）', icon: 'none' })
     if (rate <= 0) return wx.showToast({ title: '一件多少钱要大于 0', icon: 'none' })
     this.req({ url: API_BASE + '/wage-rates', method: 'POST', data: { worker, item: String(d.wr_item || ''), rate, unit: String(d.wr_unit || '件') }, success: (r) => {
@@ -9159,12 +9268,13 @@ Page({
   addAsset() {
     const d = this.data
     if (!String(d.asset_name || '').trim()) return wx.showToast({ title: '填设备名称', icon: 'none' })
-    if (!Number(d.asset_cost)) return wx.showToast({ title: '填设备原值', icon: 'none' })
+    const assetCost = this.amtOf(d.asset_cost, 0)
+    if (!(assetCost > 0)) return wx.showToast({ title: '填设备原值（比如 58000 或 5.8万）', icon: 'none' })
     // 买入日期：非法日期直接拦住（后端 /assets 解析失败会静默落今天）。
     const assetBuy = checkDate(d.asset_buy); if (!assetBuy.ok) return
     this.req({
       url: API_BASE + '/assets', method: 'POST',
-      data: { name: d.asset_name, cost: Number(d.asset_cost), buy_date: assetBuy.value, life_years: Number(d.asset_life) || 5, residual_rate: d.asset_res === '' ? 5 : Number(d.asset_res), maint_months: Number(d.asset_maint) || 0 },
+      data: { name: d.asset_name, cost: assetCost, buy_date: assetBuy.value, life_years: this.amtOf(d.asset_life, 5) || 5, residual_rate: d.asset_res === '' ? 5 : this.amtOf(d.asset_res, 5), maint_months: this.amtOf(d.asset_maint, 0) },
       success: (res) => {
         if (res.data && res.data.ok) {
           this.setData({ asset_name: '', asset_cost: '', asset_buy: '', asset_life: '', asset_res: '', asset_maint: '' })
@@ -9599,8 +9709,9 @@ Page({
     const { accounts, tr_from, tr_to, tr_amount, tr_remark } = this.data
     if (tr_from < 0 || tr_to < 0) return wx.showToast({ title: '先选转出和转入账户', icon: 'none' })
     if (tr_from === tr_to) return wx.showToast({ title: '两边不能是同一个账户', icon: 'none' })
-    const a = Number(tr_amount) || 0
-    if (!(a > 0)) return wx.showToast({ title: '转账金额不对', icon: 'error', duration: 2000 })
+    // 第 11 轮 C4：以前 Number('1,200') = NaN → 0，拦不住也不提示格式，用户只看到「金额不对」。
+    const a = this.amtOf(tr_amount, 0)
+    if (!(a > 0)) return wx.showToast({ title: '转账金额不对（比如 1200 或 1,200）', icon: 'error', duration: 2000 })
     this.req({
       url: API_BASE + '/transfer', method: 'POST',
       data: { from: accounts[tr_from].id, to: accounts[tr_to].id, amount: a, remark: tr_remark },

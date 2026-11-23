@@ -256,6 +256,7 @@ async function opMark(db, cid, kind, refId) {
     // 现在 opMark 刷新 created_at（= 完成时刻），GC 改成「未完成的 1 小时后删、已完成的 30 天后删」。
     await db.prepare('INSERT INTO op_dedupe (client_id, kind, ref_id, created_at) VALUES (?,?,?,?) ON CONFLICT(client_id) DO UPDATE SET kind=excluded.kind, ref_id=excluded.ref_id, created_at=excluded.created_at')
       .bind(opKey(cid, kind), kind, num(refId), now()).run()
+    claimDone(cid, kind)
   } catch (e) {}
 }
 // 「先占坑再干活」：同一个 client_id 只允许一个请求往下走。
@@ -264,6 +265,19 @@ async function opMark(db, cid, kind, refId) {
 // 占坑时 ref_id=-1 表示「还在干」；干完 opMark 会把它改成真单号。
 // 万一干到一半崩了（进程挂了、连接断了），这个坑会一直占着——所以超过 60 秒还挂着 -1 的，
 // 下次来的时候先清掉，让用户能重试，而不是永远被告「刚记过了」。
+// 第 11 轮 B7：占到坑之后 handler 抛异常（写库失败、校验炸了）→ 坑停在 ref_id=-1。
+// 用户拿着同一个 client_id 重试，opSeen 会说「重复请求」直接 ok:true 返回 —— 那一笔永远没记上，
+// 界面上还是「已保存」。现在把本请求占过的坑记下来，请求以 5xx 结束就自动放掉（见 fetch 末尾）。
+function claimTrack(db, cid, kind) {
+  const s = als.getStore()
+  if (s && Array.isArray(s.claims)) s.claims.push({ db, cid: String(cid), kind })
+}
+function claimDone(cid, kind) {
+  const s = als.getStore()
+  if (!s || !Array.isArray(s.claims)) return
+  const k = opKey(cid, kind)
+  s.claims = s.claims.filter((x) => opKey(x.cid, x.kind) !== k)
+}
 async function opClaim(db, cid, kind) {
   if (!cid) return true
   try {
@@ -271,6 +285,7 @@ async function opClaim(db, cid, kind) {
     await db.prepare("DELETE FROM op_dedupe WHERE client_id=? AND COALESCE(ref_id,-1)=-1 AND created_at < ?")
       .bind(key, new Date(Date.now() + TZ_MS - 60000).toISOString()).run()
     const r = await db.prepare('INSERT OR IGNORE INTO op_dedupe (client_id, kind, ref_id, created_at) VALUES (?,?,-1,?)').bind(key, kind, now()).run()
+    if (changesOf(r) > 0) claimTrack(db, cid, kind)
     return changesOf(r) > 0
   } catch (e) {
     // 占坑失败（表没了/写不进去）以前直接 return true = 「占坑成功」，
@@ -288,6 +303,7 @@ async function opRelease(db, cid, kind) {
     // 现在按「去重键 = client_id#kind」删；kind 省略时删裸 client_id 的老行。
     if (kind) await db.prepare('DELETE FROM op_dedupe WHERE client_id=? AND COALESCE(ref_id,-1)=-1').bind(opKey(cid, kind)).run()
     else await db.prepare('DELETE FROM op_dedupe WHERE client_id=? AND COALESCE(ref_id,-1)=-1').bind(String(cid)).run()
+    if (kind) claimDone(cid, kind)
   } catch (e) {}
 }
 // D1 一条语句最多 100 个绑定参数，IN (?,?,…) 用整批 id 会报 too many SQL variables（整页 500）。
@@ -316,6 +332,12 @@ const CASH_EXP_WHERE = "direction='out' AND cash=1 AND ref_type IN ('expense','f
 // 但钱确实花掉了（cash=0 的 expense 行）。以前成本只看 cash=1，这种报销永远不进成本，利润虚高。
 // 借款本身写的是 ref_type='loan'，不会在这里重复计。
 const COST_EXP_WHERE = "direction='out' AND ref_type IN ('expense','fixed')"
+// 第 11 轮 B2：摊销 / 折旧 / 预提利息都是「不动现金、只影响利润」的调整项。
+// 以前年报这里写的是 `cash=1 AND ref_type IN ('amort','dep','accrual')` —— 而这三类实际都写成
+// cash=0（amort 见 runAmort、debt_int 见 runAccrual、dep 见资产折旧），唯一 cash=1 的是 fixed（真花钱）。
+// 结果这一项恒等于 0：年报的净利里从来没扣过摊销折旧和利息，跟月报 / 总览口径对不上。
+// 现在按「非现金调整」这个语义取，同时兼容历史库里可能存在的 accrual 老类型。
+const ADJ_EXP_WHERE = "direction='out' AND cash=0 AND ref_type IN ('amort','dep','debt_int','accrual')"
 // 第 10 轮 D10：批量条数以前散着三种（50 / 90 / 100）。D1 的硬上限是「一条语句 100 个参数、
 // 一次 batch 100 条语句」（server/d1.mjs:30-31），压着上限跑迟早有一天线上炸「too many SQL variables」。
 // 现在统一成两个常量：语句批 90、参数批 90，留一点余量。
@@ -1072,17 +1094,34 @@ const tooMany = (sec) => ({ error: `试错太多次了，${Math.max(1, Math.ceil
 
 // 访问口令：首次设置 / 修改 / 校验
 app.post('/auth/setup', async (c) => {
-  const { key } = await c.req.json().catch(() => ({}))
-  const k = String(key || '').trim()
+  const body = await c.req.json().catch(() => ({}))
+  const k = String(body.key || '').trim()
   if (k.length < 4) return c.json({ error: '口令至少 4 位' }, 400)
   const db = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const existing = await getKey(db)
   if (existing) return c.json({ error: '口令已存在，请用修改功能' }, 400)
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?)").bind(await makeKeyRecord(k)).run()
+  // 第 11 轮 A1：这条路由在鉴权中间件之前（公开分支），以前谁先 POST 谁当老板。
+  // 部署时由 CI 生成一次性安装令牌（只写在 workflow 摘要里），要设置口令的人得从那儿抄；
+  // 没配 INSTALL_TOKEN 的自建部署（Docker / exe / 本机版）行为不变，只有 IP 限流这一道。
+  const ip = clientIp(c)
+  const wait = await authLocked(db, ip)
+  if (wait) return c.json(tooMany(wait), 429)
+  const needTok = String(c.env.INSTALL_TOKEN || '').trim()
+  if (needTok && !safeEq(String(body.install_token || '').trim(), needTok)) {
+    const f = await authFail(db, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return c.json({ error: '安装令牌不对。这是部署时 GitHub Actions 摘要里那串 INSTALL_TOKEN，不是访问口令', code: 'bad_install_token', left: f.left }, 403)
+  }
+  // 第 11 轮 A2：并发首设两个请求都可能读到「没口令」，以前裸 INSERT 会撞主键给 500。
+  // 改成 ON CONFLICT DO NOTHING + 看 changes，抢输的那个老老实实报「已存在」。
+  const ins = await db.prepare("INSERT INTO settings (key, value) VALUES ('access_key', ?) ON CONFLICT(key) DO NOTHING").bind(await makeKeyRecord(k)).run()
+  if (changesOf(ins) === 0) return c.json({ error: '口令已存在，请用修改功能' }, 400)
   invalidateKey(db)
+  await authOk(db, ip)
   // 顺手给一个恢复码：忘了口令时能自救（只显示这一次）
   let code = ''
   try { code = await saveRecoverCode(db) } catch (e) { /* 忽略 */ }
+  try { await logAudit(db, '首次设置访问口令', '口令', '这个库第一次设口令' + (needTok ? '（凭安装令牌）' : '')) } catch (e) { /* 忽略 */ }
   return c.json({ ok: true, recover_code: code })
 })
 
@@ -1243,35 +1282,45 @@ app.post('/auth/recover', async (c) => {
   if (!saved) return c.json({ error: '这本账还没设口令，直接设一个就行', code: 'no_key' }, 400)
   const hRow = await db.prepare("SELECT value FROM settings WHERE key='recover_hash'").first().catch(() => null)
   if (!hRow || !hRow.value) return c.json({ error: '这本账还没设过恢复码，只能用原口令进', code: 'no_recover' }, 400)
+  // 老版本留的全局锁（settings 里的 recover_lock）仍然认，最多卡 10 分钟就会自愈
   const lockRow = await db.prepare("SELECT value FROM settings WHERE key='recover_lock'").first().catch(() => null)
   if (lockRow && lockRow.value) {
     const left = 10 * 60 * 1000 - (Date.now() - new Date(lockRow.value).getTime())
     if (left > 0) return c.json({ error: `试错太多次了，${Math.ceil(left / 60000)} 分钟后再试`, code: 'too_many' }, 429)
   }
+  const ip = clientIp(c)
+  // 第 11 轮 A4：试错计数以前只有 settings 里一个全局值 —— 陌生人从任意 IP 猜错 8 次，
+  // 真老板拿着正确恢复码也被锁在门外。改成按 IP 记（复用 auth_fails），全局那把只做兜底。
+  const wait = await authLocked(db, ip)
+  if (wait) return c.json(tooMany(wait), 429)
   const code = String(body.code || '').trim()
   const pw = String(body.password || '').trim()
   if (normCode(code).length < 8) return c.json({ error: '恢复码是 16 位，像 ABCD-EFGH-JKLM-NPQR 这样', code: 'bad_code' }, 400)
   const want = await hashCode(code)
   if (want !== String(hRow.value)) {
-    const fRow = await db.prepare("SELECT value FROM settings WHERE key='recover_fail'").first().catch(() => null)
-    const n = num(fRow && fRow.value) + 1
-    await setSettingRaw(db, 'recover_fail', n)
-    if (n >= 8) {
-      await setSettingRaw(db, 'recover_lock', new Date(Date.now() + 10 * 60 * 1000).toISOString())
-      await delSettingRaw(db, 'recover_fail')
-      return c.json({ error: '恢复码错了 8 次，先锁 10 分钟（防止别人乱试）', code: 'too_many' }, 429)
-    }
-    return c.json({ error: `恢复码不对（还能试 ${8 - n} 次）`, code: 'bad_code', left: 8 - n }, 403)
+    const f = await authFail(db, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return c.json({ error: `恢复码不对（这个设备还能试 ${f.left} 次）`, code: 'bad_code', left: f.left }, 403)
   }
   if (pw.length < 8) return c.json({ error: '新口令至少 8 位', code: 'bad_password' }, 400)
+  await authOk(db, ip)
   await setSettingRaw(db, 'access_key', await makeKeyRecord(pw))
   try { _signCache.delete(db) } catch (e) {}
   await delSettingRaw(db, 'recover_fail')
   await delSettingRaw(db, 'recover_lock')
-  await logAudit(db, '用恢复码重设口令', '口令', '恢复码验证通过，口令已重设').catch(() => {})
+  // 第 11 轮 A3：恢复码用一次就换新的。以前用成功只清试错计数、recover_hash 不动，
+  // 于是抄到那串码的人可以无限次把口令改回去，跟老板打拉锯战。
+  let newCode = ''
+  try { newCode = await saveRecoverCode(db) } catch (e) { /* 换不出来也不影响重设成功 */ }
+  await logAudit(db, '用恢复码重设口令', '口令', '恢复码验证通过，口令已重设' + (newCode ? '；旧恢复码作废，已换新码' : '')).catch(() => {})
   // 第 10 轮 A12：不再把新口令明文回显（回显一次就可能被截图/抄到聊天记录里）。
   // 用户自己刚输入的，他自己知道；前端直接用输入的值登录即可。
-  return c.json({ ok: true, key_saved: true })
+  return c.json({
+    ok: true,
+    key_saved: true,
+    recover_code: newCode,
+    recover_note: newCode ? '刚才那串恢复码已经作废了，这是新的（只显示这一次，抄下来）' : '',
+  })
 })
 
 const getStaffKey = async (db) => {
@@ -2010,7 +2059,11 @@ async function attRefVisible(c, db, refType, refId) {
       return await payableVisible(c, db, p)
     }
     return true
-  } catch (e) { return true }
+  } catch (e) {
+    // 第 11 轮 A6：判断不出来就当看不见（以前返回 true = 放行，一次查询抖动就能让员工翻到别人的照片）
+    noteFail(e, '照片归属判断')
+    return false
+  }
 }
 app.post('/attachments', async (c) => {
   const db = c.env.DB
@@ -2019,6 +2072,9 @@ app.post('/attachments', async (c) => {
   const refId = num(b.ref_id)
   if (!ATT_TYPES.includes(refType)) return c.json({ error: '不支持挂在这种东西上' }, 400)
   if (!refId) return c.json({ error: '缺单据号' }, 400)
+  // 第 11 轮 A6：读侧（GET /attachments、GET /attachment/:id）都有这道闸，写侧以前没有 ——
+  // 员工可以遍历单据号把照片挂到别人的客户/供应商上。写之前先确认这单他有权看。
+  if (!(await attRefVisible(c, db, refType, refId))) return c.json({ error: '单据不在了' }, 404)
   const b64 = String(b.b64 || '').replace(/^data:[^;]+;base64,/, '')
   if (!b64) return c.json({ error: '没有图片内容' }, 400)
   if (b64.length > ATT_MAX_CHARS) return c.json({ error: '这张图太大（压缩后还超过 650KB），换个角度再拍一张' }, 400)
@@ -4720,16 +4776,18 @@ app.get('/report-print', async (c) => {
   const yFrom = `${yr}-01`
   const R = "substr(created_at,1,7)>=? AND substr(created_at,1,7)<=?"
   const yAgg = ((await db.prepare(`SELECT
-    (SELECT COALESCE(SUM(price),0) FROM orders WHERE ${R}) yo,
-    (SELECT COALESCE(SUM(amount),0) FROM payables WHERE ${R}) yp,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ${COST_EXP_WHERE} AND ${R}) yce,
-    (SELECT COALESCE(SUM(COALESCE(cost,0)),0) FROM orders WHERE ${R}) ym,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='amort' AND ${R}) ya,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='dep' AND ${R}) yd,
-    (SELECT COALESCE(SUM(amount),0) FROM ledger WHERE ref_type='debt_int' AND ${R}) yac,
+    (SELECT ${SUM_MONEY('price')} FROM orders WHERE ${R}) yo,
+    (SELECT ${SUM_MONEY('amount')} FROM payables WHERE ${R}) yp,
+    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ${COST_EXP_WHERE} AND ${R}) yce,
+    (SELECT ${SUM_MONEY('COALESCE(cost,0)')} FROM orders WHERE ${R}) ym,
+    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='amort' AND ${R}) ya,
+    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='dep' AND ${R}) yd,
+    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='debt_int' AND ${R}) yac,
     -- 第 10 轮 C1：年度累计以前不扣坏账核销，而月度侧扣了 → 同一年「本月数」和「本年累计」口径不一致。
     -- 现在年度侧也扣，口径与 plOf 一致。
-    (SELECT COALESCE(SUM(amount),0) FROM writeoffs WHERE COALESCE(month,substr(created_at,1,7))>=? AND COALESCE(month,substr(created_at,1,7))<=?) yw`)
+    -- 第 11 轮 B3：这几项以前是裸 SUM(REAL)，而月度侧已经按分累加 → 多笔 0.01/0.03 时
+    -- 「本年累计」比逐月加总差一分。现在全部按分累加（SUM_MONEY 内部乘 100 取整再除回来）。
+    (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE COALESCE(month,substr(created_at,1,7))>=? AND COALESCE(month,substr(created_at,1,7))<=?) yw`)
     .bind(yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm, yFrom, mm).first()) || {})
   const yOrder = num(yAgg.yo); const yPayable = num(yAgg.yp); const yCashExp = num(yAgg.yce)
   const yMat = num(yAgg.ym); const yAmort = num(yAgg.ya); const yDep = num(yAgg.yd); const yAccrue = num(yAgg.yac)
@@ -5502,12 +5560,26 @@ app.post('/recon-fix-batch', async (c) => {
       done.push({ party, state, mode: 'error', error: String(e.message || e).slice(0, 80) })
     }
   }
-  await logAudit(db, '对账批量处理', type, `${month} 处理 ${done.length} 家，补记 ${added}，核销 ${cut}`)
+  await logAudit(db, '对账批量处理', type, `${month} 处理 ${done.length} 家，补记 ${added}，核销 ${cut}` + (done.some((x) => x.mode === 'error') ? '（有失败的）' : ''))
   const nAdd = done.filter((x) => x.mode === 'add' || x.mode === 'new').length
   const nCut = done.filter((x) => x.mode === 'cut').length
-  const text = `对账处理完：补记 ${nAdd} 家（共 ¥${added}）` + (nCut ? `，核销差额 ${nCut} 家（共 ¥${cut}）` : '') + (skipped ? `，跳过 ${skipped} 家` : '') + '。'
-  await opMark(db, cidFix, 'recon-fix', 0)
-  return c.json({ ok: true, month, type, count: done.length, added, cut, skipped, n_add: nAdd, n_cut: nCut, rows: done, text })
+  // 第 11 轮 B6：以前某一家的 DB 写失败只 push 一条 mode:'error'，响应照样 ok:true 并 opMark，
+  // 于是「这家没处理」被静默固化：用户按成功重试时又被判重复请求，再也补不上。
+  const errs = done.filter((x) => x.mode === 'error')
+  let text = `对账处理完：补记 ${nAdd} 家（共 ¥${added}）` + (nCut ? `，核销差额 ${nCut} 家（共 ¥${cut}）` : '') + (skipped ? `，跳过 ${skipped} 家` : '') + '。'
+  if (errs.length) {
+    text = `对账只处理了一部分：成功 ${done.length - errs.length} 家，另有 ${errs.length} 家写库失败（${errs.slice(0, 3).map((x) => x.party).join('、')}${errs.length > 3 ? '…' : ''}）。失败的那几家请再点一次「处理差异」。`
+    if (cidFix) await opRelease(db, cidFix, 'recon-fix')
+  } else {
+    await opMark(db, cidFix, 'recon-fix', 0)
+  }
+  return c.json({
+    ok: errs.length === 0,
+    partial: errs.length > 0,
+    code: errs.length ? 'partial' : 'ok',
+    month, type, count: done.length, added, cut, skipped, n_add: nAdd, n_cut: nCut,
+    rows: done, errors: errs.slice(0, 20), text,
+  })
 })
 
 // 月度对账小结：这个月和谁对过、差多少、补了几笔、还有谁没对，一页说清
@@ -6794,11 +6866,14 @@ app.post('/party-merge', async (c) => {
     if (num(hit && hit.n) + num(hit2 && hit2.n) > 0) { await pmRelease(); return c.json({ error: `${month} 已结账锁定，这个月的单据名字先别改（可以换个月或先解锁）` }, 403) }
   }
   const counts = {}
+  // 第 11 轮 B6：以前每张表失败只记 counts[label]=-1，接口照样 ok:true + opMark，
+  // 于是「合并只改了一半」被当成功固化下来，用户重试又被判重复请求 —— 剩下的表永远改不到。
+  const pmFailed = []
   const step = async (label, sql, ...args) => {
     try {
       const r = await db.prepare(sql).bind(...args).run()
       counts[label] = (r.meta && r.meta.changes != null) ? r.meta.changes : 0
-    } catch (e) { counts[label] = -1 }
+    } catch (e) { counts[label] = -1; pmFailed.push(label); noteFail(e, '合并/改名·' + label) }
   }
   await step('应收单', 'UPDATE orders SET customer=? WHERE customer=?', to, from)
   await step('应付单', 'UPDATE payables SET supplier=? WHERE supplier=?', to, from)
@@ -6814,17 +6889,26 @@ app.post('/party-merge', async (c) => {
     if (hasDst) {
       const r = await db.prepare(`DELETE FROM ${table} WHERE party=?`).bind(from).run().catch(() => null)
       counts[label] = (r && r.meta && r.meta.changes) || 0
+      if (!r) pmFailed.push(label)
       counts[label + '(删源留目标)'] = counts[label]
     } else {
       const r = await db.prepare(`UPDATE ${table} SET party=? WHERE party=?`).bind(to, from).run().catch(() => null)
       counts[label] = (r && r.meta && r.meta.changes) || 0
+      if (!r) pmFailed.push(label)
     }
   }
   const moved = Object.keys(counts).reduce((s, k) => s + Math.max(0, counts[k] || 0), 0)
-  await logAudit(db, '合并/改名', to, `${from} → ${to}（动了 ${moved} 处）`, '', act(c))
-  await opMark(db, cidPM, 'party-merge', 0)
-  return c.json({ ok: true, from, to, counts, moved,
-    note: `已把「${from}」全部改成「${to}」，动了 ${moved} 处。以后记账都用新名字，对账就不会再分成两家。` })
+  await logAudit(db, '合并/改名', to, `${from} → ${to}（动了 ${moved} 处）` + (pmFailed.length ? `；没改成：${pmFailed.join('、')}` : ''), '', act(c))
+  if (pmFailed.length) {
+    if (cidPM) await opRelease(db, cidPM, 'party-merge')
+  } else {
+    await opMark(db, cidPM, 'party-merge', 0)
+  }
+  return c.json({ ok: pmFailed.length === 0, partial: pmFailed.length > 0, code: pmFailed.length ? 'partial' : 'ok',
+    from, to, counts, moved, failed: pmFailed,
+    note: pmFailed.length
+      ? `只改了一部分：「${from}」→「${to}」已经动了 ${moved} 处，但 ${pmFailed.join('、')} 没改成功。请再点一次（系统会接着把剩下的改完）。`
+      : `已把「${from}」全部改成「${to}」，动了 ${moved} 处。以后记账都用新名字，对账就不会再分成两家。` })
 })
 
 // 钱的三条线：客户先给的（预收）/ 员工借支未清 / 外面借的钱——首页一屏看清
@@ -9789,10 +9873,23 @@ app.post('/auth/super', async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   if (!(await getKey(mainDb))) return c.json({ error: '主账套还没设口令，先设主账套口令' }, 400)
+  // 第 11 轮 A5：这条路由在公开分支里（/auth/* 早退），以前可以无限猜主口令/超级口令。
+  // 现在跟 /auth/change 一样先查锁、错了计数、成功了清计数。
+  const ip = clientIp(c)
+  const wait = await authLocked(mainDb, ip)
+  if (wait) return c.json(tooMany(wait), 429)
   const givenKey = String(b.key || c.req.header('x-access-key') || '')
   const okOwner = await verifyKey(mainDb, givenKey)
   const okSuper = okOwner ? false : await verifySetting(mainDb, 'super_key', givenKey)
-  if (!okOwner && !okSuper) return c.json({ error: '只有主账套老板口令（或现有超级口令）能改这个' }, 403)
+  if (!okOwner && !okSuper) {
+    const f = await authFail(mainDb, ip)
+    if (f.locked) {
+      await logAudit(mainDb, '超级口令试错过多', '超级管理员', '同一台设备连续猜错，已临时锁 10 分钟', '', '陌生人').catch(() => {})
+      return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    }
+    return c.json({ error: '只有主账套老板口令（或现有超级口令）能改这个', code: 'bad_key', left: f.left }, 403)
+  }
+  await authOk(mainDb, ip)
   const pw = String(b.password || '').trim()
   if (pw && pw.length < 6) return c.json({ error: '超级口令至少 6 位（它管所有账套，要比普通口令长一点）' }, 400)
   if (pw && (await verifyKey(mainDb, pw))) return c.json({ error: '超级口令不能和主账套口令一样' }, 400)
@@ -9815,9 +9912,18 @@ app.post('/auth/super', async (c) => {
 app.post('/auth/super-state', async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  // 第 11 轮 A5：这条也能当「猜口令」的探针用，一起限流
+  const ip = clientIp(c)
+  const wait = await authLocked(mainDb, ip)
+  if (wait) return c.json(tooMany(wait), 429)
   const gk = String(b.key || c.req.header('x-access-key') || '')
   const ok = (await verifyKey(mainDb, gk)) || (await verifySetting(mainDb, 'super_key', gk))
-  if (!ok) return c.json({ error: '只有主账套老板口令或超级口令能看' }, 403)
+  if (!ok) {
+    const f = await authFail(mainDb, ip)
+    if (f.locked) return c.json(tooMany(AUTH_LOCK_MS / 1000), 429)
+    return c.json({ error: '只有主账套老板口令或超级口令能看', code: 'bad_key', left: f.left }, 403)
+  }
+  await authOk(mainDb, ip)
   return c.json({ ok: true, enabled: await superKeyOn(mainDb) })
 })
 
@@ -13495,8 +13601,13 @@ app.post('/quick', async (c) => {
   if (!(await opClaim(db, cidQ, 'quick'))) return c.json({ ok: true, dup_ok: true })
   const qRun = (stmt) => stmt.run().catch(async (e) => { await opRelease(db, cidQ, 'quick'); throw e })
   const cats = ['工资', '水电', '房租', '采购', '辅料', '运费', '维修', '税金', '其他']
+  // 第 11 轮 B1：quickBy 以前声明在「收」那个分支里，下面三个 else if 分支引用它 →
+  // 「付水电100」「工资5000」这类文本直接 ReferenceError（500），而且 opClaim 已占坑、
+  // 坑要等 60 秒才被清，重试会被判成重复请求。现在提到分支外，并整段兜住异常。
+  const quickBy = act(c)
   let summary = ''
   let warn = ''
+  try {
   if (/收/.test(s)) {
     const name = rest.replace(/[收收到到自从]/g, '').replace(/[的了给]/g, '').trim() || '客户'
     // 这一支建的是「新开一张应收单」，不是「收到钱」。
@@ -13510,7 +13621,6 @@ app.post('/quick', async (c) => {
     } catch (e) { noteFail(e, '一句话记账查欠款') }
     // 员工一句话记账也要记上「谁记的」：不写 created_by 的话，
     // staff_self_only='1' 下这张单既不属于员工、也不在老板的 created_by 口径里 → 账上出现「无主单据」。
-    const quickBy = act(c)
     await qRun(db.prepare('INSERT INTO orders (customer, item_name, price, status, paid, created_at, created_by) VALUES (?,?,?,0,0,?,?)')
       .bind(name, '一句话记账', amount, t, quickBy))
     summary = `新开一张应收单：${name} ${amount} 元（欠款变成 ${round2(owed + amount)}）`
@@ -13537,6 +13647,11 @@ app.post('/quick', async (c) => {
   } else {
     await opRelease(db, cidQ, 'quick')
     return c.json({ error: '没识别出收/付/分类，请写如：张老板加工费5000、付货款3000、工资5000' }, 400)
+  }
+  } catch (e) {
+    // 第 11 轮 B1：写库中途抛错也要把幂等坑放掉，不然同一个 client_id 重试会被当成重复请求吞掉
+    await opRelease(db, cidQ, 'quick').catch(() => {})
+    throw e
   }
   await logAudit(db, '一句话记账', '', summary, '', act(c))
   await opMark(db, cidQ, 'quick', 0)
@@ -15555,22 +15670,46 @@ app.get('/trend', async (c) => {
     d.setUTCMonth(d.getUTCMonth() - i)
     mons.push(d.toISOString().slice(0, 7))
   }
-  // 性能：原来每个月 3 次查询（6 个月 18 次串行，4.6 秒），改成 3 次分组查询（约 1 秒）
+  // 性能：原来每个月 3 次查询（6 个月 18 次串行，4.6 秒），改成 3 次分组查询（约 1 秒）。
+  // 第 11 轮 B4：这三条以前只算「接单 − 材料 − 现金费用」，不扣摊销/折旧/预提利息/坏账核销，
+  // 于是趋势页的「净利」跟首页、月报（都走 plOf）对不上 —— 同一个词两套数。
+  // 现在分组查询里把 plOf 的四项都算进来，公式与 plOf 完全一致（金额一律按分累加）。
   const jobs = [
-    db.prepare('SELECT month mk, COALESCE(SUM(price),0) a, COALESCE(SUM(COALESCE(cost,0)),0) c FROM orders WHERE month>=? GROUP BY mk').bind(mons[0]).all(),
-    db.prepare(`SELECT substr(created_at,1,7) mk, COALESCE(SUM(CASE WHEN ${COST_EXP_WHERE} THEN amount ELSE 0 END),0) o, COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) i FROM ledger WHERE cash=1 AND month>=? GROUP BY mk`).bind(mons[0]).all()
-  ].map((x) => x.catch((e) => { noteFail(e); return null }))
-  const [oR, lR] = await Promise.all(jobs)
+    db.prepare(`SELECT month mk, ${SUM_MONEY('price')} a, ${SUM_MONEY('COALESCE(cost,0)')} c FROM orders WHERE month>=? GROUP BY mk`).bind(mons[0]).all(),
+    db.prepare(`SELECT month mk,
+      ${SUM_MONEY('CASE WHEN ' + COST_EXP_WHERE + ' THEN amount ELSE 0 END')} o,
+      ${SUM_MONEY("CASE WHEN ref_type='amort' THEN amount ELSE 0 END")} amort,
+      ${SUM_MONEY("CASE WHEN ref_type='dep' THEN amount ELSE 0 END")} dep,
+      ${SUM_MONEY("CASE WHEN ref_type='debt_int' THEN amount ELSE 0 END")} accr,
+      ${SUM_MONEY('CASE WHEN direction=\'in\' AND cash=1 AND ' + CASH_EXCLUDE + ' THEN amount ELSE 0 END')} i
+      FROM ledger WHERE month>=? GROUP BY mk`).bind(mons[0]).all(),
+    db.prepare(`SELECT COALESCE(month,substr(created_at,1,7)) mk, ${SUM_MONEY('amount')} w
+      FROM writeoffs WHERE COALESCE(month,substr(created_at,1,7))>=? GROUP BY mk`).bind(mons[0]).all()
+  ].map((x) => x.catch((e) => { noteFail(e, '趋势'); return null }))
+  const [oR, lR, wR] = await Promise.all(jobs)
   const rowsOf = (r) => (r && r.results) || []
-  const oMap = {}, eMap = {}, iMap = {}
+  const oMap = {}, eMap = {}, iMap = {}, adjMap = {}, wMap = {}
   for (const x of rowsOf(oR)) { oMap[x.mk] = x.a; eMap[x.mk] = x.c }
-  for (const x of rowsOf(lR)) { eMap[x.mk + '#e'] = x.o; iMap[x.mk] = x.i }
+  for (const x of rowsOf(lR)) {
+    eMap[x.mk + '#e'] = x.o
+    iMap[x.mk] = x.i
+    adjMap[x.mk] = round2(num(x.amort) + num(x.dep) + num(x.accr))
+  }
+  for (const x of rowsOf(wR)) wMap[x.mk] = x.w
   const rows = []
   for (const m of mons) {
     const add = round2(num(oMap[m]))
     const cost = round2(num(eMap[m]))
     const expense = round2(num(eMap[m + '#e']))
-    rows.push({ m, label: num(m.slice(5, 7)) + '月', order_add: add, cost, gross: round2(add - cost), expense, profit: round2(add - cost - expense), cash_in: round2(num(iMap[m])) })
+    const adj = round2(num(adjMap[m]))
+    const wo = round2(num(wMap[m]))
+    rows.push({
+      m, label: num(m.slice(5, 7)) + '月', order_add: add, cost, gross: round2(add - cost),
+      expense, adj, writeoff: wo,
+      // 与 plOf 的 profit_accrual 同一公式：接单 − 材料 − 现金费用 − (摊销+折旧+预提) − 坏账核销
+      profit: round2(add - cost - expense - adj - wo),
+      cash_in: round2(num(iMap[m])),
+    })
   }
   const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.profit)))
   rows.forEach((r) => { r.bar_w = Math.max(2, Math.round(Math.abs(r.profit) / maxAbs * 100)); r.neg = r.profit < 0 })
@@ -16238,7 +16377,7 @@ async function yearBook(db, y) {
       COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) recv,
       COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) pay,
       COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
-      COALESCE(SUM(CASE WHEN cash=1 AND ref_type IN ('amort','dep','accrual') THEN amount ELSE 0 END),0) adj
+      COALESCE(SUM(CASE WHEN ${ADJ_EXP_WHERE} THEN amount ELSE 0 END),0) adj
       FROM ledger WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all(),
     // 现金余额：期初（账户期初 + 该年之前的流水）
     db.prepare(`SELECT COALESCE((SELECT SUM(COALESCE(opening,0)) FROM accounts),0) AS opening,
@@ -17070,13 +17209,14 @@ app.get('/year-summary', async (c) => {
     db.prepare(`SELECT month mk, ${SUM_MONEY('price')} add_, ${SUM_MONEY('COALESCE(cost,0)')} cst FROM orders WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all().catch((e) => { noteFail(e, '年度汇总'); return { results: [] } }),
     // 第 10 轮 C1：年度逐月利润以前不扣坏账核销，与月报口径不一致 → 这里补一条按月的核销合计
     db.prepare(`SELECT COALESCE(month,substr(created_at,1,7)) mk, ${SUM_MONEY('amount')} wo FROM writeoffs WHERE substr(COALESCE(month,substr(created_at,1,7)),1,4)=? GROUP BY mk`).bind(y).all().catch((e) => { noteFail(e, '年度汇总·坏账'); return { results: [] } }),
+    // 第 11 轮 B5：这六项以前是裸 SUM(REAL)，而月度页面已经按分累加 → 年度汇总与月报差几分钱。
     db.prepare(`SELECT substr(created_at,1,7) mk,
-      COALESCE(SUM(CASE WHEN direction='in' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) inc,
-      COALESCE(SUM(CASE WHEN direction='out' AND cash=1 AND ${CASH_EXCLUDE} THEN amount ELSE 0 END),0) outt,
-      COALESCE(SUM(CASE WHEN ${CASH_EXP_WHERE} THEN amount ELSE 0 END),0) exp,
-      COALESCE(SUM(CASE WHEN direction='out' AND cash=0 AND ref_type='dep' THEN amount ELSE 0 END),0) dep,
-      COALESCE(SUM(CASE WHEN direction='out' AND cash=0 AND ref_type='amort' THEN amount ELSE 0 END),0) amort,
-      COALESCE(SUM(CASE WHEN direction='out' AND cash=0 AND ref_type='debt_int' THEN amount ELSE 0 END),0) accr
+      ${SUM_MONEY("CASE WHEN direction='in' AND cash=1 AND " + CASH_EXCLUDE + " THEN amount ELSE 0 END")} inc,
+      ${SUM_MONEY("CASE WHEN direction='out' AND cash=1 AND " + CASH_EXCLUDE + " THEN amount ELSE 0 END")} outt,
+      ${SUM_MONEY('CASE WHEN ' + CASH_EXP_WHERE + ' THEN amount ELSE 0 END')} exp,
+      ${SUM_MONEY("CASE WHEN direction='out' AND cash=0 AND ref_type='dep' THEN amount ELSE 0 END")} dep,
+      ${SUM_MONEY("CASE WHEN direction='out' AND cash=0 AND ref_type='amort' THEN amount ELSE 0 END")} amort,
+      ${SUM_MONEY("CASE WHEN direction='out' AND cash=0 AND ref_type='debt_int' THEN amount ELSE 0 END")} accr
       FROM ledger WHERE substr(created_at,1,4)=? GROUP BY mk`).bind(y).all().catch((e) => { noteFail(e, '年度汇总'); return { results: [] } })
   ])
   const oMap = {}, lMap = {}, wMap = {}
@@ -19458,7 +19598,19 @@ const sha256Hex = async (s) => {
 async function readBackupContent(db, id) {
   const row = await db.prepare('SELECT id, content, size, sha256, parts, created_at FROM backups WHERE id=?').bind(num(id)).first()
   if (!row) return null
-  if (row.content) return row
+  // 第 11 轮 E1：整块存的（小备份）以前直接 return，完全跳过 sha 校验 ——
+  // 也就是说「被改过/传坏的整块备份」会当成好的拿去恢复。现在整块也核对。
+  if (row.content) {
+    if (row.sha256) {
+      const h0 = await sha256Hex(row.content)
+      if (h0 !== row.sha256) {
+        const err = new Error('这份备份的内容被改动过（校验对不上），已拒绝读取，别拿它恢复')
+        err.code = 'backup_corrupt'
+        throw err
+      }
+    }
+    return row
+  }
   const parts = (await db.prepare('SELECT data FROM backup_parts WHERE bid=? ORDER BY seq').bind(num(id)).all().catch(() => ({ results: [] }))).results || []
   const content = parts.map((x) => x.data).join('')
   // 第 10 轮 D2：以前缺一片就少一截字符串，恢复出来是「不完整但成功」的数据，账面永远对不平。
@@ -19997,7 +20149,16 @@ app.get('/backup-timeline', async (c) => {
 app.get('/backup-verify', async (c) => {
   const db = c.env.DB
   const row = await db.prepare('SELECT id, created_at, COALESCE(NULLIF(length(content),0), size) AS size FROM backups ORDER BY id DESC LIMIT 1').first().catch(() => null)
-  const rowContent = row ? await readBackupContent(db, row.id) : null
+  // 第 11 轮 E2：整块/分片的 sha 校验失败会抛 backup_corrupt。
+  // 以前这里没接住 → 整页 500；接住了又固定 ok:true → 「这份备份脏了」也显示绿灯。
+  let rowContent = null
+  let corrupt = false
+  if (row) {
+    try { rowContent = await readBackupContent(db, row.id) } catch (e) {
+      corrupt = true
+      noteFail(e, '备份校验')
+    }
+  }
   if (!row) return c.json({ ok: true, has: false, usable: false, text: '还没有任何备份。报表页点一次「立即备份」，以后就能回到这一天。' })
   let d = null
   try { d = JSON.parse((rowContent && rowContent.content) || '') } catch (e) { d = null }
@@ -20037,10 +20198,11 @@ app.get('/backup-verify', async (c) => {
   } catch (e) { dbTables = [] }
   const known = new Set(probe)
   const uncovered = dbTables.filter((t) => !known.has(t))
-  const usable = !!d && BACKUP_CORE.every((t) => Array.isArray(d[t]))
+  const usable = !!d && !corrupt && BACKUP_CORE.every((t) => Array.isArray(d[t]))
   const days = daysSince(String(row.created_at || '').slice(0, 10))
   const size = num(row.size)
   const warns = []
+  if (corrupt) warns.push('这份备份的校验对不上（内容被改动或分片不完整），不能用来恢复，请重新备份一份')
   const failedIn = d && Array.isArray(d.failed) ? d.failed : []
   if (failedIn.length) warns.push('这份备份导出时有 ' + failedIn.length + ' 张表没读出来（' + failedIn.map((x) => x.table).join('、') + '），恢复时这几块会是空的——请重新备份一次')
   if (!usable) warns.push('这份备份内容坏了（不是有效 JSON 或缺账目），恢复不了')
@@ -20057,7 +20219,10 @@ app.get('/backup-verify', async (c) => {
       (missing.length ? ' 但它是旧格式，缺 ' + missing.length + ' 类数据（工钱、材料这些会遇到空账）。' : ' 备份覆盖 ' + covered + ' 张表，账目和家底都在里面。') +
       (drift ? ' 和现在比有 ' + drift + ' 类数量不一样（备份之后又记了新东西，正常）。' : ' 和现在完全一致。') +
       ' 另有 ' + skipped.length + ' 张表按设计不进备份（下面写了原因）。'
-  return c.json({ ok: true, has: true, usable, id: row.id, at: row.created_at, days_ago: days, size, version: (d && d.version) || 1,
+  // 「能恢复」才是真的 ok：能用 + 导出时没缺表 + 校验没过。以前固定 ok:true，
+  // 前端看到 ok 就画绿勾，脏备份也照绿 —— 这就是「看着放心，恢复才知道坏了」的来源。
+  const okAll = usable && !failedIn.length
+  return c.json({ ok: okAll, has: true, usable, corrupt, id: row.id, at: row.created_at, days_ago: days, size, version: (d && d.version) || 1,
     tables, missing, skipped, uncovered, covered, drift_count: drift, warns, notice: BACKUP_NOTICE, text })
 })
 
@@ -21918,7 +22083,16 @@ export default {
     // 首页按时段统计、按月查账全部少一块，自检还会天天报「单据没记上月份」。
     // ensureMonthCols 自己有 PRAGMA 判断，列齐了就只剩两三条查询，每个 isolate 一次。
     try { await ensureMonthCols(db) } catch (e) { noteFail(e, '补月份兜底') }
-    return als.run({ fails: [] }, () => app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx))
+    const resp = await als.run({ fails: [], claims: [] }, () => app.fetch(req, { ...env, DB: db, BOOK: book, ENV_ALL: env }, ctx))
+    // 第 11 轮 B7：这一趟以 5xx 收场（handler 抛异常，或者 finally 里没放坑），
+    // 把还挂着的幂等坑放掉 —— 否则用户重试会被当成「重复请求」，这一笔就永远记不上。
+    if (resp && resp.status >= 500) {
+      const s2 = als.getStore()
+      for (const cl of ((s2 && s2.claims) || [])) {
+        try { await opRelease(cl.db, cl.cid, cl.kind) } catch (e) {}
+      }
+    }
+    return resp
   },
   // 每天 UTC 16:00（北京时间 0 点）自动备份一次，并同步推送到笔记站
   scheduled: async (event, env, ctx) => {

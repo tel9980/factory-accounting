@@ -52,19 +52,28 @@ for (const b of targets) {
   if (dry) { console.log('· 会补 ' + label); okNames.push(b.database_name); continue }
   const r = spawnSync('npx', ['wrangler', 'd1', 'execute', b.database_name, '--remote', '--file=' + SCHEMA], {
     cwd: BACKEND, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    // 第 11 轮 F3：以前没超时。wrangler 卡在网络上时这一步会一直挂着，整个 job 被拖到 6 小时上限。
+    timeout: 180000,
   })
   const out = String(r.stdout || '') + String(r.stderr || '')
   if (r.status === 0) {
     console.log('✅ ' + label + ' 表结构已补齐')
     okNames.push(b.database_name)
   } else {
-    // 只把「已经存在」当成功跳过（例如触发器/索引重名），其余错误要显眼
-    if (/already exists/i.test(out)) {
-      console.log('✅ ' + label + ' 表结构已是最新（重复执行被跳过）')
+    // 第 11 轮 F3：以前「输出里出现过 already exists」就整条当成功 ——
+    // 一条无关的重名错误会把「别的表根本没建」一起盖住，演示账没表也是绿的。
+    // 现在逐行看：每一行报错都必须是「已经存在」，只要有一行是别的原因就算失败。
+    const errLines = out.split('\n').map((x) => x.trim()).filter((x) => /error|错误|failed/i.test(x))
+    const realErr = errLines.filter((x) => !/already exists|已存在/i.test(x))
+    if (r.error && r.error.code === 'ETIMEDOUT') {
+      console.log('❌ ' + label + ' 超时（180 秒没跑完）')
+      failed.push(b.database_name)
+    } else if (!realErr.length && errLines.length) {
+      console.log('✅ ' + label + ' 表结构已是最新（' + errLines.length + ' 条「已存在」被跳过）')
       okNames.push(b.database_name)
     } else {
       console.log('❌ ' + label + ' 补表结构失败')
-      console.log(out.split('\n').slice(-12).join('\n'))
+      console.log((realErr.length ? realErr : out.split('\n')).slice(-12).join('\n'))
       failed.push(b.database_name)
     }
   }

@@ -21,6 +21,10 @@
       <view class="tip" wx:if="{{key_mode=='set'}}">这是你自己定的记账口令（至少 4 位），不是微信密码。设好记牢，忘了可以用恢复码重设。</view>
       <view class="tip" wx:else>老板给你的那个口令。忘了就点下面的「用恢复码」。</view>
       <input class="inp" password placeholder="{{key_mode=='set'?'设置口令（至少 4 位）':'输入口令'}}" value="{{key_input}}" bindinput="onKeyInput"/>
+      <!-- 第 11 轮 A1：自己用 Cloudflare 部署时，后端会生成一串「安装令牌」（写在部署日志摘要里）。
+           第一次设口令必须带上它，否则谁先打开这个地址，谁就能把口令设成自己的。
+           本机版 / 没配令牌的部署：这栏留空直接设就行。 -->
+      <input class="inp" wx:if="{{key_mode=='set'}}" placeholder="安装令牌（没用 Cloudflare 部署就留空）" value="{{key_install}}" bindinput="onKeyInstall"/>
       <view class="keyerr" wx:if="{{key_err}}">{{key_err}}</view>
       <button class="btn" bindtap="submitKey">{{key_mode=='set'?'设好，开始记账':'进入'}}</button>
       <view class="keydemo" wx:if="{{demo_builtin!==false}}" bindtap="enterDemoLook">👀 先看看演示（不用口令，示例数据）</view>

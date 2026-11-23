@@ -30,6 +30,14 @@ on:
       - 'scripts/**'
       - 'server/**'
       - '.github/**'
+      # 第 11 轮 F10：下面这些以前只在 push 触发，改 Dockerfile / 文档里的数字
+      # 走 PR 时压根不跑 CI，合进去才发现红。
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'docs/**'
+      - 'README.md'
+      - 'DEPLOYMENT.md'
+      - 'SECURITY.md'
   workflow_dispatch:
 
 # 同一分支上连续 push 时取消旧的部署，避免老版本后落地把生产回退。
@@ -425,6 +433,26 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
 
+      # 第 11 轮 A1：安装令牌。库里还没有 access_key 时，谁先打开这个地址、
+      # 谁就能 POST /auth/setup 把口令设成自己的 —— 从「部署完成」到「老板第一次设口令」
+      # 之间有一个真实的窗口。配了这个 secret 之后，第一次设口令必须带上它。
+      # 没配就跳过（自建/本机版走 IP 限流就够了，不强迫大家多记一串东西）。
+      - name: 设安装令牌（配了 secret 才设）
+        if: steps.token.outputs.can == 'true' && steps.deploy.outcome == 'success'
+        working-directory: backend
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: fb907fe08010a1b319f68be568331ce5
+          INSTALL_TOKEN_VALUE: ${{ secrets.INSTALL_TOKEN }}
+        run: |
+          if [ -z "${INSTALL_TOKEN_VALUE:-}" ]; then
+            echo "· 没配 INSTALL_TOKEN secret：跳过（第一次设口令只受 IP 限流保护）"
+            exit 0
+          fi
+          printf '%s' "$INSTALL_TOKEN_VALUE" | npx wrangler secret put INSTALL_TOKEN || {
+            echo "::warning title=安装令牌没设上::wrangler secret put 失败，第一次设口令仍只受 IP 限流保护"; exit 0; }
+          echo "✅ 安装令牌已设：第一次设口令时要填 GitHub 里那个 INSTALL_TOKEN"
+
       # 迁移已经在「部署到 Cloudflare」之前跑完了（迁移失败 → 直接红，线上不上线）。
       # 所以这里不再重复跑一遍。
 
@@ -564,4 +592,14 @@ jobs:
             echo ""
             echo "部署后体检没过，线上已退回上一版。commit：\`${{ github.sha }}\`"
             echo "先看这次 run 的日志定位，再决定重新部署还是本地手工 deploy。"
+            echo ""
+            echo "### 注意：数据库结构不会跟着回滚"
+            echo ""
+            echo "这次 push 里的迁移（\`backend/migrations/*.sql\`）**已经跑在远程 D1 上了**，"
+            echo "\`wrangler rollback\` 只回滚 Worker 代码，不回滚建表/加列/加索引。"
+            echo "也就是说：旧代码 + 新表结构。只加列/加索引的迁移对旧代码无害（旧代码不读新列），"
+            echo "但如果这次迁移里有改类型、删列、改名，必须手工处理。"
+            echo ""
+            echo "本次迁移文件：\`$(ls backend/migrations/*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')\`"
+            echo "已跑过的迁移记录：\`npx --prefix backend wrangler d1 execute factory-db --remote --command \"SELECT name, applied_at FROM migrations\"\`"
           } >> "$GITHUB_STEP_SUMMARY"

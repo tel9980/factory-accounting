@@ -8,7 +8,7 @@
 //   node scripts/cli.mjs diag   [--base URL] [--key K] [--book N]   一键诊断（转发给 diag.mjs）
 //   node scripts/cli.mjs reset  [--base URL] [--key K] --yes        清空账本（危险，必须 --yes）
 //   node scripts/cli.mjs backups [--base URL] [--key K]            列最近的备份
-//   node scripts/cli.mjs restore <id> [--base URL] [--key K] --yes 回到某份备份（危险，必须 --yes）
+//   node scripts/cli.mjs restore <id> [--book N] [--base URL] [--key K] --yes 回到某份备份（危险，必须 --yes）
 //   node scripts/cli.mjs errors  [--base URL] [--key K] [--days 7] 看最近的报错
 //   node scripts/cli.mjs migrate [--base URL] --yes               跑远程 D1 迁移（改库，必须 --yes）
 // BASE/KEY 可以用环境变量给：FA_BASE / FA_KEY（命令行参数优先，其次环境变量，最后默认值）。
@@ -91,20 +91,39 @@ async function main() {
     if (!rows.length) { console.log('（还没有备份）'); process.exit(0) }
     console.log('最近 ' + rows.length + ' 份备份：')
     for (const b of rows) console.log('  #' + b.id + '  ' + (b.created_at || b.at || '') + '  ' + (b.size ?? '?') + ' 字节  第' + (b.book || '1') + '本账')
-    console.log('恢复其中一份：node scripts/cli.mjs restore <id> --yes')
+    // 第 11 轮 E3：备份 id 每本账各自从 1 数。提示里以前不带账套号，
+    // 照着抄进 restore 就会拿第 2 本的 #5 去覆盖第 1 本的 #5（完全不同的两份账）。
+    const first = rows[0] || {}
+    console.log('恢复其中一份：node scripts/cli.mjs restore <id> --book ' + (first.book || '1') + ' --yes')
     process.exit(0)
   }
 
   if (cmd === 'restore') {
     const id = Number(process.argv[3])
-    if (!id) { console.log('❌ 要写明恢复哪一份备份：node scripts/cli.mjs restore <id> --yes'); process.exit(1) }
+    if (!id) { console.log('❌ 要写明恢复哪一份备份：node scripts/cli.mjs restore <id> --book N --yes'); process.exit(1) }
     if (!process.argv.includes('--yes')) {
       console.log('❌ 恢复会用备份覆盖现在的账目（不可逆，只剩快照能退）。确认要恢复就在命令末尾加 --yes。')
       process.exit(1)
     }
-    const r = await post('/backup-restore', { id, confirm: '覆盖' })
+    // 第 11 轮 E3：恢复必须带上是「哪本账的备份」。
+    // 不给 --book 就从备份列表里查出这份 id 属于哪本（查不到就拒绝，绝不猜成第 1 本）。
+    let book = arg('book')
+    if (!book) {
+      const lr = await get('/backup-list')
+      const rows2 = Array.isArray(lr.d) ? lr.d : (lr.d && lr.d.rows) || []
+      const hit = rows2.filter((x) => Number(x.id) === id)
+      if (hit.length === 1) book = hit[0].book || '1'
+      else if (hit.length > 1) {
+        console.log('❌ 备份 #' + id + ' 在多本账里都存在，要写明是哪一本：--book N（先跑 backups 看「第N本账」）')
+        process.exit(1)
+      } else {
+        console.log('❌ 备份列表里没有 #' + id + '，先跑 backups 看有哪些（也可以加 --book N 指定账套）')
+        process.exit(1)
+      }
+    }
+    const r = await post('/backup-restore', { id, confirm: '覆盖', book: String(book) }, { book: String(book) })
     if (r.status >= 400) return fail('恢复失败 HTTP ' + r.status, r.d)
-    console.log('✅ 已恢复到备份 #' + id)
+    console.log('✅ 已恢复第 ' + book + ' 本账到备份 #' + id)
     process.exit(0)
   }
 
@@ -133,7 +152,7 @@ async function main() {
 function usage() {
   console.log('本机版运维 CLI —— 用法：node scripts/cli.mjs <命令> [--base URL] [--key K] [--book N]')
   console.log('  命令：status | backup | cron | clean [--days N] | diag | reset --yes')
-  console.log('        backups | restore <id> --yes | errors [--days N] | migrate --yes')
+  console.log('        backups | restore <id> --book N --yes | errors [--days N] | migrate --yes')
   console.log('  BASE/KEY 也可用环境变量给：FA_BASE / FA_KEY')
 }
 function fail(msg, d) {

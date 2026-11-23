@@ -1292,6 +1292,19 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.41 第 11 轮的八条硬规矩（都是「看着没问题、出事才发现」那类）
+
+这些都是踩过的坑，写下来是因为**下次很容易顺手改回去**：
+
+1. **「验证 / 体检」类接口的 `ok` 不许写死**。`/backup-verify` 曾经固定 `ok:true`（`usable` 只由几个 core 数组决定），而整块存的备份在 `readBackupContent` 里 `if (row.content) return row` **直接跳过 sha 校验** —— 脏备份一路绿灯，界面画绿勾，真去恢复才发现坏了。现在：整块与分片都核对 sha256（不符抛 `err.code='backup_corrupt'`），`ok = usable && !failedIn.length`，坏包给 `corrupt:true` 和明白话。**凡是 `ok`/`usable`/`canClose` 这种「能放心用」的字段，必须由实际检查结果推出来。**
+2. **任何「占坑 / 锁」类幂等，请求异常结束必须自动放**。`opClaim` 占到坑后，之前靠每个 handler 自己记得 `opRelease`；`/quick` 的 `quickBy` 未定义直接 ReferenceError，坑停在 `ref_id=-1`，用户重试被当「重复请求」回 `ok:true` —— **那一笔永远没记上，而且越点越像成功**。现在 `opClaim` 把坑登记进本请求的 `AsyncLocalStorage` 桶（`claimTrack`），`opMark`/`opRelease` 销账，`fetch` 末尾发现 `status >= 500` 就把还挂着的坑放掉。**新增 opClaim 路由不用再加 try/finally，但失败必须返回非 2xx**（返回 200 + `ok:false` 不会放坑）。
+3. **恢复码是万能钥匙：用后必须换**。`/auth/recover` 以前重设成功只清计数，不作废 `recover_hash` → 拿到纸条/截图的人可以反复改口令把老板锁死。现在成功即轮换（纯文本新码只回一次，前端弹窗让人抄）。试错计数也必须是**按 IP**（`clientIp` + `authFail/authOk`），不能只留一个全局值 —— 否则陌生人连错 8 次就能把真主人锁 10 分钟。
+4. **`/auth/*` 全部要限流**。`path.startsWith('/auth/')` 在鉴权中间件里是公开早退，所以 `/auth/setup`（首设口令）、`/auth/recover`、`/auth/super`、`/auth/staff` 这些**每个 handler 自己就是门**。新增这类接口时必须自己 `clientIp + authLocked + authFail`，并且首设要 `INSERT ... ON CONFLICT DO NOTHING` 再判 `changesOf`（两个人同时首设不许 500、也不许互相顶掉）。云上部署建议配 `INSTALL_TOKEN` secret：第一次设口令要带令牌，否则「部署完成 → 老板第一次设口令」之间谁先打开地址谁就能设成自己的。
+5. **前端金额一律 `toAmount()` / `amtOf()`，禁止 `Number(x) || 默认值`**。这类写法在「1,200」「1.2万」「abc」上分别变成 NaN → 默认值：退回余款会退成整笔、整户付款会付成 0 或旧值。**解析不出来必须明确拦下**（toast 说清），不许静默取默认。
+6. **离线队列必须记「这笔是哪本账的」**。`enqueueOp` 要写 `op.book`，`flushPending` 只发本账的（别的原样留着并提示），`switchBook` 要连 `_tabSeq/_tabReqSeq/_keyQueue/_askingKey` 一起清。否则在一厂记的账，切到二厂联网就记进二厂 —— 这类串账错得很安静，对账时才发现，且很难倒推。
+7. **迁移必须能在「老库」上跑通，而且命令在仓库根目录**。`backend/migrations/*.sql` 要能重复跑（`ALTER TABLE ADD COLUMN` 的 `duplicate column name` 由 `migrations-lib.mjs` 当幂等跳过），`scripts/check.mjs` [4.12] 会把迁移里所有 `ADD COLUMN` 都「假装老库没这列」真跑一遍。**`docs/RUNBOOK.md` 里的急救命令一律从仓库根目录写**（`node scripts/d1-seed-schema.mjs && node scripts/d1-migrate.mjs`），别写 `cd backend && node scripts/…` —— 那里没有 `scripts/`，照抄必然 No such file。
+8. **回滚不回滚数据库**。`deploy.yml` 的迁移跑在部署之前（迁移失败就红、不上线），所以自动回滚时线上是「旧代码 + 新表结构」。只加列/加索引对旧代码无害，但**改类型/删列/改名必须人工处理**；回滚 step 的摘要里会列出本次迁移文件和 `migrations` 表的查询命令。另外：`python3 -c "import yaml,…"` 校验过的 workflow 才允许提交，PR 触发也要覆盖 Dockerfile/文档（改文档走 PR 以前压根不跑 CI）。
+
 ### 4.40 演示入口必须「不设口令就能进」（微信审核驳回项之二）
 
 审核要求是**「不许必须先注册/先设口令才能看到任何东西」**。所以演示这条路有两个硬约束，别改回去：

@@ -282,12 +282,24 @@ async function main() {
   const files = {}
   for (let i = 1; i <= BOOKS; i++) files[bookBindingOf(i)] = path.join(dataDir, bookFileOf(i))
   const dbs = {}
+  // 第 11 轮 F9：DB / DB2 / DB3 … → 1 / 2 / 3
+  const numOfBook = (k) => Number(String(k).replace(/\D/g, '')) || 1
   for (const k of Object.keys(files)) {
     dbs[k] = new LocalD1(files[k])
     const r = await ensureSchema(dbs[k], schemaSql)
     if (r.after !== r.before) console.log(`  ${k} 建好 ${r.after - r.before} 张表（共 ${r.after} 张）`)
     if (r.added && r.added.length) console.log(`  ${k} 老库补上 ${r.added.length} 个列：` + r.added.slice(0, 8).join('、') + (r.added.length > 8 ? ' …' : ''))
-    for (const f of r.failed || []) console.log(`  ⚠️ ${k} 有一个列没补上（不影响启动，但那一列的数据读不到）：` + f)
+    for (const f of r.failed || []) {
+      console.log(`  ⚠️ ${k} 有一个列没补上（不影响启动，但那一列的数据读不到）：` + f)
+      // 第 11 轮 F9：以前只打在控制台里。本机版是双击 exe 跑的，
+      // 窗口一关什么都看不到，界面上也没有「这台机器的库缺列」的地方。
+      // 现在同时写一条 error_log，界面的「设置 → 数据体检 → 运行日志」能看到。
+      try {
+        dbs[k].prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,?,?)')
+          .bind(numOfBook(k), 'BOOT', 'schema', 0, ('老库补列失败：' + f).slice(0, 300), 0, new Date(Date.now() + 8 * 3600 * 1000).toISOString())
+          .run()
+      } catch (e) { /* 连 error_log 都写不进去就只留控制台 */ }
+    }
   }
 
   const env = {
@@ -489,6 +501,12 @@ async function main() {
           stamps.delete(sl.key) // 出错就把戳撤掉，下一轮重试
           saveStamp(stamps)
           console.log('  [定时] 出错（不影响记账）：' + String((e && e.message) || e))
+          // 第 11 轮 F9：定时任务失败也要留痕，否则「今天没自动摊销」在界面上永远查不到原因
+          try {
+            (dbs[Object.keys(dbs)[0]]).prepare('INSERT INTO error_log (book,method,path,status,msg,ms,created_at) VALUES (?,?,?,?,?,?,?)')
+              .bind(1, 'CRON', (sl.key || 'cron').split('|')[1] || 'cron', 0, ('定时任务失败：' + String((e && e.message) || e)).slice(0, 300), 0, new Date(Date.now() + 8 * 3600 * 1000).toISOString())
+              .run()
+          } catch (e2) { /* 同上 */ }
         }
       }
       running = false

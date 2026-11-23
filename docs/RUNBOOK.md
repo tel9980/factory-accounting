@@ -24,14 +24,18 @@ gh run view <run-id> --log-failed     # 只看失败那几步的日志
 | 现象 | 原因 | 怎么做 |
 |---|---|---|
 | `❌ 这次 push 没有部署到线上` | 仓库没配 `CF_API_TOKEN` secret | GitHub 仓库 → Settings → Secrets → 加 `CF_API_TOKEN`（Cloudflare API Token，要 D1 Edit 权限）；加完重新 push 或手动重跑 workflow |
-| `❌ 迁移失败`（在线上迁移那一步） | 远程 D1 迁移跑挂了 | 见下面第 3 节，本机跑 `node scripts/d1-migrate.mjs` 单独看是哪条语句失败 |
+| `❌ 迁移失败`（在线上迁移那一步） | 远程 D1 迁移跑挂了 | 见下面第 3 节，在仓库根目录跑 `node scripts/d1-seed-schema.mjs && node scripts/d1-migrate.mjs` 单独看是哪条语句失败 |
 | `体检没过就自动回滚` | 部署后的体检（`/schema-check`、接口冒烟）没过，CI 已自动 `wrangler rollback` | 看 `## 线上表结构与接口体检` 那段摘要，按第 2 节查线上 500 |
 
 **手动重跑线上迁移**（CI 里那一步失败时用）：
 
 ```bash
-cd backend && npx wrangler d1 execute factory-db --remote --command "SELECT name FROM migrations"
-node scripts/d1-migrate.mjs            # 读 wrangler.toml 里的全部 d1 绑定，逐条语句跑，已跑过的跳过
+# 注意：这两个脚本都在**仓库根目录**的 scripts/ 下，不要 cd 进 backend（那里没有 scripts/）。
+# 第 11 轮 F6：以前这里写成 `cd backend && node scripts/d1-migrate.mjs`，照抄必然 No such file。
+cd <仓库根目录>
+npx --prefix backend wrangler d1 execute factory-db --remote --command "SELECT name FROM migrations"
+node scripts/d1-seed-schema.mjs        # 先补表结构（幂等：已存在的全部跳过）
+node scripts/d1-migrate.mjs            # 再跑迁移：读 wrangler.toml 里的全部 d1 绑定，逐条语句跑，已跑过的跳过
 node scripts/d1-migrate.mjs --force    # 忽略 migrations 记录重跑一遍（幂等）
 ```
 

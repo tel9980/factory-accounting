@@ -391,11 +391,16 @@ console.log('\n[4.9] 文档表数')
     ...(fs.existsSync(path.join(ROOT, 'docs')) ? fs.readdirSync(path.join(ROOT, 'docs')).filter((f) => f.endsWith('.md')).map((f) => 'docs/' + f) : []),
   ]
   // 只盯「新装时建几张表」这种当前口径的句子；编年史里「当时是 54/56/57 张」是历史记录，不拦。
+  // 第 11 轮 F8：以前只认「建全/建库/自动建好/建出全部」，Dockerfile 里写的是
+  // 「首次启动要建 60 张表」—— 句式不在名单里就永远检不到（数字刚好对才没暴露）。
+  // 现在把「要建 / 创建」也算进来。
   const docChecks = [
     /建全\s*(\d+)\s*张表/g,
     /建库\s*(\d+)\s*张表/g,       // 「确认建库 N 张」也命中这条
     /自动建好\s*(\d+)\s*张表/g,
     /建出全部\s*(\d+)\s*张表/g,
+    /要建\s*(\d+)\s*张表/g,
+    /创建\s*(\d+)\s*张表/g,
   ]
   let bad9 = 0
   for (const rel of scopeFiles) {
@@ -426,6 +431,8 @@ console.log('\n[4.12] 迁移在老库上干跑')
     const { listMigrations, splitStatements, runStatement } = await import('./migrations-lib.mjs')
     let err = null
     let addedCols = []
+    const addColsSkipped = []
+    const renamed = []
     try {
       const { DatabaseSync } = await import('node:sqlite')
       const old = new DatabaseSync(':memory:')
@@ -433,6 +440,29 @@ console.log('\n[4.12] 迁移在老库上干跑')
       // 模拟「老版本 schema」：把两列改名（老库里就没这些新列的名字）
       old.exec('ALTER TABLE orders RENAME COLUMN written_off TO old_written_off')
       old.exec('ALTER TABLE payables RENAME COLUMN written_off TO old_written_off')
+      // 第 11 轮 F7：以前只模拟 orders/payables 的 written_off，
+      // 0002 里那句 `ALTER TABLE writeoffs ADD COLUMN month` 其实是「新库里已经有这列」，
+      // 干跑能过只是因为「重复列」被当成幂等跳过 —— 等于这条迁移从没被真跑过一次。
+      // 现在把所有迁移里的 ADD COLUMN 都扒出来，能在不影响索引/触发器的前提下先改名，
+      // 让它们真的走一遍「老库没这列」的路径。
+      const addCols = []
+      for (const f of listMigrations(migDir)) {
+        const src0 = fs.readFileSync(f.path, 'utf8')
+        for (const m of src0.matchAll(/ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)/gi)) {
+          const t = m[1]; const col = m[2]
+          if (t === 'orders' || t === 'payables') continue
+          addCols.push({ t, col })
+        }
+      }
+      for (const { t, col } of addCols) {
+        try {
+          old.exec(`ALTER TABLE ${t} RENAME COLUMN ${col} TO old_${col}`)
+          renamed.push(t + '.' + col)
+        } catch (e) {
+          // 被索引/触发器引用时 SQLite 不许改名 —— 跳过并说明，不假装测过
+          addColsSkipped.push(t + '.' + col)
+        }
+      }
       for (const f of listMigrations(migDir)) {
         for (const stmt of splitStatements(fs.readFileSync(f.path, 'utf8'))) {
           const r = runStatement((x) => old.exec(x), stmt)
@@ -442,6 +472,11 @@ console.log('\n[4.12] 迁移在老库上干跑')
       for (const t of ['orders', 'payables']) {
         const cols = old.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name)
         addedCols.push(t + ':' + (cols.includes('written_off') ? '有' : '缺'))
+      }
+      for (const { t, col } of addCols) {
+        if (!renamed.includes(t + '.' + col)) continue
+        const cols = old.prepare(`PRAGMA table_info(${t})`).all().map((c) => c.name)
+        addedCols.push(t + '.' + col + ':' + (cols.includes(col) ? '有' : '缺'))
       }
       const miss = addedCols.filter((x) => x.endsWith('缺'))
       if (miss.length) throw new Error('迁移跑完了但列还没补上：' + miss.join('、'))
@@ -455,7 +490,9 @@ console.log('\n[4.12] 迁移在老库上干跑')
     } catch (e) {
       err = e
     }
-    say(!err, `${migFiles.length} 个迁移文件在老库上跑通（含第二遍幂等复跑）`, `迁移在老库上跑挂了：${err ? err.message : ''}`)
+    const extra = renamed.length ? `，另模拟了 ${renamed.length} 个新增列（${renamed.join('、')}）` : ''
+    const skipNote = addColsSkipped.length ? `（${addColsSkipped.join('、')} 被索引/触发器引用，没法改名模拟）` : ''
+    say(!err, `${migFiles.length} 个迁移文件在老库上跑通（含第二遍幂等复跑）${extra}${skipNote}`, `迁移在老库上跑挂了：${err ? err.message : ''}`)
   }
 }
 
