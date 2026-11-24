@@ -1303,6 +1303,15 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.48 第 18 轮（网页端）的六条硬规矩
+
+1. **服务端内联页也必须过手机这一关**：改 `A4_CSS` / `a4Page` 之后，用 375px 宽度打开对账单、工资单、经营报表各看一遍 —— 全仓只有 `@media print` 没有屏幕断点 11 个月，手机上正文只剩 248px 却没人发现（老板以为「网页版就这样」）。同理：**藏列只许藏序号/签字这类非金额列**，金额列在手机上再挤也得留（藏了等于藏账）。
+2. **微信里没有 `window.print()`**：任何打印按钮都要先判 `/MicroMessenger/i` 并给出「右上角「…」→ 在浏览器打开」的三步说明，别再指望用户自己猜到。
+3. **URL 里带签名的页面一律 `Cache-Control: no-store` + `Referrer-Policy: no-referrer`**。前者防「链接过期后按后退还能看金额」，后者防 URL 里的 `t=` 漏给下一个站点。判据用 `/[?&]t=/.test(search)`，写在 `applyEtag` 里（那里是唯一统一出口）。
+4. **内联页拼 HTML 时，用户数据只许进 `data-*` 或文本节点，不许拼进 `onclick="fn('…')"`**：`/pc` 员工按钮以前就是这个写法，名字里一个引号按钮就点不动、甚至能借属性注入脚本。用 `esc()` 写进 `data-name` + 事件委托。
+5. **模板字面量里的正则要写双反斜杠**：`` `…replace(/\B(?=(\d{3})+(?!\d))/g, ',')` `` —— 单反斜杠会被模板吃掉（`\B`→`B`、`\d`→`d`），不报错、只是功能静默失效（数字不再千分位）。**表达式箭头**（`(c) => c.html(\`…\`)`）结尾只能 `` `)) ``，多一个 `}` 会报 `missing ) after argument list` 且指向模板最后一行，极难定位。
+6. **新开一个「给人看」的页面，要同时确认它在公开路径白名单里**（`backend/index.js` 的 `if (path === '/' || …)`，在 `applyEtag` 前面那个中间件里）。漏了就是 401，而且本地用口令头测不出来 —— 必须**不带任何头**直接 GET 那个 URL 才算验过（`/statements-print` 第一次就漏了）。
+
 ### 4.47 第 17 轮的七条硬规矩（「保险丝也要有人验」与「屏幕上看不出来的错」）
 
 1. **`if:` 里引用了 `steps.*.outputs`，就必须显式写状态函数**（`always()` / `failure()` / `success()`），或者在该 step 里注明 `fail-fast`。GitHub 会给带自定义 `if:` 的 step 隐式 AND 一个 `success()` —— 于是「体检没过就回滚」这种步骤，**永远等不到它该跑的那一刻**。`check.mjs [4.18]` 会拦。

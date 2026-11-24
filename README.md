@@ -1734,6 +1734,21 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+360. ✅ **第 18 轮：网页端从「能打开」做到「手机上看得清、打印拿得出手、电脑前真能看账」**（用户「网页端可以优化吗」→「按方案全部由你来完成」，方案见 `docs/优化方案-20261124-网页端.md`）。这一轮改的全是 `backend/index.js` 里那些内联页，账上的算法一行没动：
+    - **手机上终于不挤了**：`A4_CSS` 以前只有一个 `@media print`，**零个屏幕断点** —— 375px 宽的手机上，`body{padding:18px}` + `.sheet{padding:14mm 12mm}` 之后正文只剩约 248px，7 列的对账单每列 35px，「本期已收」这种表头必换行、金额挤成竖条。现在加了 `@media screen and (max-width:760px)`：padding 收到 8px/14px、表格 11.5px、按钮条 `position:sticky` 钉在顶部（滚动时一直能点「打印」）、`.m-hide` 类的次要列在手机上隐藏 —— **只藏序号和签字这类列，金额列一列都不藏**（藏了等于藏账）。
+    - **微信里打不了印这件事终于说清楚了**：微信内置浏览器不弹打印框，13 个打印页里只有对账单写过一句提示。现在 `a4Page` 统一处理：微信里按钮文案变成「微信里不能打印 · 点这里看怎么办」，点了给三步说明（右上角「…」→ 在浏览器打开 → 打印）；另外加了个「🔗 复制本页链接」按钮（`navigator.clipboard` → `execCommand` → `prompt` 三级兜底），发群里给人看不用再找链接。
+    - **15 个错误页从「一行 h3」变成能照着做的页**：新增 `errorPage({title, why, how, code})` —— 说清为什么失效（这类链接 7 天作废）、回小程序点哪里重新生成、下面附一句「有疑问直接打电话问老板」。以前那些 `<h3>链接已失效</h3>` 在手机上又小又没下一步。
+    - **批量打对账单**（老板最常干的事）：`/statement-print` 的算法抽成 `statementSheetData()`，新增 `/statements-print-link?month=&parties=a,b` + 公开页 `/statements-print`，一次最多 20 家，每家一页（`page-break-after:always`），一条打印条「🖨 打印全部 N 家」。签名覆盖「月份 + 这家的名单」（`bulk:<month>:<排序后名单>`），改一家名字整批失效。
+    - **电脑端终于能看账了：`/desk`**（以前 `/pc` 只有导入导出和账套管理，老板在电脑前还得掏手机）：口令与 `/pc` 共用 `localStorage.fa_key`，先打 `/me` 判老板身份（员工看到「这个页面只有老板能看」），然后 5 张大卡（本月利润权责 / 本月收款 / 逾期没收回 / 手头现金 / 最大客户占比）+ 逾期清单（可勾选 → 「🖨 打印勾选的对账单」）+ 「📄 看这个月的报表」+ 最近单据。
+    - **安全头**：签名页（URL 带 `t=`）一律 `Cache-Control: no-store`（链接过期后按浏览器「后退」还能看到金额，以前就是这样）、`Referrer-Policy: no-referrer`（URL 里就是签名 token，别漏给下一个站点）、`X-Robots-Tag: noindex,nofollow,noarchive`、`X-Frame-Options: DENY`，全站补 `X-Content-Type-Options: nosniff`。
+    - **数字统一千分位**：新增全局 `fmtMoney()`（`1,234,567.89`），4 处本地 `money()` 与 4 处本地 `esc()` 全部改成全局别名 —— 以前同一张单子上「¥8000.00」和「¥8,000.00」两种写法混着出现。
+    - **长表打印更整齐**：年度总账 / 经营报表 / 体检报告补 `<thead>`+`<tfoot>`（跨页时表头跟着走、合计压在页尾），`tr{page-break-inside:avoid}`、`thead{display:table-header-group}`、`tfoot{display:table-footer-group}`，表头下加 2px 实线（黑白打印机上分得清）。**别指望 `@page` 页码**：Chrome 不支持 `@page` 的 margin box，提示改成「要页码就在打印对话框里勾「页眉和页脚」」。
+    - **`/pc` 上传与员工管理**：`accept` 加 `.xls` 但读之前先说「这是老格式，用 Excel 另存为 .xlsx」（以前读到一半报「读不了这个文件」）；`FileReader.onprogress` 显示「正在读文件 N%」；员工「换口令/删」按钮从 `onclick="…&quot;名字&quot;…"` 改成 `data-name` + 事件委托（名字里有一个引号按钮就点不动，甚至能借属性注入脚本）。
+    - **客户确认页记得上一回**：`/statement-ack` 现在会查 `statement_log` 里最近一条 ack，打开就显示「您已于 2026-11-24 21:46 确认「对得上」」，提交后按钮置灰并显示提交时间（以前刷新还显示按钮，客户会反复点）。
+    - **踩到的两个坑**（都会静默出错，记在这里）：①**模板字面量里的正则反斜杠会被吃掉** —— `/desk` 页的 `\B(?=(\d{3})+(?!\d))` 写进模板后输出成 `/B(?=(d{3})+(?!d))/g`，不报错、只是数字不再千分位，必须写双反斜杠；②`app.get('/desk', (c) => c.html(\`…\`))` 这类**表达式箭头**结尾只能 \`))\`，多写一个 `}` 会报 `SyntaxError: missing argument list` 且报在模板最后一行（看起来像是字符串没闭合）。
+    - **验证**：`run-all` 43/43、`test-cron` 70 项、`check.mjs` 全绿、`check-manifest` 三处一致、`check-live` 本机 17 项；手工抽查：对账单页 5 个安全头齐全 + `no-store`、批量页 200/6656B/「打印全部 1 家」、改名单即失效、确认页二次打开有横幅、`/desk` 的 `money()` 输出 `1,234,567.89`、经营报表/年度总账/体检报告都有 `thead`。
+    - ⚠️ 网页端改动**不用重传小程序**（都是服务端页面），但客户手里的旧打印链接没变、不用重发。
+
 359. ✅ **第 17 轮审计：把「发布链路从来没验过」和「屏幕上看不出来的错」一起修掉**（用户「好的，继续，最后跑模拟数据，查漏补缺」）。三路只读审计报上来 41 条，逐条回代码核实后按 A–F 六组、五批做完。这一轮最要紧的不是某个数算错，而是**三道保险其实都是空的**：
     - **CI 的「体检没过就自动回滚」从来没执行过**：`deploy.yml` 那句 `if: steps.health.outputs.bad == 'true' && …` 没写 `always()`，GitHub 会给带自定义 `if:` 的 step 隐式 AND 一个 `success()`；而 `bad=true` 只有体检步「先写标记再 `exit 1`」才产生 —— 那一刻 job 已经红了，回滚步必然 skipped。同一个毛病还让「验版本」「版本比对」「线上报错巡检」一起被跳过：**部署成功后任何一步红，就没人验、没人回滚、没人看线上有没有新 5xx**，而三份文档都写着「会自动回滚」。现在这 4 个 step 全部 `always()`，`check.mjs` 新增 `[4.18]` 检查「带 `steps.*.outputs` 的 `if:` 必须显式写状态函数或标 `fail-fast`」。
     - **首页「这半年收了多少钱」永远是 0**：`/kpi` 的 SQL 查了 `cin`/`cout`，JS 里 `lMap[x.mk] = { c, ad }` 只搬了两列 → `cash_in`/`cash_out`/`profit`/`margin` 全恒 0，不报错也不降级。
@@ -2169,7 +2184,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 435 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 438 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2560,7 +2575,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（232）
+**其它（单个接口）**（235）
 
 - `GET /`
 - `GET /access-guide`
@@ -2620,6 +2635,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `POST /db-clean`
 - `GET /db-stats`
 - `GET /delivery-plan`
+- `GET /desk`
 - `POST /detect-import`
 - `GET /dispute-book`
 - `GET /disputes`
@@ -2756,6 +2772,8 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /statement-month`
 - `GET /statement-pack`
 - `GET /statement-print`
+- `GET /statements-print`
+- `GET /statements-print-link`
 - `GET /suggest`
 - `GET /supply-price`
 - `GET /target-forecast`

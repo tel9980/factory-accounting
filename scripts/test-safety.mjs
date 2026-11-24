@@ -291,8 +291,11 @@ console.log('\n[12] 作废所有已发出的打印链接')
   eq('能生成对账单链接', !!(l1.d && l1.d.url), true)
   const oldUrl = String((l1.d || {}).url || '')
   const oldPath = oldUrl.replace(/^https?:\/\/[^/]+/, '')
+  // 第 18 轮：错误页换成了正经页面（说清为什么失效、回小程序点哪里），
+  // 不再有一句固定的「链接已失效或已过期」。用页面里的机器标记判，别依赖文案。
+  const isErrPage = (t) => /<meta name="fa-error"/.test(t)
   const o1 = await fetch(BASE + oldPath).then((r) => r.text()).catch(() => '')
-  eq('刚生成的链接能打开', o1.indexOf('链接已失效或已过期') < 0, true)
+  eq('刚生成的链接能打开', !isErrPage(o1), true)
 
   // 不带确认不许作废（防误点）
   const bad = await call('POST', '/sign-secret-rotate', {})
@@ -304,13 +307,13 @@ console.log('\n[12] 作废所有已发出的打印链接')
   eq('作废接口回 ok', !!(rot.d && rot.d.ok), true)
 
   const o2 = await fetch(BASE + oldPath).then((r) => r.text()).catch(() => '')
-  eq('作废之后旧链接打不开', o2.indexOf('链接已失效或已过期') >= 0, true)
+  eq('作废之后旧链接打不开', isErrPage(o2), true)
 
   // 新生成的链接必须照常能用（别一把锁把功能全关死）
   const l2 = await call('GET', '/statement-link?type=ar&party=' + encodeURIComponent(party))
   const newPath = String((l2.d || {}).url || '').replace(/^https?:\/\/[^/]+/, '')
   const o3 = newPath ? await fetch(BASE + newPath).then((r) => r.text()).catch(() => '') : ''
-  eq('换完密钥新链接能打开', !!newPath && o3.indexOf('链接已失效或已过期') < 0, true)
+  eq('换完密钥新链接能打开', !!newPath && !isErrPage(o3), true)
 
   // 员工口令不许作废链接（只有老板能）
   const staffTry = await call('POST', '/sign-secret-rotate', { confirm: true }, null)

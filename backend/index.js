@@ -1678,7 +1678,18 @@ async function applyEtag(c, noTransform) {
     h.set('ETag', etag)
     // 打印页额外加 no-transform：Cloudflare 一旦压缩响应就会把 ETag 摘掉（线上实测），
     // 这些页面就几 KB，重复打开时 304 比压缩更省。
-    if (noTransform) h.set('Cache-Control', 'no-cache, no-transform')
+    // 第 18 轮 C3：带签名的公开页（URL 里有 ?t=）改成 no-store —— 这类页面上是客户名+金额，
+    // 链接过期后不该还能靠浏览器「后退」看到；普通页（/、/pc、/guide）保持 no-cache 走 304。
+    const signedPage = /[?&]t=/.test(new URL(c.req.url).search || '')
+    if (noTransform) h.set('Cache-Control', signedPage ? 'no-store' : 'no-cache, no-transform')
+    // 第 18 轮 C3：以前这些头一个都没有。URL 里带签名 token，页面里只要有一个外链
+    //（现在是 tel:，将来可能有地图/二维码图片），Referer 就把签名送给了对方站点。
+    if (/text\/html/i.test(ct)) {
+      h.set('Referrer-Policy', 'no-referrer')
+      h.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
+      h.set('X-Frame-Options', 'DENY')
+    }
+    h.set('X-Content-Type-Options', 'nosniff')
     const inm = c.req.header('if-none-match') || ''
     const hit = inm && (inm.trim() === '*' || inm.split(',').some((x) => x.trim() === etag))
     c.res = hit ? new Response(null, { status: 304, headers: h }) : new Response(body, { status: 200, headers: h })
@@ -1690,7 +1701,7 @@ app.use('*', async (c, next) => {
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
   // /version 放在口令外面：部署完不用口令就能确认线上跑的是哪一版（它不返回任何账目数据）
   if (path === '/version') return c.json({ ok: true, version: String((c.env && c.env.APP_VERSION) || 'dev'), built: String((c.env && c.env.APP_BUILT) || ''), commit: String((c.env && c.env.APP_COMMIT) || ''), ray: c.req.header('cf-ray') || '' })
-  if (path === '/' || path === '/pc' || path === '/guide' || path.startsWith('/auth/') || path === '/statement-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') {
+  if (path === '/' || path === '/pc' || path === '/desk' || path === '/guide' || path.startsWith('/auth/') || path === '/statement-print' || path === '/statements-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print') {
     // 公开页（打印/对账/报价）只靠签名校验，本来就在鉴权中间件里早退，
     // 结果老板关了模块之后，带旧链接的人照样能打开看到数据 → 这里补一道模块开关检查。
     // （封存 sealed 只锁「改账」，GET 照常，所以不拦打印页。）
@@ -3318,16 +3329,17 @@ app.get('/payroll-print', async (c) => {
   if (!good || linkExpired(expP)) return c.html(a4Page({ title: '链接已失效', body: '<h1>链接已失效</h1><p>工资单链接 24 小时后失效（以前是永久有效，谁拿到就能一直看）。回小程序重新点「打工资单」重新生成。</p>' }))
   const p = await payrollOf(db, mm)
   const head = await getTitle(db)
-  const money = (n) => Number(n || 0).toFixed(2)
+  const money = fmtMoney // 第 18 轮 C2：统一用全局 fmtMoney（千分位），不再各页自己的 toFixed
   // 第 10 轮 A7：借支明细属于个人隐私，工资单只给汇总（还差多少），不给每个人的借支数字。
-  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n">${r.cnt}</td><td class="n">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${r.deduct > 0.005 ? money(r.deduct) : ''}</td><td class="n">${money(r.net)}</td><td class="n"></td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell"></td></tr>`).join('')
+  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n m-hide">${r.cnt}</td><td class="n m-hide">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${r.deduct > 0.005 ? money(r.deduct) : ''}</td><td class="n">${money(r.net)}</td><td class="n m-hide"></td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell m-hide"></td></tr>`).join('')
   const pageBody = `<h1>计件工资表</h1>
 <div class="meta"><span>${escHtml(head.title || '')}</span><span>月份：${mm}</span><span>人数：${p.people}</span></div>
-<table><thead><tr><th>工人</th><th class="n">笔数</th><th class="n">件数</th><th class="n">应发</th><th class="n">扣款</th><th class="n">实发</th><th class="n"></th><th class="n">已发</th><th class="n">还差</th><th>签字</th></tr></thead>
+<table><thead><tr><th>工人</th><th class="n m-hide">笔数</th><th class="n m-hide">件数</th><th class="n">应发</th><th class="n">扣款</th><th class="n">实发</th><th class="n m-hide"></th><th class="n">已发</th><th class="n">还差</th><th class="m-hide">签字</th></tr></thead>
 <tbody>${trs || '<tr><td colspan="10">这个月没有记工记录</td></tr>'}</tbody>
 <tfoot><tr class="total"><td>合计</td><td class="n">${p.rows.reduce((s, r) => s + r.cnt, 0)}</td><td class="n">${p.rows.reduce((s, r) => s + r.qty, 0)}</td><td class="n">${money(p.total)}</td><td class="n">${p.deduct_total > 0.005 ? money(p.deduct_total) : ''}</td><td class="n">${money(p.net_total)}</td><td></td><td class="n">${money(p.paid_total)}</td><td class="n">${money(p.left_total)}</td><td></td></tr></tfoot></table>
 <p class="tip">算法：应发 = 本月每笔记工（件数 × 单价）之和；扣款 = 宿舍水电、宿舍租金这类厂里先付给房东、再从工资里扣回来的钱；实发 = 应发 − 扣款；已发 = 本月发工资记的支出；还差 = 实发 − 已发。个人借支明细不在这张表上显示，需要请老板单独核对。</p>`
-  return c.html(a4Page({ title: `${mm} 计件工资表`, body: pageBody, sign: '<span>制表人</span><span>发款人</span><span>日期</span>' }))
+  // 第 18 轮 F2：打印页要能「有问题找到人」—— 以前只有对账单有电话。
+  return c.html(a4Page({ title: `${mm} 计件工资表`, body: pageBody, sign: '<span>制表人</span><span>发款人</span><span>日期</span>', tip: `${escHtml(head.title || '')}${head.phone ? '　工资有疑问打 ' + escHtml(head.phone) : '　工资有疑问直接找老板核对'}　数据截至 ${escHtml(now().slice(0, 10))}` }))
 })
 
 // 这周的钱够不够付：未来 N 天要付的 vs 账上现金 + 该收的
@@ -3579,7 +3591,7 @@ app.get('/track', async (c) => {
   const totalOpen = docs.reduce((a, d) => a + Math.max(0, num(d.price) - paidOf(d) - num(d.written_off)), 0)
   const totalAll = docs.reduce((a, d) => a + num(d.price), 0)
   const totalPaid = docs.reduce((a, d) => a + paidOf(d), 0)
-  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]))
+  const esc = escHtml // 第 18 轮 C2：统一用全局 escHtml（原来这里有 4 份复制，其中一份不转引号）
   const dnum = (a, b) => {
     const da = new Date(String(a || '').slice(0, 10) + 'T00:00:00Z'), db2 = new Date(String(b || '').slice(0, 10) + 'T00:00:00Z')
     return Math.round((db2 - da) / 86400000)
@@ -3618,7 +3630,7 @@ app.get('/track', async (c) => {
     '<tr><td><b>期末欠</b></td><td style="text-align:right"><b style="color:#c0392b">¥' + round2(concl.end) + '</b></td></tr></table>' +
     '<div class="sub" style="margin-top:6px">数字对不上就直接打电话，别憋着。</div></div>' : ''
   const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>' + esc(t.title || '') + ' 对账明细</title><style>body{margin:0;background:#f4f5f7;font-family:-apple-system,"PingFang SC",sans-serif;color:#222}' +
+    '<meta name="color-scheme" content="light only"><meta name="robots" content="noindex,nofollow">' + FAVICON_LINK + '<title>' + esc(t.title || '') + ' 对账明细</title><style>body{margin:0;background:#f4f5f7;font-family:-apple-system,"PingFang SC",sans-serif;color:#222}' +
     '.wrap{max-width:640px;margin:0 auto;padding:14px}.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:10px}' +
     'h1{font-size:17px;margin:0 0 4px}.sub{color:#888;font-size:13px}.big{font-size:26px;font-weight:700;color:#c0392b}' +
     'table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 4px;border-bottom:1px solid #eee;vertical-align:top}' +
@@ -3784,9 +3796,9 @@ app.get('/handover-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expH = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'handover', 'ho', expH) : ''
-  if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成交接包。</h3>')
+  if (!good || want !== good || linkExpired(expH)) return c.html(errorPage({ title: '这个交接包的链接已经失效', why: '这种链接 7 天后自动作废（防止被转发出去一直能看）', how: '回小程序 → <b>账本 → 交接包</b> → 点「重新生成链接」。' }))
   const d = await handoverData(db, c.env)
-  const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const esc = escHtml // 第 18 轮 C2：原来这份不转双引号，进属性就是 XSS 口子，统一
   const body = d.sections.map((s) => `<h2>${esc(s.title)}</h2><ul>${s.lines.map((l) => '<li>' + esc(l) + '</li>').join('')}</ul>`).join('')
   return c.html(a4Page({
     title: `账本交接包 ${d.today}`,
@@ -3801,10 +3813,28 @@ ul{margin:0 0 6px;padding-left:20px} li{margin:3px 0}`,
 
 // ===== 统一打印版式（对账单 / 月报 / 交接包 / 以后的任何 A4 页共用一套样式）=====
 const escHtml = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]))
+// 第 18 轮 A4：网页上显示的金额统一走这里（千分位 + 两位小数）。
+// 以前每页自己 Number().toFixed(2)，「1234567.89」印出来没有分隔符，
+// 客户在手机小屏上数位数容易看错一位 —— 对账单上这种错会变成纠纷。
+// 第 18 轮 F5：网页端一直没有图标，加到手机桌面/浏览器标签上是个白方块。
+// 用内联 SVG（不占额外请求、不依赖静态资源托管）。
+const FAVICON_LINK = '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 32 32\'%3E%3Crect width=\'32\' height=\'32\' rx=\'7\' fill=\'%231f6feb\'/%3E%3Crect x=\'7\' y=\'9\' width=\'18\' height=\'3\' rx=\'1.5\' fill=\'%23fff\'/%3E%3Crect x=\'7\' y=\'15\' width=\'18\' height=\'3\' rx=\'1.5\' fill=\'%23fff\' opacity=\'.8\'/%3E%3Crect x=\'7\' y=\'21\' width=\'11\' height=\'3\' rx=\'1.5\' fill=\'%23fff\' opacity=\'\'.6\'/%3E%3C/svg%3E">'
+
+const fmtMoney = (v) => {
+  // 传进来的可能是 '8,000' / '¥8000' 这种字符串（有些页面直接拼了库里的文本），先洗干净
+  const raw = typeof v === 'string' ? v.replace(/[¥￥,\s元]/g, '') : v
+  const num0 = Number(raw)
+  const n = Number.isFinite(num0) ? num0 : 0
+  const parts = (Math.abs(n) < 0.005 ? 0 : n).toFixed(2).split('.')
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return parts[0] + '.' + parts[1]
+}
 const A4_CSS = `
 @page { size: A4; margin: 14mm 12mm; }
 * { box-sizing: border-box; }
 body { font-family: "Microsoft YaHei","PingFang SC","Hiragino Sans GB",-apple-system,sans-serif; color:#111; margin:0; padding:18px; background:#f4f5f7; font-size:13px; line-height:1.6; }
+.pbar { max-width:210mm; margin:0 auto; display:flex; gap:8px; justify-content:center; }
+.pbar .btn { width:auto; min-width:190px; margin:12px 0 0; }
 .sheet { background:#fff; max-width:210mm; margin:0 auto; padding:14mm 12mm; box-shadow:0 2px 14px rgba(0,0,0,.12); }
 h1 { font-size:22px; text-align:center; margin:0 0 4px; letter-spacing:2px; }
 h2 { font-size:14px; margin:18px 0 6px; border-left:4px solid #1f6feb; padding-left:8px; }
@@ -3812,53 +3842,128 @@ h2 { font-size:14px; margin:18px 0 6px; border-left:4px solid #1f6feb; padding-l
 .who { text-align:center; font-size:12.5px; color:#444; margin-bottom:10px; }
 table { width:100%; border-collapse:collapse; font-size:12.5px; margin-bottom:8px; }
 th, td { border:1px solid #bbb; padding:6px 8px; }
-th { background:#f0f2f5; font-weight:600; text-align:left; }
+th { background:#f0f2f5; font-weight:600; text-align:left; border-bottom:2px solid #333; }
 .n { text-align:right; font-variant-numeric: tabular-nums; }
 .b { font-weight:700; }
-.total td { font-weight:700; border-top:2px solid #333; border-bottom:2px solid #333; background:#fafafa; }
+.total td { font-weight:700; border-top:2px solid #333; border-bottom:2px solid #333; background:#fafafa; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
 .red { color:#b3261e; } .green { color:#0a7d32; }
 .btn { display:block; width:200px; margin:16px auto 0; padding:12px; text-align:center; background:#1f6feb; color:#fff; border:0; border-radius:8px; font-size:15px; }
+.btn.gray { background:#6b7280; }
 .sign { margin-top:26px; display:flex; justify-content:space-between; font-size:12.5px; color:#333; }
 .sign span { flex:1; margin-right:18px; }
 .tip { text-align:center; font-size:12px; color:#888; margin-top:18px; }
-@media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; padding:0; margin:0; } .btn, .tip { display:none; } }
+.foot { margin-top:14px; text-align:center; font-size:11.5px; color:#777; border-top:1px dashed #ccc; padding-top:8px; }
+/* 第 18 轮 B1：跨页时别把一行切两半，表头每页重复，标题别孤零零留在页尾 */
+tr { page-break-inside: avoid; }
+h1, h2 { page-break-after: avoid; }
+thead { display: table-header-group; }
+tfoot { display: table-footer-group; }
+.w38 { width:38px; } .w70 { width:70px; } .w88 { width:88px; } .w92 { width:92px; }
+/* 第 18 轮 A1：客户点开对账单 90% 是在微信里用手机看，而这里以前只有 @media print、
+   没有任何屏幕断点 —— 375px 下光是 body 18px + .sheet 12mm×2 的边距就吃掉 127px，
+   7 列表格内容只剩 ~248px，表头全折成两行、金额挤成竖排。 */
+@media screen and (max-width:760px) {
+  body { padding:8px; font-size:12.5px; background:#eef0f3; }
+  /* A5：按钮跟着滚就看不见了（客户滚到中间想打印得滑回顶部），手机端吸顶 */
+  .pbar { max-width:none; position:sticky; top:0; z-index:9; background:rgba(238,240,243,.97); padding:6px 0 8px; border-bottom:1px solid #dfe3e8; }
+  .pbar .btn { flex:1; min-width:0; margin:0; font-size:13px; padding:11px 6px; }
+  .sheet { padding:14px 10px; box-shadow:none; border-radius:8px; max-width:100%; }
+  h1 { font-size:19px; letter-spacing:1px; }
+  h2 { font-size:13px; margin:14px 0 5px; }
+  table { font-size:11.5px; }
+  th, td { padding:5px 4px; }
+  .w38, .w70, .w88, .w92 { width:auto; }
+  .m-hide { display:none; }
+  .sign { flex-direction:column; gap:10px; }
+  .sign span { margin-right:0; }
+  .tip, .foot { font-size:11.5px; }
+  .sum table { min-width:100%; }
+}
+@media print { body { background:#fff; padding:0; } .sheet { box-shadow:none; padding:0; margin:0; } .pbar, .btn, .tip { display:none; } }
 `
 // 第 10 轮 A6：公开对账单里不要写完整的收款账号。
 // 以前直接把 settings.report_bank 整段打出来（开户行 + 账号 + 户名），
 // 而对账单链接是发给客户看的、永久有效 → 任何拿到链接的人都能看到公司收款账户。
 // 现在只保留开户行文字，账号数字只留末 4 位。
 const maskBankTail = (s) => String(s == null ? '' : s).replace(/\d(?=\d{4})/g, '*')
+// 第 18 轮 A3：微信内置浏览器不弹打印对话框，点了「打印」就是没反应 ——
+// 以前只有对账单页手写了一行提示，另外 12 个打印页什么都没有，客户以为坏了。
+// 现在统一在 a4Page 里判 UA：微信里把按钮改成说明 + 露出提示，并给一个「复制本页链接」
+// （粘到电脑浏览器打开就能打印/存 PDF）。打印时这两块都不进纸（.pbar 打印时隐藏）。
 const a4Page = ({ title, body, extraCss, sign, tip, btn }) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="robots" content="noindex,nofollow">
+${FAVICON_LINK}
 <title>${escHtml(title)}</title>
 <style>${A4_CSS}${extraCss || ''}</style></head><body>
-<button class="btn" onclick="window.print()">${btn || '🖨 打印 / 存为 PDF'}</button>
+<div class="pbar"><button class="btn" id="pbtn" onclick="window.print()">${btn || '🖨 打印 / 存为 PDF'}</button><button class="btn gray" id="cbtn" type="button">🔗 复制本页链接</button></div>
 <div class="sheet">
 ${body}
 ${sign ? '<div class="sign">' + sign + '</div>' : ''}
 ${tip ? '<div class="tip">' + tip + '</div>' : ''}
-</div></body></html>`
+<div class="tip" id="wxtip" style="display:none">微信里不能直接打印：点右上角「…」→「在浏览器打开」再点打印；或点上面「复制本页链接」发到电脑上打开。</div>
+</div>
+<script>(function(){
+var wx=/MicroMessenger/i.test(navigator.userAgent),b=document.getElementById('pbtn'),c=document.getElementById('cbtn'),t=document.getElementById('wxtip');
+function cp(){var u=location.href;
+function done(){if(!c)return;c.textContent='✅ 已复制';setTimeout(function(){c.textContent='🔗 复制本页链接'},1600)}
+function fb(){try{var a=document.createElement('textarea');a.value=u;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);done()}catch(e){window.prompt('手动复制这条链接：',u)}}
+if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(u).then(done,fb)}else{fb()}}
+if(c)c.onclick=cp;
+if(wx&&b){b.textContent='微信里不能打印 · 点这里看怎么办';b.onclick=function(){window.alert('微信内置浏览器不能打印。\n\n1) 点右上角「···」\n2) 选「在浏览器打开」\n3) 在浏览器里再点打印\n\n也可以点「复制本页链接」，粘到电脑上打开。')};if(t)t.style.display='block'}
+})();</script>
+</body></html>`
 
-app.get('/statement-print', async (c) => {
-  const db = c.env.DB
-  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
-  const saved = await getKey(mainDb)
-  const party = String(c.req.query('party') || '').trim()
-  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
-  // 链接里带签名，不含口令本身（口令泄露风险）
-  const want = String(c.req.query('t') || '')
-  const expS = numTs(c.req.query('x'))
-  const good = saved ? await sigBook(mainDb, c.env.BOOK, party, type, expS) : ''
-  if (!good || want !== good || linkExpired(expS)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印版」生成新链接。</h3>')
-  if (!party) return c.html('<h3>缺少对账单位。</h3>')
-  const today = now().slice(0, 10)
-  let from = String(c.req.query('from') || '').slice(0, 10) || (today.slice(0, 7) + '-01')
-  let to = String(c.req.query('to') || '').slice(0, 10) || today
-  if (from > to) { const t = from; from = to; to = t }
+// 第 18 轮 B4：一份 HTML 里排多张 A4（批量对账单用）。每张之间强制翻页，
+// 顶上的打印条只有一条。sign/tip 每家各自带，免得客户拿错页。
+const a4MultiPage = ({ title, sheets }) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="robots" content="noindex,nofollow">
+${FAVICON_LINK}
+<title>${escHtml(title)}</title>
+<style>${A4_CSS}${(sheets[0] && sheets[0].extraCss) || ''}
+.psheet { page-break-after: always; }
+.psheet:last-of-type { page-break-after: auto; }</style></head><body>
+<div class="pbar"><button class="btn" id="pbtn" onclick="window.print()">🖨 打印全部 ${sheets.length} 家 / 存为 PDF</button><button class="btn gray" id="cbtn" type="button">🔗 复制本页链接</button></div>
+${sheets.map((s) => `<div class="sheet psheet">${s.pageBody}${s.sign ? '<div class="sign">' + s.sign + '</div>' : ''}${s.tip ? '<div class="tip">' + s.tip + '</div>' : ''}</div>`).join('')}
+<div class="tip" id="wxtip" style="display:none">微信里不能直接打印：点右上角「…」→「在浏览器打开」再点打印；或点上面「复制本页链接」发到电脑上打开。</div>
+<script>(function(){
+var wx=/MicroMessenger/i.test(navigator.userAgent),b=document.getElementById('pbtn'),c=document.getElementById('cbtn'),t=document.getElementById('wxtip');
+function cp(){var u=location.href;
+function done(){if(!c)return;c.textContent='✅ 已复制';setTimeout(function(){c.textContent='🔗 复制本页链接'},1600)}
+function fb(){try{var a=document.createElement('textarea');a.value=u;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);done()}catch(e){window.prompt('手动复制这条链接：',u)}}
+if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(u).then(done,fb)}else{fb()}}
+if(c)c.onclick=cp;
+if(wx&&b){b.textContent='微信里不能打印 · 点这里看怎么办';b.onclick=function(){window.alert('微信内置浏览器不能打印。\\n\\n1) 点右上角「···」\\n2) 选「在浏览器打开」\\n3) 在浏览器里再点打印')};if(t)t.style.display='block'}
+})();</script>
+</body></html>`
 
+// 第 18 轮 C1：以前出错就返回一行 `c.html('<h3>…')` —— 没有 viewport（手机上按 980px 缩放，
+// 字小得看不清）、没告诉客户「下一步点哪里」、也没有电话。而链接 7 天就过期，客户碰到这一屏
+// 是必然事件。现在统一走这个页面：说清为什么、点哪里能重新生成。
+const errorPage = ({ title, why, how, code }) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="robots" content="noindex,nofollow">
+<meta name="fa-error" content="${escHtml(code || 'expired')}">
+${FAVICON_LINK}
+<title>${escHtml(title)}</title>
+<style>body{margin:0;background:#f4f5f7;font-family:"Microsoft YaHei","PingFang SC","Hiragino Sans GB",-apple-system,sans-serif;color:#222;padding:20px 14px;line-height:1.7}
+.card{max-width:520px;margin:7vh auto 0;background:#fff;border-radius:14px;padding:26px 22px;box-shadow:0 4px 20px rgba(0,0,0,.08)}
+h1{font-size:19px;margin:0 0 10px;color:#b3261e;text-align:center}.why{color:#555;font-size:14px;margin:0 0 14px;text-align:center}
+.how{background:#f7f8fa;border-radius:10px;padding:14px 16px;font-size:14px;color:#333}.how b{color:#1f6feb}
+.tip2{color:#8a94a6;font-size:12.5px;margin-top:14px;text-align:center}.code{color:#aaa;font-size:11.5px;margin-top:8px;text-align:center}</style></head>
+<body><div class="card"><h1>${escHtml(title)}</h1>${why ? `<p class="why">${escHtml(why)}</p>` : ''}${how ? `<div class="how">${how}</div>` : ''}${code ? `<p class="code">${escHtml(code)}</p>` : ''}<p class="tip2">有疑问直接打电话问老板，不用客气</p></div></body></html>`
+
+// 第 18 轮 B4：把「一家对账单怎么算、怎么排」抽成函数，
+// /statement-print（一家）和 /statements-print（一次多家）共用同一份渲染，
+// 免得两边口径哪天又走岔（这一页是客户拿去核对钱的东西，两套算法最要命）。
+async function statementSheetData(db, party, type, from, to) {
+  const q = (sql, ...a) => db.prepare(sql).bind(...a).all().then((r) => r.results)
   const t = await getTitle(db)
   const prof = await db.prepare('SELECT * FROM party_profiles WHERE party=?').bind(party).first().catch(() => null)
-  const q = (sql, ...a) => db.prepare(sql).bind(...a).all().then((r) => r.results)
   const docs = type === 'ar'
     ? await q('SELECT * FROM orders WHERE customer=? ORDER BY id', party)
     : await q('SELECT * FROM payables WHERE supplier=? ORDER BY id', party)
@@ -3892,9 +3997,11 @@ app.get('/statement-print', async (c) => {
     rows.push({ id: d.id, date: d0, item: (type === 'ar' ? d.item_name : d.remark) || '', total: totalOf(d), rec, wo: woOf(d), left: Math.max(0, totalOf(d) - woOf(d) - rec - paidIn(d, '0000-00-00', addDaysIso(from, -1))) })
   }
   const closing = opening + added - got - woff
-  const money = (v) => Number(v || 0).toFixed(2)
-  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[m]))
-  const body = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${esc(r.date)}</td><td>${esc(r.item || '—')}</td><td class="n">${money(r.total)}</td><td class="n">${money(r.rec)}</td><td class="n">${money(r.wo)}</td><td class="n b">${money(r.left)}</td></tr>`).join('')
+  const money = fmtMoney // 第 18 轮 C2：统一用全局 fmtMoney（千分位）
+  const esc = escHtml // 第 18 轮 C2：统一用全局 escHtml
+  // 第 18 轮 A1/A2：手机窄屏只留客户真正要对的东西（日期/项目/金额/已收/未结），
+  // 「#」和「核销」在手机上藏起来 —— 金额列一列都不许藏（藏了等于藏账）。
+  const body = rows.map((r, i) => `<tr><td class="m-hide">${i + 1}</td><td>${esc(r.date)}</td><td>${esc(r.item || '—')}</td><td class="n">${money(r.total)}</td><td class="n">${money(r.rec)}</td><td class="n m-hide">${money(r.wo)}</td><td class="n b">${money(r.left)}</td></tr>`).join('')
   const label = type === 'ar' ? '应收账款对账单' : '应付账款对账单'
   const who = type === 'ar' ? '客户' : '供应商'
   const pageBody = `
@@ -3904,7 +4011,7 @@ app.get('/statement-print', async (c) => {
 <div class="meta"><div>${who}：<b>${esc(party)}</b>${prof && prof.contact ? '（' + esc(prof.contact) + '）' : ''}</div><div>账期：${esc(from)} 至 ${esc(to)}</div></div>
 ${prof && (prof.phone || prof.addr || prof.note) ? `<div class="meta2">${prof.phone ? '联系电话：' + esc(prof.phone) + '　' : ''}${prof.addr ? '地址：' + esc(prof.addr) + '　' : ''}${prof.note ? '备注：' + esc(prof.note) : ''}</div>` : ''}
 <table>
-<thead><tr><th style="width:38px">#</th><th style="width:92px">日期</th><th>项目/备注</th><th style="width:88px">金额</th><th style="width:88px">本期${type === 'ar' ? '已收' : '已付'}</th><th style="width:70px">核销</th><th style="width:88px">未结</th></tr></thead>
+<thead><tr><th class="w38 m-hide">#</th><th class="w92">日期</th><th>项目/备注</th><th class="w88">金额</th><th class="w88">本期${type === 'ar' ? '已收' : '已付'}</th><th class="w70 m-hide">核销</th><th class="w88">未结</th></tr></thead>
 <tbody>${body || '<tr><td colspan="7" style="text-align:center;color:#888">本期没有发生</td></tr>'}</tbody>
 </table>
 <div class="sum"><table>
@@ -3916,7 +4023,7 @@ ${prof && (prof.phone || prof.addr || prof.note) ? `<div class="meta2">${prof.ph
 </table></div>
 ${t.note ? '<div style="font-size:12.5px;color:#555;margin-top:10px">备注：' + esc(t.note) + '</div>' : ''}
 ${t.bank ? '<div style="font-size:12.5px;color:#333;margin-top:6px">收款信息：' + esc(maskBankTail(t.bank)) + '</div>' : ''}
-` 
+`
   const extraCss = `.meta{display:flex;justify-content:space-between;font-size:13px;margin:10px 0;border-bottom:1px solid #ddd;padding-bottom:8px}
 .meta2{font-size:12px;color:#555;margin:-4px 0 8px}
 .sum{margin-top:12px;font-size:13px}
@@ -3924,13 +4031,76 @@ ${t.bank ? '<div style="font-size:12.5px;color:#333;margin-top:6px">收款信息
 .sum td{border:none;padding:4px 10px}
 .sum .big{font-size:15px;font-weight:700;color:#b3261e}
 .sign span{border-top:1px solid #999;padding-top:6px}`
-  return c.html(a4Page({
+  return {
     title: `${party} ${label} ${from}~${to}`,
-    body: pageBody,
+    pageBody,
     extraCss,
-    sign: `<span>对账单位签章：</span><span>制表：${esc(t.title || '')}　${esc(today)}</span>`,
-    tip: '手机上：右上角「…」→ 发送给朋友或用浏览器打开 → 打印',
-  }))
+    sign: `<span>对账单位签章：</span><span>制表：${esc(t.title || '')}　${esc(now().slice(0, 10))}</span>`,
+    tip: `${esc(t.title || '')}${t.phone ? '　有疑问打 ' + esc(t.phone) : ''}　这份对账单按账本生成，数据截至 ${esc(now().slice(0, 10))}（要页码就在打印对话框里勾「页眉和页脚」）`,
+  }
+}
+
+app.get('/statement-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const party = String(c.req.query('party') || '').trim()
+  const type = String(c.req.query('type') || 'ar') === 'ap' ? 'ap' : 'ar'
+  // 链接里带签名，不含口令本身（口令泄露风险）
+  const want = String(c.req.query('t') || '')
+  const expS = numTs(c.req.query('x'))
+  const good = saved ? await sigBook(mainDb, c.env.BOOK, party, type, expS) : ''
+  if (!good || want !== good || linkExpired(expS)) return c.html(errorPage({ title: '这份对账单的链接已经失效', why: '这种链接 7 天后自动作废（防止被转发出去一直能看）', how: '回小程序 → <b>报表 → 批量发对账单</b> → 找到这家 → 点「打印版」，会生成一条新链接。' }))
+  if (!party) return c.html(errorPage({ title: '这条链接少了单位名', why: '链接不完整，多半是聊天软件转发时截断了', how: '让老板在<b>报表 → 批量发对账单</b>里重新发一次完整链接。' }))
+  const today = now().slice(0, 10)
+  let from = String(c.req.query('from') || '').slice(0, 10) || (today.slice(0, 7) + '-01')
+  let to = String(c.req.query('to') || '').slice(0, 10) || today
+  if (from > to) { const t0 = from; from = to; to = t0 }
+  const d = await statementSheetData(db, party, type, from, to)
+  return c.html(a4Page({ title: d.title, body: d.pageBody, extraCss: d.extraCss, sign: d.sign, tip: d.tip }))
+})
+
+// 第 18 轮 B4：一次打多家对账单（老板月底给 20 家发，以前要在小程序里点 20 次）。
+// 一份 HTML 里排多张 A4，每张之间强制翻页 —— 浏览器一次打印就是 20 页、每家一页。
+// 签名串 = 'bulk:<月份>:<排序后的单位名用|连起来>'，改名单/改单位都会失效。
+const BULK_MAX = 20
+const bulkKeyOf = (month, parties) => 'bulk:' + month + ':' + parties.slice().sort().join('|')
+
+app.get('/statements-print-link', async (c) => {
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  if (!saved) return c.json({ error: '还没设访问口令' }, 400)
+  const month = String(c.req.query('month') || now().slice(0, 7)).slice(0, 7)
+  const parties = String(c.req.query('parties') || '').split(',').map((x) => x.trim()).filter(Boolean)
+  if (!parties.length) return c.json({ error: '要指定打哪几家（parties=张三,李四）' }, 400)
+  if (parties.length > BULK_MAX) return c.json({ error: '一次最多 ' + BULK_MAX + ' 家（多了浏览器会卡；分两次打）' }, 400)
+  const exp = linkExpOf(LINK_TTL.statement)
+  const t = await sigBook(mainDb, c.env.BOOK, bulkKeyOf(month, parties), 'bulk', exp)
+  const base = new URL(c.req.url).origin
+  return c.json({
+    ok: true, month, count: parties.length,
+    url: base + '/statements-print?m=' + encodeURIComponent(month) + '&parties=' + encodeURIComponent(parties.join(',')) + '&t=' + t + '&book=' + (num(c.env.BOOK) || 1) + '&x=' + exp,
+  })
+})
+
+app.get('/statements-print', async (c) => {
+  const db = c.env.DB
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const month = String(c.req.query('m') || now().slice(0, 7)).slice(0, 7)
+  const parties = String(c.req.query('parties') || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, BULK_MAX)
+  const want = String(c.req.query('t') || '')
+  const expB = numTs(c.req.query('x'))
+  const good = saved && parties.length ? await sigBook(mainDb, c.env.BOOK, bulkKeyOf(month, parties), 'bulk', expB) : ''
+  if (!good || want !== good || linkExpired(expB)) return c.html(errorPage({ title: '这批对账单的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 批量发对账单</b> → 重新点「批量打印」。' }))
+  const from = month + '-01'
+  const to = String(monthEndOf(month) || (month + '-31')).slice(0, 10) // 该月最后一天
+  const sheets = []
+  for (const party of parties) {
+    try { sheets.push(await statementSheetData(db, party, 'ar', from, to)) } catch (e) { noteFail(e, '批量打对账单') }
+  }
+  if (!sheets.length) return c.html(errorPage({ title: '这批一张都没打出来', why: '查询出错了（不是没有账）', how: '过一会儿再点一次；一直不行就把这条链接发给技术。' }))
+  return c.html(a4MultiPage({ title: `${month} 对账单 ${sheets.length} 家`, sheets }))
 })
 
 // ==================== 借款台账（银行/亲友借款 + 利息 + 还款计划） ====================
@@ -4855,12 +5025,12 @@ app.get('/order-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expO = numTs(c.req.query('x'))
   const good = saved && id ? await sigBook(mainDb, c.env.BOOK, String(id), 'order', expO) : ''
-  if (!good || want !== good || linkExpired(expO)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印加工单」生成新链接。</h3>')
+  if (!good || want !== good || linkExpired(expO)) return c.html(errorPage({ title: '这张加工单的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>单据</b> → 打开这张单 → 点「打印加工单」。' }))
   const d = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first()
-  if (!d) return c.html('<h3>没找到这张单。</h3>')
+  if (!d) return c.html(errorPage({ title: '这张单找不到了', why: '可能已经被删掉，或者链接里的单号不对', how: '让老板在小程序里重新点一次「打印加工单」。' }))
   const t = await getTitle(db)
   const prof = await db.prepare('SELECT * FROM party_profiles WHERE party=?').bind(d.customer).first().catch(() => null)
-  const money = (v) => Number(v || 0).toFixed(2)
+  const money = fmtMoney // 第 18 轮 C2：统一用全局 fmtMoney（千分位）
   const ST = ['待加工', '加工中', '已交付']
   const left = Math.max(0, num(d.price) - num(d.paid) - num(d.written_off))
   const pageBody = `
@@ -4885,7 +5055,7 @@ app.get('/order-print', async (c) => {
     body: pageBody,
     extraCss: '.meta{display:flex;flex-wrap:wrap;gap:6px 24px;margin:6px 0 12px}.meta div{min-width:45%}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px 8px;font-size:13px}th{background:#f4f6f8;text-align:left}.sum{margin-top:10px}.sum table{width:60%;margin-left:auto}.sum td{border:0;padding:3px 6px}',
     sign: '<span>客户签收（签字 / 日期）</span><span>我方经手（签字 / 日期）</span>',
-    tip: '这张单只认单据号和签名，凭这条链接打开就能打印；改单请在小程序里改，重新生成链接。'
+    tip: '这张单只认单据号和签名，凭这条链接打开就能打印；改单请在小程序里改，重新生成链接。' + (t && t.phone ? '　有疑问打 ' + escHtml(t.phone) : '')
   }))
 })
 
@@ -4894,11 +5064,11 @@ app.get('/report-print', async (c) => {
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const saved = await getKey(mainDb)
   const mm = String(c.req.query('month') || month()).slice(0, 7)
-  if (!/^\d{4}-\d{2}$/.test(mm)) return c.html('<h3>月份格式不对（应为 2026-11）</h3>')
+  if (!/^\d{4}-\d{2}$/.test(mm)) return c.html(errorPage({ title: '月份写错了', why: '链接里的月份不是「2026-11」这种格式', how: '回小程序里重新点一次「打印报表」，会生成正确的链接。' }))
   const want = String(c.req.query('t') || '')
   const expR = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'report:' + mm, 'rp', expR) : ''
-  if (!good || want !== good || linkExpired(expR)) return c.html('<h3>链接已失效或已过期：请在小程序里重新点「打印报表」生成新链接。</h3>')
+  if (!good || want !== good || linkExpired(expR)) return c.html(errorPage({ title: '这份报表的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表</b> → 点「打印报表」。' }))
   const head = await getTitle(db)
   const snap = await snapOf(db, mm)
   const yr = mm.slice(0, 4)
@@ -4930,7 +5100,7 @@ app.get('/report-print', async (c) => {
   const cats = (await db.prepare("SELECT category, COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND month=? GROUP BY category ORDER BY t DESC").bind(mm).all()).results
   const accounts = (await db.prepare('SELECT * FROM accounts ORDER BY id').all()).results
   const bal = await accountBalances(db)
-  const money = (n) => Number(n || 0).toFixed(2)
+  const money = fmtMoney // 第 18 轮 C2：统一用全局 fmtMoney（千分位），不再各页自己的 toFixed
   const rows = (arr) => arr.map((r) => `<tr><td>${r[0]}</td><td class="n">${r[1]}</td></tr>`).join('')
   const catRows = cats.map((x) => `<tr><td>　${x.category || '其他'}</td><td class="n">${money(x.t)}</td></tr>`).join('')
   const accRows = (bal.accounts || []).map((a) => `<tr><td>　${a.name}</td><td class="n">${money(a.balance)}</td></tr>`).join('')
@@ -4940,7 +5110,7 @@ app.get('/report-print', async (c) => {
 
 <h2>一、利润表（${mm}）</h2>
 <table>
-<tr><th>项目</th><th class="n">本月</th><th class="n">本年累计</th></tr>
+<thead><tr><th>项目</th><th class="n">本月</th><th class="n">本年累计</th></tr></thead>
 <tr><td>营业收入（接单金额）</td><td class="n">${money(snap.order_add)}</td><td class="n">${money(yOrder)}</td></tr>
 <tr><td>材料·外协成本</td><td class="n">${money(num(snap.mat_cost))}</td><td class="n">${money(yMat)}</td></tr>
 <tr><td>　本月赊购（备查，等付款时进现金流）</td><td class="n">${money(snap.payable_add)}</td><td class="n">${money(yPayable)}</td></tr>
@@ -4958,14 +5128,14 @@ ${(num(snap.writeoff_gain) || yWoGain) ? `<tr><td>　豁免应付（少付供应
 
 <h2>二、资产负债表（${snap.period_end} 期末）</h2>
 <table>
-<tr><th>资产</th><th class="n">金额</th></tr>
+<thead><tr><th>资产</th><th class="n">金额</th></tr></thead>
 <tr><td>货币资金（账户合计）</td><td class="n">${money(snap.cash_balance)}</td></tr>
 ${accRows}
 <tr><td>应收账款（别人欠我）</td><td class="n">${money(snap.ar_left)}</td></tr>
 <tr class="total"><td>资产合计</td><td class="n">${money(round2(snap.cash_balance + snap.ar_left))}</td></tr>
 </table>
 <table>
-<tr><th>负债与所有者权益</th><th class="n">金额</th></tr>
+<thead><tr><th>负债与所有者权益</th><th class="n">金额</th></tr></thead>
 <tr><td>应付账款（我欠供应商）</td><td class="n">${money(snap.ap_left)}</td></tr>
 <tr><td>借款余额</td><td class="n">${money(snap.debt_left)}</td></tr>
 <tr class="total"><td>负债合计</td><td class="n">${money(round2(snap.ap_left + snap.debt_left))}</td></tr>
@@ -5579,7 +5749,7 @@ app.get('/recon-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expN = numTs(c.req.query('x'))
   const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type, expN) : ''
-  if (!good || want !== good || linkExpired(expN)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成对账确认单。</h3>')
+  if (!good || want !== good || linkExpired(expN)) return c.html(errorPage({ title: '这张对账确认单的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 对账确认单</b> → 重新生成。' }))
   const o = await conclusionOf(db, type, party, month)
   const title = await getTitle(db)
   const prof = await profLine(db, party)
@@ -6008,6 +6178,8 @@ app.post('/detect-import', async (c) => {
 app.get('/', (c) => c.html(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+${FAVICON_LINK}
 <title>小工厂记账</title>
 <style>
  body{margin:0;font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#222}
@@ -6023,6 +6195,11 @@ app.get('/', (c) => c.html(`<!doctype html>
 </style></head><body><div class="wrap">
 <h1>小工厂记账</h1>
 <div class="sub">记账本身在微信小程序里（手机）；电脑上填表、查教程用下面两个链接。</div>
+
+<a class="card" href="/desk" style="background:#1f6feb;color:#fff;box-shadow:0 2px 10px rgba(31,111,235,.3)">
+  <div class="t" style="color:#fff">👉 我已经在用，进电脑看账台</div>
+  <div class="d" style="color:#dbe7ff">本月利润、谁欠最多、该催谁、批量打对账单（输一次口令，这台电脑记着）</div>
+</a>
 
 <a class="card" href="/pc">
   <div class="t">💻 电脑上填表</div>
@@ -7819,7 +7996,7 @@ function fitDvList(list, max = 250) {
 }
 
 function sheetXml(rows, dv) {
-  const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+  const esc = escHtml // 第 18 轮 C2：统一
   const colName = (i) => {
     let s = ''
     let n = i + 1
@@ -8180,14 +8357,192 @@ app.get('/import-template-pack', async (c) => {
 // 免口令就能看 —— 教程里没有账目数据，用不着口令；/pc 页面和它互相有链接。
 app.get('/guide', async (c) => {
   const { GUIDE_HTML } = await import('./guide.js')
-  return c.html(GUIDE_HTML)
+  // 第 18 轮 C4：以前教程页不带版本号 —— 功能改了几轮之后，老板照着教程点会找不到按钮，
+  // 还以为是坏了。这里在页脚标上当前版本，并说明「以小程序实际为准」。
+  const ver = String((c.env && c.env.APP_VERSION) || 'dev')
+  const html = GUIDE_HTML
+    .replace('<head>', '<head><meta name="color-scheme" content="light only">' + FAVICON_LINK)
+    .replace('</body>', '<div style="max-width:880px;margin:0 auto 40px;padding:0 22px;color:#9aa3af;font-size:12.5px;line-height:1.8">'
+      + '这份教程对应版本 ' + escHtml(ver) + '。界面文字有小改动时以小程序里实际看到的为准；'
+      + '真找不到按钮，就把这一节的标题发给技术，让他更新教程。</div></body>')
+  return c.html(html)
 })
 
 // 电脑上填表 / 上传：手机上一个个敲 70 多个客户不现实，这个页面就干两件事 ——
 // 下载带客户名的模板、把填好的 Excel 传回来（同一个口令，不经过小程序）
+// 第 18 轮 D2：电脑看账台（只读）。
+// 以前 /pc 只能导入导出和管账套 —— 老板坐在电脑前想看「这个月剩多少、谁欠最多、该催谁」，
+// 还得掏手机看小程序。这一页把已有的只读接口拼成一块屏：不新增 SQL、不带任何写操作，
+// 写完的权限面只到「看得见」，看不见的人（员工口令）连数字都拿不到。
+app.get('/desk', (c) => c.html(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+${FAVICON_LINK}
+<title>电脑看账台</title>
+<style>
+ body{margin:0;font:15px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:#f0f2f5;color:#1f2328}
+ .wrap{max-width:1080px;margin:0 auto;padding:26px 18px 70px}
+ h1{font-size:22px;margin:0 0 4px}
+ .sub{color:#6b7280;font-size:13px;margin-bottom:18px}
+ .card{background:#fff;border-radius:12px;padding:16px 18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
+ .ct{font-size:15px;font-weight:600;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+ .ct small{font-weight:400;color:#8a94a6;font-size:12.5px}
+ .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:14px}
+ .stat{background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
+ .stat .k{color:#6b7280;font-size:12.5px}
+ .stat .v{font-size:24px;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
+ .stat .n2{color:#8a94a6;font-size:12px;margin-top:2px}
+ .v.red{color:#b3261e}.v.green{color:#0a7d32}.v.blue{color:#1f6feb}
+ table{width:100%;border-collapse:collapse;font-size:14px}
+ th,td{padding:8px 6px;border-bottom:1px solid #eef0f3;text-align:left}
+ th{color:#6b7280;font-weight:600;font-size:12.5px}
+ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+ tr:hover td{background:#fafbfc}
+ .btn{display:inline-block;background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer}
+ .btn.gray{background:#e7eaee;color:#24292f}
+ .btn.sm{padding:7px 12px;font-size:13px}
+ .btn:disabled{opacity:.5;cursor:not-allowed}
+ .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
+ input[type=month],input[type=password]{padding:8px 10px;border:1px solid #d8dde3;border-radius:8px;font-size:14px;font-family:inherit}
+ #gate input{width:100%;box-sizing:border-box;margin-bottom:10px}
+ .tip2{color:#8a94a6;font-size:12.5px;margin-top:10px}
+ .err{background:#fff1f0;color:#b3261e;border-radius:10px;padding:12px 14px;font-size:14px;margin-bottom:12px}
+ .bad{color:#b3261e;font-weight:600}
+ .links a{display:inline-block;margin:0 14px 8px 0;color:#1f6feb;text-decoration:none;font-size:14px}
+ .links a:hover{text-decoration:underline}
+ @media (max-width:640px){ .wrap{padding:16px 10px 60px} .stat .v{font-size:20px} table{font-size:13px} th,td{padding:6px 4px} }
+</style></head><body><div class="wrap">
+<h1>📊 电脑看账台</h1>
+<div class="sub">只看不改（改账还是在小程序里）· 数据每次打开重新取</div>
+<div id="err" class="err" style="display:none"></div>
+
+<div id="gate" class="card" style="display:none">
+  <div class="ct">先输访问口令</div>
+  <input id="key" type="password" placeholder="就是小程序里那个访问口令" autocomplete="current-password">
+  <button class="btn" onclick="saveKey()">进来</button>
+  <div class="tip2">口令只存在这台电脑的浏览器里（localStorage），不会发到别的地方。公用电脑请用完点「退出」。</div>
+</div>
+
+<div id="main" style="display:none">
+  <div class="stats" id="stats"></div>
+
+  <div class="card">
+    <div class="ct">该催的钱<span id="dueSum"></span></div>
+    <div id="dueBox">正在取…</div>
+    <div class="row">
+      <label>账期 <input id="bm" type="month"></label>
+      <button class="btn sm" id="bulkBtn" onclick="bulkPrint()">🖨 打印勾选的对账单</button>
+      <button class="btn sm gray" onclick="openReport()">📄 看这个月的报表</button>
+      <button class="btn sm gray" onclick="logout()">退出</button>
+    </div>
+    <div class="tip2">勾上几家 → 一次打印，每家一页。链接 7 天有效，可以发给客户。</div>
+  </div>
+
+  <div class="card">
+    <div class="ct">最近的单<small>新记的单据，点单号看这一家的往来</small></div>
+    <div id="recent">正在取…</div>
+  </div>
+
+  <div class="card links">
+    <div class="ct">其它</div>
+    <a href="/pc">💻 电脑填表 / 导入导出</a>
+    <a href="/guide">📖 使用教程</a>
+    <a href="/">🏠 首页</a>
+  </div>
+</div>
+</div>
+<script>
+var K = localStorage.getItem('fa_key') || '';
+function el(id){ return document.getElementById(id) }
+function money(n){ n = Number(n||0); var a = Math.abs(n).toFixed(2).split('.'); a[0]=a[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,','); return (n<0?'-':'')+a[0]+'.'+a[1] }
+function ym(){ var d=new Date(); return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2) }
+function showErr(t){ var e=el('err'); e.textContent=t; e.style.display='block' }
+function hideErr(){ el('err').style.display='none' }
+function showGate(msg){ el('main').style.display='none'; el('gate').style.display='block'; if(msg) showErr(msg) }
+function saveKey(){ var v=el('key').value.trim(); if(!v){ showErr('先输口令'); return } localStorage.setItem('fa_key',v); K=v; hideErr(); load() }
+function logout(){ localStorage.removeItem('fa_key'); K=''; el('gate').style.display='block'; el('main').style.display='none' }
+function api(p){
+  return fetch(p,{headers:{'x-access-key':K}}).then(function(r){
+    if(r.status===401||r.status===403){ var e=new Error('auth'); e.auth=true; throw e }
+    if(!r.ok){ var e2=new Error('http'+r.status); e2.http=r.status; throw e2 }
+    return r.json()
+  })
+}
+function load(){
+  if(!K){ showGate(''); return }
+  api('/me').then(function(me){
+    if(me.role!=='owner'){ showGate('这个页面只有老板能看（员工账号看不到金额）'); return }
+    var m = el('bm').value || ym(); el('bm').value = m;
+    el('gate').style.display='none'; el('main').style.display='block';
+    Promise.all([ api('/kpi?month='+m), api('/ar-summary?month='+m), api('/due-schedule?type=ar&days=365&limit=20'), api('/dashboard?month='+m) ])
+      .then(function(r){ hideErr(); render(r[0],r[1],r[2],r[3]) })
+      .catch(function(e){ if(e&&e.auth) showGate('口令不对（或换了账套）：重新输一次'); else showErr('数据没取全：'+(e&&e.message||'网络不好')+' —— 稍后再打开这一页') })
+  }).catch(function(e){ if(e&&e.auth) showGate('口令不对（或换了账套）：重新输一次'); else showErr('连不上：'+(e&&e.message||'网络不好')) })
+}
+function render(kpi, ar, due, dash){
+  var st = [
+    { k:'本月利润（按单子算）', v:'¥'+money(kpi.profit_accrual), c: (Number(kpi.profit_accrual)<0?'red':'green'), n:'现金口径 ¥'+money(kpi.profit) },
+    { k:'本月收款', v:'¥'+money(kpi.cash_in), c:'blue', n:'本月付出去 ¥'+money(kpi.cash_out) },
+    { k:'逾期没收回', v:'¥'+money(ar.overdue_amount), c:(Number(ar.overdue_amount)>0?'red':''), n:(ar.overdue_count||0)+' 家有逾期 · 总共还欠 ¥'+money(ar.open_amount) },
+    { k:'手头现金', v:'¥'+money(kpi.cash_now), c:'', n: (kpi.cushion_months!=null? '按现在的花法能撑 '+kpi.cushion_months+' 个月' : '') },
+    { k:'最大客户占比', v:(kpi.conc_pct!=null? kpi.conc_pct+'%' : '—'), c:(Number(kpi.conc_pct)>50?'red':''), n: (kpi.top_customer? String(kpi.top_customer).slice(0,14) : '') }
+  ];
+  el('stats').innerHTML = st.map(function(x){
+    return '<div class="stat"><div class="k">'+x.k+'</div><div class="v '+(x.c||'')+'">'+x.v+'</div><div class="n2">'+(x.n||'&nbsp;')+'</div></div>'
+  }).join('');
+  var rows = (due && due.rows) || [];
+  el('dueSum').innerHTML = rows.length ? '<small>逾期共 ¥'+money(due.overdue_total)+' · 按逾期天数从多到少</small>' : '';
+  if(!rows.length){
+    el('dueBox').innerHTML = '<div style="color:#0a7d32;padding:6px 0">没有逾期没收回的钱 👍</div>';
+  } else {
+    el('dueBox').innerHTML = '<table><thead><tr><th style="width:34px"><input type="checkbox" id="ckAll" onclick="toggleAll(this.checked)" checked></th>'
+      + '<th>单位</th><th>单据</th><th class="num">还欠</th><th>应结日</th><th>情况</th></tr></thead><tbody>'
+      + rows.map(function(r){
+          return '<tr><td><input type="checkbox" class="ck" data-party="'+String(r.party).replace(/"/g,'&quot;')+'" checked></td>'
+            + '<td>'+esc(r.party)+'</td><td>'+esc(String(r.item||'—')).slice(0,18)+'</td>'
+            + '<td class="num">¥'+money(r.left)+'</td><td>'+esc(r.due||'—')+'</td>'
+            + '<td class="'+(Number(r.days)>30?'bad':'')+'">'+esc(r.state||'')+'</td></tr>'
+        }).join('') + '</tbody></table>';
+  }
+  var rec = (dash && dash.recent) || [];
+  el('recent').innerHTML = rec.length ? '<table><thead><tr><th>单号</th><th>单位</th><th>产品</th><th class="num">金额</th><th class="num">还没收</th></tr></thead><tbody>'
+    + rec.slice(0,12).map(function(x){
+        var amt = (x.price!=null? x.price : x.amount);
+        var left = Number(amt||0) - Number(x.paid||0) - Number(x.written_off||0);
+        return '<tr><td>#'+esc(String(x.id))+'</td><td>'+esc(x.customer||x.supplier||'')+'</td><td>'+esc(String(x.item_name||x.remark||'').slice(0,16))+'</td>'
+          + '<td class="num">¥'+money(amt)+'</td><td class="num">'+(left>0.005? '¥'+money(left) : '<span style="color:#0a7d32">已结清</span>')+'</td></tr>'
+      }).join('') + '</tbody></table>' : '<div style="color:#8a94a6">最近没有单据</div>';
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c] }) }
+function toggleAll(on){ var cs=document.querySelectorAll('.ck'); for(var i=0;i<cs.length;i++) cs[i].checked=on }
+function bulkPrint(){
+  var parties=[]; var cs=document.querySelectorAll('.ck');
+  for(var i=0;i<cs.length;i++) if(cs[i].checked) parties.push(cs[i].getAttribute('data-party'));
+  if(!parties.length){ showErr('先勾至少一家'); return }
+  hideErr();
+  var m=el('bm').value||ym();
+  el('bulkBtn').disabled=true;
+  api('/statements-print-link?month='+encodeURIComponent(m)+'&parties='+encodeURIComponent(parties.join(',')))
+    .then(function(d){ el('bulkBtn').disabled=false; if(!d.url){ showErr(d.error||'没生成出来'); return } window.open(d.url,'_blank') })
+    .catch(function(){ el('bulkBtn').disabled=false; showErr('没生成出来，稍后再点一次') })
+}
+function openReport(){
+  var m=el('bm').value||ym();
+  api('/report-link?month='+encodeURIComponent(m)).then(function(d){ if(d&&d.url) window.open(d.url,'_blank'); else showErr('报表还没生成（先在小程序里出这个月的报表）') })
+    .catch(function(){ showErr('没取到报表链接') })
+}
+el('key').addEventListener('keydown',function(e){ if(e.key==='Enter') saveKey() });
+el('bm').addEventListener('change',function(){ load() });
+load();
+</script>
+</body></html>`))
+
 app.get('/pc', async (c) => {
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light only"/>
+${FAVICON_LINK}
 <title>电脑填表 · 上传回来</title>
 <style>
  body{margin:0;font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#222}
@@ -8245,13 +8600,13 @@ app.get('/pc', async (c) => {
     <button onclick="dlSheet('ap_recon')">只下应付对账</button>
   </div>
   <label class="tip"><input type="checkbox" id="fill" checked/> 把系统里已有的客户 / 供应商名字先填好（你只填金额）</label>
-  <div class="tip">页签名别改 · 一家一行只填金额 · 月份可以留空（留空算当月）· 没填金额的行会自己跳过</div>
+  <div class="tip">页签名别改 · 一家一行只填金额 · 月份可以留空（留空算当月）· 没填金额的行会自己跳过<br/>只认 <b>.xlsx</b>（Excel 2007 以后）；如果你的文件是 .xls，用 Excel 打开后「另存为」选 .xlsx 再传。单个文件上限 12MB。</div>
 </div>
 
 <div class="card">
   <h2>3. 上传填好的表</h2>
   <div class="row">
-    <input type="file" id="f" accept=".xlsx"/>
+    <input type="file" id="f" accept=".xlsx,.xls"/>
     <button class="p" id="btn1" onclick="preview()">先看看要导什么</button>
   </div>
   <div id="msg" class="tip"></div>
@@ -8493,14 +8848,31 @@ function loadStaff(){
           + '<td>' + (u.pin_set ? '已设' : '还没设') + '</td>'
           + '<td>' + esc(u.mod_text || '全部') + '</td>'
           + '<td>' + (Number(u.active) ? '在用' : '停用') + '</td>'
-          + '<td><button onclick="chgStaffPin(' + u.id + ',&quot;' + String(u.name || '').replace(/&quot;/g, '') + '&quot;)">换口令</button> '
-          + '<button onclick="chgStaffMods(' + u.id + ')">改权限</button> '
+          // 第 18 轮 F4：以前把员工名字拼进 onclick 的字符串里，只做了 .replace(/&quot;/g,'')。
+          // 名字里只要出现一个双引号（或者 &quot; 本身），按钮就点不动，甚至能借属性注入脚本。
+          // 现在名字放 data-name（已转义），点击走事件委托，不再拼进 JS。
+          + '<td><button class="stbtn" data-act="pin" data-id="' + u.id + '" data-name="' + esc(u.name) + '">换口令</button> '
+          + '<button class="stbtn" data-act="mods" data-id="' + u.id + '">改权限</button> '
           + '<button onclick="toggleStaff(' + u.id + ',' + (Number(u.active) ? 0 : 1) + ')">' + (Number(u.active) ? '停用' : '启用') + '</button> '
-          + '<button onclick="delStaff(' + u.id + ',&quot;' + String(u.name || '').replace(/&quot;/g, '') + '&quot;)">删</button></td></tr>'
+          + '<button class="stbtn" data-act="del" data-id="' + u.id + '" data-name="' + esc(u.name) + '">删</button></td></tr>'
           + '<tr id="mrow_' + u.id + '" style="display:none"><td colspan="5">' + modBoxes(u.id, u.mods || []) + '<button onclick="saveStaffMods(' + u.id + ')">保存权限</button></td></tr>'
       })
       h += '</table>'
-      document.getElementById('st_list').innerHTML = h
+      var box = document.getElementById('st_list')
+      box.innerHTML = h
+      // 事件委托：按钮上只带 data-*，名字和动作都从 dataset 读（见上面 F4 的说明）
+      if (!box._bound) {
+        box._bound = true
+        box.addEventListener('click', function (e) {
+          var t = e.target || {}, b = null
+          for (var i = 0; i < 3 && t; i++) { if (t.className && String(t.className).indexOf('stbtn') >= 0) { b = t; break } t = t.parentNode }
+          if (!b) return
+          var id = b.getAttribute('data-id'), nm = b.getAttribute('data-name') || '', act = b.getAttribute('data-act')
+          if (act === 'pin') chgStaffPin(id, nm)
+          else if (act === 'mods') chgStaffMods(id)
+          else if (act === 'del') delStaff(id, nm)
+        })
+      }
   var sb = document.getElementById('st_book')
   if (sb) sb.textContent = '第 ' + (d.book || bookCur()) + ' 本'
       document.getElementById('sp_self_own').checked = !!d.self_only
@@ -8810,7 +9182,12 @@ function readFile(){
     var f = document.getElementById('f').files[0]
     if (!f) { bad('先选一个 xlsx 文件'); return }
     if (f.size > 12 * 1024 * 1024) { bad('文件超过 12MB，分月导吧'); return }
+    // 第 18 轮 F3：.xls（老格式）读不出来，以前是读到一半才报「读不了这个文件」，
+    // 用户不知道是格式问题。现在先说清楚要怎么做。
+    if (/\.xls$/i.test(f.name)) { bad('这是老的 .xls 格式：用 Excel 打开它，「另存为」选 .xlsx，再传新文件'); return }
     var rd = new FileReader()
+    // 第 18 轮 F3：以前读文件没有任何提示，几十兆的表看着像卡死了。给个百分比。
+    rd.onprogress = function(e){ if (e && e.lengthComputable) msg('正在读文件 ' + Math.round(e.loaded / e.total * 100) + '%') }
     rd.onload = function(){ ok(b64(rd.result)) }
     rd.onerror = function(){ bad('读不了这个文件') }
     rd.readAsArrayBuffer(f)
@@ -12114,9 +12491,9 @@ app.get('/quote-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expQ = numTs(c.req.query('x'))
   const good = saved && id ? await sigBook(mainDb, c.env.BOOK, 'quote', 'q:' + id, expQ) : ''
-  if (!good || want !== good || linkExpired(expQ)) return c.html('<h3>链接已失效或已过期：请让对方重新发一次报价。</h3>')
+  if (!good || want !== good || linkExpired(expQ)) return c.html(errorPage({ title: '这份报价的链接已经失效', why: '这种链接 7 天后自动作废', how: '让报价方在小程序里重新发一次报价链接。' }))
   const r = await qGet(db, id)
-  if (!r) return c.html('<h3>这份报价已经不在了。</h3>')
+  if (!r) return c.html(errorPage({ title: '这份报价不在了', why: '可能已经被删掉', how: '让报价方重新发一次。' }))
   const t = await getTitle(db)
   const q = qSlim(r)
   const body = `<h1>报 价 单</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}${t.addr ? ' · ' + escHtml(t.addr) : ''}</div>
@@ -15668,7 +16045,7 @@ const ACK_CSS = 'body{margin:0;background:#f5f6f8;font:15px/1.65 -apple-system,B
   + '.ok{background:#eaf7ee;color:#1a7f37;border-radius:10px;padding:12px;font-size:15px;margin-top:10px}'
 
 const ackPage = (inner, script) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">`
-  + `<meta name="viewport" content="width=device-width,initial-scale=1"><title>对账确认</title><style>${ACK_CSS}</style></head>`
+  + `<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light only"><meta name="robots" content="noindex,nofollow">${FAVICON_LINK}<title>对账确认</title><style>${ACK_CSS}</style></head>`
   + `<body><div class="wrap">${inner}</div>${script ? `<script>${script}</script>` : ''}</body></html>`
 
 app.get('/statement-ack-link', async (c) => {
@@ -15708,7 +16085,16 @@ app.get('/statement-ack', async (c) => {
     : 'SELECT id, created_at, remark AS item, amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo FROM payables WHERE supplier=? AND amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 ORDER BY created_at ASC LIMIT 12').bind(party).all()).results || [])
   const docRows = docs.map((r) => `<div class="doc">${escHtml(String(r.created_at || '').slice(0, 10))} ${escHtml(r.item || (type === 'ar' ? '加工费' : '货款'))} <b>¥${round2(num(r.amount))}</b> <i>已${type === 'ar' ? '收' : '付'} ${round2(num(r.paid))}，还欠 ${round2(num(r.amount) - num(r.paid) - num(r.wo))}</i></div>`).join('')
   const openAmt = round2(num(d.end))
+  // 第 18 轮 F1：以前刷新页面还是那两个按钮，客户不知道自己到底确认过没有（也有人点两遍）。
+  // 现在把上一次的确认结果读出来，明说「您已于 X 确认过」。
+  const prevAck = await db.prepare("SELECT ack, ack_at, note FROM statement_log WHERE party=? AND type=? AND month=? AND ack IS NOT NULL ORDER BY id DESC LIMIT 1")
+    .bind(party, type, month).first().catch(() => null)
+  const ackBanner = prevAck
+    ? `<div class="ok" style="margin-top:0;background:#fff8e6;color:#8a5a00">您已于 ${escHtml(String(prevAck.ack_at || '').slice(0, 16).replace('T', ' '))} ${
+      prevAck.ack === 'ok' ? '确认「对得上」' : '说过「有几笔对不上」'}${prevAck.ack !== 'ok' && prevAck.note ? '（' + escHtml(String(prevAck.note).slice(0, 60)) + '）' : ''}。<br>要改口就在下面重新点一次。</div>`
+    : ''
   const inner = `<div class="hd"><b>${escHtml(t.title || '对账确认')}</b><span>${type === 'ar' ? '给您对一下加工费的账' : '和您对一下货款的账'} · ${escHtml(month)}</span></div>`
+    + ackBanner
     + `<div class="card"><h3>${escHtml(party)}，到 ${now().slice(0, 10)}</h3>`
     + `<div class="kv"><span>月初欠</span><b>¥${round2(num(d.open))}</b></div>`
     + `<div class="kv"><span>本月新增</span><b>¥${round2(num(d.add))}</b></div>`
@@ -15729,7 +16115,7 @@ app.get('/statement-ack', async (c) => {
     + `function ack(kind){var amt=0,note='';if(kind==='doubt'){amt=Number(document.getElementById('amt').value||0);note=String(document.getElementById('note').value||'')}`
     + `if(kind==='doubt'&&!amt&&!note){alert('写一下差多少，或者说明哪一笔不对');return}`
     + `fetch('/statement-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:P.type,party:P.party,month:P.month,t:P.t,x:P.x,ack:kind,amount:amt,note:note})})`
-    + `.then(function(r){return r.json()}).then(function(d){document.getElementById('res').innerHTML='<div class="ok">'+(d.text||'收到了，谢谢！')+'</div>';document.getElementById('doubt').style.display='none'})`
+    + `.then(function(r){return r.json()}).then(function(d){var bs=document.querySelectorAll('.btn');for(var i=0;i<bs.length;i++){bs[i].disabled=true;bs[i].style.opacity=.5}var tm=new Date();document.getElementById('res').innerHTML='<div class="ok">'+(d.text||'收到了，谢谢！')+'<br><span style="font-size:12px;color:#6b7280">提交时间 '+tm.toLocaleString('zh-CN')+'</span></div>';document.getElementById('doubt').style.display='none'})`
     + `.catch(function(){alert('没提交成功，请检查网络再点一次')})}`
   return c.html(ackPage(inner, script))
 })
@@ -17193,7 +17579,7 @@ app.get('/year-review-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expY = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearreview', 'yr:' + y, expY) : ''
-  if (!good || want !== good || linkExpired(expY)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度回顾。</h3>')
+  if (!good || want !== good || linkExpired(expY)) return c.html(errorPage({ title: '这份年度回顾的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 年度回顾</b> → 重新生成。' }))
   const d = await yearReview(db, y)
   const t = await getTitle(db)
   const bars = d.months.map((m) => `<div class="bc"><div class="bv">${m.profit || ''}</div><div class="bb" style="height:${Math.max(2, Math.round(Math.abs(m.profit) / Math.max(1, ...d.months.map((x) => Math.abs(x.profit))) * 90))}px"></div><div class="bl">${escHtml(m.label)}</div></div>`).join('')
@@ -17497,7 +17883,7 @@ app.get('/year-close-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expC = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yc:' + y, expC) : ''
-  if (!good || want !== good || linkExpired(expC)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度封账单。</h3>')
+  if (!good || want !== good || linkExpired(expC)) return c.html(errorPage({ title: '这份年度封账单的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 年度封账</b> → 重新生成。' }))
   const d = await yearBook(db, y)
   const s = await yearCloseScan(db, y)
   const t = await getTitle(db)
@@ -17543,13 +17929,13 @@ app.get('/year-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expB = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'year', 'yb:' + y, expB) : ''
-  if (!good || want !== good || linkExpired(expB)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成年度总账打印页。</h3>')
+  if (!good || want !== good || linkExpired(expB)) return c.html(errorPage({ title: '这份年度总账的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 年度总账</b> → 重新生成。' }))
   const d = await yearBook(db, y)
   const t = await getTitle(db)
   const rows = d.months.map((m) => `<tr><td>${escHtml(m.label)}</td><td class="n">${m.cnt || ''}</td><td class="n">${m.income || ''}</td><td class="n">${m.mat || ''}</td><td class="n">${m.exp || ''}</td><td class="n b ${m.profit < 0 ? 'red' : ''}">${m.profit || ''}</td><td class="n">${m.recv || ''}</td><td class="n">${m.pay || ''}</td></tr>`).join('')
   const body = `<h1>${escHtml(y)} 年度总账</h1><div class="sub">${escHtml(t.title || '')}${t.phone ? ' · ' + escHtml(t.phone) : ''}　制表日期 ${now().slice(0, 10)}</div>
-<table><tr><th>月份</th><th>单数</th><th>接单额</th><th>材料外协</th><th>现金费用</th><th>净利</th><th>实收</th><th>实付</th></tr>${rows}
-<tr class="total"><td>全年</td><td class="n">${d.totals.cnt}</td><td class="n">${d.totals.income}</td><td class="n">${d.totals.mat}</td><td class="n">${d.totals.exp}</td><td class="n">${d.totals.profit}</td><td class="n">${d.totals.recv}</td><td class="n">${d.totals.pay}</td></tr></table>
+<table><thead><tr><th>月份</th><th>单数</th><th>接单额</th><th>材料外协</th><th>现金费用</th><th>净利</th><th>实收</th><th>实付</th></tr></thead><tbody>${rows}</tbody>
+<tfoot><tr class="total"><td>全年</td><td class="n">${d.totals.cnt}</td><td class="n">${d.totals.income}</td><td class="n">${d.totals.mat}</td><td class="n">${d.totals.exp}</td><td class="n">${d.totals.profit}</td><td class="n">${d.totals.recv}</td><td class="n">${d.totals.pay}</td></tr></tfoot></table>
 <h2>年底结存</h2>
 <table><tr><td>现金（各账户合计）</td><td class="n">${d.cash.end}</td></tr><tr><td>客户还欠（应收）</td><td class="n">${d.ar_end}</td></tr><tr><td>欠供应商（应付）</td><td class="n">-${d.ap_end}</td></tr><tr><td>欠借款</td><td class="n">-${d.debt_end}</td></tr><tr class="total"><td>家底（净资产）</td><td class="n">${d.net_worth}</td></tr></table>
 <h2>说明</h2><div class="sub" style="text-align:left">净利（权责口径）= 接单额 − 单子上的材料·外协成本 − 现金费用 − 摊销 − 折旧 − 预提利息；赊购只进现金流不重复算成本。年底应收/应付按「截至 ${y}-12-31 已收付多少」计算，不是现在的余额。</div>`
@@ -17704,7 +18090,7 @@ app.get('/year-open-print', async (c) => {
   const snap = recRow && recRow.value ? recRow.value : ''
   const xYo = String(c.req.query('x') || '')
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'yearopen', 'yo:' + y + '@' + String(snap).slice(0, 100), numTs(xYo)) : ''
-  if (!good || want !== good || linkExpired(xYo)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成结转凭据。</h3>')
+  if (!good || want !== good || linkExpired(xYo)) return c.html(errorPage({ title: '这份结转凭据的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 期初结转</b> → 重新生成。' }))
   const d = await yearOpenData(db, y)
   const t = await getTitle(db)
   const rec = d.record || { ...d.opening, ar_cnt: d.ar_cnt, ap_cnt: d.ap_cnt, created_at: now() }
@@ -18964,7 +19350,7 @@ app.get('/health-print', async (c) => {
   const want = String(c.req.query('t') || '')
   const expH = numTs(c.req.query('x'))
   const good = saved ? await sigBook(mainDb, c.env.BOOK, 'health', 'hr:' + days, expH) : ''
-  if (!good || want !== good || linkExpired(expH)) return c.html('<h3>链接已失效或已过期：请在小程序里重新生成体检报告单。</h3>')
+  if (!good || want !== good || linkExpired(expH)) return c.html(errorPage({ title: '这份体检报告的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>设置 → 体检报告</b> → 重新生成。' }))
   const r = await healthReport(db, days, mainDb, c.env.BOOK)
   const t = await getTitle(db)
   const tr = (x) => `<tr><td>${escHtml(x.label)}</td><td class="n">${x.count > 0 ? '还有 ' + x.count + ' 处' : '正常'}</td><td>${escHtml(x.since || '')}</td><td>${x.count > 0 ? daysTxtPrint(x.days_open) : (x.fixed ? '已修好' : '')}</td><td>${escHtml(x.fixed || '')}</td><td>${escHtml(x.count > 0 ? (x.tip || '') : '')}</td></tr>`
@@ -18974,7 +19360,7 @@ app.get('/health-print', async (c) => {
 <div class="score"><span class="big">${r.score}</span> 分 · ${escHtml(r.grade)}${r.delta ? `（${r.delta > 0 ? '+' : ''}${r.delta}）` : ''}</div>
 <h2>分数变化</h2><div class="spark">${escHtml(r.spark || '（还没有历史记录）')}</div><div class="tip">${escHtml(pts || '')}</div>
 <h2>结论</h2><ul>${r.sentences.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>
-<h2>逐项体检</h2><table><tr><th>检查项</th><th>现在</th><th>哪天发现的</th><th>持续多久</th><th>哪天修好的</th><th>怎么改</th></tr>${rows}</table>
+<h2>逐项体检</h2><table><thead><tr><th>检查项</th><th>现在</th><th>哪天发现的</th><th>持续多久</th><th>哪天修好的</th><th>怎么改</th></tr></thead><tbody>${rows}</tbody></table>
 <div class="tip">分数算法：满分 100，按问题扣分——接口报错、没备份各扣 10，上月没结账扣 5，其余每项扣 8。分数只是提醒，不影响账上的数字。</div>`
   return c.html(a4Page({ title: '账本体检报告单', body, extraCss: '.score{font-size:15px;margin:6px 0 12px}.score .big{font-size:30px;font-weight:700;color:#1f6feb}.spark{font-size:22px;letter-spacing:2px;color:#1f6feb;margin:4px 0}.tip{font-size:12px;color:#777;margin:6px 0}' }))
 })
