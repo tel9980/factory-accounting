@@ -44,7 +44,7 @@ if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
         CLOUDFLARE_API_TOKEN=xxxx
         CLOUDFLARE_ACCOUNT_ID=fb907fe08010a1b319f68be568331ce5
    2) 写到 ~/.dsh/cf-token（多个项目共用）
-   3) 直接 export CLOUDFLARE_API_TOKEN=xxxx
+   3) 临时 export（不推荐：会进 shell history / 录屏 / 贴给别人时漏出）
 EOF
   exit 1
 fi
@@ -120,11 +120,32 @@ if [ "$DRY" = "1" ]; then
 else
   KEY_TRY="${FA_KEY:-${FACTORY_KEY:-}}"
   if [ -z "$KEY_TRY" ]; then
-    echo "→ 部署后体检：跳过（没给 FA_KEY 访问口令；要跑就 FA_KEY=你的口令 bash scripts/deploy.sh）"
+    # 第 17 轮 D7：以前这里只是一行轻描淡写的「跳过」。手工部署恰恰是最常用的应急路径，
+    # 而「没配口令 → 不做体检」意味着这次发布完全没人验过线上接口 —— 必须说得足够刺眼。
+    echo ""
+    echo "  ⚠️⚠️ 本次没有做线上体检（没给访问口令）"
+    echo "     这次发布只验了 /version，没有任何接口/表结构检查。"
+    echo "     要补做：FA_KEY=你的口令 node scripts/check-live.mjs --base https://jz.qy663.de5.net"
+    echo ""
   else
     echo "→ 部署后体检（线上接口 + 表结构）"
     node scripts/check-live.mjs --base https://jz.qy663.de5.net --key "$KEY_TRY" || {
+      RC=$?
       echo "❌ 部署后体检没过：版本对了，但线上有接口/表结构不对。先看上面哪一项红。"
+      if [ "$RC" = "2" ]; then
+        # 退出码 2 = 全部失败都是口令被拒，不是线上坏了 —— 别回滚，回滚反而把好版本撤掉
+        echo "   （退出码 2：全部失败都是「口令被拒」，这不是线上坏了，先确认 FA_KEY 对不对）"
+        exit 1
+      fi
+      # 第 17 轮 D7：CI 那边有自动回滚（第 17 轮 D1 修好了那个从不执行的 if），
+      # 手工部署这条路径以前只 exit 1 —— 坏版本留在线上没人管。这里给出一键回滚。
+      echo "→ 尝试回滚到上一个版本"
+      if npx wrangler rollback --name factory-accounting --yes 2>&1 | tail -3; then
+        echo "✅ 已回滚到上一个版本（请再跑一次 node scripts/check-live.mjs 确认）"
+      else
+        echo "❌ 自动回滚没成功。手动回滚：npx wrangler deployments list --name factory-accounting"
+        echo "   然后：npx wrangler rollback <上一个 deployment id> --name factory-accounting"
+      fi
       exit 1
     }
   fi

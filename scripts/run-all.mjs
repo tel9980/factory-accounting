@@ -12,6 +12,7 @@
 // 只跑离线五件套，不用动。别在 workflow 里加、这里忘了登记——那样 check-manifest 会报「多了」。
 
 import { spawnSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 
 export const OFFLINE = [
   'test-batch',
@@ -71,7 +72,12 @@ export const ONLINE = [
 export const CASES = [...OFFLINE, ...ONLINE]
 
 // 被 check-manifest.mjs import 时只取上面两份清单，别真跑；只有 `node scripts/run-all.mjs` 才跑。
-if (import.meta.main) {
+// 第 17 轮 D4：`import.meta.main` 是 Node ≥24.2 才有的属性。
+// 在 Node 22（backend/package.json 的 engines 下限）上它是 undefined → 下面的 main() 整段不执行，
+// 退出码还是 0：迁移「跑完了」其实一条没跑、回归「全过」其实一个测试没跑。
+// 用 argv[1] 与 import.meta.url 比较，Node 18+ 都可靠。
+const IS_MAIN = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (IS_MAIN) {
   const argv = process.argv.slice(2)
   const opt = (n, d) => {
     const i = argv.indexOf('--' + n)

@@ -50,8 +50,14 @@ const main = async () => {
   // ===== 1. 设备：新增 → 折旧 → 维修 → 处置（一条链）=====
   console.log('\n[1] 设备从买到卖：折旧进成本、处置进流水')
   const cost = 12000 + off
-  const add = await post('/assets', { name: '测试车床' + tag, cost, buy_date: day(40), life_years: 5, residual_rate: 5 })
-  eq('[1] 新增设备', add.status, 200)
+  // 第 17 轮 A5：买入日期填到以前的月份，折旧要从那个月补提 —— 历史报表会变，
+  // 已结账的月份还会永久少提。所以后端先回 409 backdate_confirm，前端问过再带 confirm:true 重发。
+  const back = await post('/assets', { name: '测试车床' + tag, cost, buy_date: day(40), life_years: 5, residual_rate: 5 })
+  eq('[1] 买入日期在上个月要先确认（409）', back.status, 409)
+  eq('[1]   确认码是 backdate_confirm', (back.d || {}).code, 'backdate_confirm')
+  ok('[1]   说清了后果（历史报表会变 / 已结账月份少提）', /补提|少提/.test(String((back.d || {}).error || '')), String((back.d || {}).error || '').slice(0, 40))
+  const add = await post('/assets', { name: '测试车床' + tag, cost, buy_date: day(40), life_years: 5, residual_rate: 5, confirm: true })
+  eq('[1] 确认之后新增设备', add.status, 200)
   const list1 = await get('/assets')
   const arr1 = Array.isArray(list1.d) ? list1.d : ((list1.d && (list1.d.rows || list1.d.list || list1.d.assets)) || [])
   const asset = arr1.find((x) => String(x.name) === '测试车床' + tag)

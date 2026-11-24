@@ -512,3 +512,5 @@
 
 /* 第 16 轮 D1：设置页里「最近一次提醒没发出去」要用红色顶出来（.tip 默认灰） */
 .tip.red { color: #d93025; }
+
+.bar-sub { color: #8a8f99; font-size: 22rpx; }

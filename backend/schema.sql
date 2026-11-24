@@ -32,6 +32,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_month ON orders(month);
 CREATE INDEX IF NOT EXISTS idx_orders_deliver ON orders(deliver_date);
 CREATE INDEX IF NOT EXISTS idx_orders_by ON orders(created_by);
+-- 第 17 轮 E1：见 ledger 那段注释 —— 这个索引原来也只在迁移里
+CREATE INDEX IF NOT EXISTS idx_orders_paid ON orders(paid, written_off);
 CREATE TRIGGER IF NOT EXISTS trg_orders_month AFTER INSERT ON orders WHEN NEW.month IS NULL
 BEGIN UPDATE orders SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
@@ -72,6 +74,8 @@ CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier);
 CREATE INDEX IF NOT EXISTS idx_payables_created ON payables(created_at);
 CREATE INDEX IF NOT EXISTS idx_payables_month ON payables(month);
 CREATE INDEX IF NOT EXISTS idx_payables_by ON payables(created_by);
+-- 第 17 轮 E1：见 ledger 那段注释 —— 这个索引原来也只在迁移里
+CREATE INDEX IF NOT EXISTS idx_payables_paid ON payables(paid, written_off);
 CREATE TRIGGER IF NOT EXISTS trg_payables_month AFTER INSERT ON payables WHEN NEW.month IS NULL
 BEGIN UPDATE payables SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
@@ -98,6 +102,13 @@ CREATE TABLE IF NOT EXISTS ledger (
 CREATE INDEX IF NOT EXISTS idx_ledger_created ON ledger(created_at);
 CREATE INDEX IF NOT EXISTS idx_ledger_month ON ledger(month);
 CREATE INDEX IF NOT EXISTS idx_ledger_cash_dir ON ledger(cash, direction, ref_type);
+-- 第 17 轮 E1：这三个索引原来**只**在 backend/migrations/0001_indexes.sql 里。
+-- CI 每次都会跑迁移，所以云上有；但按 DEPLOYMENT.md「一个 schema.sql 就够」自建库、
+-- 或者打单文件 exe 的机器上永远没有它们 —— 而「还没结清」那个条件
+-- （COALESCE(paid,0)+COALESCE(written_off,0) < price）全库出现几十处，订单过万后
+-- 首页、账龄就变成全表扫，用户只感觉「这软件越用越卡」。
+-- 迁移里保留同样的语句（幂等），这里也建一份。
+CREATE INDEX IF NOT EXISTS idx_ledger_ref_dir ON ledger(ref_type, ref_id, direction);
 CREATE TRIGGER IF NOT EXISTS trg_ledger_month AFTER INSERT ON ledger WHEN NEW.month IS NULL
 BEGIN UPDATE ledger SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 

@@ -21,9 +21,9 @@ const MONEY_WORDS = [
   'break_even', 'var_ratio', 'accrual', 'amort', 'depreciation',
 ]
 
-const DENY_RE = /^\/(margin-by|cost-hint|report-data|report$|cashbook|health-report|invoice-check|cashflow|networth(-snapshots)?$|funding|year-print-link)/
-const SCRUB_RE = /^\/(wip|materials|supply-price|frame-prices|rework-book|outsource-book)/
-const COST_RE = /^\/(ar|ap|orders|settled|quick$|collect)/
+// 注意：这里**不**再抄一份三张名单（以前抄过，抄完就旧了 —— 第 17 轮 /month-brief
+// 明明不在名单里，这里的副本也没人更新）。名单的唯一来源是 backend/index.js 里的
+// STAFF_MONEY_DENY / STAFF_MONEY_SCRUB / STAFF_COST_PATHS，由下面 staffLists() 现读。
 
 // 从 backend/index.js 里抽出所有 GET 路由 + 它后面那一段 handler 文本
 export function scanMoneyRoutes(beSrc) {

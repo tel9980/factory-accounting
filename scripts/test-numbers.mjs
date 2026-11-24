@@ -153,7 +153,9 @@ const run = async () => {
 
   // 金额做成唯一的：后端对「同一天同分类同金额」有防重，写死会被 409 挡掉
   const EXP = 300 + (Date.now() % 89)
-  const exp = await post('/expenses', { amount: EXP, category: '水电', remark: TAG + '数测支出', date: TODAY, account_id: cashAcc.id, client_id: TAG + '-exp' })
+  // 同一天重复跑这个脚本时，后端会拦「今天已经记过一笔水电 334」——那是产品行为（防重复记账），
+  // 但这是测试自己故意记的账，所以显式 confirm_dup，保证脚本当天可以反复跑。
+  const exp = await post('/expenses', { amount: EXP, category: '水电', remark: TAG + '数测支出', date: TODAY, account_id: cashAcc.id, client_id: TAG + '-exp', confirm_dup: true })
   yes('记一笔支出 ' + EXP, exp.s === 200, exp.d)
 
   const after = await snap()

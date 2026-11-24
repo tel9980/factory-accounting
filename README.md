@@ -1734,6 +1734,17 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+359. ✅ **第 17 轮审计：把「发布链路从来没验过」和「屏幕上看不出来的错」一起修掉**（用户「好的，继续，最后跑模拟数据，查漏补缺」）。三路只读审计报上来 41 条，逐条回代码核实后按 A–F 六组、五批做完。这一轮最要紧的不是某个数算错，而是**三道保险其实都是空的**：
+    - **CI 的「体检没过就自动回滚」从来没执行过**：`deploy.yml` 那句 `if: steps.health.outputs.bad == 'true' && …` 没写 `always()`，GitHub 会给带自定义 `if:` 的 step 隐式 AND 一个 `success()`；而 `bad=true` 只有体检步「先写标记再 `exit 1`」才产生 —— 那一刻 job 已经红了，回滚步必然 skipped。同一个毛病还让「验版本」「版本比对」「线上报错巡检」一起被跳过：**部署成功后任何一步红，就没人验、没人回滚、没人看线上有没有新 5xx**，而三份文档都写着「会自动回滚」。现在这 4 个 step 全部 `always()`，`check.mjs` 新增 `[4.18]` 检查「带 `steps.*.outputs` 的 `if:` 必须显式写状态函数或标 `fail-fast`」。
+    - **首页「这半年收了多少钱」永远是 0**：`/kpi` 的 SQL 查了 `cin`/`cout`，JS 里 `lMap[x.mk] = { c, ad }` 只搬了两列 → `cash_in`/`cash_out`/`profit`/`margin` 全恒 0，不报错也不降级。
+    - **员工还能从两个口子看到毛利**：`/month-brief` 不在任何员工抹数名单里（直接给 `profit`、`cash_in/out`，文案还拼「这个月到手 ¥…」）；`/dashboard` 的 `hideProfit` 只挡利润总额，成本分项照给，减一下就是毛利。现在前者整条 403、后者五项成本置 `null`。
+    - **三条写路由漏月结锁**：`POST /orders/:id/apply-advance`、`/payables/:id/apply-advance`、`DELETE /loans/:id` 能改/删已结账月份的数据（同表其它路由都有锁）。
+    - **钱算错一类**：`POST /assets` 不判锁（填个老日期就能悄悄改历史报表，现在返回 409 `backdate_confirm` 并说清会补提几个月）；`DELETE /assets/:id` 只删设备、折旧流水全留（现在有锁就 403、没锁就一起删并记账）；`POST /fixed` 金额不 `round2`；`last_insert_rowid()` 与 `MAX(id)` 两套相反写法（统一成 `MAX(id)` 并写清理由）。
+    - **假安心一类**：`accountBalances` 四处 `.catch(() => [])` → 账上「0 元」还回 `failed:false`，输出「差 Y 元先把 Z 的催回来」；`/networth-snapshots` 查失败时每月都显示「无偏差」；`noteFailDb`/`noteQuiet` 写日志不 `await`（Worker 一冻结就丢）；`error_log` 的查询串原样入库（现在把 `key/token/sign/pwd…` 的值抹成 `***`）。
+    - **前端三类**：`role` 初值就是 `'owner'` 且 `loadMe` 没 `fail`（弱网时员工看到老板界面，30 处判断全放行 → 改成 `is_boss` + 「身份没确认」提示条）；收清/转账/还款都不传日期（补记 9 月一律落今天 → 四个入口都加了日期输入）；`flushPending` 用「长度差」认新账（补发中丢一条又记一条 → 新账被覆盖 → 改成按 `uid` 求差集）。另外 16 个 loader 的 `fail` 是空的，现在统一 `_err()` + 页面顶部一条「这些没拉出来（不是没有）」横幅。
+    - **门禁/索引/文档**：`import.meta.main` 在 Node 22 上是 `undefined`（迁移空跑、回归空过，退出码还是 0）→ 改 `argv[1] + pathToFileURL`，并加 `[4.19]` 禁用它；`--update-baseline` 以前一点就把「老库缺列」门禁关掉 → 现在没有同批迁移就拒绝重写；`schema.sql` 缺 3 个热索引（只在迁移里，按文档自建的库/exe 永远没有）→ 补上并加 `[4.20]` 真建两个内存库比索引集合；`/loans` 无 LIMIT（→ 500 条 + 合计仍按全表算）；`/statement-pack` 全表 `SELECT *`（→ 只取用到的列 + 5000 张上限 + 超了写在文件里）；`wxPush` 一次全发会撞 Worker 子请求上限（→ 每轮 40 个 + 游标接着发）；恢复备份后补一句「照片不在这份包里，库里还剩 N 张」。
+    - 还留了个**棘轮**：`check.mjs [4.21]` 记录「裸 `SUM(金额列)`」的出现次数（本轮从 306 降到 291），**只许减不许增**，新增一律用 `SUM_MONEY`。
+    - ⚠️ 小程序要重新上传（前端改了 30 处角色判断、16 个错误态、4 个日期输入）。
 358. ✅ **CI 首跑红在「迁移」那步：`env:` 被前一个 step 吃掉了**（第 16 轮 C3 自己带出来的伤）。第 16 轮把「灌表结构」改成跑两遍（建表 → 迁移 → 再补索引），我新插的「第 2 遍」步骤正好插在「跑远程数据库迁移」的 `run` 与它的 `env:` 之间 —— YAML 里 `env:` 属于**它前面那个 step**，于是 `CLOUDFLARE_API_TOKEN` 被新步骤吃走，迁移裸跑、2 秒就 `exit 1`，GitHub 只报「Process completed with exit code 1.」，看不出是没 token；后续 9 个步骤全 skipped，线上还是上一版（所以那一次 push 等于没发出去）。
    - **修法**：给迁移步骤补上自己的 `env:`（`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`），并把这段踩坑写进注释，提醒下一个人「删除/插入 step 时先看 `env:` 归谁」。
    - **防回潮**：`scripts/check.mjs` 新增 **[4.17] 动 Cloudflare 的 step 都带 token 环境变量** —— 按 `- name:` 切块，凡是 `run` 里真去执行 `node scripts/d1-migrate.mjs` / `node scripts/d1-seed-schema.mjs` / `npx wrangler deploy|rollback|secret` 的步骤，块内必须自己出现 `CLOUDFLARE_API_TOKEN:` 与 `CLOUDFLARE_ACCOUNT_ID:`（不是「job 里有」，是「这个 step 里有」）。写完后故意把这段 `env` 删掉重跑，确认它真会红并点名「跑远程数据库迁移（缺 CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID）」。

@@ -9,7 +9,8 @@
 //
 // 用法：
 //   node scripts/check-live.mjs --base https://jz.qy663.de5.net --key <老板口令>
-// 退出码：0 = 全通；1 = 有接口 5xx / 表结构不对 / 版本不通。
+// 退出码：0 = 全通；1 = 有接口 5xx / 表结构不对 / 版本不通；
+//         2 = 全部失败都是「口令被拒」（PROD_KEY 填错了 —— 配置问题，不是线上坏了，别回滚）。
 
 const argOf = (name, dflt) => {
   const i = process.argv.indexOf('--' + name)
@@ -60,6 +61,10 @@ const hit = async (p) => {
 
 const bad = []
 const ok = []
+// 第 17 轮 D1：区分「线上真坏了」和「口令填错了」。
+//   401/403 = PROD_KEY 不是老板口令 → 回滚救不了（回滚之后口令还是错的），
+//   不该触发自动回滚；但要显眼地喊出来，因为「体检被跳过」和「体检通过」不能长得一样。
+const authBad = []
 
 const main = async () => {
   console.log('线上只读体检（只发 GET，不写任何数据）：' + BASE)
@@ -91,7 +96,7 @@ const main = async () => {
   for (const p of PATHS.slice(1)) {
     const r = await hit(p)
     if (r.status === 0) { bad.push([p, '请求失败：' + r.text.slice(0, 120)]); continue }
-    if (r.status === 401 || r.status === 403) { bad.push([p, '口令被拒（HTTP ' + r.status + '）——检查 PROD_KEY 是不是老板口令']); continue }
+    if (r.status === 401 || r.status === 403) { authBad.push(p); bad.push([p, '口令被拒（HTTP ' + r.status + '）——检查 PROD_KEY 是不是老板口令']); continue }
     if (r.status !== 200) { bad.push([p, 'HTTP ' + r.status + '（应 200）：' + String(r.text || '').slice(0, 160)]); continue }
     ok.push(p)
   }
@@ -123,6 +128,13 @@ const main = async () => {
   if (bad.length) {
     console.log(`❌ 失败 ${bad.length} 项：`)
     for (const [p, why] of bad) console.log(`   · ${p} → ${why}`)
+    // 全是「口令被拒」→ 退出码 2（配置问题，不是线上坏了）。
+    // 调用方（deploy.yml）看到 2 只写 warning、不回滚：回滚换不回一个正确的口令。
+    if (authBad.length && authBad.length === bad.length) {
+      console.log('⚠️ 全部失败都是「口令被拒」：PROD_KEY 不是线上老板口令。这不是线上坏了，别回滚。')
+      process.exit(2)
+    }
+    if (authBad.length) console.log(`⚠️ 其中 ${authBad.length} 项是口令被拒，其余是真的坏了`)
     process.exit(1)
   }
   console.log('✅ 线上只读体检全部通过')

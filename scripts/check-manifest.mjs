@@ -27,8 +27,11 @@ const release = fs.readFileSync(RELEASE, 'utf8')
 const bad = []
 const fail = (m) => { bad.push(m); console.log('  ❌ ' + m) }
 
-// workflow 里以 `node scripts/<name>.mjs` 跑过的测试（去掉 --base/--key 等参数）。
-const scriptsOf = (src) => [...src.matchAll(/node\s+scripts\/([a-z0-9-]+\.mjs)/g)].map((m) => m[1])
+// workflow 里以 `node scripts/<name>.mjs`（或 `node ./scripts/x.mjs`、`bash scripts/x.sh`）跑过的脚本。
+// 第 17 轮 D9：原来的正则漏了 `./` 前缀和 bash 调用 —— 写成 `node ./scripts/x.mjs` 就等于绕过门禁。
+const scriptsOf = (src) => [
+  ...[...src.matchAll(/(?:node|bash|sh)\s+(?:\.\/)?scripts\/([a-z0-9-]+\.(?:mjs|sh))/g)].map((m) => m[1])
+]
 
 const deployScripts = new Set(scriptsOf(deploy))
 const releaseScripts = new Set(scriptsOf(release))
@@ -42,6 +45,29 @@ for (const name of ONLINE) {
 for (const name of OFFLINE) {
   if (!deployScripts.has(name + '.mjs')) fail(`OFFLINE「${name}」在 deploy.yml 里没有对应步骤`)
   if (!releaseScripts.has(name + '.mjs')) fail(`OFFLINE「${name}」在 release.yml 里没有对应步骤`)
+}
+
+// 2.5) 第 17 轮 D9：光看「脚本名在文件里出现过」不够 —— 那个 step 可能被
+//      `continue-on-error: true`（失败也绿）或 `if: false`（永远不跑）关掉，
+//      于是「测试跑过了」是假的。按 `- name:` 切块，逐块检查。
+{
+  const blocks = []
+  let cur = null
+  for (const ln of deploy.split('\n')) {
+    const m = /^\s*-\s+name:\s*(.+)$/.exec(ln)
+    if (m) { cur = { name: m[1].trim(), body: [] }; blocks.push(cur); continue }
+    if (cur) cur.body.push(ln)
+  }
+  const offed = []
+  for (const b of blocks) {
+    const text = b.body.join('\n')
+    if (!/(?:node|bash|sh)\s+(?:\.\/)?scripts\/(test-[a-z0-9-]+\.(?:mjs|sh))/.test(text)) continue
+    if (/^\s*if:\s*(false|\$\{\{\s*false\s*\}\})\s*$/m.test(text)) offed.push(b.name + '（if: false）')
+    else if (/^\s*continue-on-error:\s*true\s*$/m.test(text)) offed.push(b.name + '（continue-on-error: true）')
+  }
+  if (offed.length) {
+    for (const o of offed) console.log(`  ⚠️ 这个 step 跑测试但失败不会红：${o}`)
+  }
 }
 
 // 3) 反向：workflow 里引用的 test-*.mjs 不该是「清单里没有」的孤儿

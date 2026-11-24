@@ -173,10 +173,13 @@ if (!flag('no-test')) {
       const db = new DatabaseSync(path.join(dataDir, 'book1.db'))
       const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map((r) => String(r.name)))
       db.close()
-      const need = ['idx_ledger_ref_dir', 'idx_orders_paid', 'idx_payables_paid']
+      // 第 17 轮 E1：need 列表改成「schema.sql 里声明的全部索引」——
+      // 以前只写死三个，以后 schema.sql 新增索引时这里不会跟着变，exe 上缺了也没人知道。
+      const schemaSrc = fs.readFileSync(path.join(ROOT, 'backend/schema.sql'), 'utf8')
+      const need = [...schemaSrc.matchAll(/CREATE INDEX IF NOT EXISTS\s+(\w+)/g)].map((m) => m[1])
       const miss = need.filter((n) => !names.has(n))
       if (miss.length) throw new Error('打包出来的程序没跑迁移，缺索引：' + miss.join('、') + '（build 的 assets 里要带 migrations.json）')
-      console.log('  ✅ 迁移在 exe 上跑过了（' + need.join(' / ') + ' 都在）')
+      console.log('  ✅ 迁移在 exe 上跑过了（schema.sql 的 ' + need.length + ' 个索引都在）')
     } catch (e) {
       // 本机 Node 太老没有 node:sqlite 时只提示，不判定失败（CI 的 Node 24 一定有）
       if (/node:sqlite|Cannot find|ERR_UNKNOWN_BUILTIN/.test(String(e && e.message))) console.log('  ⚠️ 这台机器的 Node 没有 node:sqlite，跳过索引自检')

@@ -21,6 +21,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { listMigrations, splitStatements, isDuplicateColumnError, isAlreadyExistsError } from './migrations-lib.mjs'
+import { pathToFileURL } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(HERE, '..')
@@ -149,4 +150,9 @@ function main() {
   console.log('✅ 迁移全部跑完')
 }
 
-if (import.meta.main) main()
+// 第 17 轮 D4：`import.meta.main` 是 Node ≥24.2 才有的属性。
+// 在 Node 22（backend/package.json 的 engines 下限）上它是 undefined → 下面的 main() 整段不执行，
+// 退出码还是 0：迁移「跑完了」其实一条没跑、回归「全过」其实一个测试没跑。
+// 用 argv[1] 与 import.meta.url 比较，Node 18+ 都可靠。
+const IS_MAIN = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (IS_MAIN) main()

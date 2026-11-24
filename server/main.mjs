@@ -309,6 +309,11 @@ async function main() {
     NOTES_BASE: process.env.NOTES_BASE || '',
     NOTES_SLUG: process.env.NOTES_SLUG || '',
     NOTES_PASS: process.env.NOTES_PASS || '',
+    // 第 17 轮 F4：安装令牌（首次 /auth/setup 要带它）以前本机版 env 里根本没有 ——
+    // 「装过一次就再也不测这条路」，线上漏配令牌（或配了但没人带）在本机永远发现不了。
+    // 现在本机也能配上：FA_INSTALL_TOKEN=xxx node server/main.mjs，然后 /auth/setup 必须带
+    // install_token，否则 403 bad_install_token（默认不设 = 行为跟以前一样，不影响本机测试）。
+    INSTALL_TOKEN: process.env.FA_INSTALL_TOKEN || '',
   }
   // 九本账的绑定：DB、DB2 … DB9（backend 按 bookDbs(env) 自己发现有几本）
   for (const k of Object.keys(files)) env[k] = dbs[k]

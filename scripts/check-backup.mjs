@@ -88,6 +88,37 @@ for (const m of src.matchAll(/settings[\s\S]{0,80}?(?:key\s*[:,]\s*|INSERT INTO 
 for (const m of src.matchAll(/setSetting\(\s*'([a-z0-9_]+)'/gi)) usedKeys.add(m[1])
 for (const m of src.matchAll(/kv\(\s*'([a-z0-9_]+)'/gi)) usedKeys.add(m[1])
 
+// 第 17 轮 D8：上面三行只抓「键名写死成字面量」的写法。`setSetting(k, v)`、参数化 INSERT、
+// 模板串拼出来的键都抓不到 —— 而「备份包里夹了凭证」正好可能从这种写法漏进来（新加一个
+// `setSetting(K.wxToken, …)` 既不在名单里、也不会被这条门禁发现）。
+// 所以再加一条反向检查：凡写 settings 的调用点，第一个参数必须是字面量键。
+const dynWrites = []
+{
+  // 允许两种签名：setSetting('k', v) 与 setSetting(db, 'k', v)；调用可以出现在行中任意位置
+  const CALL = /(?:setSetting|setSettingRaw|putSetting|kv)\(/g
+  const ARG = /^\s*(?:[A-Za-z_$][\w$.]*\s*,\s*)?'[a-z0-9_]+'/
+  const lines = src.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i]
+    if (ln.trim().startsWith('//')) continue
+    if (/function\s+(setSetting|setSettingRaw|putSetting|kv)\b/.test(ln)) continue
+    CALL.lastIndex = 0
+    let m
+    while ((m = CALL.exec(ln))) {
+      const rest = ln.slice(m.index + m[0].length)
+      if (ARG.test(rest)) continue
+      dynWrites.push(`${i + 1}: ${ln.trim().slice(0, 90)}`)
+      break
+    }
+  }
+}
+if (dynWrites.length) {
+  console.log(`  ⚠️ ${dynWrites.length} 处写 settings 的地方键名不是字面量 —— 备份排除名单查不到它们（自己确认存的是不是凭证）：`)
+  for (const w of dynWrites.slice(0, 8)) console.log('      ' + w)
+} else {
+  ok('所有写 settings 的调用点都用字面量键（备份排除名单能查到）')
+}
+
 const leakKeys = [...usedKeys].filter((k) => CRED_KEY.test(k) && !CRED_KEY_ALLOW.includes(k) && !skippedSet.has(k))
 if (leakKeys.length) {
   for (const k of leakKeys) fail(`settings 里的凭据键「${k}」没进 BACKUP_SETTINGS_SKIP —— 备份发出去就等于把口令发出去`)

@@ -396,7 +396,7 @@ jobs:
               echo "仓库没配 \`CF_API_TOKEN\`，所以只跑了自检 + 冒烟，**线上代码还是旧的**。这次 CI 断在这里，配好之前新改动不会上线。"
               echo ""
               echo "配法：Settings → Secrets and variables → Actions → New repository secret，名字 \`CF_API_TOKEN\`。"
-              echo "配好之前，改完后请在本机手动部署：\`cd backend && CLOUDFLARE_API_TOKEN=… npx wrangler deploy --var APP_VERSION:…\`"
+              echo "配好之前，改完后请在本机手动部署：先 \`bash scripts/deploy.sh --dry-run\` 看计划，再把 token 写进 \`~/.dsh/cf-token\`（chmod 600）后跑 \`bash scripts/deploy.sh\`。别把 token 直接写在命令行里（会进 shell history）。"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           else
@@ -417,6 +417,7 @@ jobs:
       # 第一遍在老库上只建表（引用新列的索引会失败 → 这一步可能报错），第二遍在迁移之后补上。
       # 做不到「一遍过」，那就老老实实跑两遍；只跑一遍的结果是「新表建了、索引缺了」或者「整体红」。
       - name: 补表结构（第 1 遍：建表）
+  # fail-fast：前序失败就跳过（故意的）—— 这类步骤是「部署前的地基」，前面红了下游不该继续。
         if: steps.token.outputs.can == 'true'
         continue-on-error: true
         id: seed1
@@ -427,6 +428,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CF_ACCOUNT_ID || 'fb907fe08010a1b319f68be568331ce5' }}
 
       - name: 跑远程数据库迁移
+  # fail-fast：前序失败就跳过（故意的）—— 这类步骤是「部署前的地基」，前面红了下游不该继续。
         if: steps.token.outputs.can == 'true'
         run: |
           set -euo pipefail
@@ -446,6 +448,7 @@ jobs:
       # 第 16 轮 C3：第二遍补表结构。迁移已经把新列加上了，这一遍才能把「引用新列」的索引建出来。
       # 这一遍**必须绿**：它绿了才说明「表齐了、索引齐了」，后面部署上去才不会 500。
       - name: 补表结构（第 2 遍：迁移之后补索引）
+  # fail-fast：前序失败就跳过（故意的）—— 这类步骤是「部署前的地基」，前面红了下游不该继续。
         if: steps.token.outputs.can == 'true'
         run: |
           set -euo pipefail
@@ -464,6 +467,7 @@ jobs:
       # 这里在部署前把当前线上 commit 记下来，回滚后必须正好回到这一版。
       - name: 记下回滚目标版本
         id: prever
+  # fail-fast：前序失败就跳过（故意的）—— 这类步骤是「部署前的地基」，前面红了下游不该继续。
         if: steps.token.outputs.can == 'true'
         run: |
           # 注意：stdout 只能有 `key=value` 这种行，否则 GitHub 会判 "Invalid format" 让整步失败
@@ -480,6 +484,7 @@ jobs:
 
       - name: 部署到 Cloudflare
         id: deploy
+  # fail-fast：前序失败就跳过（故意的）—— 这类步骤是「部署前的地基」，前面红了下游不该继续。
         if: steps.token.outputs.can == 'true'
         # 版本号必须带上去：wrangler.toml 里写的是 APP_VERSION="dev"，
         # 以前光跑 `wrangler deploy`，线上 /version 永远是 dev，出了事分不清哪次部署。
@@ -505,6 +510,7 @@ jobs:
       # 之间有一个真实的窗口。配了这个 secret 之后，第一次设口令必须带上它。
       # 没配就跳过（自建/本机版走 IP 限流就够了，不强迫大家多记一串东西）。
       - name: 设安装令牌（配了 secret 才设）
+  # fail-fast：前序失败就跳过（故意的）—— 这类步骤是「部署前的地基」，前面红了下游不该继续。
         if: steps.token.outputs.can == 'true' && steps.deploy.outcome == 'success'
         working-directory: backend
         env:
@@ -527,7 +533,8 @@ jobs:
       # 所以这里不再重复跑一遍。
 
       - name: 部署后验版本
-        if: steps.token.outputs.can == 'true'
+        # 第 17 轮 D2：部署成功后必须验，不受前面任何一步成败影响。
+        if: always() && steps.token.outputs.can == 'true' && steps.deploy.outcome == 'success'
         run: |
           sleep 5
           curl -fsS https://jz.qy663.de5.net/version | tee /tmp/ver.json
@@ -541,7 +548,9 @@ jobs:
       # 这在「部署本身就失败/被跳过」时是真实故障，必须报错（exit 1），不能只是 warning。
       - name: 线上版本 vs 这次 push
         id: liveversion
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        # 第 17 轮 D2：这条是「线上到底跑的是不是这次 push」的唯一证据，
+        # 以前前面任何一步红它就 skipped —— 那正是最需要它的时候。
+        if: always() && steps.deploy.outcome == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
           node -e '
             const sha = process.env.GITHUB_SHA || "";
@@ -572,7 +581,11 @@ jobs:
       # 缺 PROD_KEY 时 bad=false（跳过 ≠ 通过，摘要里会写明跳过）。
       - name: 线上表结构与接口体检
         id: health
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        # 第 17 轮 D2：这里是**部署的必做后置**，不能受前面步骤成败影响。
+        # 以前带自定义 if: 又没写 always()，GitHub 会隐式 AND 一个 success() ——
+        # 于是「设安装令牌 / 验版本 / commit 比对」任何一步红了，体检就整步 skipped，
+        # 而那时新代码**已经上线**，结果没人验、没人回滚、没人看线上有没有新 5xx。
+        if: always() && steps.deploy.outcome == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           PROD_KEY: ${{ secrets.PROD_KEY }}
         run: |
@@ -591,8 +604,20 @@ jobs:
           # 而且注释里写明「少数 GET 会顺手补建表、写默认值」，那是给本机/测试库用的脚本。
           # 拿它打生产等于每次部署都往线上写一遍，自愈分支一旦有 bug 就是改坏线上数据。
           # 现在换成 scripts/check-live.mjs：只发 GET，表结构判定（ok===true 且 bad_count===0）也在里面。
-          if node scripts/check-live.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY"; then
+          # 第 17 轮 D1：check-live 的退出码 2 = 「全部失败都是口令被拒」，那是 PROD_KEY 填错，
+          # 回滚换不回一个正确口令 → 只警告、不触发回滚（以前这种情况会被当成「线上坏了」）。
+          RC=0
+          node scripts/check-live.mjs --base https://jz.qy663.de5.net --key "$PROD_KEY" || RC=$?
+          if [ "$RC" = "0" ]; then
             echo "线上只读体检通过（含表结构）"
+          elif [ "$RC" = "2" ]; then
+            echo "::warning title=线上体检没做成（口令不对）::PROD_KEY 不是线上老板口令，体检整轮没验成。这不是线上坏了，所以不触发回滚。请更新 PROD_KEY 后重跑。"
+            {
+              echo "## ⚠️ 线上体检没做成（PROD_KEY 口令不对）"
+              echo ""
+              echo "这次**没有**验证线上表结构和接口 —— 不是通过。更新 \`PROD_KEY\` 后重跑这一步。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           else
             echo "::error title=线上体检没过::线上只读体检（check-live.mjs）失败，详见上面的失败清单"
             echo "bad=true" >> "$GITHUB_OUTPUT"
@@ -606,7 +631,8 @@ jobs:
       # 注意：这里**不 fail**（不让它触发自动回滚）：error_log 里可能有部署之前就有的旧错，
       # 因为一条旧错把一次好好的部署退回去，比留着这个错更糟。有错就显眼地喊一声。
       - name: 线上最近一天的报错
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        # 第 17 轮 D2：同上 —— 这是部署的必做后置，不能因为前面某一步红了就整步跳过。
+        if: always() && steps.deploy.outcome == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           PROD_KEY: ${{ secrets.PROD_KEY }}
         run: |
@@ -635,12 +661,15 @@ jobs:
           '
 
       # 部署完了但线上体检没过（缺列、接口 500）→ 自动退回上一版，别让坏版本挂着。
-      # 条件用体检步自己报出来的 bad=true（以前写 failure() && steps.deploy.outcome=='success'，
-      # 但体检步缺 PROD_KEY 时 exit 0，永远不会失败 → 那个条件基本不触发）。
-      # 现在：体检真没过 → 体检步写 bad=true 并 exit 1 → 这里看到 bad=true 就回滚。
-      # 只在这一步「真的部署过」时才回滚，没配 token 的情况下什么都不做。
+      # 第 17 轮 D1（真 bug）：这一步的 if 以前是
+      #     steps.health.outputs.bad == 'true' && steps.deploy.outcome == 'success' && steps.token.outputs.can == 'true'
+      # 没有任何 status check 函数 → GitHub Actions 会给它**隐式 AND 一个 success()**。
+      # 而 bad=true 只可能由体检步「先写标记再 exit 1」产生，那一刻 job 已经红了，
+      # success() 为假 → 这一步必然 skipped。也就是说：自动回滚从上线起一次都没执行过，
+      # 而 DEPLOYMENT / RUNBOOK / README 三处都写着「体检没过会自动回滚」。
+      # 现在显式写 always()（状态函数优先于隐式 success），并保留其余三个条件。
       - name: 体检没过就自动回滚
-        if: steps.health.outputs.bad == 'true' && steps.deploy.outcome == 'success' && steps.token.outputs.can == 'true'
+        if: always() && steps.health.outputs.bad == 'true' && steps.deploy.outcome == 'success' && steps.token.outputs.can == 'true'
         working-directory: backend
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

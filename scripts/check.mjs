@@ -310,9 +310,30 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
     snapshot[t] = [...cols].sort().map((c) => Object.assign({ name: c }, meta.get(c) || { type: '', notnull: 0, dflt: '' }))
   }
   const wantWrite = process.argv.includes('--update-baseline')
+  const wantForce = process.argv.includes('--force')
   if (wantWrite) {
-    fs.writeFileSync(baselineFile, JSON.stringify(snapshot, null, 2) + '\n')
-    console.log('  📝 已把当前列结构（含类型/默认值）写进 scripts/schema-baseline.json（下次发布后的新列才算「新增」）')
+    // 第 17 轮 D6：以前失败文案教人「跑 --update-baseline」，而它直接把现状写成基线 ——
+    // 一跑门禁就变成「现状即基线」，永远绿。这条门禁存在的意义（老库缺列 → no such column → 500）
+    // 就这么被自己关掉了。现在要求「同一次改动里确实有迁移文件」才允许重写基线。
+    let migNewer = []
+    try {
+      const baseT = fs.existsSync(baselineFile) ? fs.statSync(baselineFile).mtimeMs : 0
+      const mdir = path.join(ROOT, 'backend/migrations')
+      for (const f of fs.readdirSync(mdir).filter((x) => x.endsWith('.sql'))) {
+        if (fs.statSync(path.join(mdir, f)).mtimeMs > baseT) migNewer.push(f)
+      }
+    } catch (e) { migNewer = [] }
+    if (!migNewer.length && !wantForce) {
+      console.log('  ❌ 拒绝重写基线：backend/migrations/ 里没有比基线更新的迁移文件。')
+      console.log('     基线是用来拦「schema.sql 加了列、老库没有」的。直接重写等于把门禁关掉。')
+      console.log('     正确做法：把这次的新列写成 backend/migrations/00xx_*.sql（幂等），再跑 --update-baseline；')
+      console.log('     确实不需要迁移（例如只改类型注释）才用 --force。')
+      fail('--update-baseline 被拒绝：没有对应的迁移文件（见上面的说明）')
+    } else {
+      fs.writeFileSync(baselineFile, JSON.stringify(snapshot, null, 2) + '\n')
+      console.log('  📝 已把当前列结构（含类型/默认值）写进 scripts/schema-baseline.json'
+        + (migNewer.length ? `（同批迁移：${migNewer.join('、')}）` : '（--force）'))
+    }
   } else if (!fs.existsSync(baselineFile)) {
     warn.push('没有 scripts/schema-baseline.json，老库补列 drift 查不了（跑 node scripts/check.mjs --update-baseline 生成）')
   } else {
@@ -341,7 +362,7 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
       // 只认 ① 会把走 ② 的列误报成「老库必 500」—— 迁移文件就是干这个的。
       const miss = fresh.filter((c) => !(extras.get(t) && extras.get(t).has(c)) && !migCols.has(t + '.' + c))
       if (miss.length) {
-        fail(`表 ${t} 新加的列没进 EXTRA_COLS 也没有迁移补：${miss.join(', ')}（老库升级后一查就 500；补进 EXTRA_COLS 或 backend/migrations/*.sql 再跑 --update-baseline）`)
+        fail(`表 ${t} 新加的列没进 EXTRA_COLS 也没有迁移补：${miss.join(', ')}（老库升级后一查就 500）。修法：补进 EXTRA_COLS 或写成 backend/migrations/00xx_*.sql，然后再跑 --update-baseline（没有新迁移时它会被拒绝）`)
         bad47++
       }
       // 第 12 轮 F3：列的类型/默认值变了也要查（以前只比列名，改类型/改默认永远发现不了）。
@@ -349,11 +370,11 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
         const now = colList.find((c) => c.name === oc.name)
         if (!now) continue
         if (oc.type && now.type && !typeEq(oc.type, now.type)) {
-          fail(`表 ${t}.${oc.name} 类型变了：${oc.type} → ${now.type}（老库用旧类型，新库用新类型，同一份代码两台机器表现不一样；要么改回，要么确认无害后跑 --update-baseline）`)
+          fail(`表 ${t}.${oc.name} 类型变了：${oc.type} → ${now.type}（老库用旧类型，新库用新类型，同一份代码两台机器表现不一样）。要么改回，要么写一条迁移把老库也改成新类型，再跑 --update-baseline`)
           bad47++
         }
         if (String(oc.dflt || '') !== String(now.dflt || '')) {
-          fail(`表 ${t}.${oc.name} 默认值变了：${oc.dflt || '(无)'} → ${now.dflt || '(无)'}（老库用旧默认，新库用新默认，新装的表初始值不同；确认无害后跑 --update-baseline）`)
+          fail(`表 ${t}.${oc.name} 默认值变了：${oc.dflt || '(无)'} → ${now.dflt || '(无)'}（老库用旧默认，新库用新默认，新装的表初始值不同）。确认无害后跑 --update-baseline，并在同一次提交里带上说明`)
           bad47++
         }
       }
@@ -367,7 +388,7 @@ say(schemaBad === 0, `${declared.size} 张表声明完整，代码写入的列�
       if (!now) continue // 整张表删了：另说，不在列级检查范围
       const gone = (oldCols || []).map((c) => c.name).filter((c) => !now.has(c))
       if (gone.length) {
-        fail(`表 ${t} 的列被删了但基线里还在：${gone.join(', ')}（老库还留着这几列，新库没有 → 同一份代码两台机器表现不一样）。要么把列加回 schema.sql，要么确认无害后跑 node scripts/check.mjs --update-baseline`)
+        fail(`表 ${t} 的列被删了但基线里还在：${gone.join(', ')}（老库还留着这几列，新库没有 → 同一份代码两台机器表现不一样）。要么把列加回 schema.sql，要么确认无害后跑 node scripts/check.mjs --update-baseline（需要同批迁移或 --force）`)
         bad47++
       }
     }
@@ -638,6 +659,47 @@ console.log('\n[4.15] 索引定义一致（schema.sql vs 迁移）')
     `索引同名但定义不同（新库老库会长得不一样）：${clashes.join('；')}`)
 }
 
+console.log('\n[4.20] 按 schema.sql 建的库 == 跑完迁移的库（索引集合）')
+{
+  // 第 17 轮 E1：DEPLOYMENT.md 说「一个 schema.sql 就够」，但索引原先只在 migrations 里 ——
+  // 按文档建的自建库 / 单文件 exe 就永远缺那几个索引（性能问题，不报错，所以一直没人发现）。
+  // 这里真的建两个内存库比一遍：只跑 schema.sql vs schema.sql + 全部迁移。
+  let DatabaseSync = null
+  try { ({ DatabaseSync } = await import('node:sqlite')) } catch (e) { DatabaseSync = null }
+  if (!DatabaseSync) {
+    warn.push('本机没有 node:sqlite，[4.20] 索引集合对比跳过了（CI 的 Node 24 会跑）')
+  } else {
+    const onlySchema = () => {
+      const db = new DatabaseSync(':memory:')
+      db.exec(schemaSrc)
+      return db
+    }
+    const dbA = onlySchema()
+    const idxA = new Set(dbA.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all().map((r) => String(r.name)))
+    dbA.close()
+    const dbB = onlySchema()
+    const migDir2 = path.join(ROOT, 'backend/migrations')
+    const mfiles = fs.existsSync(migDir2) ? fs.readdirSync(migDir2).filter((f) => f.endsWith('.sql')).sort() : []
+    for (const f of mfiles) {
+      const sql = fs.readFileSync(path.join(migDir2, f), 'utf8')
+      for (const st of sql.split(/;\s*\n/)) {
+        const t = st.trim()
+        if (!t || t.startsWith('--')) continue
+        try { dbB.exec(t) } catch (e) { /* 幂等重跑/重复列，忽略 */ }
+      }
+    }
+    const idxB = new Set(dbB.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all().map((r) => String(r.name)))
+    dbB.close()
+    const onlyMig = [...idxB].filter((x) => !idxA.has(x))
+    const onlySch = [...idxA].filter((x) => !idxB.has(x))
+    say(onlyMig.length === 0 && onlySch.length === 0,
+      `只按 schema.sql 建库有 ${idxA.size} 个索引，跑完迁移也有 ${idxB.size} 个，两边一致`,
+      `两边的索引集合不一样（按 schema.sql 建的自建库/exe 会缺索引 → 大账本全表扫）：`
+        + (onlyMig.length ? `只在迁移里有：${onlyMig.join('、')}` : '')
+        + (onlySch.length ? `只在 schema.sql 里有：${onlySch.join('、')}` : ''))
+  }
+}
+
 // ── 4.14 后端引用的 D1 绑定都要在 wrangler.toml 里声明（先报不拦）──
 // 第 12 轮 F5：本地 server/main.mjs 会自动建 9 本账、自动 ensureSchema，
 // 本地跑得过不代表线上能跑 —— 线上只绑 wrangler.toml 里声明的库，引用没声明的
@@ -645,6 +707,26 @@ console.log('\n[4.15] 索引定义一致（schema.sql vs 迁移）')
 // BOOK（按请求注入）、ENV_ALL（聚合对象）、INSTALL_TOKEN（secret）、ATTACH（KV）
 // 这些运行时注入的不算 D1 绑定，不查，避免误报。
 // 先报不拦：历史上有宽松 SQL，一次性全修要分批，先让漂移可见。
+// 把 workflow YAML 按 `- name:` 切成 step 块。
+// 第 17 轮：判断「谁在迁移前、谁在迁移后」「这个 step 有没有带 env」都必须按真实 step 边界，
+// 不能用「文件里第一次出现某个字符串的位置」—— 在注释里写一句就能骗过门禁（[4.16]/[4.17] 都栽过）。
+function splitYamlSteps(src) {
+  const out = []
+  let cur = null
+  for (const l of src.split('\n')) {
+    const m = l.match(/^(\s*)-\s+name:\s*(.+)$/)
+    if (m) { cur = { name: m[2].trim(), body: [] }; out.push(cur); continue }
+    if (cur) cur.body.push(l)
+  }
+  for (const s of out) {
+    s.text = s.body.join('\n')
+    // 只留真正会被执行的命令行：`#` 开头的注释不算（注释里写命令是最常见的假绿来源）
+    s.cmds = s.body.filter((l) => !/^\s*#/.test(l)).join('\n')
+    s.ifText = (s.body.find((l) => /^\s*if:/.test(l)) || '').trim()
+  }
+  return out
+}
+
 // ── 4.16 灌表结构要跑两遍：schema.sql 里有索引引用了「迁移才加上的列」──
 // 第 16 轮 C3。老库里 writeoffs 表早就存在（CREATE TABLE IF NOT EXISTS 整句跳过），
 // 而 month 列是 0002 迁移才加的 —— 所以 schema.sql 里的
@@ -677,16 +759,29 @@ console.log('\n[4.16] 灌表结构两遍（依赖迁移列的索引）')
     }
   }
   // 顺序检查：两个入口都必须「seed → migrate → seed」
+  // 第 17 轮 D5：按真实 step 边界判（以前用文件文本首次出现位置，注释里写一句就能骗过）。
   const dep2 = path.join(ROOT, '.github/workflows/deploy.yml')
   const yml = fs.existsSync(dep2) ? fs.readFileSync(dep2, 'utf8') : ''
   const sh = fs.readFileSync(path.join(ROOT, 'scripts/deploy.sh'), 'utf8')
-  const seeds = (src) => [...src.matchAll(/d1-seed-schema\.mjs/g)].map((x) => x.index)
-  const migs = (src) => [...src.matchAll(/d1-migrate\.mjs/g)].map((x) => x.index)
   const orderOK = (src, what) => {
-    const sd = seeds(src); const mg = migs(src)
-    if (!mg.length) { fail(`${what} 里没有跑迁移`); return false }
-    const before = sd.filter((i) => i < mg[0]).length
-    const after = sd.filter((i) => i > mg[0]).length
+    // deploy.yml 是 YAML（按 step 切块）；scripts/deploy.sh 是 bash（按非注释行取位置）。
+    let seedAt = []
+    let migAt = -1
+    if (/- name:/.test(src)) {
+      splitYamlSteps(src).forEach((s, i) => {
+        if (/d1-seed-schema\.mjs/.test(s.cmds)) seedAt.push(i)
+        if (/d1-migrate\.mjs/.test(s.cmds)) migAt = i
+      })
+    } else {
+      src.split('\n').forEach((l, i) => {
+        if (/^\s*#/.test(l)) return
+        if (/d1-seed-schema\.mjs/.test(l)) seedAt.push(i)
+        if (/d1-migrate\.mjs/.test(l)) migAt = i
+      })
+    }
+    if (migAt < 0) { fail(`${what} 里没有跑迁移`); return false }
+    const before = seedAt.filter((i) => i < migAt).length
+    const after = seedAt.filter((i) => i > migAt).length
     if (!before || !after) {
       fail(`${what} 里灌表结构的顺序不对（迁移前 ${before} 遍、迁移后 ${after} 遍）：依赖迁移列的索引（${dep.join('、') || '暂无'}）会建不出来`)
       return false
@@ -712,28 +807,103 @@ console.log('\n[4.17] 动 Cloudflare 的 step 都带 token 环境变量')
 {
   const depYml = path.join(ROOT, '.github/workflows/deploy.yml')
   const src = fs.existsSync(depYml) ? fs.readFileSync(depYml, 'utf8') : ''
-  const lines = src.split('\n')
   const bad = []
-  let cur = null
-  const flush = () => {
-    if (!cur) return
-    const cmd = cur.body.some((l) => /^\s*(node\s+scripts\/d1-(migrate|seed-schema)\.mjs|npx\s+wrangler\s+(deploy|rollback|secret))\b/.test(l))
-    if (!cmd) return
-    const all = cur.body.join('\n')
+  for (const s of splitYamlSteps(src)) {
+    // 第 17 轮 D3：以前要求行首就是 node/npx，而实际写法是
+    //   `printf '%s' "$INSTALL_TOKEN_VALUE" | npx wrangler secret put INSTALL_TOKEN`
+    // 于是「设安装令牌」这一步整个在门禁之外 —— 哪天 env 被相邻 step 吃掉（正是本检查要防的事故），
+    // 这里照样绿，只有部署时 wrangler 才失败。现在管道/&&/; 前缀都认，注释行不算。
+    const cmd = /(?:^|[\n|&;])\s*(?:node\s+scripts\/d1-(?:migrate|seed-schema)\.mjs|npx\s+wrangler\s+(?:deploy|rollback|secret))\b/.test(s.cmds)
+    if (!cmd) continue
     const miss = []
-    if (!/CLOUDFLARE_API_TOKEN\s*:/.test(all)) miss.push('CLOUDFLARE_API_TOKEN')
-    if (!/CLOUDFLARE_ACCOUNT_ID\s*:/.test(all)) miss.push('CLOUDFLARE_ACCOUNT_ID')
-    if (miss.length) bad.push(`${cur.name}（缺 ${miss.join('、')}）`)
+    if (!/CLOUDFLARE_API_TOKEN\s*:/.test(s.text)) miss.push('CLOUDFLARE_API_TOKEN')
+    if (!/CLOUDFLARE_ACCOUNT_ID\s*:/.test(s.text)) miss.push('CLOUDFLARE_ACCOUNT_ID')
+    if (miss.length) bad.push(`${s.name}（缺 ${miss.join('、')}）`)
   }
-  for (const l of lines) {
-    const m = l.match(/^(\s*)-\s+name:\s*(.+)$/)
-    if (m) { flush(); cur = { name: m[2].trim(), body: [] }; continue }
-    if (cur) cur.body.push(l)
-  }
-  flush()
   say(bad.length === 0,
     '跑迁移 / 补表结构 / wrangler 的 step 都自己带了 CLOUDFLARE_API_TOKEN 与 ACCOUNT_ID',
     `这些 step 在动 Cloudflare 却没带 token 环境变量（YAML 里 env 可能被前一个 step 吃掉了）：${bad.join('；')}`)
+}
+
+// ── 4.18 带自定义 if: 的 step 必须显式写状态函数 ──
+// 第 17 轮 D1（真 bug）：`if: steps.health.outputs.bad == 'true' && …` 这样的条件里
+// 没有任何状态函数时，GitHub Actions 会给它**隐式 AND 一个 success()**。
+// 「体检没过就自动回滚」正是这么写的，而 bad=true 只由「先写标记再 exit 1」产生 ——
+// 那一刻 job 已经红了，success() 为假 → 回滚步必然 skipped，上线以来一次都没执行过。
+// 规则：凡是 if: 里引用了 steps.*.outputs 的 step，要么显式写状态函数
+// （想「不管前面成败都跑」就写 always()），要么在注释里写明 `fail-fast` 表示
+// 「前序失败就跳过是故意的」—— 两者都不写就是没想清楚，最容易写出死代码。
+console.log('\n[4.18] 带自定义 if: 的 step 显式写了状态函数')
+{
+  const depYml = path.join(ROOT, '.github/workflows/deploy.yml')
+  const src = fs.existsSync(depYml) ? fs.readFileSync(depYml, 'utf8') : ''
+  const bad = []
+  let checked = 0
+  let fast = 0
+  for (const s of splitYamlSteps(src)) {
+    if (!/^\s*if:/.test(s.ifText)) continue
+    if (!/steps\.[\w-]+\.outputs/.test(s.ifText)) continue
+    checked++
+    if (/\b(always|failure|success|cancelled)\s*\(/.test(s.ifText)) continue
+    if (/fail-fast/i.test(s.text)) { fast++; continue }
+    bad.push(s.name)
+  }
+  say(bad.length === 0,
+    `${checked} 个「按前序 step 输出决定跑不跑」的 step 都写清了语义（${checked - fast} 个显式状态函数、${fast} 个标注 fail-fast）`,
+    `这些 step 的 if: 引用了 steps.*.outputs 却没写状态函数也没标 fail-fast —— GitHub 会隐式 AND 一个 success()，前面一红它就永远不跑：${bad.join('；')}`)
+}
+
+console.log('\n[4.19] 脚本不许用 import' + '.meta.main 判主模块')
+{
+  // 第 17 轮 D4：`import.meta.main` 是 Node ≥24.2 才有的属性；backend/package.json 的 engines
+  // 下限是 22.5 —— 在 Node 22 上它是 undefined，`if (import.meta.main) main()` 整段不执行，
+  // 退出码还是 0。后果：迁移「✅ 跑完了」其实一条没跑，随后新代码打老库 → 线上 500；
+  // 回归脚本「全过」其实一个测试都没跑。这类静默空跑比报错危险得多。
+  const files = fs.readdirSync(path.join(ROOT, 'scripts')).filter((f) => f.endsWith('.mjs'))
+  // 字符串拼出来，免得这段检查把自己也算进去
+  const NEEDLE = 'import' + '.meta' + '.main'
+  const bad = []
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', f), 'utf8')
+    for (const line of src.split('\n')) {
+      if (line.trim().startsWith('//')) continue
+      if (line.indexOf(NEEDLE) >= 0) bad.push(f)
+    }
+  }
+  say(bad.length === 0,
+    `${files.length} 个脚本都没有用 ${NEEDLE}（用 argv[1] + pathToFileURL 判主模块）`,
+    `这些脚本用了 ${NEEDLE} 判主模块 —— Node 22 上它会静默空跑且退出码 0：${[...new Set(bad)].join('、')}`)
+}
+
+console.log('\n[4.21] 裸 SUM(金额列) 不许再增加（棘轮）')
+{
+  // 第 17 轮 A6：SQLite 的 SUM(REAL) 是逐行浮点相加，几百行之后会留下 0.01 的尾差；
+  // 两个报表一个用 SUM_MONEY（按分取整）一个用裸 SUM，就会出现「同一个月两处利润差 0.01」
+  // 这种没人能解释的差额。全仓 300+ 处一次性换掉风险太大，改成棘轮：
+  // 当前数量记进 scripts/sum-baseline.json，**只许减不许增**（新增一律用 SUM_MONEY）。
+  const file = path.join(ROOT, 'backend/index.js')
+  const src = fs.readFileSync(file, 'utf8')
+  const MONEY = /(amount|price|paid|cost|unpaid|left|principal|balance|total|sum_money)/i
+  const hits = []
+  src.split('\n').forEach((ln, i) => {
+    if (ln.trim().startsWith('//')) return
+    if (ln.indexOf('SUM_MONEY') >= 0) return
+    const re = /\bSUM\(\s*\(?([^)]{0,80})/g
+    let m
+    while ((m = re.exec(ln))) {
+      if (MONEY.test(m[1])) { hits.push(i + 1); break }
+    }
+  })
+  const baseFile = path.join(ROOT, 'scripts/sum-baseline.json')
+  const base = fs.existsSync(baseFile) ? JSON.parse(fs.readFileSync(baseFile, 'utf8')) : null
+  if (!base) {
+    fs.writeFileSync(baseFile, JSON.stringify({ count: hits.length, note: '第 17 轮 A6 棘轮基线：裸 SUM(金额列) 的出现次数，只许减不许增' }, null, 2) + '\n')
+    console.log(`  📝 已记录基线：${hits.length} 处（以后只许减不许增）`)
+  } else {
+    say(hits.length <= base.count,
+      `裸 SUM(金额列) ${hits.length} 处，没超过基线 ${base.count} 处（新增请用 SUM_MONEY）`,
+      `裸 SUM(金额列) 从 ${base.count} 处涨到 ${hits.length} 处 —— 新加的合计请用 SUM_MONEY（按分取整，避免 0.01 尾差）`)
+  }
 }
 
 console.log('\n[4.14] D1 绑定引用')

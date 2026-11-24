@@ -142,8 +142,12 @@ npx wrangler rollback [deployment-id]  # 不填就是退回上一个版本
 值：  线上那本账的老板口令
 ```
 
-这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/smoke.mjs`（239 个 GET，
-只读不写）；②问一次 `/schema-check`，线上真缺列就直接红，并打印缺哪张表哪个字段。
+这一步做两件事：①对 `https://jz.qy663.de5.net` 跑一遍 `scripts/check-live.mjs`
+（16 个 GET，**只读不写**；任何非 200 都算坏；口令被拒时退出码 2 = 不是线上坏了，不回滚）；
+②问一次 `/schema-check`，线上真缺列就直接红，并打印缺哪张表哪个字段。
+
+> ⚠️ 别拿 `scripts/smoke.mjs` 去跑生产：它第一步就 `POST /auth/setup`，会在线上写东西。
+> 那是本机/CI 冒烟用的，只能 `--base http://127.0.0.1:…`（第 17 轮 F1）。
 为什么不配也能跑：`check.mjs` 只能证明「`schema.sql` 在空库上建得出来」，证明不了
 「线上那个库缺不缺列」——这两个 secret 都不配时，CI 只能保证「代码能跑」，保证不了「线上是对的」。
 
@@ -1298,6 +1302,16 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **`ref_type NOT IN` 的排除名单只有两种标准**：`('transfer','tax_ar','tax_ap')`（排除内部转账和代垫税）和 `('loan','transfer')`（借支口径）。`check.mjs` [4.10] 会拦第三种名单。**改排除项要三处一起想**：语义上到底排谁、跟其它 66 处一不一致、check.mjs 会不会红。
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
+
+### 4.47 第 17 轮的七条硬规矩（「保险丝也要有人验」与「屏幕上看不出来的错」）
+
+1. **`if:` 里引用了 `steps.*.outputs`，就必须显式写状态函数**（`always()` / `failure()` / `success()`），或者在该 step 里注明 `fail-fast`。GitHub 会给带自定义 `if:` 的 step 隐式 AND 一个 `success()` —— 于是「体检没过就回滚」这种步骤，**永远等不到它该跑的那一刻**。`check.mjs [4.18]` 会拦。
+2. **部署后置的检查（验版本、版本比对、线上体检、报错巡检）一律 `always()` + `deploy.outcome == 'success'`**。它们的价值就在「前面某步红了」的时候，跟着一起被跳过等于没有。
+3. **体检失败要先分清「线上坏了」还是「口令不对」**：`check-live.mjs` 用退出码 2 表示「全部失败都是 401/403」，CI 见到 2 只告警、**不回滚**（回滚会把好版本撤掉）。
+4. **判主模块不许用 `import.meta.main`**（Node < 24.2 上是 `undefined`，整段 `main()` 不执行而退出码 0 —— 迁移「跑完了」其实一条没跑）。用 `argv[1]` 比 `pathToFileURL`。`check.mjs [4.19]` 会拦。
+5. **门禁的「修法」不许是关掉门禁**：`--update-baseline` 只在「同批有迁移文件」或显式 `--force` 时才允许重写基线。
+6. **`schema.sql` 必须是「一个文件建出来的库 == 跑完全部迁移的库」**：索引也好、列也好，只在迁移里加 = 按文档自建/打 exe 的机器永远缺。`check.mjs [4.20]` 真建两个内存库比集合。
+7. **列表可以截断，合计不能跟着截断**：分页/封顶之后，凡是给人看的「合计」必须另用一条全表聚合算（`/loans` 的每人欠款、`/due-schedule` 的总额都是这个道理），并且响应里要带 `more`/`truncated`/`warn`，让人知道「这不是全量」。
 
 ### 4.46 第 16 轮的九条硬规矩（「同一个概念两套算法」与「失败写成成功」）
 

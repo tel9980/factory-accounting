@@ -44,10 +44,14 @@ node scripts/d1-migrate.mjs --force    # 忽略 migrations 记录重跑一遍（
 > （例如 `idx_writeoffs_m` 要 `writeoffs.month`）。老库里表已存在、建表语句整句跳过，
 > 所以第一遍建不出这些索引，要等迁移加完列再补一遍（第 16 轮 C3）。
 > 下面那条 `npx wrangler` 也一样：`wrangler` 装在 `backend/` 里，根目录直接 `npx wrangler`
-> 会拉到另一个版本 —— 一律带 `--prefix backend`（第 16 轮 C5）。
+> 会拉到另一个版本 —— 一律带 `--prefix backend`（第 16 轮 C5）。注意 `--prefix` 要放在
+> `d1 execute` 之后、`--remote` 前后的位置都能被 wrangler 接受，但**不能省**。
+>
+> `scripts/cli.mjs` 的默认 `BASE` 是 `http://127.0.0.1:8791`（= wrangler dev）。本机版服务跑在
+> **8787**，要打它得显式给：`FA_BASE=http://127.0.0.1:8787 node scripts/cli.mjs status`（第 17 轮 F2）。
 
 **成功判据**：`node scripts/d1-migrate.mjs` 打印「✅ 迁移全部跑完」，且
-`npx wrangler d1 execute factory-db --remote --command "SELECT name FROM migrations"` 能看到每个迁移文件名。
+`npx wrangler d1 execute factory-db --remote --prefix backend --command "SELECT name FROM migrations"` 能看到每个迁移文件名。
 
 ---
 
