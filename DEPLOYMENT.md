@@ -1303,6 +1303,18 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.54 第 24 轮（网页端第四轮）的八条硬规矩
+
+1. **数字填错必须报错，不许「按原来的值保存还回 ok」**。`num(x, 默认值)` 这种写法等于把用户的输入悄悄丢掉：`PATCH /ledger/:id` 填「1000元整」会静默保存原值、`/loans/:id/reimburse` 填「三百」会按**全额**冲、空串会把账户期初改成 0。改金额、改期初、改税率、填报销，一律 `numStrict` + 明确错误码（`bad_amount` / `bad_opening` / `bad_tax`），并且回一句人话。门禁 `[4.29]`。
+2. **查询失败不许变成「一切正常」**。这一轮抓到的都是同一类病：`closePrecheck` 六条 `.catch(() => ({ n: 0 }))` → 查询一挂就显示「七件事都办好了，可以结账」并把月份锁死；`netSeries` 七条吞错 → 家底偏大；`conclusionOf` 吞错 → 客户签字那页印「本期结清 ¥0」。规矩是：**失败要么整体返回 `null` 并让调用点给「这次没算出来」，要么带着 `checked:false` / `code:'degraded'` 上来**。门禁 `[4.30]`。
+3. **永久快照里更不许吞错**。`month_archive`、`net_snapshots`、`backups` 这类「存下来以后再也看不出来源」的地方，算不全就**别存**（`snapNet` 现在 `code:'degraded'` 直接拒存）。宁可今天没有这条记录，也不要留一条几年后还在骗人的数。
+4. **形状变了要让手机端能接受**。`GET /networth` 是**裸数组**（小程序 `list.forEach`），改成 `{rows:[…]}` 会让老板的手机白屏，而小程序重传要他自己动手。规矩：**能不改形状就不改**（失败靠响应头 `X-FA-Degraded`），真要改就得同步前端并提醒重传。
+5. **内联 `onclick` 不要拼引号**（第 23 轮已经写过一次，这一轮又踩）。`onclick="bkRestore(' + id + ',\'' + at + '\',this)"` 里的反斜杠会在模板字面量里被吃掉、引号提前闭合。正确写法是 `data-id`/`data-at` + `onclick="bkRestore(this)"`，函数里 `btn.getAttribute('data-id')`。
+6. **模板字面量里的 `
+` 会变成真换行**（同上，第 23 轮写过，这一轮又踩）。后端 `c.html(\`…\`)` 里的页面脚本写 `confirm('…？\n\n…')`，渲染出来是真换行 → 整个 `/pc` 的脚本 `SyntaxError`，按钮全点不动。源文件必须写 `\\n`。**改完页面脚本一定抽出来 `node --check`**（`scripts/test-web-pages.mjs` 的 `new Function` 断言就是干这个的）。
+7. **一天跑一次的事别让每个 cron 都跑**。`wrangler.toml` 有 4 条 cron × N 本账，自检/备份/清理这种「一天一次就够」的动作必须用 `dailyOnce` 门控（`cron === '0 16 * * *'`），否则一天把全库重算十几遍、白烧 D1 行数额度。门禁 `[4.31]`。
+8. **网页上写下的承诺必须能在网页上兑现**。`/pc` 写着「清空前会自动备份，点错了还能退回去」，可整页既没有备份列表也没有恢复按钮 —— 老板只能掏手机。凡是文案里说「能退回去 / 能导出 / 能改」的，同一页就要有对应按钮（这一轮补了备份列表+恢复、报价单发链接/转单、记一张单、记预收）。门禁 `[4.32]`。
+
 ### 4.53 第 23 轮（网页端第三轮）的七条硬规矩
 
 1. **查询失败不许变成 0，也不许变成「没有欠款」。** 这一类错误最坏的地方是**页面看不出异常**：`conclusionOf()` 六条查询失败算成「期末 0 元」，这行字会印到客户签字的那张对账单上；批量对账的名单查询失败回落空数组，页面回「账是清的」。规矩是：**只要这个数字会印给客户或拿去决策，就不许 `.catch(() => 0)` / `.catch(() => [])`**，要么整体 `return null` 由调用方给「这次没算出来」，要么带 `code` 报错。只影响备注/确认记录这种附带信息的（`recon_log`、`recon_confirm`），才允许静默降级。`check.mjs` [4.25] 守着。

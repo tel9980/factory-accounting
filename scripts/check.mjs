@@ -1071,6 +1071,95 @@ console.log('\n[4.28] 客户那一页：进度页反馈接口必须在公开白�
   say(bad28.length === 0, '客户侧反馈：签名校验 + 公开白名单 + 三种结论都在', bad28.join('；'))
 }
 
+console.log('\n[4.29] 数字填错要报错，不许静默改成别的值（第 24 轮 A4/A5/A8）')
+{
+  const src29 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad29 = []
+  // 账户期初：以前空串 → num('')=0，静默把期初改成 0 还回 ok
+  const accSeg = src29.slice(src29.indexOf("app.patch('/accounts/:id'"), src29.indexOf("app.patch('/accounts/:id'") + 2600)
+  if (accSeg.indexOf('numStrict') < 0) bad29.push("PATCH /accounts/:id 没用 numStrict（期初填空会被静默改成 0）")
+  if (accSeg.indexOf('bad_opening') < 0) bad29.push('PATCH /accounts/:id 没回 bad_opening')
+  if (accSeg.indexOf('has_flow') < 0) bad29.push('PATCH /accounts/:id 没拦「这个账户已经记过账」')
+  if (accSeg.indexOf('month_locked') < 0) bad29.push('PATCH /accounts/:id 没看月结锁')
+  // 改金额：以前 num('1000元整', 原值) 静默保存原值还回 ok
+  const paySeg = src29.slice(src29.indexOf("app.patch('/payables/:id'"), src29.indexOf("app.patch('/payables/:id'") + 2200)
+  if (paySeg.indexOf('numStrict') < 0) bad29.push("PATCH /payables/:id 没用 numStrict")
+  const lgSeg = src29.slice(src29.indexOf("app.patch('/ledger/:id'"), src29.indexOf("app.patch('/ledger/:id'") + 4000)
+  if (lgSeg.indexOf('numStrict') < 0) bad29.push("PATCH /ledger/:id 没用 numStrict")
+  // 税率校验在同一个处理函数的后半段（4000 字窗口内），失败要回 bad_tax 而不是静默夹到 0~100
+  // 税率在改单（orders/payables）里改，不在流水上；失败要回 bad_tax，不许静默夹到 0~100
+  const odSeg = src29.slice(src29.indexOf("app.patch('/orders/:id'"), src29.indexOf("app.patch('/orders/:id'") + 6000)
+  if (odSeg.indexOf('bad_tax') < 0) bad29.push('PATCH /orders/:id 的税率没有 0~100 硬校验（bad_tax）')
+  // 报销：不传金额才默认全额，填错不许按全额冲
+  const rbSeg = src29.slice(src29.indexOf("app.post('/loans/:id/reimburse'"), src29.indexOf("app.post('/loans/:id/reimburse'") + 2200)
+  if (rbSeg.indexOf('numStrict') < 0) bad29.push('/loans/:id/reimburse 没用 numStrict（填「三百」会按全额冲）')
+  if (rbSeg.indexOf('opClaim') < 0) bad29.push('/loans/:id/reimburse 没做幂等（连点两次冲两笔）')
+  say(bad29.length === 0, '金额/期初/税率填错一律 400，不静默改值也不按全额兜底', bad29.join('；'))
+}
+
+console.log('\n[4.30] 算不准就别装准：折旧、结账检查、家底（第 24 轮 A2/A6/A7）')
+{
+  const src30 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad30 = []
+  // 折旧：booked 从 prev 起算，同一笔再加一遍会提前撞上限，解锁后永远补不回来
+  if (/changesOf\(ins\) <= 0\) \{ booked = round2\(booked \+ amt\); continue \}/.test(src30)) bad30.push('折旧还在重复累加 booked（提前撞上限）')
+  if (!/changesOf\(ins\) <= 0\) continue/.test(src30)) bad30.push('折旧没找到「已提过就 continue」的写法')
+  // 结账前检查：六条查询不许再 catch 成 0（失败就显示「可以结账」）
+  const preSeg = src30.slice(src30.indexOf('async function closePrecheck'), src30.indexOf('async function closePrecheck') + 9000)
+  if (/\.catch\(\(\) => \(\{ n: 0 \}\)\)/.test(preSeg)) bad30.push('closePrecheck 里还有 .catch(() => ({ n: 0 }))（查询失败当成「办好了」）')
+  if (preSeg.indexOf('checked = false') < 0) bad30.push('closePrecheck 没有失败标记 checked')
+  if (src30.indexOf("code: 'precheck_failed'") < 0) bad30.push('POST /month-close 没拦 precheck_failed')
+  // 家底：失败要能被调用方看见；存档不许存残缺数
+  if (src30.indexOf('NET_JOB_NAMES') < 0) bad30.push('netSeries 没收集失败项（失败被当成 0，家底偏大）')
+  if (!/await netSeries\(db, 36, vf\)/.test(src30)) bad30.push('snapNet 没传 failBox（残缺家底会被永久存档）')
+  if (src30.indexOf("'X-FA-Degraded'") < 0) bad30.push('/networth 失败时没有 X-FA-Degraded 响应头')
+  say(bad30.length === 0, '折旧不重复加、结账检查失败不改口、家底残缺不存档', bad30.join('；'))
+}
+
+console.log('\n[4.31] 定时任务：一天跑一次的事不许每个 cron 都跑（第 24 轮 B1）')
+{
+  const src31 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad31 = []
+  const schAt = src31.indexOf('scheduled: async (event, env, ctx)')
+  if (schAt < 0) bad31.push('找不到 scheduled 处理函数')
+  const schSeg = schAt < 0 ? '' : src31.slice(schAt, schAt + 14000)
+  if (schSeg.indexOf('dailyOnce') < 0) bad31.push('scheduled 里没有 dailyOnce 门控（4 个 cron × N 本账，一天把全库重算十几遍）')
+  for (const need of ['selfCheck', 'saveBackup']) {
+    const i = schSeg.indexOf(need)
+    if (i < 0) { bad31.push('scheduled 里找不到 ' + need); continue }
+    const near = schSeg.slice(Math.max(0, i - 400), i)
+    if (near.indexOf('dailyOnce') < 0) bad31.push(need + ' 没被 dailyOnce 包住')
+  }
+  // 清理 DELETE 也不许每个 cron 重跑
+  if (!/if \(dailyOnce\) try \{[\s\S]{0,400}DELETE FROM audit_log/.test(schSeg)) bad31.push('审计日志清理没走 dailyOnce')
+  // 顺手 B8：函数包字段吃不到索引
+  if (/DELETE FROM audit_log WHERE substr\(created_at,1,10\) < \?/.test(src31)) bad31.push('审计清理还用 substr(created_at) —— 吃不到索引')
+  say(bad31.length === 0, '自检/备份/清理只在每天那一次 cron 里跑', bad31.join('；'))
+}
+
+console.log('\n[4.32] 网页端能干活：开单、备份、报价、预收、名词解释（第 24 轮 C 组）')
+{
+  const src32 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad32 = []
+  for (const [needle, why] of [
+    ['3.4 记一张单', '/pc 没有「记一张单」（空账套引导却让人去电脑开单）'],
+    ['function newOrder(', '/pc 没有 newOrder()'],
+    ['function bkList(', '/pc 没有备份列表（文案承诺「能退回去」但没按钮）'],
+    ['function bkRestore(', '/pc 没有恢复备份'],
+    ['3.5 报价单', '/pc 没有报价单入口'],
+    ['function qToOrder(', '/pc 没有「报价转单」'],
+    ['function doAdv(', '/desk 不能记预收'],
+    ['id="bfJson"', '/pc 的 json 上传框还和 Excel 撞 id（导入整本永远失败）'],
+    ['id="toast"', '/pc 的提示没做成顶部固定条（点了没反应）'],
+  ]) if (src32.indexOf(needle) < 0) bad32.push(why)
+  if ((src32.split('id="bf"').length - 1) !== 1) bad32.push('/pc 里 id="bf" 不止一处')
+  if (src32.indexOf("app.get('/glossary'") < 0) bad32.push('没有 /glossary 页面（词典只有 JSON，没人看得到）')
+  if (src32.indexOf("path === '/glossary'") < 0) bad32.push('/glossary 不在公开路径白名单')
+  if (src32.indexOf("app.get('/desk-recent'") < 0) bad32.push('没有 /desk-recent（首屏还为 12 行拉整个 /dashboard）')
+  if (!/oAdd > 0 && topCust \? round2\(\(num\(topCust\.t\) \/ oAdd\) \* 100\)/.test(src32)) bad32.push('最大客户占比的分母不是本月开单额')
+  say(bad32.length === 0, '电脑上能开单/看备份/报价转单/记预收，词典有页面入口', bad32.join('；'))
+}
+
 console.log('\n[4.14] D1 绑定引用')
 {
   const tomlSrc = fs.readFileSync(path.join(ROOT, 'backend/wrangler.toml'), 'utf8')

@@ -275,7 +275,10 @@ const run = async () => {
     ['PATCH /recon-log/:id', '/recon-log/' + ids.recon, { done: 1, note: TAG }, 200],
     ['DELETE /recon-log/:id', '/recon-log/' + ids.recon, null, 200],
     ['DELETE /recon-log', '/recon-log', null, 400],
-    ['PATCH /accounts/:id', '/accounts/' + ids.account, { name: TAG + '户改', opening: 1000 }, 200],
+    // 第 24 轮 A4：账户期初是全局的（改一次历史每个月都变），已经记过账的账户一律 400 has_flow；
+    // 改名不受影响，所以这里分两条验：改名 200、改期初 400。
+    ['PATCH /accounts/:id', '/accounts/' + ids.account, { name: TAG + '户改' }, 200],
+    ['PATCH /accounts/:id（改期初应有流水拒绝）', '/accounts/' + ids.account, { opening: 1000 }, 400],
     ['DELETE /accounts/:id', '/accounts/' + ids.account, null, 400],
 
     // —— 模板 / 分类 / 预付 / 借支 ——

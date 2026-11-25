@@ -49,6 +49,9 @@ const page = async (url) => {
   return { status: r.status, text: await r.text().catch(() => ''), headers: r.headers }
 }
 const pathOf = (u) => String(u || '').replace(/^https?:\/\/[^/]+/, '')
+// 判断「哪张卡在前」时先把 HTML 注释去掉 —— 注释里也会写到「第一次用 / 已经在用」，
+// 直接 indexOf 会被注释里那句话带偏（第 24 轮 C6 就踩过这个坑）。
+const noComment = (t) => String(t || '').replace(/<!--[\s\S]*?-->/g, '')
 const wait = async () => {
   for (let i = 0; i < 60; i++) {
     try { const r = await fetch(BASE + '/version'); if (r.ok) return true } catch (e) {}
@@ -326,7 +329,11 @@ console.log('\n[10] 电脑端：能记一笔、带账套号、批量去重')
   isTrue('首页版本号还在', land.text.includes("'版本 '") || land.text.includes('版本 '))
   isTrue('首页 commit 收进 title（不再直接印一长串 hash）', land.text.includes('el.title') && !/版本 [0-9a-f]{40}/.test(land.text))
   // E3：三张卡的说法
-  isTrue('首页不再说「下面两个链接」（实际三张卡）', !land.text.includes('用下面两个链接') && land.text.includes('三张卡'))
+  // 第 24 轮 C6：落地页第一张卡改成「第一次用，三步就开了张」（以前第一张卡是「我已经在用」，
+  // 新老板要跳 4 次才找到设口令的地方）。所以这里改成断言「先教新手上路」而不是「三张卡」。
+  const landTxt = noComment(land.text)
+  isTrue('首页先教「第一次用」再给「已经在用」', !landTxt.includes('用下面两个链接') &&
+    landTxt.indexOf('第一次用') >= 0 && landTxt.indexOf('第一次用') < landTxt.indexOf('已经在用'))
 
   // E2：500 文案不再指向小程序菜单（首页本来就没有，改查后端返回的 500 文案得造错，
   // 这里用源码产物间接确认：全站 500 文案里已经没有「运行日志」这条路径）
@@ -518,7 +525,7 @@ console.log('\n[15] 第 23 轮：假成功堵上 / 下拉不复位 / 付供应�
   isTrue('A1 单据下拉重画后记着上次选的', d.includes('var keepDoc') && d.includes('okKeep'))
   isTrue('A1 正在填表时自动刷新让一步', d.includes('function formBusy(') && d.includes('!formBusy()'))
   isTrue('A1 收款成功提示带单号', d.includes("' → #' + esc(String(id))"))
-  isTrue('B1 自动刷新间隔 ≥ 5 分钟', /load\(\) \}, 300000\)/.test(d))
+  isTrue('B1 自动刷新间隔 ≥ 5 分钟', /\}, 300000\)/.test(d) && d.includes('function quickRefresh('))
 
   // A13 / C5：付供应商
   isTrue('A13 有「付供应商」tab', d.includes('id="tabPay"') && d.includes("tab('pay')"))
@@ -537,8 +544,8 @@ console.log('\n[15] 第 23 轮：假成功堵上 / 下拉不复位 / 付供应�
   const cats = (catList.d && catList.d.out) || []
   isTrue('A4 支出分类列表正常', cats.length > 0)
   if (cats.length) {
-    await call('POST', '/expenses', { amount: 11.11, category: String(cats[0].id), date: TODAY, remark: 'A4回归' })
-    const after = await call('GET', '/flows?month=' + MM + '&limit=3')
+    await call('POST', '/expenses', { amount: 11.11, category: String(cats[0].id), date: TODAY, remark: 'A4回归', confirm_dup: true })
+    const after = await call('GET', '/flows?month=' + MM + '&limit=30')
     const rows = (after.d && after.d.rows) || []
     const row = rows.filter((x) => String(x.remark || '').indexOf('A4回归') >= 0)[0]
     isTrue('A4 传分类 id 也记成中文分类名', !!row && row.cat_text === String(cats[0].name) && !/^\d+$/.test(String(row.cat_text)))
@@ -599,6 +606,124 @@ console.log('\n[15] 第 23 轮：假成功堵上 / 下拉不复位 / 付供应�
     const post = await call('POST', '/track-ack', { party: u.searchParams.get('party'), t: u.searchParams.get('t'), x: u.searchParams.get('x'), ack: 'ok' })
     isTrue('C7 进度页反馈真落库（POST /track-ack）', !!(post.status === 200 && post.d && post.d.ok))
   } else { isTrue('C7 进度页链接能生成', false) }
+
+  // ---------- [16] 第 24 轮：稳定（该报错的报错）/ 高效（别白算）/ 便捷（该有入口） ----------
+  console.log('')
+  console.log('【16】第 24 轮：金额填错要报错、电脑上要能干活')
+  const dk = (await page('/desk')).text
+  const ptx = (await page('/pc')).text
+
+  // A1 经营报表的钱从哪来：账户余额明细以前永远空白（accountBalances 返回数组却按对象取）
+  const repLink = await call('GET', '/report-link?month=' + MM)
+  if (repLink.d && repLink.d.url) {
+    const rp = await page(repLink.d.url)
+    isTrue('A1 经营报表列出每个账户的余额', rp.text.includes('其中各账户合计'))
+  } else { isTrue('A1 经营报表链接能生成', false) }
+
+  // A4 期初填空不许静默改成 0
+  const accAll = await call('GET', '/accounts')
+  const accList = (accAll.d && accAll.d.accounts) || []
+  if (accList.length) {
+    const p1 = await call('PATCH', '/accounts/' + accList[0].id, { opening: '' })
+    isTrue('A4 期初填空 → 400 bad_opening（以前静默改 0）', p1.status === 400 && p1.d && p1.d.code === 'bad_opening')
+  } else { isTrue('A4 至少有一个账户', false) }
+
+  // A5 金额填「1000元整」→ 400，不许静默保存原值还回 ok
+  await call('POST', '/expenses', { amount: 12.34, category: '其他', date: TODAY, remark: 'T24-A5-' + TAG })
+  const fl0 = await call('GET', '/flows?month=' + MM + '&limit=5')
+  const row0 = ((fl0.d && fl0.d.rows) || []).find((x) => String(x.remark || '') === 'T24-A5-' + TAG)
+  if (row0) {
+    const p2 = await call('PATCH', '/ledger/' + row0.id, { amount: '1000元整' })
+    isTrue('A5 金额填「1000元整」→ 400 bad_amount', p2.status === 400 && p2.d && p2.d.code === 'bad_amount')
+    await call('DELETE', '/ledger/' + row0.id)
+  } else { isTrue('A5 造一笔支出用于改金额', false) }
+
+  // A6 结账前检查失败时不许说「可以结账」
+  const pre = await call('GET', '/close-precheck?month=' + MM)
+  isTrue('A6 结账前检查带 checked 标记', !!(pre.d && pre.d.checked !== false && Array.isArray(pre.d.items)))
+  const me2 = await call('GET', '/month-end?month=' + MM)
+  isTrue('A6 月底收尾带 precheck 结论', !!(me2.d && me2.d.precheck === true))
+
+  // A7 家底：形状仍是裸数组（小程序直接 forEach），失败靠响应头
+  const nw = await call('GET', '/networth?months=6')
+  isTrue('A7 /networth 仍是裸数组（小程序不用重传）', Array.isArray(nw.d))
+  const nwSnap = await call('POST', '/networth-snapshot', {})
+  isTrue('A7 家底存档能存（算全了才留档）', !!(nwSnap.d && (nwSnap.d.ok || nwSnap.d.code === 'degraded')))
+
+  // A8 报销金额乱填 → 400（自己造一笔，别指望别人留下的借支还欠着）
+  const nLoan = await call('POST', '/loans', { staff: TAG + '员工', amount: 1000, remark: 'T24-A8', client_id: 't24-a8-' + TAG })
+  const loans2 = await call('GET', '/loans')
+  const myLoan = ((loans2.d && loans2.d.list) || []).filter((x) => String(x.staff || '').indexOf(TAG) >= 0)[0]
+  if (myLoan) {
+    const rb = await call('POST', '/loans/' + myLoan.id + '/reimburse', { amount: 'abc' })
+    isTrue('A8 报销金额填「abc」→ 400 bad_amount（以前按全额冲）', rb.status === 400 && rb.d && rb.d.code === 'bad_amount')
+  } else { isTrue('A8 造一笔借支（POST /loans）', !!(nLoan.d && nLoan.d.ok)) }
+
+  // B2/B3/B4 高效：少打请求、能只翻这一页
+  isTrue('B2 自动刷新走「只刷数字」的轻请求', dk.includes('function quickRefresh(') && dk.includes('}, 300000)'))
+  const rec = await call('GET', '/desk-recent?month=' + MM)
+  isTrue('B3 首屏不再为 12 行拉整个 /dashboard', !!(rec.d && rec.d.ok && Array.isArray(rec.d.recent)))
+  const f8 = await call('GET', '/flows?month=' + MM + '&limit=8')
+  isTrue('B4 /flows?limit=8 真的只给 8 行', ((f8.d && f8.d.rows) || []).length <= 8)
+  const al = await call('GET', '/audit-logs?limit=2')
+  isTrue('B10 审计日志能分页（limit=2）', Array.isArray(al.d) && al.d.length <= 2)
+  const rem = await call('GET', '/reminders')
+  isTrue('B7 「等你处理」接口正常', !!(rem.d && Array.isArray(rem.d.items)))
+
+  // C1/C2 /pc 上传框与提示
+  isTrue('C1 /pc 的 json 上传框不再和 Excel 撞 id', ptx.includes('id="bfJson"') && (ptx.split('id="bf"').length - 1) === 1)
+  isTrue('C2 /pc 的提示是顶部固定条（不再写在别的卡片里）', ptx.includes('id="toast"') && ptx.includes('.toast{position:fixed'))
+  isTrue('C3 催款话术带厂名', dk.includes('var SHOP = {') && dk.includes('SHOP.title'))
+  const meMe = await call('GET', '/me')
+  isTrue('C3 /me 给出店名与电话', !!(meMe.d && meMe.d.shop_title))
+
+  // C4 客户侧页面「打电话」必须有号码；C5 进度页能存 PDF
+  const ackBad = await page('/statement-ack?party=nobody&type=ar&month=' + MM)
+  isTrue('C4 确认页出错页仍给得出电话或「问老板」', ackBad.text.includes('tel:') || ackBad.text.includes('老板'))
+  const tk2 = await call('GET', '/track-link?party=' + encodeURIComponent(CUST))
+  if (tk2.d && tk2.d.url) {
+    const tp2 = await page(tk2.d.url)
+    isTrue('C5 客户进度页能存 PDF', tp2.text.includes('window.print()') && tp2.text.includes('存成 PDF'))
+  } else { isTrue('C5 进度页链接能生成', false) }
+
+  // C6 落地页第一张卡是「第一次用」
+  const home = await page('/')
+  const homeTxt = noComment(home.text)
+  isTrue('C6 落地页先教「第一次用」再给「已经在用」', homeTxt.indexOf('第一次用') >= 0 && homeTxt.indexOf('第一次用') < homeTxt.indexOf('已经在用'))
+
+  // C7 电脑上能开一张单
+  isTrue('C7 /pc 有「记一张单」和 newOrder', ptx.includes('3.4 记一张单') && ptx.includes('function newOrder('))
+  const cid7 = 't24-c7-' + TAG
+  const o1 = await call('POST', '/orders', { customer: TAG + '客户', item_name: '法兰盘', price: 1234.5, client_id: cid7 })
+  const o2 = await call('POST', '/orders', { customer: TAG + '客户', item_name: '法兰盘', price: 1234.5, client_id: cid7 })
+  isTrue('C7 开单能成，连点两下只记一张', !!(o1.d && o1.d.ok && o2.d && o2.d.dup_ok))
+
+  // C8 最大客户占比口径 + 词典有页面入口
+  const kpiC = await call('GET', '/kpi?month=' + MM)
+  isTrue('C8 最大客户占比不再超过 100%', !!(kpiC.d && (kpiC.d.conc_pct === 0 || kpiC.d.conc_pct <= 100)))
+  const gl = await page('/glossary')
+  isTrue('C8 名词解释有真页面（以前只有 JSON）', gl.status === 200 && gl.text.includes('核销') && gl.text.includes('账期'))
+  isTrue('C8 看账台链到名词解释', dk.includes('/glossary'))
+
+  // C9 备份能看能退
+  isTrue('C9 /pc 能列备份、能回到某一份', ptx.includes('function bkList(') && ptx.includes('function bkRestore('))
+  const bk = await call('GET', '/backup-list')
+  isTrue('C9 备份列表接口正常', Array.isArray(bk.d))
+
+  // C10 手机窄屏逾期表不撑破卡片
+  isTrue('C10 逾期表在窄屏里自己横滚', dk.includes('#dueBox, #apBox, #undoBox{overflow-x:auto'))
+
+  // C11 报价单能发、能转单
+  isTrue('C11 /pc 有报价单入口', ptx.includes('3.5 报价单') && ptx.includes('function qList(') && ptx.includes('function qToOrder('))
+  const qs = await call('GET', '/quotes?limit=5')
+  isTrue('C11 报价列表接口正常', !!(qs.d && qs.d.ok))
+
+  // C12 预收能记
+  isTrue('C12 看账台能记预收', dk.includes('tabAdv') && dk.includes('function doAdv('))
+  const advCid = 't24-c12-' + TAG
+  const av1 = await call('POST', '/advances', { type: 'in', party: TAG + '客户', amount: 500, date: TODAY, client_id: advCid })
+  const av2 = await call('POST', '/advances', { type: 'in', party: TAG + '客户', amount: 500, date: TODAY, client_id: advCid })
+  isTrue('C12 记预收能成，重复提交不记两笔', !!(av1.d && av1.d.ok && av2.d && av2.d.dup_ok))
 }
 
 console.log('')

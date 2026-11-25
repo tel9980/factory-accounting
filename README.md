@@ -1734,6 +1734,17 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+366. ✅ **第 24 轮：网页端第四轮 —— 算不准就别装准，电脑上要真能干活**（用户「从稳定、高效、便捷，网页端可以优化吗」→ 方案 `docs/优化方案-20261125-网页端第5轮.md` 31 条，随后「开始，全部由你来完成」）。三路只读审计 + 我逐条回代码核实，**账上的算法仍然一动没动**；改的是「数字错了它会不会说」「一天把全库重算几遍」「老板在电脑上到底能不能干活」。
+   - **A 组 稳定 9 条（已经算错、界面一切正常）**：①**经营报表「账户余额明细」永远空白** —— `accountBalances(db)` 返回的是**数组**，下一行却按 `bal.accounts` 取（`(bal.accounts || [])`）→ 打印出来的报表少一整节。现在照实列出每个账户余额 + 一行「其中各账户合计（应等于上面的货币资金）」。②**折旧重复累加**：`runDepreciation` 遇到「这个月已经提过」时仍然 `booked += amt`，而 `booked` 从历史已提总额（`prev`）起算 → 提前撞「提满」上限，被月结锁跳过的月份解锁后也补不回来（页面那句「解锁后再跑一次会补上」是假承诺）。现在「已提过就跳过」，文案也改成真的能做到的「再点一次就会补上」。③**期初借款把批次号写进了日期**：`INSERT` 11 列只给 8 个 `?`，最后一个绑定是 `batch`（`IM2026112512345612`）→ `created_at` 成了批次号，家底/借款余额按字符串比日期。现在绑 `now()`，并加一次性修补 `fixDebtCreatedOnce()`（`settings.fix_debt_created_v24`）。④**改账户期初填空就变 0**（`num('')`）→ 现在 `numStrict` + 400 `bad_opening`；已经记过账的账户不许改期初（`has_flow`，因为 `accounts.opening` 是全局期初，改一次历史每个月都变），有月结锁时也不许改。⑤**填「1000元整」静默保存原值还回 ok**（`num(amount, 原值)`）→ 现在 `numStrict` + 400 `bad_amount`；税率不许静默夹到 0~100，超界回 `bad_tax`。⑥**结账前检查一失败就显示「可以结账」**（六条查询各 `.catch(() => ({ n: 0 }))`）→ 现在任一条失败 `checked:false` + `blockers:['precheck_failed']` + `can_close:false`，`POST /month-close` 直接 500 拦住，`/month-end` 的第 3 步也不再显示「已完成」。⑦**家底少算一条还被永久存档**（`netSeries` 七条各自吞错 → 缺失的桶当 0，家底偏大；每月 1 号 cron 还把它写进 `net_snapshots`）→ 现在收集失败项，`snapNet` **算不全就不留档**，`GET /networth` 仍回**裸数组**（手机端是 `list.forEach`，改形状会让小程序白屏，而重传要老板自己动手）但带 `X-FA-Degraded` / `X-FA-Degraded-Jobs` 响应头。⑧**报销填「三百」按全额冲**（`num(amount) > 0 ? ... : remain`）→ 现在 `numStrict`，且加 `client_id` 幂等（连点两次不会冲两笔）。⑨打印页的 0 与空白统一 `fmtMoney`（`/quote-print` 明细与合计）。
+   - **B 组 高效 10 条**：①**定时任务一天把全库重算十几遍**（`crons` 有 4 条 × 3 本账 = 12 次/天，而自检、备份、五类清理**根本没 cron 门控**）→ 加 `dailyOnce`（只在 `0 16 * * *` 那次跑），省 75% 的读取；顺手把 `DELETE FROM audit_log WHERE substr(created_at,1,10) < ?` 改成 `created_at < ?`（函数包字段吃不到 `idx_audit_created`）。②`/desk` 自动刷新从「11 个请求、55–57 条 SQL」改成 `quickRefresh()` 只发 4 个轻请求（利润/应收/到期/最近几笔）。③新增 `GET /desk-recent`（2 条 SQL），首屏不再为 12 行「最近记的单」拉整个 `/dashboard`（19 条 SQL）。④`/flows` 的 `limit` 以前是死参数（SQL 写死 `LIMIT 300`，`/desk` 传 `limit=8` 白传）→ 现在真的按 `limit` 取，且 `limit<=20` 时不再算那四个聚合。⑤`/due-schedule` 的客户电话与催款记录加 30 秒缓存（`partyProfMap` / `partyDunMap`），和 `party_terms` 一致。⑥`/suggest` 三条「最近 90 天」全表分组，每笔记账都跑 → 60 秒缓存 + 写操作即失效（`invalidateSuggest()`）。⑦`/reminders` 里一条「有些客户开过好几次单」的灰字把建库以来全部订单按客户分组 → 缩到最近 12 个月。⑧`/audit-logs`、`/import-log` 支持 `limit/offset`（以前写死 100 / 50，查历史只能导出全表）。
+   - **C 组 便捷 12 条（电脑上真能干活）**：①**`/pc` 的「导入到这本账」从来没成功过** —— Excel 框与 json 框都叫 `id="bf"`，`bookIn()` 拿到的是上面那个空的 Excel 框 → 现在 json 框叫 `bfJson`。②**`/pc` 的提示只写在页面第 3 块里**（`#msg` 全页只有一处）→ 点「导出这本账 / 一键初始化」页面毫无反应，老板以为没成再点一次，备份已被覆盖。现在改成顶部固定 `#toast`（3.5 秒消失，失败常驻）。③**催款话术漏厂名**（拼成「我是」+「这边对一下账」，客户收到像诈骗）→ `/me` 增加 `shop_title`/`shop_phone`，话术改成「我是 XX加工厂，…（电话 139…）」。④客户确认页让他「打给老板」却没号码 → 现在失效页/「没打开」页都带 `tel:` 链接。⑤客户进度页加「🖨 存成 PDF / 打印」。⑥落地页第一张卡改成「🆕 第一次用？三步就开了张」（以前是「我已经在用」，新老板要跳 4 次才找到设口令的地方）。⑦**电脑上能开一张单**：`/pc` 新增「3.4 记一张单（应收 · 开单）」—— 客户/做什么/多少钱/什么时候结四个框，走 `POST /orders`（同一次点击的 `client_id` 不变，连点两下只记一张），`/desk` 空账套引导里那句「去电脑填第一张单」终于不是空话。⑧**最大客户占比口径错**：分子按「本月回款」、分母按「本月全部现金流入（含贷款、借款、别家转入）」→ 有时候能算出 100% 以上。现在两边都按「本月开单额」，并给词典做了真页面 `GET /glossary`（以前 `GLOSSARY` 只经 `/help` 吐 JSON，全站没有一处链到它，老板看不懂「权责口径」「核销」时手机上找不到任何解释），`/desk` 顶部加「📖 看不懂的词」。⑨**备份能看能退**：`/pc` 文案写着「清空前自动备份，点错了还能退回去」，但整页既没有列表也没有恢复按钮（只有手机能）→ 现在「看这台账上的备份」+「回到这一份」（`GET /backup-list` / `POST /backup-restore`，恢复前自动再留一份）。⑩手机窄屏逾期表判得下不来：7 列 + 操作列 `nowrap` 会把卡片撑破、右上角三个按钮看不见 → 给 `#dueBox`/`#apBox`/`#undoBox` 自己一个横向滚动容器（金额列一列不藏）。⑪**报价单网页能发能转**：「3.5 报价单」列出状态与剩余天数，「发链接」（7 天有效）和「转成单子」（`/quotes/:id/to-order`，自动开一张应收单）。⑫**预收能记**：`/desk` 加「🧾 记预收（客户先给的钱）」tab → `POST /advances`，并在文案里说清「以后开单了要抵预收，别用记收款」。
+   - **我自己踩的两个坑（都写进 4.54）**：①`
+` 在模板字面量里会变成**真换行** → 后端模板里的 `confirm('…？
+
+…')` 会把页面脚本劈成两半（`/pc` 整页 `SyntaxError`），源文件必须写 `\n`；②我按「内联 `onclick` 不要拼引号」这条规矩把 `bkRestore('…')` 改成 `data-id`/`data-at` + `onclick="bkRestore(this)"` —— 之前那个写法的反斜杠在模板字面量里被吃掉，引号直接闭合了字符串。
+   - **门禁**：`check.mjs` 新增 **[4.29]**（金额/期初/税率填错必须 400：`numStrict` + `bad_opening`/`bad_amount`/`bad_tax`，报销不许按全额兜底）、**[4.30]**（折旧不许重复累加 `booked`；`closePrecheck` 不许再出现 `.catch(() => ({ n: 0 }))`；`snapNet` 必须传 `failBox`，否则残缺家底会被永久存档）、**[4.31]**（`scheduled` 必须有 `dailyOnce`，且 `selfCheck`/`saveBackup`/审计清理都在它里面；审计清理不许再用 `substr(created_at)`）、**[4.32]**（`/pc` 必须有开单/备份列表/恢复/报价转单/预收，`id="bf"` 只能出现一次，`/glossary` 存在且在公开白名单，`/desk-recent` 存在，最大客户占比的分母必须是本月开单额）。`scripts/test-web-pages.mjs` 从 205 项加到 **237 项**（新增 [16] 段 32 项：期初填空 400、金额「1000元整」400、结账检查带 `checked`、`/networth` 仍是裸数组、报销「abc」400、`/desk-recent`/`/flows?limit=8`/`/audit-logs?limit=2`、`/pc` 上传框与提示条、催款话术带厂名、确认页出错仍有电话、进度页能存 PDF、落地页先教新手、电脑开单连点两次只记一张、`conc_pct ≤ 100`、`/glossary` 真页面且看账台链得到、备份列表、窄屏横滚、报价入口、预收幂等）。
+   - **本轮没做 2 条**（写进 `DEPLOYMENT.md 4.54`）：B9（六个单位页 `/contacts` `/profiles` `/party-dups` `/term-gap` `/credit-limits` `/dispute-book` 各把 orders+payables 全表 `GROUP BY` 一遍，方案建议抽一个公共的「单位汇总」）—— 抽公共函数要动六个页面的口径，而它们各自还带筛选参数（`kw`/`min`/`days`），收益是全表扫少 5 次、风险是六个页面的数字可能一起变，留到下一轮单独做并配逐字段比对；B10 的另外 6 个列表（`/track-log` `/export` `/credits` `/compare` `/backup-timeline` `/recon-progress`）同理，先把日志类的两个做了。
+
 365. ✅ **第 23 轮：网页端第三轮 —— 该说「没算出来」的地方不许说「账是清的」**（用户「从稳定、高效、便捷，网页端可以优化吗」→ 方案 `docs/优化方案-20261125-网页端第4轮.md` 37 条，随后「全部由你来完成」）。这一轮改的全是网页端（`backend/index.js` 内联页 + 几个接口），**账上的算法一动没动**，改的是「出错时它说了什么」和「电脑上能不能干活」。
    - **A 组 稳定 13 条（错账 / 让人信错）**：①**A4 记支出把分类 id 写进账**（第 20 轮我自己引入的）：`/desk` 下拉 `<option value="${c.id}">`，而 `POST /expenses` 的 `category` 是**名字** → 账上出现 `cat_text:"39"`。现在下拉用名字，后端再加一层「传进来是数字就按 id 反查名字」，并补了一个一次性补丁 `fixCategoryIdsOnce()`（`settings.fix_cat_id_v23` 置位，把历史脏行改回中文名）。②**A1 自动刷新把「记给谁」打回第一条**：`fillForms()` 每 60 秒重建单据下拉、不记选择 → 老板正在填「张三那笔 3000」，刷新一来自动跳回第一张单，钱就记到别人头上。现在下拉记着上次选的、正在填表时自动刷新让一步、收款成功提示带单号客户名。③**A2 对账单印成「本期结清 ¥0」**：`conclusionOf()` 六条查询各自 `.catch(() => null)` → 期末算成 0 元，而这句会印到**客户签字的那张纸**上（客户看到不欠了就不打款）。现在任一条失败整体返回 `null`，五个调用点全部给「这次没算出来」（`/track` 卡片黄字、`/recon-conclusion`/`/recon-confirm` 503 `no_concl`、`/recon-print` 与 `/statement-ack` 走错误页）。④**A3 批量对账失败说「账是清的」**：名单查询失败回落空数组 → 回 `ok:true` + 「没有欠加工费的客户，账是清的。」并进 `all_text`。现在 503 `no_list` +「先别当成账是清的」。⑤**A13 网页付不了货款**：`/desk` 记支出走 `/expenses`（不进应付），老板以为付了供应商的钱，其实 `payables` 一分没动。新增「🏭 付供应商」tab + 「该付谁」名单 + `doPay()` 走 `POST /payables/:id/pay`，并显示「最近 7 天要付 X · 账上现金 Y · 缺 Z」。⑥其余 8 条：报价单按钮失败后恢复可点（A5）、`/track` 降级显示「—」并说明只列 40 单（A6）、年度回顾失败项点名而不是写「一分没回」（A7）、月结归档的预收预付不再吞成 0（A8，结果是永久快照）、借款 PATCH/DELETE 查不到流水就不许动（A9）、`/pc` 下载错误翻人话（A10）、厂名取不到不再印「加工厂」（A11）、发工资把「没记工 / 都发过 / 扣成 0」三种原因分开（A12）。
    - **B 组 高效 11 条（额度与延迟）**：`/desk` 开着不动原来**每 60 秒**拉 7 个接口、约 5–7 万行读（D1 免费额度 500 万行/天，开着 70 分钟就打满）→ 改成 5 分钟且正在填表时跳过。`/kpi` 的 `avg_days` 从全表 JOIN 改成一条带 12 个月窗口的子查询；`/dashboard` 把 `ar`/`over_limit`/`top_customer` 三次扫合成一次分组（再和 `credit_limits` 对），`qOrders`/`qPays`/`qLedger` 十几个重复子查询砍到各自一个（`order_add`/`cash_exp` 等直接取 `plOf()` 已算好的）；`/ar-summary` 的 `open/overdue/due` 三条全表扫合成一次条件聚合；`/pc` 快捷面板不再为 6 个数字拉整个 `/dashboard`；`moreDue()` 只重发到期表；`/desk` 首屏 6 个数据请求与 `/me` 同层并发（**绝不能「数据先画、权限后判」**，员工不许看到利润哪怕 0.2 秒）；`/books-all` 加 60 秒弱引用缓存（key 里必须带 `super` 标志，否则超级口令会看到别家账套名）；`/due-schedule` 的「合计」从「按 3000 一段把全部未结单搬进 Worker 再排序」改成**一条 SQL 算四个合计 + 一条 SQL 排序分页**（往返 1–20 次 → 2 次，改前改后 18 组参数逐字段比对完全相等）；批量打对账单从 20 家串行 `await` 改成每 6 家一批并发（页序仍按勾选顺序）。
@@ -2253,7 +2264,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 440 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 442 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2644,7 +2655,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（237）
+**其它（单个接口）**（239）
 
 - `GET /`
 - `GET /access-guide`
@@ -2706,6 +2717,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /db-stats`
 - `GET /delivery-plan`
 - `GET /desk`
+- `GET /desk-recent`
 - `POST /detect-import`
 - `GET /dispute-book`
 - `GET /disputes`
@@ -2725,6 +2737,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /forecast`
 - `GET /frame-check`
 - `GET /funding`
+- `GET /glossary`
 - `GET /guide`
 - `GET /handover`
 - `POST /handover-note`
