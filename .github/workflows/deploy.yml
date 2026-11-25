@@ -107,6 +107,12 @@ jobs:
       # BACKUP_SKIP / BACKUP_SETTINGS_SKIP 名单，不写死。
       - name: 备份里没有口令类的东西
         run: node scripts/check-backup.mjs
+      # 演示账套自检：docs/演示账套/*.json 是发给新手照着做的（一键导入 + 照着填）。
+      # 文档里写了几十个具体数字（接单额 96,390、全年净利 −296,212.22、家底 32,218.50…），
+      # 谁重新生成一次账套而忘了改文档，新手照着填就会对不上、以为自己错了。
+      # 这条把「文件算出来的数」和「文档写的数」两边都钉住，纯读文件不联网。
+      - name: 演示账套与演练文档对得上（新手照着做不会对不上数）
+        run: node scripts/check-demo-pack.mjs
 
   smoke:
     name: 起本地服务，GET 全打一遍 + 写接口按业务顺序跑一遍

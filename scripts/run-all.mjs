@@ -29,6 +29,10 @@ export const OFFLINE = [
   // 备份口径自检：读 backend/index.js 里真实的 BACKUP_SKIP / BACKUP_SETTINGS_SKIP，
   // 确认口令类的东西不会混进备份包。只用内置模块，不联网、不依赖服务。
   'check-backup',
+  // 演示账套（给新手照着做的那份）自检：docs/演示账套/*.json 与
+  // docs/新手照着做-完整账套演练.md 里那张月度表、全年结论必须逐个对得上。
+  // 纯读文件，不联网 —— 谁重新生成演示账套而忘了改文档，这里立刻红。
+  'check-demo-pack',
 ]
 
 export const ONLINE = [

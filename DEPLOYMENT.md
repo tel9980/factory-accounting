@@ -1303,6 +1303,14 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.52 第 22 轮（演示账套 / 新手演练文档）的五条硬规矩
+
+1. **发出去的示例账套里不许有能进账的东西。** `docs/演示账套/*.json` 是要贴给用户、当培训材料发出去的。`/export-all` 已经跳过 `access_key` / `staff_key` / `sign_secret` 这类设置项（`BACKUP_SETTINGS_SKIP`），但**新加设置项时要回来确认一遍**：`scripts/check-demo-pack.mjs` 会用语义规则（key/secret/pass/token/pin/hash/code）扫 `settings` 的键，还会拒 `wx_users` / `auth_fails` 非空。员工口令必须留在文档里写明是**演示值**（当前 123456）。
+2. **文档里的数字不许手写，必须由脚本核对。** 那份演练文档里有几十个具体数字（接单额 96,390、全年净利 −296,212.22、家底 32,218.50…），手写必然有一天和文件脱节。`check-demo-pack.mjs` 的 `[4][5][6]` 三段就是干这个的：**逐月 8×9 列**、**14 项年度结论**、**15 个关键数字必须能在文档里找到**。改文件不改文档 → CI 红，比人肉 review 可靠。
+3. **重新生成演示账套的顺序不能变**：干净库 → `node scripts/mock-data.mjs` → **立刻** `GET /export-all` → 删 `op_dedupe`（103 KB 幂等管道，无教学价值）→ 重算 `counts` / `rows_total` → 最后才跑 `test-ledger.mjs`。**`test-ledger.mjs` 会写数据**（口径客户 / 口径供应商 / 361 单 / 6 条核销），先跑它再导出，账套里就带着测试残留，所有数字都会漂。
+4. **给新手看的表要写清口径，别让他自己对不上。** 文档那张月度表里三处最容易让人怀疑自己：①「费用（材料之外）」含 `cash=0` 的报销冲借支（4～7 月各 2,000），真金白银比这列少；②报表页的「费用」还把折旧算进去了（4 月页面写 58,675 = 57,250 + 1,425）；③「实收 / 实付」是真金白银进出（4 月实收 324,480.50 里 300,000 是银行贷款），**转账两边都不算**。这三句已经直接写进文档的注里 —— 以后再改表，注也要改。
+5. **演示账套是故意做成亏损的**（全年 −296,212.22，含借支报销 / 坏账核销 / 供应商豁免 / 设备中途处置 / 半年房租摊销）。别「顺手」把它改成盈利或把它抹平：账做平了就看不出「记了成本却没动现金」这类特殊行，那份文档的教学价值也就没了。要换剧本改 `scripts/mock-data.mjs` 的 `MONTHS` / `TODAY`，但**日期故意写死**（换了「今天」，折旧摊销月数就变，逐月加总对不上）。
+
 ### 4.51 第 21 轮（模拟数据跑完整账套）的六条硬规矩
 
 1. **账上多一类流水，桥接就要多一行。** `/cash-bridge` 用的是恒等式「净利 + 调整 = 现金变动」，任何一类流水进了利润却没被某一行解释，它就会静静躺在「残差」里，谁也不知道差在哪。第 21 轮就是「借支报销」（`ref_type='expense'` 但 `cash=0`）没行承接，残差每月正好多一笔报销额。**新增/修改任何写 `ledger` 的地方，都要问一句：桥接哪一行负责它？** 兜底行 `other` 只该解释「确实没法归类」的那点东西。`scripts/test-ledger.mjs` [P5] 会扫 `ref_type` 是否有未归类项。

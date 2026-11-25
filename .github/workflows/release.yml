@@ -63,6 +63,8 @@ jobs:
       - run: node scripts/test-offline.mjs
       # 备份口径自检：口令类的东西不能混进备份包（包是要往外发的）
       - run: node scripts/check-backup.mjs
+      # 演示账套与演练文档必须逐个数字对得上（纯读文件，不联网）
+      - run: node scripts/check-demo-pack.mjs
       # 第 4 本账演练要自己起 server/main.mjs（依赖 hono），必须先装后端依赖。
       - name: 装后端依赖（第 4 本账演练要起本机服务）
         run: npm ci
