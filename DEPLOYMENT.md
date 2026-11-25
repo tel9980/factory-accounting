@@ -1303,6 +1303,16 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.53 第 23 轮（网页端第三轮）的七条硬规矩
+
+1. **查询失败不许变成 0，也不许变成「没有欠款」。** 这一类错误最坏的地方是**页面看不出异常**：`conclusionOf()` 六条查询失败算成「期末 0 元」，这行字会印到客户签字的那张对账单上；批量对账的名单查询失败回落空数组，页面回「账是清的」。规矩是：**只要这个数字会印给客户或拿去决策，就不许 `.catch(() => 0)` / `.catch(() => [])`**，要么整体 `return null` 由调用方给「这次没算出来」，要么带 `code` 报错。只影响备注/确认记录这种附带信息的（`recon_log`、`recon_confirm`），才允许静默降级。`check.mjs` [4.25] 守着。
+2. **永久快照里更不许吞错。** `month_snapshot` / `month_archive` 是「这个月就长这样」的存证，事后没有任何痕迹可查。他们里面调用的 `advLeftAt()` 一旦 `.catch` 成 `{in:0,out:0}`，那笔预收就永久从快照里消失了 —— 而归档是幂等的，报错让它重试才是对的。
+3. **分类、账户这类「表单里的选项」必须传名字（或必须与后端字段语义一致）。** 第 20 轮把支出分类的 `<option value>` 写成 `c.id`，后端 `/expenses` 的 `category` 要的是**名字**，于是账上出现 `cat_text:"39"`——`/cash-bridge`、分类报表、导出全跟着错，但页面一点异常都没有。规矩：**新增任何下拉/选项，先看后端这个字段收的是什么**；后端再加一层「是数字就按 id 反查名字」的兜底；`check.mjs` [4.26] 守着。
+4. **内联 `onclick` 里不要拼引号。** 后端模板字面量里写 `\\'` 会被吃成 `'`，输出成 `onclick="goNext(''` → 整页脚本 `SyntaxError: Unexpected string`，页面上所有按钮一起失效（而且 `curl` 看页面是 200，只有真浏览器里才炸）。正确写法：`data-tab="'+esc(tab)+'"` 配 `onclick="goNext(this.dataset.tab)"`。`test-web-pages.mjs` [12] 会把每个页面的内联脚本抽出来 `new Function()` 编译一遍，就是防这个。
+5. **模板字面量里的 `\n` 会被解释成真换行。** 源文件要写 `\\n`（在 `python3 - <<'PY'` 里要写 `\\\\n`），否则页面脚本 `SyntaxError: Invalid or unexpected token`。同一个坑在本轮出现两次，都是「后端多写一层转义」造成的。
+6. **两个接口算同一个数，宁可重算也不许「共享一份逻辑」。** B11（把 `/kpi` 与 `/dashboard` 的未结总额并成一个 `/desk-data`）本轮**故意没做**：并接口等于在**第 4 个地方**复制一遍利润口径，而「任何页面的净利都必须等于 `/year-book`」那条（4.51 第 3 条）是断言级的硬约束，多一处实现就多一条漂的路。要并，必须先把「未结订单条件聚合」抽成一个函数、`/kpi` `/dashboard` `/ar-summary` `/due-schedule` 四处都调它，再谈合并。
+7. **到期表（`dueRows`）的合计与列表必须在 SQL 里算。** 以前「合计」要按 3000 一段把全部未结单搬进 Worker（最多 6 万行）、造几千个对象再排序，最后只取 20 行 —— 翻页看一次账就烧掉几万行读（D1 免费额度 500 万行/天）。现在一条 SQL 算四个合计、一条 SQL 排序分页。**改它之前先把改前改后的输出编号存下来逐字段比对**（本轮比了 18 组参数：ar/ap × limit 10/20/300 × months 空/6/12，含每行内容）。`check.mjs` [4.27] 守着「不许改回搬进 Worker」，另外两个容易漂的点：`ORDER BY` 必须用 SQL 里那个 `due_eff`（不是 JS 里的 `due`）、`party_terms` 必须 JOIN（没填到期日的单靠账期推算，漏 JOIN 就全按 30 天算）。
+
 ### 4.52 第 22 轮（演示账套 / 新手演练文档）的五条硬规矩
 
 1. **发出去的示例账套里不许有能进账的东西。** `docs/演示账套/*.json` 是要贴给用户、当培训材料发出去的。`/export-all` 已经跳过 `access_key` / `staff_key` / `sign_secret` 这类设置项（`BACKUP_SETTINGS_SKIP`），但**新加设置项时要回来确认一遍**：`scripts/check-demo-pack.mjs` 会用语义规则（key/secret/pass/token/pin/hash/code）扫 `settings` 的键，还会拒 `wx_users` / `auth_fails` 非空。员工口令必须留在文档里写明是**演示值**（当前 123456）。

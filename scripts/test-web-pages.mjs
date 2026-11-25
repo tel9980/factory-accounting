@@ -465,7 +465,8 @@ console.log('\n[13] 便捷：今天收了、能刷新、点链接真有反应')
   isTrue('有刷新按钮', t.includes('🔄 刷新'))
   isTrue('显示「最后更新 HH:MM」', t.includes("el('lastUpd').textContent"))
   isTrue('切回标签页会自动刷一次', t.includes('visibilitychange'))
-  isTrue('页面开着时每分钟自动刷', t.includes('setInterval(function(){ if(!document.hidden && K) load() }'))
+  // 第 23 轮 B1：从 60 秒改成 5 分钟（一次 load 7 个请求、5–7 万行，开着 70 分钟就打满 D1 免费额度）
+  isTrue('页面开着时会定时自动刷（≥5 分钟一次）', /setInterval\(function\(\)\{ if\(!document\.hidden && K/.test(t) && /\}, 300000\)/.test(t))
   // C1：window.open 在 fetch 回调里会被浏览器当弹窗拦掉 —— 必须点击时先同步开窗口
   isTrue('点击时先同步开窗口（preWin）', t.includes('function preWin('))
   isTrue('拿到链接再改地址（goWin）', t.includes('function goWin('))
@@ -505,6 +506,99 @@ console.log('\n[14] 模块关掉给错误页、搜单位/按条件勾、教程�
   const isErr = /name="fa-error"/.test(off.text) || off.status === 403
   isTrue('模块关掉 → 打印页给错误页（不是 JSON 花括号）', isErr && !/^\s*\{/.test(off.text.trim()))
   await call('POST', '/modules', { off: [] })
+}
+
+// ── 15. 第 23 轮：稳定（A）/ 效率（B）/ 便捷（C）──
+console.log('\n[15] 第 23 轮：假成功堵上 / 下拉不复位 / 付供应商 / 电脑端真能干活')
+{
+  const d = (await page('/desk')).text
+  const pc = (await page('/pc')).text
+
+  // A1：下拉记忆 + 自动刷新别在填表时打断
+  isTrue('A1 单据下拉重画后记着上次选的', d.includes('var keepDoc') && d.includes('okKeep'))
+  isTrue('A1 正在填表时自动刷新让一步', d.includes('function formBusy(') && d.includes('!formBusy()'))
+  isTrue('A1 收款成功提示带单号', d.includes("' → #' + esc(String(id))"))
+  isTrue('B1 自动刷新间隔 ≥ 5 分钟', /load\(\) \}, 300000\)/.test(d))
+
+  // A13 / C5：付供应商
+  isTrue('A13 有「付供应商」tab', d.includes('id="tabPay"') && d.includes("tab('pay')"))
+  isTrue('A13 付货款走 /payables/:id/pay（不是记支出）', d.includes("/payables/'+encodeURIComponent(id)+'/pay'"))
+  isTrue('C5 有「该付谁」名单', d.includes('function renderAp(') && d.includes('id="apBox"'))
+  isTrue('C5 说了「最近 7 天要付」和账上现金', d.includes('最近 7 天要付') && d.includes('账上现金'))
+
+  // A2 / A3：失败不许说成「0 / 账是清的」
+  const rcBad = await page('/recon-print?party=' + encodeURIComponent('不存在这家'))
+  isTrue('A2 对账单没签名 → 错误页（不是一张全 0 的对账单）', /name="fa-error"/.test(rcBad.text))
+  const rq = await call('POST', '/recon-confirm', { party: '不存在这家', type: 'ar', month: MM })
+  isTrue('A3 对账确认失败要报错，不许回 ok:true', !(rq.d && rq.d.ok === true))
+
+  // A4：分类 id 不许再写进账（第 20 轮引入的真 bug）
+  const catList = await call('GET', '/categories')
+  const cats = (catList.d && catList.d.out) || []
+  isTrue('A4 支出分类列表正常', cats.length > 0)
+  if (cats.length) {
+    await call('POST', '/expenses', { amount: 11.11, category: String(cats[0].id), date: TODAY, remark: 'A4回归' })
+    const after = await call('GET', '/flows?month=' + MM + '&limit=3')
+    const rows = (after.d && after.d.rows) || []
+    const row = rows.filter((x) => String(x.remark || '').indexOf('A4回归') >= 0)[0]
+    isTrue('A4 传分类 id 也记成中文分类名', !!row && row.cat_text === String(cats[0].name) && !/^\d+$/.test(String(row.cat_text)))
+    if (row) await call('DELETE', '/ledger/' + row.id)
+  }
+
+  // A5 / A10 / B2 / B9
+  isTrue('A10 /pc 报错翻人话、不再裸抛英文', pc.includes('function pcErr('))
+  isTrue('B9 首屏请求同时发（不必等 /me 往返）', d.includes('var pData = Promise.allSettled('))
+  const kpi = await call('GET', '/kpi?month=' + MM)
+  isTrue('B2 /kpi 仍回 avg_days（改成一条 SQL 后没丢）', !!(kpi.d && kpi.d.avg_days !== undefined))
+  isTrue('B3 /pc 不再为 6 个数字拉整个 /dashboard', !/one\('\/dashboard'\)/.test(pc))
+
+  // B10：到期表合计交给 SQL，顺序仍按到期日
+  const ds = await call('GET', '/due-schedule?type=ar&limit=5&months=6')
+  const db10 = ds.d || {}
+  isTrue('B10 到期表能取到行与合计', Array.isArray(db10.rows) && typeof db10.total === 'number')
+  isTrue('B10 合计口径齐全（总/逾期/7天内/未到期）', ['total', 'overdue_total', 'soon_total', 'future_total'].every((k) => typeof db10[k] === 'number'))
+  if (Array.isArray(db10.rows) && db10.rows.length > 1) {
+    isTrue('B10 仍按到期日升序', db10.rows.every((x, i) => i === 0 || String(db10.rows[i - 1].due) <= String(x.due)))
+    isTrue('C3 到期表带电话与催款字段', 'phone' in db10.rows[0] && 'dun_at' in db10.rows[0])
+  }
+  isTrue('B10 逾期家数与总额自洽', Number(db10.overdue_count || 0) <= Number(db10.count || 0))
+
+  // C1 / C2 / C4 / C6 / C10 / C11 / C12
+  isTrue('C1 能搜单号/客户/产品', d.includes('function doSearch(') && d.includes('/search?kw='))
+  isTrue('C2 记收款下拉能打字找单', d.includes('function filterDocs(') && d.includes('id="rcFind"'))
+  isTrue('C2 没命中说「查全部」而不是「没有逾期」', d.includes('function findAllDocs('))
+  isTrue('C4 显示「现在先做这一件」', d.includes('id="nextCard"') && d.includes('function renderNext('))
+  isTrue('C6 能撤掉刚记的一笔', d.includes('function undoLedger(') && d.includes("del('/ledger/' + encodeURIComponent(id)"))
+  isTrue('C10 能直接打这一张单', d.includes('function printOrder(') && d.includes("api('/order-print-link?id='+encodeURIComponent(id)"))
+  isTrue('C11 有「等你处理」', d.includes('function renderRem('))
+  isTrue('C12 空账套给「三步开账」', d.includes('id="emptyGuide"') && d.includes('三步就开了张'))
+  isTrue('C3 逾期行能拨号', d.includes('href="tel:') && d.includes('r.phone'))
+  isTrue('C3 能记「催过了，答应哪天付」', d.includes('function chase(') && d.includes("post('/dunning-log'"))
+
+  // C8 / C9 / C12：/pc 三块新东西
+  isTrue('C8 /pc 有「本月收尾」', pc.includes('3.3 本月收尾') && pc.includes('function monthEnd('))
+  isTrue('C8 /pc 明说「真结账回手机」', pc.includes('真结账回手机'))
+  isTrue('C9 /pc 能上传账单 xlsx', pc.includes('3.1 导入账单') && pc.includes('function bankPreview(') && pc.includes("type:'bank'"))
+  isTrue('C9 /pc 能一键自动认领', pc.includes('function bankAuto(') && pc.includes('/bank-auto-match'))
+  isTrue('C12 /pc 能首次设口令（要安装令牌）', pc.includes('1.2 第一次用') && pc.includes('install_token'))
+  const me = await call('GET', '/month-end?month=' + MM)
+  isTrue('C8 后端七件事接口正常', !!(me.d && me.d.ok && Array.isArray(me.d.steps) && me.d.steps.length >= 5))
+
+  // C7：客户侧能说一句 / 能存 PDF；进度页能反馈
+  const ackLink = await call('GET', '/statement-ack-link?type=ar&party=' + encodeURIComponent(CUST))
+  if (ackLink.d && ackLink.d.url) {
+    const ap2 = await page(ackLink.d.url)
+    isTrue('C7 确认页能「存成 PDF」', ap2.text.includes('window.print()'))
+    isTrue('C7 确认页有「我有话说」第三个按钮', ap2.text.includes('我有话说') && ap2.text.includes('有几笔对不上'))
+  } else { isTrue('C7 确认页链接能生成', false) }
+  const tk = await call('GET', '/track-link?party=' + encodeURIComponent(CUST))
+  if (tk.d && tk.d.url) {
+    const tp = await page(tk.d.url)
+    isTrue('C7 进度页能「收到了 / 有问题」', tp.text.includes('这批货收到了') && tp.text.includes('function fb('))
+    const u = new URL(tk.d.url)
+    const post = await call('POST', '/track-ack', { party: u.searchParams.get('party'), t: u.searchParams.get('t'), x: u.searchParams.get('x'), ack: 'ok' })
+    isTrue('C7 进度页反馈真落库（POST /track-ack）', !!(post.status === 200 && post.d && post.d.ok))
+  } else { isTrue('C7 进度页链接能生成', false) }
 }
 
 console.log('')

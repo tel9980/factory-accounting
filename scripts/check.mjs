@@ -941,7 +941,8 @@ console.log('\n[4.23] 打印页/客户页出错要给 HTML 错误页，不许回
   if (!/function serverErrResp\(/.test(src)) bad23.push('找不到 serverErrResp()')
   if (!/return serverErrResp\(c\)/.test(src)) bad23.push('500 分支没走 serverErrResp(c)')
   // A5：批量打对账单失败的那几家必须点名（以前只写「17 家」，老板不知道少了谁）
-  if (!/failed\.push\(party\)/.test(src)) bad23.push('/statements-print 没收集失败的家数')
+  // 第 23 轮 B12 改成每 6 家一批并发，失败的家数改由 failed.push(x.party) 收集 —— 两种写法都认
+  if (!/failed\.push\((party|x\.party)\)/.test(src)) bad23.push('/statements-print 没收集失败的家数')
   if (src.indexOf('没生成出来：') < 0) bad23.push('批量页标题没写「没生成出来」')
   if (/c\.json\(\{ ok: false, code: 'server_error'/.test(src)) {
     const n = (src.match(/c\.json\(\{ ok: false, code: 'server_error'/g) || []).length
@@ -989,6 +990,85 @@ console.log('\n[4.24] 净利口径不许回潮（第 21 轮：模拟数据跑完
   const ra = fs.readFileSync(path.join(ROOT, 'scripts/run-all.mjs'), 'utf8')
   if (ra.indexOf("'test-ledger'") < 0) bad24.push('run-all.mjs 没登记 test-ledger')
   say(bad24.length === 0, '净利口径四处口径一致 + 有常驻测试守着', bad24.join('；'))
+}
+
+console.log('\n[4.25] 网页端「失败就说失败」不许再静默变成 0（第 23 轮）')
+{
+  // 这一类错误的共同点：数据库抖一下，页面照样渲染，只是数字变成 0 / 结论变成「账是清的」。
+  // 老板看不出异常，客户拿到的对账单上写着「本期结清 ¥0」。
+  const src25 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad25 = []
+  // ① 对账结论：六条查询失败就 return null，调用方必须给 503 / 错误页
+  const cStart = src25.indexOf('async function conclusionOf(')
+  const cEnd = cStart >= 0 ? src25.indexOf('const conclusionBatch', cStart) : -1
+  if (cStart < 0) bad25.push('找不到 conclusionOf')
+  else {
+    const seg = src25.slice(cStart, cEnd > 0 ? cEnd : cStart + 6000)
+    // 只看那六条「算期末」的查询（q6 那一段）；后面 recon_log / recon_confirm 两条
+    // 只影响「有没有备注/确认记录」，失败了照常出账是正确的，不算违规。
+    const qi = seg.indexOf('let q6')
+    const qe = seg.indexOf('const [open0, add, paid, wo, paidBefore, woBefore]', qi)
+    const qseg = qi >= 0 ? seg.slice(qi, qe > 0 ? qe : qi + 3000) : seg
+    if (/\.catch\(\(\) => null\)/.test(qseg)) bad25.push('conclusionOf 又有查询失败吞成 null（会让期末算成 0）')
+    if (seg.indexOf("code: 'no_concl'") >= 0) bad25.push('conclusionOf 自己不该带 error 码')
+  }
+  if (src25.indexOf("code: 'no_concl'") < 0) bad25.push('对账结论失败没有 no_concl 错误码（前端没法区分「没算出来」和「真是 0」）')
+  if (src25.indexOf("code: 'no_list'") < 0) bad25.push('批量对账名单失败没有 no_list 错误码（会回一句「账是清的」）')
+  // ② 归档里的预收预付不许吞（结果是永久快照，事后无痕迹）
+  if (/advLeftAt\(db, end\)\.catch/.test(src25)) bad25.push('monthSnapshot 的 advLeftAt 又吞错了（归档快照会永久少一笔预收）')
+  // ③ 借款改动前必须查得到还过几次，查不到就不许动
+  if (src25.indexOf("code: 'db'") < 0) bad25.push('借款改/删没有「查不到就先不动」的护栏')
+  // ④ 对账确认：单位名打错不许写一条「期末 0 元、对方确认过」
+  if (src25.indexOf("code: 'no_account'") < 0) bad25.push('/recon-confirm 不校验这一家有没有往来（会写假确认）')
+  say(bad25.length === 0, '对账/归档/借款/确认的失败路径都会明确报错，不再静默变 0', bad25.join('；'))
+}
+
+console.log('\n[4.26] 网页「记支出」只收分类名字，id 不许落库（第 23 轮 A4）')
+{
+  // 第 20 轮把 /desk 的支出分类下拉写成 <option value="${c.id}">，
+  // 而后端 /expenses 的 category 是**名字** → 账上出现 cat_text:"39" 这种行。
+  const src26 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad26 = []
+  if (!/apply\(db, 'category'|catName0/.test(src26)) bad26.push('后端没有「传进来是 id 就换成名字」的兜底')
+  if (src26.indexOf("SELECT name FROM categories WHERE id=?") < 0) bad26.push('后端没有按 id 反查分类名')
+  if (src26.indexOf('fixCategoryIdsOnce') < 0) bad26.push('没有「把历史脏分类 id 修回名字」的一次性补丁')
+  // /desk 的下拉必须是名字
+  const dStart = src26.indexOf("el('exCat').innerHTML")
+  if (dStart < 0) bad26.push('找不到 /desk 的 exCat 下拉')
+  else {
+    const seg = src26.slice(dStart, dStart + 400)
+    if (seg.indexOf("esc(c.name)") < 0) bad26.push('/desk 的支出分类下拉又用 id 当 value 了')
+    if (/value="'\+esc\(c\.id\)/.test(seg)) bad26.push('/desk 的支出分类下拉 value 又是 id')
+  }
+  say(bad26.length === 0, '支出分类只认名字（表单 + 后端两层都挡住 id）', bad26.join('；'))
+}
+
+console.log('\n[4.27] 到期表合计交给 SQL，别再整表搬进 Worker（第 23 轮 B10）')
+{
+  const src27 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const s27 = src27.indexOf('async function dueRows')
+  const e27 = s27 >= 0 ? src27.indexOf("app.get('/due-schedule'", s27) : -1
+  const bad27 = []
+  if (s27 < 0) bad27.push('找不到 dueRows')
+  else {
+    const seg = src27.slice(s27, e27 > 0 ? e27 : s27 + 12000)
+    if (seg.indexOf('for (let off = 0; off < 60000; off += 3000)') >= 0) bad27.push('dueRows 又把全部未结单按 3000 一段搬进 Worker 了')
+    if (seg.indexOf('totSql') < 0) bad27.push('dueRows 没有一条 SQL 算合计（total/逾期/7天内/未到期）')
+    if (!/ORDER BY \$\{de\} ASC/.test(seg)) bad27.push('列表不是按到期日在 SQL 里排序的（分页顺序会变）')
+    if (seg.indexOf('party_terms pt ON pt.party') < 0) bad27.push('没 JOIN 账期表（没有到期日的单会算错应结日）')
+  }
+  say(bad27.length === 0, '到期表：合计一条 SQL、列表 SQL 排序分页、账期 JOIN 都在', bad27.join('；'))
+}
+
+console.log('\n[4.28] 客户那一页：进度页反馈接口必须在公开白名单里（第 23 轮 C7）')
+{
+  const src28 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad28 = []
+  if (src28.indexOf("path === '/track-ack'") < 0) bad28.push('/track-ack 不在公开路径白名单（客户点了会 401）')
+  if (src28.indexOf("app.post('/track-ack'") < 0) bad28.push('没有 /track-ack 接口')
+  if (src28.indexOf("sigBook(mainDb, c.env.BOOK, party, 'track'") < 0) bad28.push('/track-ack 没校验签名（谁都能替客户回话）')
+  if (!/ack === 'note'/.test(src28)) bad28.push('确认页没有第三种结论「我有话说」（客户只能说「对不上」）')
+  say(bad28.length === 0, '客户侧反馈：签名校验 + 公开白名单 + 三种结论都在', bad28.join('；'))
 }
 
 console.log('\n[4.14] D1 绑定引用')

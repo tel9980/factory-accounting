@@ -1793,6 +1793,9 @@ app.post('/client-err', async (c) => {
 
 app.use('*', async (c, next) => {
   const path = new URL(c.req.url).pathname
+  // 第 23 轮 B8：账套列表有 60 秒缓存，任何写操作都要让它立刻失效 ——
+  // 否则刚开完单再打开账套页，单数还是 60 秒前的（页面会把旧的当真的显示）。
+  if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && path !== '/books-all') invalidateBooksAll(c.env.ENV_ALL || c.env)
   // 打印页在浏览器里打开（没有请求头），放行并由页面自己校验 ?k=
   // /version 放在口令外面：部署完不用口令就能确认线上跑的是哪一版（它不返回任何账目数据）
   if (path === '/version') {
@@ -1803,7 +1806,7 @@ app.use('*', async (c, next) => {
       'Cache-Control': 'no-store',
     })
   }
-  if (path === '/' || path === '/pc' || path === '/desk' || path === '/guide' || path.startsWith('/auth/') || path === '/statement-print' || path === '/statements-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print' || path === '/client-err') {
+  if (path === '/' || path === '/pc' || path === '/desk' || path === '/guide' || path.startsWith('/auth/') || path === '/statement-print' || path === '/statements-print' || path === '/report-print' || path === '/track' || path === '/handover-print' || path === '/recon-print' || path === '/year-print' || path === '/year-close-print' || path === '/year-open-print' || path === '/statement-ack' || path === '/track-ack' || path === '/health-print' || path === '/year-review-print' || path === '/quote-print' || path === '/quote-ack' || path === '/order-print' || path === '/payroll-print' || path === '/client-err') {
     // 公开页（打印/对账/报价）只靠签名校验，本来就在鉴权中间件里早退，
     // 结果老板关了模块之后，带旧链接的人照样能打开看到数据 → 这里补一道模块开关检查。
     // （封存 sealed 只锁「改账」，GET 照常，所以不拦打印页。）
@@ -3364,7 +3367,21 @@ app.post('/payroll/pay', async (c) => {
       }
     } catch (e) { noteFail(e, '发工资·流水核对') }
   }
-  if (!done.length) { await opRelease(db, cidW, 'payroll-pay'); return c.json({ error: '这几个人这个月的工资都已经发过了' }, 400) }
+  if (!done.length) {
+    await opRelease(db, cidW, 'payroll-pay')
+    // 第 23 轮 A12（真 bug）：以前不管什么原因，只要一个人都没发出去就报「都已经发过了」。
+    // 而「这个月还没记工」也走这里（due 是 0 → continue），老板以为自己两个月前就发过了，
+    // 实际是这一个月一笔工都没记 —— 该补记工的事被一句假话盖住。
+    const anyDue = workers.some((w) => num(dueMap.get(w)) > 0.005)
+    const allPaid = workers.every((w) => {
+      const due0 = num(dueMap.get(w)), paid0 = num(paidMap.get(w)), ded0 = num(deductMap.get(w))
+      const net0 = Math.round((due0 - ded0) * 100) / 100
+      return due0 > 0.005 && Math.round((net0 - paid0) * 100) / 100 <= 0.005
+    })
+    if (!anyDue) return c.json({ error: '这个月还没记工（这几位都没有计件记录），先去记工再来发工资', code: 'no_wage' }, 400)
+    if (allPaid) return c.json({ error: '这几个人这个月的工资都已经发过了' }, 400)
+    return c.json({ error: '这几个人这个月没有可发的钱（应发被扣成 0 了，先看看扣款）', code: 'nothing_left' }, 400)
+  }
   await opMark(db, cidW, 'payroll-pay', 0)
   const sum = centsSum(done, (d) => d.amount)
   await logAudit(db, '发工资', done.map((d) => d.worker).join('、'), `${mm} 共 ¥${centsSum(done, (d) => d.amount)}`, '', act(c))
@@ -3715,9 +3732,12 @@ app.get('/track', async (c) => {
   const docs = await db.prepare('SELECT * FROM orders WHERE customer=? ORDER BY id DESC LIMIT 40').bind(party).all().then((r) => r.results)
   const ids = docs.map((d) => d.id)
   let pays = [], procs = []
+  // 第 23 轮 A6：以前收款流水查失败就静默变空数组 → 每张单都显示「未收 全额」，
+  // 而顶部总额是另一条 SQL 算的，两边自相矛盾，客户只会觉得账乱。
+  let paysFail = false
   for (const part of chunkIds(ids)) {
     const ph = part.map(() => '?').join(',')
-    pays = pays.concat(await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id IN (" + ph + ')').bind(...part).all().then((r) => r.results).catch(() => []))
+    try { pays = pays.concat((await db.prepare("SELECT * FROM ledger WHERE ref_type='order' AND ref_id IN (" + ph + ')').bind(...part).all()).results || []) } catch (e) { paysFail = true }
     procs = procs.concat(await db.prepare("SELECT * FROM process_log WHERE order_id IN (" + ph + ') ORDER BY id DESC').bind(...part).all().then((r) => r.results).catch(() => []))
   }
   const today = now().slice(0, 10)
@@ -3728,6 +3748,9 @@ app.get('/track', async (c) => {
   const allAgg = await db.prepare(`SELECT COUNT(*) AS c, ${SUM_MONEY('price')} AS tot, ${SUM_MONEY('COALESCE(paid,0)')} AS pd,
     ${SUM_MONEY('CASE WHEN price-COALESCE(paid,0)-COALESCE(written_off,0) > 0 THEN price-COALESCE(paid,0)-COALESCE(written_off,0) ELSE 0 END')} AS open_amt
     FROM orders WHERE customer=?`).bind(party).first().catch(() => null)
+  // 第 23 轮 A6：这条 SQL 失败时以前静默退回「只算最近 40 单」，而用来提示口径的那句话
+  // 也是在「allCount > docs.length」时才出现 → 两个一起消失，客户完全看不出少了。
+  const aggFail = !allAgg
   const allOpen = allAgg ? round2(num(allAgg.open_amt)) : null
   const totalOpen = allOpen != null ? allOpen : docs.reduce((a, d) => a + Math.max(0, num(d.price) - paidOf(d) - num(d.written_off)), 0)
   const totalAll = allAgg ? round2(num(allAgg.tot)) : docs.reduce((a, d) => a + num(d.price), 0)
@@ -3750,8 +3773,10 @@ app.get('/track', async (c) => {
     const prog = lastP ? '<br><span style="color:#888;font-size:13px">' + esc(String(lastP.created_at || '').slice(5, 10)) + ' ' + esc(lastP.progress || '') + '</span>' : ''
     return '<tr><td>' + esc(String(d.created_at || '').slice(5, 10)) + '</td><td>' + esc(d.item_name || '加工') +
       '<br><span style="color:#2d6cdf;font-size:13px">' + st + '</span>' + prog + '</td>' +
-      '<td style="text-align:right">' + fmtMoney(num(d.price)) + (paid ? '<br><span style="color:#888;font-size:13px">已收 ' + fmtMoney(paid) + '</span>' : '') +
-      (left ? '<br><span style="color:#c0392b">未收 ' + fmtMoney(left) + ' ' + late + '</span>' : '<br><span style="color:#27ae60">已结清</span>') +
+      '<td style="text-align:right">' + fmtMoney(num(d.price)) + (!paysFail && paid ? '<br><span style="color:#888;font-size:13px">已收 ' + fmtMoney(paid) + '</span>' : '') +
+      (paysFail
+        ? '<br><span style="color:#8a5a00">收款记录这次没取到</span>'
+        : (left ? '<br><span style="color:#c0392b">未收 ' + fmtMoney(left) + ' ' + late + '</span>' : '<br><span style="color:#27ae60">已结清</span>')) +
       '</td></tr>'
   }).join('')
   // 收款记录（对方最想自己核对的就是这个）
@@ -3764,29 +3789,49 @@ app.get('/track', async (c) => {
   // 本月对账结论（期初 + 新增 − 已收 − 核销 = 期末）
   let concl = null
   try { concl = await conclusionOf(db, 'ar', party, now().slice(0, 7)) } catch (e) { concl = null }
+  // 第 23 轮 A2：算不出来就直说，绝不印一个「期末 ¥0.00」给客户看
   const conclHtml = concl ? '<div class="card"><div class="sub">本月对账（' + esc(concl.month) + '）</div>' +
     '<table><tr><td>期初欠</td><td style="text-align:right">¥' + fmtMoney(concl.open) + '</td></tr>' +
     '<tr><td>本月新做（' + concl.add_cnt + ' 笔）</td><td style="text-align:right">¥' + fmtMoney(concl.add) + '</td></tr>' +
     '<tr><td>本月已付（' + concl.paid_cnt + ' 笔）</td><td style="text-align:right">−¥' + fmtMoney(concl.paid) + '</td></tr>' +
     (concl.wo > 0 ? '<tr><td>已核销</td><td style="text-align:right">−¥' + fmtMoney(concl.wo) + '</td></tr>' : '') +
     '<tr><td><b>期末欠</b></td><td style="text-align:right"><b style="color:#c0392b">¥' + fmtMoney(concl.end) + '</b></td></tr></table>' +
-    '<div class="sub" style="margin-top:6px">数字对不上就直接打电话，别憋着。</div></div>' : ''
+    '<div class="sub" style="margin-top:6px">数字对不上就直接打电话，别憋着。</div></div>'
+    : '<div class="card"><div class="sub">本月对账</div><div style="color:#8a5a00">这一家的对账这次没算出来（服务器刚抖了一下），过一会儿再打开这条链接看看 —— 上面的单据不受影响。</div></div>'
   const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
     '<meta name="color-scheme" content="light only"><meta name="robots" content="noindex,nofollow">' + FAVICON_LINK + '<title>' + esc(t.title || '') + ' 对账明细</title><style>body{margin:0;background:#f4f5f7;font-family:-apple-system,"PingFang SC",sans-serif;color:#222}' +
     '.wrap{max-width:640px;margin:0 auto;padding:14px}.card{background:#fff;border-radius:10px;padding:14px;margin-bottom:10px}' +
     'h1{font-size:17px;margin:0 0 4px}.sub{color:#888;font-size:13px}.big{font-size:26px;font-weight:700;color:#c0392b}' +
     'table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 4px;border-bottom:1px solid #eee;vertical-align:top}' +
-    '.foot{color:#999;font-size:12px;text-align:center;padding:10px 0 24px}</style></head><body><div class="wrap">' +
+    '.foot{color:#999;font-size:12px;text-align:center;padding:10px 0 24px}' +
+    '.fb{flex:1;padding:12px 8px;font-size:15px;border:1px solid #d7dbe2;background:#fff;border-radius:10px;color:#222}' +
+    '</style></head><body><div class="wrap">' +
     '<div class="card"><h1>' + esc(party) + ' · 对账明细</h1><div class="sub">' + esc(t.title || '') + (t.phone ? ' · ' + esc(t.phone) : '') + '　更新于 ' + today + '</div></div>' +
-    '<div class="card"><div class="sub">还没收的钱</div><div class="big">¥' + fmtMoney(totalOpen) + '</div>' +
-    '<div class="sub">共 ' + allCount + ' 单 · 合计 ¥' + fmtMoney(totalAll) + ' · 已收 ¥' + fmtMoney(totalPaid) +
-    (allCount > docs.length ? '（下面只列最近 ' + docs.length + ' 单）' : '') + '</div></div>' +
+    '<div class="card"><div class="sub">还没收的钱</div><div class="big">' + (aggFail ? '—' : '¥' + fmtMoney(totalOpen)) + '</div>' +
+    (aggFail
+      ? '<div class="sub" style="color:#8a5a00">欠款总额这次没取到（服务器刚抖了一下）。下面只列最近 ' + docs.length + ' 单，不是全部，稍后再打开一次这条链接。</div>'
+      : '<div class="sub">共 ' + allCount + ' 单 · 合计 ¥' + fmtMoney(totalAll) + ' · 已收 ¥' + fmtMoney(totalPaid) +
+        (allCount > docs.length ? '（下面只列最近 ' + docs.length + ' 单）' : '') + '</div>') + '</div>' +
     conclHtml +
     '<div class="card"><div class="sub">每笔单据（做完了没、收了没）</div><table>' + (rows || '<tr><td>暂时没有单子</td></tr>') + '</table></div>' +
     '<div class="card"><div class="sub">收到的钱（自己核对一下）</div><table>' + (payRows || '<tr><td>还没有收款记录</td></tr>') + '</table></div>' +
+    // 第 23 轮 C7：客户看完只说得出「电话多少」。加两句反馈（收到货了 / 有问题），
+    // 直接进老板的「等你处理」，不用客户打电话。
+    '<div class="card"><div class="sub">给老板说一声（不填也行）</div>' +
+    '<div style="display:flex;gap:8px;margin-top:8px">' +
+    '<button class="fb" onclick="fb(\'ok\')">👍 这批货收到了</button>' +
+    '<button class="fb" onclick="fb(\'doubt\')">🙋 有问题</button></div>' +
+    '<div id="fbRes" style="margin-top:8px;font-size:13px"></div></div>' +
     '<div class="foot">这是一条只读链接，只能看这一家，看不到别人、也不能改账。' +
     (t.phone ? '<br><a href="tel:' + esc(t.phone) + '" style="color:#2d6cdf">有疑问打 ' + esc(t.phone) + '</a>' : '') +
-    '<br>' + esc(t.title || '') + (t.addr ? ' · ' + esc(t.addr) : '') + '</div></div></body></html>'
+    '<br>' + esc(t.title || '') + (t.addr ? ' · ' + esc(t.addr) : '') + '</div></div>' +
+    '<script>var P=' + JSON.stringify({ party, t: want, x: String(c.req.query('x') || '') }).replace(/</g, '\\u003c') + ';' +
+    'function fb(kind){var note="";if(kind==="doubt"){note=window.prompt("哪里有问题？一句话就行（比如「少了 2 件」）","")||"";if(!note)return}' +
+    'fetch("/track-ack",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({party:P.party,t:P.t,x:P.x,ack:kind,note:note})})' +
+    '.then(function(r){return r.json().then(function(d){return {ok:r.ok,d:d||{}}}).catch(function(){return {ok:false,d:{}}})})' +
+    '.then(function(o){var e=document.getElementById("fbRes");e.innerHTML="";var dv=document.createElement("div");dv.textContent=o.ok?(o.d.text||"收到了，谢谢！"):((o.d&&o.d.error)||"没发出去，再点一次");dv.style.color=o.ok?"#0a7d32":"#b3261e";e.appendChild(dv);' +
+    'if(o.ok){var bs=document.querySelectorAll(".fb");for(var i=0;i<bs.length;i++){bs[i].disabled=true;bs[i].style.opacity=.5}}})' +
+    '.catch(function(){alert("没发出去，检查一下网络再点一次")})}</script></body></html>'
   // 留痕：谁什么时候看过。
   // A11：以前每次打开公开页都插一行 —— 谁把链接转发出去，就能靠刷这个表把库写爆。
   // 现在「同一家每小时只记一条」，看完一页再刷新不会一直长。
@@ -3795,6 +3840,37 @@ app.get('/track', async (c) => {
     "INSERT INTO track_log (party, ua, created_at) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM track_log WHERE party=? AND created_at > ?)"
   ).bind(party, ua, now(), party, String(now()).slice(0, 13) + ':00:00.000Z').run().catch(() => {})
   return c.html(html)
+})
+
+// 第 23 轮 C7：进度页的「收到了 / 有问题」写进 statement_log（type='track'），
+// 老板在小程序「对账记录」和网页 /desk 的「等你处理」里都能看到。
+app.post('/track-ack', async (c) => {
+  const db = c.env.DB
+  const b = await c.req.json().catch(() => ({}))
+  const party = String(b.party || '').trim()
+  const want = String(b.t || '')
+  const bx = String(b.x || '')
+  const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
+  const saved = await getKey(mainDb)
+  const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'track', numTs(bx)) : ''
+  if (!good || want !== good || linkExpired(bx)) return c.json({ error: '链接已失效或已过期，让老板重新发一条' }, 403)
+  const kind = b.ack === 'doubt' ? 'doubt' : 'ok'
+  const note = String(b.note || '').slice(0, 120)
+  const month = now().slice(0, 7)
+  const cid = 'track:' + party + '#' + kind + '#' + now().slice(0, 10)
+  if (await opSeen(db, cid, 'track-ack')) return c.json({ ok: true, dup_ok: true, text: '今天已经说过一次了，老板能看到' })
+  if (!(await opClaim(db, cid, 'track-ack'))) return c.json({ ok: true, dup_ok: true, text: '今天已经说过一次了，老板能看到' })
+  const memo = kind === 'ok' ? '客户说：这批货收到了' : ('客户说有问题' + (note ? '：' + note : ''))
+  try {
+    await db.prepare('INSERT INTO statement_log (party,type,month,channel,note,ack,ack_at,created_at) VALUES (?,?,?,?,?,?,?,?)')
+      .bind(party, 'track', month, '自助进度', memo.slice(0, 200), kind, now(), now()).run()
+    await opMark(db, cid, 'track-ack', 1)
+  } catch (e) {
+    await opRelease(db, cid, 'track-ack')
+    throw e
+  }
+  await logAudit(db, 'track_ack', party, memo)
+  return c.json({ ok: true, text: kind === 'ok' ? '收到，谢谢！老板那边也能看到。' : '收到，老板会尽快联系您。' })
 })
 
 app.get('/track-log', async (c) => {
@@ -4271,8 +4347,15 @@ app.get('/statements-print', async (c) => {
   const sheets = []
   const failed = []
   const preTitle = await getTitle(db).catch(() => null)
-  for (const party of parties) {
-    try { sheets.push(await statementSheetData(db, party, type, from, to, preTitle)) } catch (e) { noteFail(e, '批量打对账单'); failed.push(party) }
+  // 第 23 轮 B12：以前 20 家一家一家 await（每家 2 条 SQL），打一批要等 3 秒以上。
+  // 现在每 6 家一批并发 —— 不用 Promise.all 全开，是怕 20 家同时打把 D1 连接打满。
+  for (let bi = 0; bi < parties.length; bi += 6) {
+    const batchP = parties.slice(bi, bi + 6)
+    const got = await Promise.all(batchP.map((party) => statementSheetData(db, party, type, from, to, preTitle)
+      .then((sh) => ({ party, sh }))
+      .catch((e) => { noteFail(e, '批量打对账单'); return { party, sh: null } })))
+    // 顺序必须和勾选顺序一致，否则客户拿到的一叠对账单页序乱掉
+    got.forEach((x) => { if (x.sh) sheets.push(x.sh); else failed.push(x.party) })
   }
   if (!sheets.length) return c.html(errorPage({ title: '这批一张都没打出来', why: '查询出错了（不是没有账）', how: '过一会儿再点一次；一直不行就把这条链接发给技术。', code: 'bulk_failed' }))
   // 第 20 轮 A5：以前某一家查询失败就静默跳过，标题只写「17 家」——
@@ -4421,7 +4504,10 @@ app.patch('/debts/:id', async (c) => {
   const newP = b.principal !== undefined ? num(b.principal) : num(d.principal)
   const pChanged = round2(newP) !== round2(num(d.principal))
   if (pChanged) {
-    const rep = await db.prepare('SELECT COUNT(*) AS n FROM debt_repays WHERE debt_id=?').bind(id).first().catch(() => ({ n: 0 }))
+    // 第 23 轮 A9（真 bug）：这条护栏以前失败就当成「一次都没还过」，于是本金能改。
+    // 查不出来就必须不让改（宁可回一句「再试一次」）。
+    let rep = null
+    try { rep = await db.prepare('SELECT COUNT(*) AS n FROM debt_repays WHERE debt_id=?').bind(id).first() } catch (e) { noteFail(e, '改借款·查还款'); return c.json({ error: '没查到这笔借款还过几次钱，先别改（再点一次）', code: 'db' }, 500) }
     if (num(rep && rep.n) > 0) {
       return c.json({ error: '这笔借款已经还过钱了，本金不能改（改本金会让已还的金额对不上）。要改请在备注里写清楚', code: 'has_repay' }, 400)
     }
@@ -4445,10 +4531,19 @@ app.delete('/debts/:id', async (c) => {
   const db = c.env.DB
   const d = await db.prepare('SELECT * FROM debts WHERE id=?').bind(id).first()
   if (!d) return c.json({ error: '没有这笔借款' }, 404)
-  const [lgs, reps] = await Promise.all([
-    db.prepare("SELECT * FROM ledger WHERE ref_type='debt' AND ref_id=?").bind(id).all().catch(() => ({ results: [] })),
-    db.prepare('SELECT * FROM debt_repays WHERE debt_id=?').bind(id).all().catch(() => ({ results: [] }))
-  ])
+  // 第 23 轮 A9（真 bug）：这两条查询以前失败就变空数组 → anyMonthLocked 拿不到月份
+  // → 已结账月份的账照样被删；同时 intoTrash 遍历空数组 → 流水一条都没进回收站就被硬删。
+  // 现在查不出来就不删。
+  let lgs, reps
+  try {
+    [lgs, reps] = await Promise.all([
+      db.prepare("SELECT * FROM ledger WHERE ref_type='debt' AND ref_id=?").bind(id).all(),
+      db.prepare('SELECT * FROM debt_repays WHERE debt_id=?').bind(id).all()
+    ])
+  } catch (e) {
+    noteFail(e, '删借款·查流水')
+    return c.json({ error: '没查到这笔借款的流水，为了不误删月结过的账，先不删 —— 再点一次', code: 'db' }, 500)
+  }
   // 这笔借款的借入/还款分散在好几个月，只要有一个月结了账就不能删
   const lockM = await anyMonthLocked(db, [
     (d.start_date || d.created_at || '').slice(0, 7),
@@ -4848,7 +4943,10 @@ const monthSnapshot = async (db, mm) => {
     arApLeftAt(db, end, 'ap'),
     debtLeftAt(db, end),
     // 预收/预付也进家底（客户先打来的钱是我们欠他的货，先付给供应商的是他欠我们的货）
-    advLeftAt(db, end).catch((e) => { noteFail(e, '月结归档·预收预付'); return { in: 0, out: 0 } }),
+    // 第 23 轮 A8（真 bug）：这里以前被 .catch 吞成 0，而结果是 saveArchive 写进 month_archive 的
+    // **永久快照** —— 家底会永久少这一块，事后没有任何痕迹。别的地方（应收应付/借款/利润）
+    // 失败都会抛，这里必须一样：算不全就不归档，重试一次即可（归档本身幂等）。
+    advLeftAt(db, end),
     plOf(db, mm, { includeWriteoff: true, includeAccrual: true })
   ])
   const g = agg || {}
@@ -5800,16 +5898,25 @@ async function conclusionOf(db, type, party, month) {
   const L = `${A} - COALESCE(paid,0) - COALESCE(written_off,0)`
   const m0 = `${month}-01`
   const m1 = `${month}-31`
-  const [open0, add, paid, wo, paidBefore, woBefore] = await Promise.all([
+  // 第 23 轮 A2（真 bug）：以前六条查询各自 .catch(() => null)，失败就变成 0，
+  // 于是「期末 = 0 − 0 + 0 − 0 = 0 元」被印到客户签字的那张对账单上（客户看到「不欠了」就不打款）。
+  // 现在任一条失败就整体返回 null，调用方必须显示「这次没算出来」，绝不许回落成 0。
+  let q6
+  try {
+    q6 = await Promise.all([
     // 期初：这个月之前开的单的「原始金额」（不能直接用 paid，因为 paid 是累计到现在，含本月的收款）
-    db.prepare(`SELECT COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE ${P}=? AND substr(created_at,1,10)<?`).bind(party, m0).first().catch(() => null),
-    db.prepare(`SELECT COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE ${P}=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?`).bind(party, m0, m1).first().catch(() => null),
-    db.prepare(`SELECT COALESCE(SUM(l.amount),0) AS v, COUNT(*) AS c FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND t.${P}=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=?`).bind(isAp ? 'payable' : 'order', party, m0, m1).first().catch(() => null),
-    db.prepare(`SELECT COALESCE(SUM(amount),0) AS v, COUNT(*) AS c FROM writeoffs WHERE ref_type=? AND party=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?`).bind(isAp ? 'payable' : 'order', party, m0, m1).first().catch(() => null),
+    db.prepare(`SELECT COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE ${P}=? AND substr(created_at,1,10)<?`).bind(party, m0).first(),
+    db.prepare(`SELECT COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE ${P}=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?`).bind(party, m0, m1).first(),
+    db.prepare(`SELECT COALESCE(SUM(l.amount),0) AS v, COUNT(*) AS c FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND t.${P}=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=?`).bind(isAp ? 'payable' : 'order', party, m0, m1).first(),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) AS v, COUNT(*) AS c FROM writeoffs WHERE ref_type=? AND party=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=?`).bind(isAp ? 'payable' : 'order', party, m0, m1).first(),
     // 这个月之前已经收/付掉的（含老单在本月前收的钱）
-    db.prepare(`SELECT COALESCE(SUM(l.amount),0) AS v FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND t.${P}=? AND substr(l.created_at,1,10)<?`).bind(isAp ? 'payable' : 'order', party, m0).first().catch(() => null),
-    db.prepare(`SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type=? AND party=? AND substr(created_at,1,10)<?`).bind(isAp ? 'payable' : 'order', party, m0).first().catch(() => null)
-  ])
+    db.prepare(`SELECT COALESCE(SUM(l.amount),0) AS v FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND t.${P}=? AND substr(l.created_at,1,10)<?`).bind(isAp ? 'payable' : 'order', party, m0).first(),
+    db.prepare(`SELECT COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type=? AND party=? AND substr(created_at,1,10)<?`).bind(isAp ? 'payable' : 'order', party, m0).first()
+    ])
+  } catch (e) {
+    return null
+  }
+  const [open0, add, paid, wo, paidBefore, woBefore] = q6
   const rOpen = round2(num(open0 && open0.v) - num(paidBefore && paidBefore.v) - num(woBefore && woBefore.v))
   const rAdd = round2(num(add && add.v))
   const rPaid = round2(num(paid && paid.v))
@@ -5832,16 +5939,24 @@ async function conclusionBatch(db, type, month, names) {
   const m0 = `${month}-01`
   const m1 = `${month}-31`
   const none = { results: [] }
-  const [rOpen0, rAdd, rPaid, rWo, rPaidBefore, rWoBefore, rCfm, rLog] = await Promise.all([
-    db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE substr(created_at,1,10)<? GROUP BY ${P}`).bind(m0).all().catch(() => none),
-    db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? GROUP BY ${P}`).bind(m0, m1).all().catch(() => none),
-    db.prepare(`SELECT t.${P} AS party, COALESCE(SUM(l.amount),0) AS v, COUNT(*) AS c FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=? GROUP BY t.${P}`).bind(rtype, m0, m1).all().catch(() => none),
-    db.prepare('SELECT party, COALESCE(SUM(amount),0) AS v, COUNT(*) AS c FROM writeoffs WHERE ref_type=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? GROUP BY party').bind(rtype, m0, m1).all().catch(() => none),
-    db.prepare(`SELECT t.${P} AS party, COALESCE(SUM(l.amount),0) AS v FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)<? GROUP BY t.${P}`).bind(rtype, m0).all().catch(() => none),
-    db.prepare('SELECT party, COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type=? AND substr(created_at,1,10)<? GROUP BY party').bind(rtype, m0).all().catch(() => none),
+  // 第 23 轮 A2：前六条是「钱」的口径，任一条失败就必须整体放弃（返回 null），
+  // 否则会算出「这批单位期末都是 0 元」再当成成功发出去。后两条只是确认/差异备注，失败可以空着。
+  let q8
+  try {
+    q8 = await Promise.all([
+    db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE substr(created_at,1,10)<? GROUP BY ${P}`).bind(m0).all(),
+    db.prepare(`SELECT ${P} AS party, COALESCE(SUM(${A}),0) AS v, COUNT(*) AS c FROM ${T} WHERE substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? GROUP BY ${P}`).bind(m0, m1).all(),
+    db.prepare(`SELECT t.${P} AS party, COALESCE(SUM(l.amount),0) AS v, COUNT(*) AS c FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)>=? AND substr(l.created_at,1,10)<=? GROUP BY t.${P}`).bind(rtype, m0, m1).all(),
+    db.prepare('SELECT party, COALESCE(SUM(amount),0) AS v, COUNT(*) AS c FROM writeoffs WHERE ref_type=? AND substr(created_at,1,10)>=? AND substr(created_at,1,10)<=? GROUP BY party').bind(rtype, m0, m1).all(),
+    db.prepare(`SELECT t.${P} AS party, COALESCE(SUM(l.amount),0) AS v FROM ledger l JOIN ${T} t ON t.id=l.ref_id WHERE l.ref_type=? AND substr(l.created_at,1,10)<? GROUP BY t.${P}`).bind(rtype, m0).all(),
+    db.prepare('SELECT party, COALESCE(SUM(amount),0) AS v FROM writeoffs WHERE ref_type=? AND substr(created_at,1,10)<? GROUP BY party').bind(rtype, m0).all(),
     db.prepare('SELECT party, created_at FROM recon_confirm WHERE month=? AND type=? ORDER BY id DESC').bind(month, type).all().catch(() => none),
     db.prepare('SELECT party, imported, system, note FROM recon_log WHERE month=? AND type=? ORDER BY id DESC').bind(month, type).all().catch(() => none)
-  ])
+    ])
+  } catch (e) {
+    return null
+  }
+  const [rOpen0, rAdd, rPaid, rWo, rPaidBefore, rWoBefore, rCfm, rLog] = q8
   const idx = (res) => {
     const m = new Map()
     for (const r of ((res && res.results) || [])) m.set(r.party, r)
@@ -5879,6 +5994,8 @@ app.get('/recon-conclusion', async (c) => {
   const party = String(c.req.query('party') || '').trim()
   if (party) {
     const one = await conclusionOf(db, type, party, month)
+    // 第 23 轮 A2：算不出来要明说，不能把 null 摊平成「期末 0 元」
+    if (!one) return c.json({ ok: false, error: '这一家这次没算出来（数据库刚抖了一下），过一会儿再点一次', code: 'no_concl' }, 503)
     return c.json({ ok: true, single: true, month, type, ...one })
   }
   const isAp = type === 'ap'
@@ -5886,15 +6003,34 @@ app.get('/recon-conclusion', async (c) => {
   const P = isAp ? 'supplier' : 'customer'
   const A = isAp ? 'amount' : 'price'
   const L = `${A} - COALESCE(paid,0) - COALESCE(written_off,0)`
-  const parties = (await db.prepare(`SELECT ${P} AS party, COALESCE(SUM(CASE WHEN ${L}>0 THEN ${L} ELSE 0 END),0) AS left FROM ${T} GROUP BY ${P} HAVING left > 0.009 ORDER BY left DESC`).all().catch(() => ({ results: [] }))).results || []
-  const logParties = (await db.prepare('SELECT DISTINCT party FROM recon_log WHERE month=? AND type=?').bind(month, type).all().catch(() => ({ results: [] }))).results || []
+  // 第 23 轮 A3（真 bug）：这条「谁还欠钱」的查询失败时以前被吞成空数组，
+  // 于是页面显示「没有欠加工费的客户，账是清的」，还进了能一键复制的 all_text ——
+  // 老板据此这个月就不催款了。现在失败就明确报「没查出来」，不许说成「账是清的」。
+  let parties = []
+  let listFail = false
+  try {
+    parties = (await db.prepare(`SELECT ${P} AS party, COALESCE(SUM(CASE WHEN ${L}>0 THEN ${L} ELSE 0 END),0) AS left FROM ${T} GROUP BY ${P} HAVING left > 0.009 ORDER BY left DESC`).all()).results || []
+  } catch (e) { listFail = true }
+  if (listFail) return c.json({ ok: false, error: '欠款名单没查出来（数据库刚抖了一下）。先别当成「账是清的」，过一会儿再点一次', code: 'no_list' }, 503)
+  let logParties = []
+  let logFail = false
+  try {
+    logParties = (await db.prepare('SELECT DISTINCT party FROM recon_log WHERE month=? AND type=?').bind(month, type).all()).results || []
+  } catch (e) { logFail = true }
   const names = Array.from(new Set(parties.map((x) => x.party).concat(logParties.map((x) => x.party))))
+  // 第 23 轮 A3：以前 aggSql 一类失败会静默变空表 → 「这个月没有要出对账结论的单位」，
+  // 老板以为账是清的，这句话还会进 all_text 被转发出去。现在算不出来就明确说没算出来。
+  if (!parties.length && !logParties.length) return c.json({ ok: true, single: false, month, type, count: 0, total_end: 0, unconfirmed: 0, rows: [], all_text: '', text: '这个月没有要出对账结论的单位（确实没有欠款，也没人和你对过账）。' })
   const rows = await conclusionBatch(db, type, month, names.slice(0, 60))
+  if (!rows) return c.json({ ok: false, error: '对账结论没算出来（数据库刚抖了一下）。先别当成「账是清的」，过一会儿再点一次', code: 'no_concl' }, 503)
   const totalEnd = round2(rows.reduce((a, x) => a + x.end, 0))
   const unconfirmed = rows.filter((x) => !x.confirmed).length
-  return c.json({ ok: true, single: false, month, type, count: rows.length, total_end: totalEnd, unconfirmed, rows,
+  // 第 23 轮 A3：「谁对过账」那张表失败只是少了历史备注，不影响钱，但要说一声。
+  const warn = logFail ? '（另外「谁对过账」那张表这次没查出来，下面可能少几家的历史备注）' : ''
+  return c.json({ ok: true, single: false, month, type, count: rows.length, total_end: totalEnd, unconfirmed, rows, warn,
+    log_gap: logFail,
     all_text: rows.map((x) => x.text).join('\n\n'),
-    text: rows.length ? `这个月有 ${rows.length} 家要出对账结论，期末合计 ${totalEnd} 元，还有 ${unconfirmed} 家没确认。` : '这个月没有要出对账结论的单位。' })
+    text: (rows.length ? `这个月有 ${rows.length} 家要出对账结论，期末合计 ${totalEnd} 元，还有 ${unconfirmed} 家没确认。` : '这个月没有要出对账结论的单位。') + warn })
 })
 
 // 对方回「对」了 → 记一笔确认（同一家同月只留最新一条）
@@ -5906,6 +6042,13 @@ app.post('/recon-confirm', async (c) => {
   const month = (String(b.month || '').slice(0, 7)) || now().slice(0, 7)
   if (!party) return c.json({ error: '缺少单位名称' }, 400)
   const o = await conclusionOf(db, type, party, month)
+  // 第 23 轮 A2：算不出来就别写一条「确认金额 0 元」的记录
+  if (!o) return c.json({ error: '这一家这个月的账这次没算出来，过一会儿再确认一次', code: 'no_concl' }, 503)
+  // 第 23 轮 A3 附带：以前单位名打错一个字母也照样写一条「期末 0 元，对方确认过」，
+  // 对账记录里就多出一家根本不存在、却「确认过上万元」的假单位。
+  if (num(o.open) === 0 && num(o.add) === 0 && num(o.paid) === 0) {
+    return c.json({ error: '这一家在这个月没有任何往来（名字是不是打错了？），没法确认', code: 'no_account' }, 400)
+  }
   const r = await db.prepare('INSERT INTO recon_confirm (month, type, party, amount, imported, system, diff, note, by, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
     .bind(month, type, party, o.end, num(b.imported), num(b.system), round2(num(b.imported) - num(b.system)), String(b.note || '').trim(), act(c), now()).run()
   await logAudit(db, '对账确认', party, `${month} 确认期末 ${o.end} 元`)
@@ -5952,6 +6095,8 @@ app.get('/recon-print', async (c) => {
   const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'recon:' + month + ':' + type, expN) : ''
   if (!good || want !== good || linkExpired(expN)) return c.html(errorPage({ title: '这张对账确认单的链接已经失效', why: '这种链接 7 天后自动作废', how: '回小程序 → <b>报表 → 对账确认单</b> → 重新生成。' }))
   const o = await conclusionOf(db, type, party, month)
+  // 第 23 轮 A2：这是要双方签字的那张纸，算不出来绝不能印成「期末 0 元」
+  if (!o) return c.html(errorPage({ title: '这张对账确认单这次没生成出来', why: '账没算出来（数据库刚抖了一下），不是链接的问题，也不是你点错了', how: '过一会儿再点一次这条链接；一直不行就让老板在小程序里重新生成。', code: 'no_concl' }))
   const title = await getTitle(db)
   const prof = await profLine(db, party)
   const isAp = type === 'ap'
@@ -6787,7 +6932,10 @@ const getTitle = async (db) => {
     const rows = (await db.prepare("SELECT key, value FROM settings WHERE key IN ('report_title','report_note','report_phone','report_addr','report_bank')").all()).results
     const g = (k) => { const r = rows.find((x) => x.key === k); return r ? r.value : '' }
     return { title: g('report_title') || '加工厂', note: g('report_note') || '', phone: g('report_phone') || '', addr: g('report_addr') || '', bank: g('report_bank') || '' }
-  } catch (e) { return { title: '加工厂', note: '', phone: '', addr: '', bank: '' } }
+  // 第 23 轮 A11（真 bug）：以前这里失败就返回写死的「加工厂」—— 一个像真厂名的默认值，
+  // 打印出来的对账单/加工单/工资单抬头就变成「加工厂」，客户会问「这是你们吗」，
+  // 而老板手机上一切正常，没人知道是数据库抖了一下。现在明说没取到。
+  } catch (e) { return { title: '（厂名没取到，重开一次）', note: '', phone: '', addr: '', bank: '', failed: true } }
 }
 // 账期：客户/供应商约定「月结 N 天」，建单没填到期日就自动算出到期日
 const GRADE_DAYS = { A: 45, B: 30, C: 15, D: 7, N: 30 }
@@ -8677,7 +8825,30 @@ ${FAVICON_LINK}
   </div>
 </noscript>
 <div id="main" style="display:none">
+  <!-- 第 23 轮 C12：新账套打开是 6 张 ¥0.00 + 绿字「没有逾期没收回的钱 👍」，
+       没有一句「第一步做什么」。空账套时换成三步开账。 -->
+  <div class="card" id="emptyGuide" style="display:none">
+    <div class="ct">这本账还是空的 —— 三步就开了张</div>
+    <div style="line-height:1.7">
+      <b>第 1 步</b>：把客户和供应商录进去（手机小程序「客户」→ 新建，或在这儿上传 Excel 名单）<br>
+      <b>第 2 步</b>：记第一张单（<a href="/pc">电脑填表</a> 或手机「单据 → 新建」），已有欠款就录成「开账应收」<br>
+      <b>第 3 步</b>：收到钱就在上面「💰 记收款」记一笔 —— 数字立刻跟着变
+    </div>
+    <div class="tip2" style="margin-top:8px">想先拿一套假数据练手？<a href="/guide">新手教程 7.9</a> 有一份演示账套，一键导入，练完再清掉。</div>
+  </div>
+
   <div class="stats" id="stats"></div>
+
+  <!-- 第 23 轮 C1：电脑上一直没有「搜一下」。客户电话问「上个月那批法兰多少钱」，
+       以前只能掏手机翻。后端 /search 早就有（客户名/产品/备注/流水），这里只补入口。 -->
+  <div class="card">
+    <div class="ct">查一下<small>客户名、产品、备注、单号都能搜</small></div>
+    <div class="row">
+      <input id="sq" placeholder="比如「恒达」或者 128" onkeydown="if(event.key==='Enter'){doSearch()}">
+      <button class="btn sm" onclick="doSearch()">🔍 搜</button>
+    </div>
+    <div id="sBox"></div>
+  </div>
 
   <!-- 第 19 轮 C1：电脑上终于能「动手」了。以前这一页只能看，老板在电脑前
        发现客户刚转来一笔钱，还得掏手机 —— 而手机输入金额比键盘慢十倍。
@@ -8688,10 +8859,16 @@ ${FAVICON_LINK}
     <div class="row">
       <button class="btn sm" id="tabRecv" onclick="tab('recv')">💰 记收款</button>
       <button class="btn sm gray" id="tabExp" onclick="tab('exp')">💸 记支出</button>
+      <button class="btn sm gray" id="tabPay" onclick="tab('pay')">🏭 付供应商</button>
     </div>
     <div id="fRecv" class="form" style="display:none">
+      <!-- 第 23 轮 C2：以前下拉只有「逾期最久的前 20 张」，客户刚转钱的那张单还没到期就找不到，
+           只能点「别的单」手敲单号（敲错就记到别家）。现在打两个字就能筛，筛不到还能查全部。 -->
       <label>哪张单（还欠钱的）
+        <input id="rcFind" placeholder="打两个字找：客户名 / 产品 / 单号" oninput="filterDocs()">
         <select id="rcDoc"></select>
+        <span id="rcNoHit" class="tip2" style="display:none;color:#8a5a00">这 20 张里没有。
+          <a href="#" onclick="findAllDocs();return false" style="color:#1f6feb">查全部还欠钱的单</a></span>
       </label>
       <label>收多少<input id="rcAmt" inputmode="decimal" placeholder="比如 3000"></label>
       <label>进哪个账户<select id="rcAcc"></select></label>
@@ -8706,10 +8883,41 @@ ${FAVICON_LINK}
       <label>备注<input id="exNote" placeholder="选填，比如「交电费」"></label>
       <label>&nbsp;<button class="btn" onclick="doExp(this)">记上</button></label>
     </div>
+    <!-- 第 23 轮 A13/C5：付给供应商的货款必须记在「应付单」上，不能记成「支出」。
+         以前网页只有「记支出」，老板顺手把 2 万材料款记成费用 → 现金对了、费用多一笔、
+         应付那张单一分没减，月底桥接和催款清单全对不上。 -->
+    <div id="fPay" class="form" style="display:none">
+      <label>付哪一张（还欠钱的）<select id="pyDoc"></select></label>
+      <label>付多少<input id="pyAmt" inputmode="decimal" placeholder="比如 4200"></label>
+      <label>从哪个账户出<select id="pyAcc"></select></label>
+      <label>哪天付的<input id="pyDate" type="date"></label>
+      <label>&nbsp;<button class="btn" onclick="doPay(this)">记上</button></label>
+      <div class="tip2" style="grid-column:1/-1">付货款、加工费、材料款都记在这里 —— <b>别用上面的「记支出」</b>：那样这笔欠款不会减，费用却多了一笔，月底对不上。当天现结的新料，也不用在这儿，直接记支出就行。</div>
+    </div>
     <div class="tip2">记完上面的数字会自动跟着变。同一个按钮连点两下只会记一笔。</div>
   </div>
 
-  <div class="card">
+  <!-- 第 23 轮 C11：/reminders 早就算好「等你处理」的事（员工改单申请、未认领流水、
+       待开发票、超 90 天欠款），电脑上一条都不显示 —— 员工在手机上干等老板点同意。 -->
+  <div class="card" id="remCard" style="display:none">
+    <div class="ct">等你处理<span id="remSum"></span></div>
+    <div id="remBox"></div>
+  </div>
+
+  <!-- 第 23 轮 C6：刚记错的一笔（3000 打成 30000）以前网页上撤不掉，只能掏手机翻流水。 -->
+  <div class="card" id="undoCard" style="display:none">
+    <div class="ct">最近记的几笔<span id="undoSum"></span></div>
+    <div id="undoBox"></div>
+  </div>
+
+  <!-- 第 23 轮 C4：后端 /next-step 早就算好了「现在先做这一件」，手机上有，电脑上一直没显示。
+       老板打开电脑版看到 6 个数字，自己判断先动哪件，判断不出来就关掉。 -->
+  <div class="card" id="nextCard" style="display:none">
+    <div class="ct">现在先做这一件<span id="nextHint"></span></div>
+    <div id="nextBox"></div>
+  </div>
+
+  <div class="card" id="dueCard">
     <div class="ct">该催的钱<span id="dueSum"></span></div>
     <!-- 第 20 轮 C7/C11：找单位 + 按条件勾。放在 dueBox 外面 —— 表格重画时不能把
          正在输入的搜索框也一起换掉（那样每打一个字就失焦）。 -->
@@ -8732,6 +8940,13 @@ ${FAVICON_LINK}
     <div class="tip2">每家后面「发确认」那条链接可以发给客户（只显示这一家）。<b>批量打印这条链接别外发</b>：它打开是几十家在一起，客户能看到别人的欠款。</div>
   </div>
 
+  <!-- 第 23 轮 C5：电脑上一直只有「该催谁」，没有「该付谁」—— 付钱那半拉只能在手机上做。 -->
+  <div class="card" id="apCard">
+    <div class="ct">该付谁<span id="apSum"></span></div>
+    <div id="apBox">正在取…</div>
+    <div class="tip2">这里只列最近要付的 <span id="apLimit">20</span> 张。点「付了」会把单号填到上面的「付供应商」里，填个金额就行。</div>
+  </div>
+
   <div class="card">
     <div class="ct">最近的单<small>点单号看这一家的对账单</small></div>
     <div id="recent">正在取…</div>
@@ -8748,7 +8963,7 @@ ${FAVICON_LINK}
 <script>
 var K = localStorage.getItem('fa_key') || '';
 var BK = localStorage.getItem('fa_book') || '';
-var LAST = { due: [], accs: [], cats: [] };
+var LAST = { due: [], accs: [], cats: [], ap: [], apMeta: {} };
 // 第 19 轮 D13：页面里任何一处脚本出错都静默失败（卡片停在「正在取…」），
 // 老板只会说「这页打不开」。这里把它报回去，进错误日志，一天最多 300 条。
 window.onerror = function(m, src, ln){
@@ -8794,6 +9009,15 @@ function api(p){
 function cidOf(tag, parts){
   return 'desk-' + tag + '-' + Math.floor(Date.now()/3000).toString(36) + '-' + parts.map(function(x){ return String(x==null?'':x).replace(/[^\w.\-]/g,'_') }).join('_')
 }
+// 第 23 轮 C6：删一笔要真的发 DELETE（api() 只会发 GET），错话也翻成人话
+function del(p){
+  return fetch(p,{method:'DELETE',headers:{'x-access-key':K,'x-book':BK}}).then(function(r){
+    return r.json().catch(function(){ return {} }).then(function(d){
+      if(!r.ok){ var e=new Error((d && d.error) || ('HTTP '+r.status)); e.code=(d && d.code)||''; e.http=r.status; throw e }
+      return d
+    })
+  })
+}
 function post(p, body, cid){
   body = body || {}
   body.client_id = cid || ('desk-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6))
@@ -8820,32 +9044,65 @@ function errText(e){
 function tab(which){
   el('fRecv').style.display = which==='recv' ? 'grid' : 'none'
   el('fExp').style.display = which==='exp' ? 'grid' : 'none'
+  el('fPay').style.display = which==='pay' ? 'grid' : 'none'
   el('tabRecv').className = 'btn sm' + (which==='recv' ? '' : ' gray')
   el('tabExp').className = 'btn sm' + (which==='exp' ? '' : ' gray')
+  el('tabPay').className = 'btn sm' + (which==='pay' ? '' : ' gray')
 }
-function fillForms(due, accs, cats){
+function fillForms(due, accs, cats, ap){
   LAST.due = ((due && due.rows) || []).filter(function(r){ return Number(r.left) > 0.005 })
+  LAST.ap = ((ap && ap.rows) || []).filter(function(r){ return Number(r.left) > 0.005 })
+  LAST.apMeta = ap || {}
   LAST.accs = (accs && accs.accounts) || []
   LAST.cats = (cats && cats.out) || []
   // 第 20 轮 C9：以前下拉只有「已到期/逾期」那 20 张单，想记「没到期先付一笔」
   // 必须回小程序。现在多一个入口：手输单号。
   var otherOpt = '<option value="__other">— 别的单（手输单号）—</option>'
+  // 第 23 轮 A1（真 bug）：以前每次 fillForms 都从头重建这个下拉，而 load() 会被
+  // 60 秒定时器、切回标签页、记完上一笔触发 —— 老板选好「#128 张老板」、填了金额正犹豫，
+  // 页面一刷新，下拉就被打回第一条（欠得最多那家），金额还在 → 3000 记到别人头上。
+  // 账户下拉有 fa_acc 记忆，单据下拉以前没有。现在重建前后保住原来的选择。
+  var keepDoc = ''
+  try { keepDoc = el('rcDoc').value || '' } catch(e) {}
+  // 第 23 轮 C2：每个选项带上「客户名+产品+单号」当搜索词，上面那个输入框据此筛
   el('rcDoc').innerHTML = LAST.due.length ? LAST.due.map(function(r){
-    return '<option value="'+esc(r.id)+'">#'+esc(r.id)+' '+esc(String(r.party||'').slice(0,10))+' '+esc(String(r.item||'').slice(0,10))+' 还欠 '+money(r.left)+'</option>'
+    var kw = String(r.party||'') + ' ' + String(r.item||'') + ' ' + String(r.id||'')
+    return '<option value="'+esc(r.id)+'" data-kw="'+esc(kw)+'">#'+esc(r.id)+' '+esc(String(r.party||'').slice(0,10))+' '+esc(String(r.item||'').slice(0,10))+' 还欠 '+money(r.left)+'</option>'
   }).join('') + otherOpt : (due ? '<option value="">没有还欠钱的单</option>' + otherOpt : '<option value="">（没取到，不是没有 —— 点刷新再看）</option>')
+  if(keepDoc){
+    var okKeep = [].some.call(el('rcDoc').options, function(o){ return o.value === keepDoc })
+    if(okKeep) el('rcDoc').value = keepDoc
+  }
+  try { filterDocs() } catch(e) {}
   var accOpt = LAST.accs.map(function(a){ return '<option value="'+esc(a.id)+'">'+esc(a.name)+'（余 '+money(a.balance)+'）</option>' }).join('')
   // 第 20 轮 A7：账户/分类没取到时以前是空下拉（点了也没反应），现在写明「没取到」。
   if(!accOpt) accOpt = '<option value="">（账户没取到 —— 点刷新再看）</option>'
   el('rcAcc').innerHTML = accOpt
   el('exAcc').innerHTML = accOpt
-  el('exCat').innerHTML = LAST.cats.length ? LAST.cats.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>' }).join('') : '<option value="">（支出分类没取到 —— 点刷新再看）</option>'
+  el('pyAcc').innerHTML = accOpt
+  // 第 23 轮 A4（真 bug）：下拉的 value 以前写的是 c.id（数字），而 POST /expenses 的 category
+  // 是**名字**。于是网页记的每一笔支出，分类都存成了「39」「40」这种数字 id：
+  // 首页支出分组、费用对比、经营报表的分类明细全变成数字，中文名一个都没有。
+  // 现在 value 直接用名字，和 /pc、小程序一致。
+  el('exCat').innerHTML = LAST.cats.length ? LAST.cats.map(function(c){ return '<option value="'+esc(c.name)+'">'+esc(c.name)+'</option>' }).join('') : '<option value="">（支出分类没取到 —— 点刷新再看）</option>'
+  // 第 23 轮 A13/C5：「付哪一张」下拉 —— 和收款那边一样保住已经选好的那张，
+  // 免得自动刷新把它换掉、把钱付到别的单上。
+  var keepPay = ''
+  try { keepPay = el('pyDoc').value || '' } catch(e) {}
+  var apOpt = LAST.ap.map(function(r){
+    var tail = r.due ? ('　应结 '+(r.guess ? '约' : '')+r.due) : ''
+    return '<option value="'+esc(String(r.id))+'">#'+esc(String(r.id))+' '+esc(String(r.party||'').slice(0,10))+' 还欠 ¥'+money(r.left)+esc(tail)+'</option>'
+  }).join('')
+  el('pyDoc').innerHTML = apOpt || '<option value="">（没有还没付完的应付单）</option>'
+  if(keepPay && [].some.call(el('pyDoc').options, function(o){ return o.value===keepPay })) el('pyDoc').value = keepPay
   // 第 20 轮 C15：记住上次用的账户（老板通常只有一个收款账户），少点一次
   try {
     var lastAcc = localStorage.getItem('fa_acc')
-    if(lastAcc){ ['rcAcc','exAcc'].forEach(function(k){ var e0=el(k); if(e0 && [].some.call(e0.options, function(o){ return o.value===lastAcc })) e0.value = lastAcc }) }
+    if(lastAcc){ ['rcAcc','exAcc','pyAcc'].forEach(function(k){ var e0=el(k); if(e0 && [].some.call(e0.options, function(o){ return o.value===lastAcc })) e0.value = lastAcc }) }
   } catch(e) {}
   if(!el('rcDate').value) el('rcDate').value = ymd()
   if(!el('exDate').value) el('exDate').value = ymd()
+  if(!el('pyDate').value) el('pyDate').value = ymd()
 }
 function numOf(v){ var s=String(v||'').replace(/[¥￥,\s元]/g,''); if(!s) return null; var n=Number(s); return isFinite(n)? n : null }
 // 第 20 轮 A2：连点保护。以前 doRecv 进来就发请求、按钮也不 disable，
@@ -8869,8 +9126,84 @@ function doRecv(btn){
   hideErr()
   var dt = el('rcDate').value||ymd(), acc = el('rcAcc').value||null
   post('/orders/'+encodeURIComponent(id)+'/receive', { amount: amt, account_id: acc, date: dt }, cidOf('recv',[id,amt,dt,acc]))
-    .then(function(d){ el('rcAmt').value=''; busyEnd('recv', btn); showOk(d && d.dup_ok ? '这笔刚才已经记上了（没重复记）' : ('记上了'+(d && d.overdue_left ? '，这张单还欠 ¥'+money(d.overdue_left) : ''))); load() })
+    .then(function(d){
+      // 第 23 轮 A1：以前只说「记上了，这张单还欠 ¥X」，不回单号 —— 万一下拉被别人/自动刷新
+      // 换过，老板看不出记错了。现在把「#单号 客户名」一起报出来。
+      var who = ''
+      try {
+        var hit = LAST.due.filter(function(r){ return String(r.id) === String(id) })[0]
+        if(hit) who = ' → #' + esc(String(id)) + ' ' + esc(String(hit.party||'').slice(0,12))
+        else who = ' → #' + esc(String(id))
+      } catch(e) { who = ' → #' + String(id) }
+      el('rcAmt').value=''
+      busyEnd('recv', btn)
+      showOk(d && d.dup_ok ? ('这笔刚才已经记上了（没重复记）' + who) : ('记上了' + who + (d && d.overdue_left ? '，这张单还欠 ¥'+money(d.overdue_left) : '')))
+      load()
+    })
     .catch(function(e){ busyEnd('recv', btn); showErr('没记上：'+errText(e)) })
+}
+// 第 23 轮 C5：该付谁只列最近 20 张，和「该催的钱」一致的量级
+var AP_LIMIT = 20
+function renderAp(ap){
+  ap = ap || {}
+  var rows = (ap.rows || []).filter(function(r){ return Number(r.left) > 0.005 })
+  if(!rows.length){
+    el('apSum').innerHTML = ''
+    el('apBox').innerHTML = '<div style="color:#0a7d32;padding:6px 0">没有还没付完的钱 👍</div>'
+    return
+  }
+  // 该付多少、最近要付多少 —— 老板最关心的就是这两句
+  var soon = 0
+  rows.forEach(function(r){ if(r.days !== null && r.days <= 7) soon += Number(r.left)||0 })
+  var cashNow = (LAST && LAST.cashNow != null) ? Number(LAST.cashNow) : null
+  var short0 = (cashNow != null && soon > cashNow) ? Number(soon) - cashNow : 0
+  el('apSum').innerHTML = '<small>最近 7 天要付 ¥'+money(soon)+' · 一共还欠 ¥'+money(ap.total)+'（'+esc(String(ap.count||rows.length))+' 张）'
+    + (cashNow != null ? '　账上现金 ¥'+money(cashNow) : '')
+    + '</small>'
+    + (short0 > 0.005 ? '<div style="color:#b3261e;margin-top:2px">这周要付的比账上的现金多 ¥'+money(short0)+' —— 先看看要不要催一笔回来</div>' : '')
+  el('apBox').innerHTML = '<table><thead><tr><th>供应商</th><th>单据</th><th class="num">还欠</th><th>应结日</th><th>情况</th><th>操作</th></tr></thead><tbody>'
+    + rows.map(function(r){
+        return '<tr><td>'+esc(r.party)+'</td><td>#'+esc(String(r.id))+' '+esc(String(r.item||'—').slice(0,14))+'</td>'
+          + '<td class="num">¥'+money(r.left)+'</td><td>'+esc(r.due||'—')+'</td>'
+          + '<td class="'+(Number(r.days)>30?'bad':'')+'">'+esc(r.state||'')+'</td>'
+          + '<td><button class="btn sm gray" data-pay="'+esc(String(r.id))+'" data-left="'+esc(String(r.left))+'" onclick="pickPay(this)">付了</button></td></tr>'
+      }).join('') + '</tbody></table>'
+}
+// 点「付了」= 把这张单填进上面的表单，默认金额填成还欠的数（多数情况是一次付清）
+function pickPay(btn){
+  tab('pay')
+  try {
+    el('pyDoc').value = btn.getAttribute('data-pay') || ''
+    el('pyAmt').value = btn.getAttribute('data-left') || ''
+    el('pyAmt').focus()
+    el('pyAmt').select()
+  } catch(e) {}
+  showOk('已填好这张单，核一下金额就点「记上」')
+}
+function doPay(btn){
+  var id = el('pyDoc').value
+  if(!id){ showErr('没有还没付完的应付单'); return }
+  var amt = numOf(el('pyAmt').value)
+  if(amt===null || amt<=0){ showErr('付多少要填个正常数字（比如 4200 或 4,200）'); return }
+  if(!busyStart('pay', btn)) return
+  hideErr()
+  var dt = el('pyDate').value||ymd(), acc = el('pyAcc').value||null
+  post('/payables/'+encodeURIComponent(id)+'/pay', { amount: amt, account_id: acc, date: dt }, cidOf('pay',[id,amt,dt,acc]))
+    .then(function(d){
+      var who = ''
+      try {
+        var hit = LAST.ap.filter(function(r){ return String(r.id) === String(id) })[0]
+        who = hit ? (' → #' + esc(String(id)) + ' ' + esc(String(hit.party||'').slice(0,12))) : (' → #' + esc(String(id)))
+      } catch(e) { who = ' → #' + String(id) }
+      el('pyAmt').value = ''
+      busyEnd('pay', btn)
+      var tail = ''
+      if(d && d.over_pay) tail = '，多付的 ¥'+money(d.over_pay)+' 记成了这家的预付'
+      else if(d && d.left != null) tail = '，这张单还欠 ¥'+money(d.left)
+      showOk(d && d.dup_ok ? ('这笔刚才已经记上了（没重复记）'+who) : ('付了'+who+tail))
+      load()
+    })
+    .catch(function(e){ busyEnd('pay', btn); showErr('没记上：'+errText(e)) })
 }
 function doExp(btn){
   var amt = numOf(el('exAmt').value)
@@ -8902,6 +9235,19 @@ function sendExp(amt, cat, acc, dt, note, force, btn){
 function showOk(t){ var e=el('ok'); e.textContent=t; e.style.display='block'; setTimeout(function(){ e.style.display='none' }, 4000) }
 function load(){
   if(!K){ showGate(''); return }
+  // 第 23 轮 B9：以前是先等 /me 回来，再发 7 条数据请求 —— 两跳串行，首屏白等一个往返。
+  // 现在两条并发跑（数据先到就攥着），/me 回来决定「能不能看」之后再画。
+  // 注意：绝不能「数据先画、/me 后判」—— 员工口令不许看到利润，哪怕只闪 0.2 秒。
+  var m0 = el('bm').value
+  if(!m0){ try { m0 = localStorage.getItem('fa_month') || '' } catch(e){} }
+  if(!m0) m0 = ym()
+  el('bm').value = m0
+  var pData = Promise.allSettled([
+    api('/kpi?month='+m0), api('/ar-summary?month='+m0), api('/due-schedule?type=ar&limit='+DUE_LIMIT),
+    api('/dashboard?month='+m0), api('/accounts'), api('/categories'),
+    api('/due-schedule?type=ap&limit='+AP_LIMIT), api('/next-step'),
+    api('/reminders'), api('/flows?month='+m0+'&limit=8')
+  ])
   api('/me').then(function(me){
     // 第 19 轮 C12：员工输口令进来以前只有一句「只有老板能看」，人不知道该干嘛。
     // 现在说清楚「你是员工 / 这里为什么不行 / 你要记账去哪儿」。
@@ -8914,23 +9260,20 @@ function load(){
     BK = String(me.book||'') || BK
     try { localStorage.setItem('fa_book', BK) } catch(e) {}
     el('bookTag').textContent = '第 ' + (BK||'1') + ' 本账'
-    // 第 20 轮 C8：月份记住上次看的（老板常年盯上个月的对账，每次都要重选）
-    var m = el('bm').value
-    if(!m){ try { m = localStorage.getItem('fa_month') || '' } catch(e){} }
-    if(!m) m = ym()
-    el('bm').value = m
     el('gate').style.display='none'; el('main').style.display='block'
     // 第 19 轮 C9：以前用 Promise.all —— 六个接口里任何一个抖一下，整页空白，
     // 老板以为账没了。现在各自独立：取到几张卡就显示几张卡，缺的单独提示。
-    Promise.allSettled([
-      api('/kpi?month='+m), api('/ar-summary?month='+m), api('/due-schedule?type=ar&limit='+DUE_LIMIT),
-      api('/dashboard?month='+m), api('/accounts'), api('/categories')
-    ]).then(function(rs){
+    // （第 23 轮 B9：这七条在 /me 之前就发出去了，见函数开头。）
+    return pData.then(function(rs){
       var miss = []
       function get(i, name){ if(rs[i].status==='fulfilled') return rs[i].value; miss.push(name); return null }
-      var kpi = get(0,'利润'), ar = get(1,'应收汇总'), due = get(2,'逾期'), dash = get(3,'首页数据'), accs = get(4,'账户'), cats = get(5,'支出分类')
-      fillForms(due, accs, cats)
+      var kpi = get(0,'利润'), ar = get(1,'应收汇总'), due = get(2,'逾期'), dash = get(3,'首页数据'), accs = get(4,'账户'), cats = get(5,'支出分类'), ap = get(6,'该付的钱'), nx = get(7,'先做哪一件')
+      fillForms(due, accs, cats, ap)
       render(kpi, ar, due, dash)
+      renderAp(ap)
+      renderNext(nx)
+      renderRem(get(8,'等你处理'))
+      renderUndo(get(9,'最近记的几笔'))
       if(miss.length) showErr('这几块没取到：'+miss.join('、')+' —— 其它数字照常，点「🔄 刷新」再试')
       else hideErr()
       var d0 = new Date()
@@ -8949,6 +9292,8 @@ function load(){
 }
 function render(kpi, ar, due, dash){
   kpi = kpi || {}; ar = ar || {}; due = due || {}; dash = dash || {}
+  // 第 23 轮 C5：「这周要付 X，账上只有 Y」—— 只报要付多少，老板还得自己翻现金
+  try { LAST.cashNow = Number(kpi.cash_now || 0) } catch (e) {}
   var st = [
     // 第 20 轮 C2：老板每天第一句话是「今天收了多少钱」，而 /dashboard 早就返回了
     // today_income，这一页以前偏偏不画 —— 得回手机看。
@@ -8959,20 +9304,27 @@ function render(kpi, ar, due, dash){
     { k:'手头现金', v:'¥'+money(kpi.cash_now), c:'', n: (kpi.cushion_months!=null? '按现在的花法能撑 '+kpi.cushion_months+' 个月' : '') },
     { k:'最大客户占比', v:(kpi.conc_pct!=null? kpi.conc_pct+'%' : '—'), c:(Number(kpi.conc_pct)>50?'red':''), n: (kpi.top_customer? esc(String(kpi.top_customer).slice(0,14)) : '') }
   ]
+  // 第 23 轮 C12：全零 + 没有单据 = 空账套，先把「三步开账」摆出来
+  try {
+    var emptyBook = !Number(kpi.order_add || 0) && !Number(kpi.cash_in || 0) && !Number(kpi.cash_out || 0)
+      && !Number(ar.open_count || 0) && !Number(ar.open_amount || 0) && !((dash && dash.recent) || []).length
+    el('emptyGuide').style.display = emptyBook ? 'block' : 'none'
+  } catch (e) {}
   el('stats').innerHTML = st.map(function(x){
     return '<div class="stat"><div class="k">'+esc(x.k)+'</div><div class="v '+(x.c||'')+'">'+esc(x.v)+'</div><div class="n2">'+(x.n||'&nbsp;')+'</div></div>'
   }).join('')
   renderDue(due.rows || [], due)
   var rec = (dash && dash.recent) || []
-  var rec = (dash && dash.recent) || []
-  el('recent').innerHTML = rec.length ? '<table><thead><tr><th>单号</th><th>单位</th><th>产品</th><th class="num">金额</th><th class="num">还没收</th></tr></thead><tbody>'
+  el('recent').innerHTML = rec.length ? '<table><thead><tr><th>单号</th><th>单位</th><th>产品</th><th class="num">金额</th><th class="num">还没收</th><th>操作</th></tr></thead><tbody>'
     + rec.slice(0,12).map(function(x){
         var amt = (x.price!=null? x.price : x.amount)
         var left = Number(amt||0) - Number(x.paid||0) - Number(x.written_off||0)
         // 第 19 轮 C4：以前这里写着「点单号看这一家的往来」，可单号是死的纯文字。
+        // 第 23 轮 C10：再加一个「打这张单」—— 客户要送货单签字时，电脑接着打印机却打不出来。
         return '<tr><td><a href="#" data-party="'+esc(x.customer||x.supplier||'')+'" onclick="openStmt(this);return false" style="color:#1f6feb;text-decoration:none">#'+esc(String(x.id))+'</a></td>'
           + '<td>'+esc(x.customer||x.supplier||'')+'</td><td>'+esc(String(x.item_name||x.remark||'').slice(0,16))+'</td>'
-          + '<td class="num">¥'+money(amt)+'</td><td class="num">'+(left>0.005? '¥'+money(left) : '<span style="color:#0a7d32">已结清</span>')+'</td></tr>'
+          + '<td class="num">¥'+money(amt)+'</td><td class="num">'+(left>0.005? '¥'+money(left) : '<span style="color:#0a7d32">已结清</span>')+'</td>'
+          + '<td><button class="btn sm gray" onclick="printOrder('+esc(String(x.id))+')">打这张单</button></td></tr>'
       }).join('') + '</tbody></table>' : '<div style="color:#8a94a6">最近没有单据</div>'
 }
 // 第 20 轮 C7/C11：逾期表单独成函数 —— 搜索框和「只勾逾期 30 天以上」要重画它。
@@ -9004,10 +9356,38 @@ function renderDue(rows, due){
           + '<td class="num">¥'+money(r.left)+'</td><td>'+esc(r.due||'—')+'</td>'
           + '<td class="'+(Number(r.days)>30?'bad':'')+'">'+esc(r.state||'')+'</td>'
           // 第 19 轮 C5：每家一条「发确认链接」（只含这一家，能发给客户）
-          + '<td><button class="btn sm gray" data-ack="'+esc(r.party)+'" onclick="sendAck(this)">发确认</button></td></tr>'
+          // 第 23 轮 C3：再加「拨电话」和「催过了」—— 以前要话术得切到 /pc（还只有 6 家），
+          // 号码得翻微信，打完想记一句还得回手机。
+          + '<td style="white-space:nowrap">'
+          + (r.phone ? '<a class="btn sm gray" href="tel:'+esc(r.phone)+'" title="'+esc(r.contact||'')+'">📞 '+esc(String(r.phone).slice(0,13))+'</a> ' : '')
+          + '<button class="btn sm gray" data-ack="'+esc(r.party)+'" onclick="sendAck(this)">发确认</button> '
+          + '<button class="btn sm gray" data-chase="'+esc(r.party)+'" data-left="'+esc(String(r.left))+'" onclick="chase(this)">催过了</button>'
+          + (r.dun_at ? '<div class="tip2" style="margin-top:2px">上次催 '+esc(String(r.dun_at).slice(5))+esc(r.dun_pdate? ' · 答应 '+String(r.dun_pdate).slice(5)+' 付' : '')+'</div>' : '')
+          + '</td></tr>'
       }).join('') + '</tbody></table>'
 }
 
+// 第 23 轮 C3：催账的三件事放在一行里 —— 拨号、说辞、记下「催过了」。
+// 话术照抄 /pc 快捷面板那几句（同一套说法，客户听到的不会两样）。
+function chaseText(party, left, due){
+  return party + '的老板您好，我是' + '这边对一下账：' + (due ? due + ' 到期' : '') +
+    '的货款 ' + money(left) + ' 元还没收到，' + (due ? '已经过了几天了，' : '') +
+    '麻烦您这边安排一下，转完跟我说一声，我这边给您把单结掉。谢谢！'
+}
+function chase(btn){
+  var party = btn.getAttribute('data-chase') || ''
+  var left = Number(btn.getAttribute('data-left') || 0)
+  var hit = (LAST.due || []).filter(function(r){ return String(r.party) === String(party) })[0] || {}
+  var txt = chaseText(party, left, hit.due || '')
+  var copied = copyText(txt)
+  var day = window.prompt((copied ? '话术已经复制好了，粘到微信里发过去就行。\\n\\n' : '话术（手动复制一下）：\\n' + txt + '\\n\\n') +
+    '他答应哪天付？（不填就只记「催过了」，格式 2026-11-30）', '')
+  if(day === null) return
+  var ok = /^\d{4}-\d{2}-\d{2}$/.test(String(day).trim())
+  post('/dunning-log', { party: party, type: 'ar', channel: '电话', note: '电脑上看账台催的', promise_date: ok ? String(day).trim() : null })
+    .then(function(){ showOk('记上了：' + party + (ok ? '，答应 ' + day + ' 付' : '')); load() })
+    .catch(function(e){ showErr('没记上：' + errText(e)) })
+}
 function toggleAll(on){ var cs=document.querySelectorAll('.ck'); for(var i=0;i<cs.length;i++) cs[i].checked=on }
 // 第 20 轮 C11：按条件勾选（逾期 30 天以上 / 全不选），20 家一个个点容易点错
 function checkOverdue(days){
@@ -9048,9 +9428,179 @@ function copyText(t){
 }
 // 第 20 轮 C6：默认 20 家，点「显示更多」加到 40、60… 最多 100
 var DUE_LIMIT = 20
-function moreDue(){ DUE_LIMIT = Math.min(100, DUE_LIMIT + 20); load() }
+// 第 23 轮 B4：以前「显示更多」是把整页 7 个请求重跑一遍（5–7 万行）——
+// 只为把 limit 从 20 调到 40。现在只重发这一条，表格局部重画。
+function moreDue(){
+  DUE_LIMIT = Math.min(100, DUE_LIMIT + 20)
+  api('/due-schedule?type=ar&limit=' + DUE_LIMIT).then(function(d){
+    LAST.due = (d && d.rows) || []
+    renderDue(d.rows || [], d)
+  }).catch(function(e){ showErr('没取到更多：' + errText(e)) })
+}
+// 第 23 轮 C4：把 /next-step 的结论画出来，点一下就跳到对应的区块/页面
+function goNext(tab){
+  var t = String(tab || '')
+  if(!t) return
+  if(t.indexOf('me:') === 0){ location.href = '/pc'; return }
+  if(t.indexOf('report:') === 0){ openReport(); return }
+  var id = t.indexOf('bill:ap') === 0 ? 'apCard' : 'dueCard'
+  var e = document.getElementById(id)
+  if(e && e.scrollIntoView) e.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+function renderNext(nx){
+  nx = nx || {}
+  var it = nx.item
+  if(!it || !it.title){
+    el('nextHint').innerHTML = ''
+    el('nextBox').innerHTML = '<div style="color:#0a7d32">今天没有必须处理的事。'+(nx.text ? esc(nx.text) : '')+'</div>'
+    el('nextCard').style.display = 'block'
+    return
+  }
+  var h = '<div style="font-size:16px;font-weight:600;margin:2px 0 4px">'+esc(it.title)+'</div>'
+  h += '<div class="tip2">'+esc(it.why||'')+(Number(it.amount||0) > 0 ? '（¥'+money(it.amount)+'）' : '')+'</div>'
+  // 第 23 轮 C4：用 data-tab + getAttribute，不在内联 onclick 里拼单引号
+  //（模板字面量里拼引号被吃过一次：输出成 goNext(''）→ 整页脚本 SyntaxError）
+  h += '<div class="row" style="margin-top:6px"><button class="btn sm" data-tab="'+esc(String(it.tab||''))+'" onclick="goNext(this.dataset.tab)">去做</button>'
+  var oth = (nx.others || []).slice(0,3)
+  if(oth.length){
+    h += '<span class="tip2" style="margin-left:10px">后面还有：</span>'
+    h += oth.map(function(x){ return '<button class="btn sm gray" data-tab="'+esc(String(x.tab||''))+'" onclick="goNext(this.dataset.tab)">'+esc(String(x.title||'').slice(0,16))+'</button>' }).join(' ')
+  }
+  h += '</div>'
+  if(nx.degraded && nx.degraded.length) h += '<div class="tip2" style="color:#8a5a00">（这次有几项没查出来：'+esc(nx.degraded.join('、'))+'，先按上面说的做）</div>'
+  el('nextBox').innerHTML = h
+  el('nextHint').innerHTML = nx.rest ? '<small>另外还有 '+esc(String(nx.rest))+' 件不急的</small>' : ''
+  el('nextCard').style.display = 'block'
+}
+// 第 23 轮 C11：把「等你处理」原样列出来，点一条去处理（tab 映射同 goNext）
+function renderRem(d){
+  d = d || {}
+  var items = (d.items || []).filter(function(x){ return x && x.text })
+  if(!items.length){ el('remCard').style.display = 'none'; return }
+  var red = items.filter(function(x){ return x.level === 'red' }).length
+  el('remSum').innerHTML = '<small>' + items.length + ' 件' + (red ? '（其中 ' + red + ' 件着急）' : '') + '</small>'
+  el('remBox').innerHTML = items.map(function(x){
+    var col = x.level === 'red' ? '#b3261e' : (x.level === 'yellow' ? '#8a5a00' : '#5b6472')
+    var sub = (x.list && x.list.length)
+      ? '<div class="tip2" style="margin-top:2px">' + x.list.slice(0,3).map(function(l){
+          return esc(String(l.party || '')) + (l.amount ? ' ¥' + money(l.amount) : '') + (l.note ? '（' + esc(String(l.note)) + '）' : '')
+        }).join('　') + '</div>'
+      : ''
+    return '<div style="padding:4px 0;border-bottom:1px solid #f0f2f5">'
+      + '<div style="color:' + col + '">' + esc(String(x.text)) + '</div>' + sub + '</div>'
+  }).join('')
+}
+
+// 第 23 轮 C6：最近 8 笔，点「撤掉」直接删（DELETE /ledger/:id 本来就拦月结过的月份）
+function renderUndo(d){
+  d = d || {}
+  var rows = (d.rows || []).slice(0, 8)
+  if(!rows.length){ el('undoCard').style.display = 'none'; return }
+  el('undoSum').innerHTML = '<small>记错了就点「撤掉」</small>'
+  el('undoBox').innerHTML = '<table><thead><tr><th>日期</th><th>收支</th><th>项目</th><th class="num">金额</th><th>账户</th><th>操作</th></tr></thead><tbody>'
+    + rows.map(function(r){
+        return '<tr><td>' + esc(String(r.date || '').slice(5)) + '</td><td>' + esc(String(r.dir_text || '')) + '</td>'
+          + '<td>' + esc(String(r.cat_text || r.remark || '—').slice(0, 14)) + '</td>'
+          + '<td class="num">¥' + money(r.amount) + '</td><td>' + esc(String(r.account || '—')) + '</td>'
+          + '<td><button class="btn sm gray" data-lid="' + esc(String(r.id)) + '" onclick="undoLedger(this)">撤掉</button></td></tr>'
+      }).join('') + '</tbody></table>'
+  el('undoCard').style.display = 'block'
+}
+function undoLedger(btn){
+  var id = btn.getAttribute('data-lid') || ''
+  if(!id) return
+  if(!window.confirm('撤掉这一笔？撤掉以后账上的数字会跟着变回去。')) return
+  del('/ledger/' + encodeURIComponent(id))
+    .then(function(){ showOk('撤掉了'); load() })
+    .catch(function(e){ showErr('没撤掉：' + errText(e)) })
+}
+
+// 第 23 轮 C2：单据下拉的筛选（纯前端，不联网）
+function filterDocs(){
+  var q = String(el('rcFind').value||'').trim().toLowerCase()
+  var sel = el('rcDoc'), any = 0
+  for(var i=0;i<sel.options.length;i++){
+    var o = sel.options[i]
+    var kw = String(o.getAttribute('data-kw')||'').toLowerCase()
+    var hit = !q || kw.indexOf(q) >= 0 || String(o.value)==='__other'
+    o.style.display = hit ? '' : 'none'
+    if(hit) any++
+  }
+  el('rcNoHit').style.display = (any ? 'none' : 'block')
+}
+// 第 23 轮 C2：筛不到就去后端按名字找（可以找到前 20 张之外的、还没到期的单）
+function findAllDocs(){
+  var q = String(el('rcFind').value||'').trim()
+  if(!q){ return }
+  api('/due-schedule?type=ar&limit=100&q='+encodeURIComponent(q)).then(function(d){
+    var rows = ((d && d.rows) || []).filter(function(r){ return Number(r.left) > 0.005 })
+    if(!rows.length){ showErr('全账里也没有「'+q+'」还欠钱的单（可能已经结清了）'); return }
+    // 并到 LAST.due 前面，重画下拉（保留已经选中的那张）
+    var seen = {}
+    LAST.due.forEach(function(r){ seen[String(r.id)] = 1 })
+    var add = rows.filter(function(r){ return !seen[String(r.id)] })
+    LAST.due = add.concat(LAST.due)
+    fillForms({ rows: LAST.due }, { accounts: LAST.accs }, { out: LAST.cats }, LAST.apMeta)
+    showOk('找到 '+rows.length+' 张，已放进下拉')
+  }).catch(function(e){ showErr('没查到：'+errText(e)) })
+}
+// 第 23 轮 C10：网页上打不出「这一张」加工单/送货单（客户要签字，电脑接着打印机却打不了）
+function printOrder(id){
+  hideErr()
+  var w = preWin()
+  api('/order-print-link?id='+encodeURIComponent(id))
+    .then(function(d){ if(d && d.url) goWin(w, d.url); else { goWin(w, ''); showErr((d && d.error) || '没生成出来') } })
+    .catch(function(e){ goWin(w, ''); showErr('没取到这张单：'+errText(e)) })
+}
+// 第 23 轮 C1：把搜索结果里点中的单填进「记收款」
+function pickDoc(id){
+  tab('recv')
+  var sel = el('rcDoc')
+  var has = [].some.call(sel.options, function(o){ return String(o.value) === String(id) })
+  if(!has){
+    var o = document.createElement('option')
+    o.value = String(id); o.textContent = '#'+id + '（刚搜到的）'
+    sel.appendChild(o)
+  }
+  sel.value = String(id)
+  el('rcFind').value = ''
+  filterDocs()
+  try { el('rcAmt').focus(); el('rcAmt').select() } catch(e) {}
+  showOk('已选好 #'+id+'，填金额就点「记上」')
+}
+// 第 23 轮 C1：搜一下（客户名 / 产品 / 备注 / 单号）
+function doSearch(){
+  var q = String(el('sq').value||'').trim()
+  if(!q){ el('sBox').innerHTML = ''; return }
+  el('sBox').innerHTML = '<div class="tip2">搜「'+esc(q)+'」……</div>'
+  api('/search?kw='+encodeURIComponent(q)).then(function(d){
+    var os = (d && d.orders) || [], ps = (d && d.payables) || []
+    if(!os.length && !ps.length){
+      el('sBox').innerHTML = '<div class="tip2" style="color:#8a5a00">没搜到「'+esc(q)+'」。换个词试试（客户名、产品、单号都行）。</div>'
+      return
+    }
+    var h = ''
+    if(os.length){
+      h += '<table><thead><tr><th>单号</th><th>客户</th><th>产品</th><th class="num">金额</th><th class="num">还没收</th><th>操作</th></tr></thead><tbody>'
+      h += os.slice(0,12).map(function(x){
+        var left = Number(x.price||0) - Number(x.paid||0) - Number(x.written_off||0)
+        return '<tr><td>#'+esc(String(x.id))+'</td><td>'+esc(x.customer||'')+'</td><td>'+esc(String(x.item_name||'').slice(0,16))+'</td>'
+          + '<td class="num">¥'+money(x.price)+'</td><td class="num">'+(left>0.005?'¥'+money(left):'<span style="color:#0a7d32">已结清</span>')+'</td>'
+          + '<td><button class="btn sm gray" data-party="'+esc(x.customer||'')+'" onclick="openStmt(this)">对账单</button>'
+          + (left>0.005?' <button class="btn sm" onclick="pickDoc('+esc(String(x.id))+')">记收款</button>':'')
+          + ' <button class="btn sm gray" onclick="printOrder('+esc(String(x.id))+')">打这张单</button></td></tr>'
+      }).join('') + '</tbody></table>'
+    }
+    if(ps.length){
+      h += '<div class="tip2" style="margin-top:8px">还搜到 '+ps.length+' 张应付（供应商货款）：'+ps.slice(0,4).map(function(x){ return esc(String(x.supplier||'').slice(0,10)) }).join('、')+'…（付款在下面「该付谁」里）</div>'
+    }
+    el('sBox').innerHTML = h
+  }).catch(function(e){ el('sBox').innerHTML = '<div class="tip2" style="color:#b3261e">没搜成：'+esc(errText(e))+'</div>' })
+}
 function openStmt(a){
-  var party = a.getAttribute('data-party')
+  openStmtParty(a.getAttribute('data-party'))
+}
+function openStmtParty(party){
   if(!party){ showErr('这单没有单位名'); return }
   hideErr()
   var w = preWin()
@@ -9096,7 +9646,13 @@ function openReport(){
 // 第 20 轮 C3：页面开着不动时，数字会一直停在打开那一刻。切回来就刷一次；
 // 一直盯着的话每分钟刷一次（老板常年开着一个标签页）。
 document.addEventListener('visibilitychange', function(){ if(!document.hidden && K) load() })
-setInterval(function(){ if(!document.hidden && K) load() }, 60000)
+// 第 23 轮 A1：表单里已经填了数（正在犹豫/正在翻手机核账号）时别自动刷新，
+// 免得把人家填的东西冲掉，或者把选好的单换掉。
+function formBusy(){ try { return !!(el('rcAmt').value || el('exAmt').value || el('exNote').value || el('pyAmt').value) } catch(e) { return false } }
+// 第 23 轮 B1：以前是 60 秒。一次 load() 是 7 个请求、5–7 万行 D1；
+// 标签页开着 70 分钟就能把免费额度（500 万行/天）打满，之后全站变慢，老板以为「系统坏了」。
+// 改成 5 分钟，并且表单里填了一半就不刷（见 formBusy）。
+setInterval(function(){ if(!document.hidden && K && !formBusy()) load() }, 300000)
 el('key').addEventListener('keydown',function(e){ if(e.key==='Enter') saveKey() })
 // 第 20 轮 C14：金额框里敲回车直接提交（以前必须去点按钮；键盘手最烦这个）
 ;['rcAmt','exAmt'].forEach(function(id){
@@ -9105,7 +9661,7 @@ el('key').addEventListener('keydown',function(e){ if(e.key==='Enter') saveKey() 
 })
 // 第 20 轮 C8/C15：月份和账户都记住上次用的
 el('bm').addEventListener('change', function(){ try { localStorage.setItem('fa_month', el('bm').value||'') } catch(e){} })
-;['rcAcc','exAcc'].forEach(function(id){ var e0=el(id); if(e0) e0.addEventListener('change', function(){ try { localStorage.setItem('fa_acc', e0.value||'') } catch(e){} }) })
+;['rcAcc','exAcc','pyAcc'].forEach(function(id){ var e0=el(id); if(e0) e0.addEventListener('change', function(){ try { localStorage.setItem('fa_acc', e0.value||'') } catch(e){} }) })
 el('bm').addEventListener('change',function(){ load() })
 load();
 </script>
@@ -9168,6 +9724,24 @@ ${FAVICON_LINK}
   <div class="tip">重设成功后，这台电脑上记的口令会自动换成新的。已经发出去的打印链接不受影响（它们用的是另一把「链接密钥」）。</div>
 </div>
 
+<!-- 第 23 轮 C12：老板娘第一次开电脑版，不知道口令 → 点「第一次用」→ 要 16 位恢复码
+     → 恢复码在手机里 → 掏手机。从来没设过口令的，这条路直接走不通。
+     现在真做出来：设完当场显示一次性恢复码。部署配了 INSTALL_TOKEN 的，必须同时填令牌
+     （否则谁先打开这个网址谁就成了老板）—— 密码学上这道闸不能拆。 -->
+<div class="card">
+  <h2>1.2 第一次用：在这儿设访问口令</h2>
+  <div class="tip">只在这台机器<b>还没设过口令</b>时有用。设完会给你一串 16 位恢复码，抄到纸上放抽屉 —— 忘了口令只有它能救。</div>
+  <div class="row">
+    <input type="password" id="newk" placeholder="新的访问口令（至少 4 位）" autocomplete="new-password"/>
+    <input type="password" id="newk2" placeholder="再输一遍" autocomplete="new-password"/>
+  </div>
+  <div class="row">
+    <input type="text" id="newtok" placeholder="安装令牌（部署时配了才要填，没配就留空）" autocomplete="off"/>
+    <button class="p" onclick="doSetup()">设口令</button>
+  </div>
+  <div id="setupMsg" class="tip"></div>
+</div>
+
 <div class="card" id="quickCard">
   <h2>★ 快捷面板（今天要盯的数，一屏看完）</h2>
   <div class="row">
@@ -9207,6 +9781,47 @@ ${FAVICON_LINK}
     <button class="hide" id="btn0" onclick="reset()">重选文件</button>
   </div>
   <label class="tip" style="display:block;margin-top:8px"><input type="checkbox" id="force1"/> 这份表我确实要再导一遍（同一份文件默认只导一次，防止手抖翻倍）</label>
+</div>
+
+<!-- 第 23 轮 C9：账单只能手机上「粘贴文本」再一笔笔认领。电脑上导出的 xlsx
+     传不进来 —— 后端 /import-xlsx 早就支持 type:'bank'，只是没人接。 -->
+<div class="card">
+  <h2>3.1 导入账单（微信 / 支付宝 / 银行）</h2>
+  <div class="row">
+    <input type="file" id="bf" accept=".xlsx,.xls,.csv"/>
+    <button class="p" onclick="bankPreview()">先看看认出几笔</button>
+  </div>
+  <div id="bankMsg" class="tip"></div>
+  <div id="bankRes"></div>
+  <div class="row" id="bankRow" style="margin-top:10px">
+    <button class="p hide" id="bankGo" onclick="bankImport()">确认入库</button>
+    <button class="hide" id="bankRe" onclick="bankReset()">重选文件</button>
+    <button class="hide" id="bankAuto" onclick="bankAuto()">一键自动认领</button>
+  </div>
+  <div class="tip">从微信 / 支付宝 / 银行导出的对账单 Excel 直接传上来，认出多少笔、收多少付多少先给你看，你点「确认入库」才真的写进账。<br/>入库以后还要一笔笔认到单子上（认领在下面这块）。</div>
+</div>
+
+<div class="card">
+  <h2>3.2 还没认领的流水</h2>
+  <div class="row">
+    <button onclick="bankUnmatched()">看看还有多少笔</button>
+  </div>
+  <div id="umMsg" class="tip"></div>
+  <div id="umBox"></div>
+</div>
+
+<!-- 第 23 轮 C8：月底收尾七件事、能不能结账，后端 /month-end 与 /close-precheck 都写好了，
+     电脑上一直看不见 —— 月初想结账只能掏手机一条条看。
+     按方案的风险提示，这里只做「看七件事 + 看能不能结」，真结账仍回手机（点错要解锁，代价大）。 -->
+<div class="card">
+  <h2>3.3 本月收尾（七件事 · 能不能结账）</h2>
+  <div class="row">
+    <input type="month" id="meM" style="padding:9px 12px;border:1px solid #d8dbe0;border-radius:8px;font-size:16px"/>
+    <button class="p" onclick="monthEnd()">看看还差什么</button>
+  </div>
+  <div id="meMsg" class="tip"></div>
+  <div id="meBox"></div>
+  <div class="tip">真结账回手机做（报表 → 月结）：结完这个月就锁死，网页上点错要解锁，代价比省这几步大。</div>
 </div>
 
 <div class="card">
@@ -9569,6 +10184,152 @@ function logoutPc(){
   var k = document.getElementById('key'); if (k) k.value = ''
   msg('已经退出：这台电脑上的口令清掉了。要接着用，重新输一次口令。', true)
 }
+// 第 23 轮 C8：本月收尾七件事 + 能不能结账（只读，真结账仍回手机）
+function monthEnd(){
+  var m = (document.getElementById('meM').value || '').slice(0, 7)
+  if(!m){ var d0 = new Date(); m = d0.getFullYear() + '-' + ('0' + (d0.getMonth() + 1)).slice(-2); document.getElementById('meM').value = m }
+  var m1 = document.getElementById('meMsg')
+  m1.textContent = '正在看…'
+  document.getElementById('meBox').innerHTML = ''
+  Promise.all([
+    fetch('/month-end?month=' + m, { headers: { 'x-access-key': K, 'X-Book': bk() } }).then(function(r){ return r.json() }),
+    fetch('/close-precheck?month=' + m, { headers: { 'x-access-key': K, 'X-Book': bk() } }).then(function(r){ return r.json() })
+  ]).then(function(a){
+    var me = a[0] || {}, pk = a[1] || {}
+    if(me.error){ m1.textContent = me.error; return }
+    var steps = me.steps || []
+    var doneN = steps.filter(function(x){ return x.done }).length
+    var bad = (pk.items || []).filter(function(x){ return x.tone === 'bad' })
+    m1.textContent = m + '：七件事办了 ' + doneN + '/' + steps.length + (me.locked ? '（这个月已经结过账）' : (bad.length ? '，还有 ' + bad.length + ' 项会挡结账' : '，可以结账'))
+    var h = '<table><tr><th>#</th><th>这件事</th><th>状态</th><th>还差什么</th></tr>'
+    h += steps.map(function(x){
+      return '<tr><td>' + pcEsc(x.no) + '</td><td>' + pcEsc(x.title) + '</td><td>' + (x.done ? '✅' : '⬜') + '</td><td>' + pcEsc(x.detail || '') + '</td></tr>'
+    }).join('')
+    h += '</table>'
+    var blocks = (pk.items || []).filter(function(x){ return x.count !== 0 || x.tone !== 'ok' })
+    if(blocks.length){
+      h += '<div class="tip" style="margin-top:8px">结账前会卡住这些：</div><table>' + blocks.slice(0,8).map(function(x){
+        return '<tr><td>' + (x.tone === 'bad' ? '⛔' : (x.tone === 'warn' ? '⚠️' : '✅')) + ' ' + pcEsc(x.label) + '</td><td>' + pcEsc(x.tip || '') + '</td></tr>'
+      }).join('') + '</table>'
+    }
+    document.getElementById('meBox').innerHTML = h
+    if(me.unlock_how) document.getElementById('meBox').innerHTML += '<div class="tip">要解锁：' + pcEsc(me.unlock_how) + '</div>'
+  }).catch(function(e){ m1.textContent = '没取到：' + pcErr(e) })
+}
+
+// 第 23 轮 C9：账单上传（预览 → 确认入库 → 自动认领 → 看未认领）
+var BANK_B64 = ''
+function bankBytes(f, cb){
+  var rd = new FileReader()
+  rd.onload = function(){ var u = String(rd.result||''); BANK_B64 = u.slice(u.indexOf(',')+1) ; cb('') }
+  rd.onerror = function(){ cb('读不了这个文件，换一个试试') }
+  rd.readAsDataURL(f)
+}
+function bankPreview(){
+  var f = document.getElementById('bf').files[0]
+  if(!f){ msg('先选一个账单文件（.xlsx 或 .csv）', false); return }
+  var m = document.getElementById('bankMsg')
+  m.textContent = '正在读文件…'
+  bankBytes(f, function(err){
+    if(err){ m.textContent = err; return }
+    m.textContent = '正在认…'
+    fetch('/import-xlsx',{method:'POST',headers:{'content-type':'application/json','x-access-key':K,'X-Book':bk()},body:JSON.stringify({type:'bank',b64:BANK_B64,preview:true})})
+      .then(function(r){ return r.json() })
+      .then(function(d){
+        if(d.error){ m.textContent = d.error; return }
+        m.textContent = d.text || ('认出 ' + (d.count||0) + ' 笔')
+        var rows = (d.rows||[]).slice(0,12)
+        document.getElementById('bankRes').innerHTML = rows.length
+          ? '<table><tr><th>日期</th><th>收/付</th><th>金额</th><th>摘要</th></tr>' + rows.map(function(r){
+              return '<tr><td>'+pcEsc(r.date)+'</td><td>'+(r.direction==='in'?'收':'付')+'</td><td>'+pcMoney(r.amount)+'</td><td>'+pcEsc(String(r.memo||'').slice(0,20))+'</td></tr>'
+            }).join('') + '</table>'
+          : ''
+        document.getElementById('bankGo').className = 'p'
+        document.getElementById('bankRe').className = ''
+      })
+      .catch(function(e){ m.textContent = '没认出来：' + pcErr(e) })
+  })
+}
+function bankImport(){
+  var m = document.getElementById('bankMsg')
+  m.textContent = '正在入库…'
+  fetch('/import-xlsx',{method:'POST',headers:{'content-type':'application/json','x-access-key':K,'X-Book':bk()},body:JSON.stringify({type:'bank',b64:BANK_B64})})
+    .then(function(r){ return r.json() })
+    .then(function(d){
+      if(d.error){ m.textContent = d.error; return }
+      m.textContent = '入库了 ' + (d.imported||0) + ' 笔' + (d.skipped ? '（跳过 ' + d.skipped + ' 笔不计收支的）' : '') + '。接着可以点「一键自动认领」。'
+      document.getElementById('bankGo').className = 'hide'
+      document.getElementById('bankAuto').className = ''
+    })
+    .catch(function(e){ m.textContent = '没入库：' + pcErr(e) })
+}
+function bankReset(){
+  BANK_B64 = ''
+  document.getElementById('bankRes').innerHTML = ''
+  document.getElementById('bankMsg').textContent = ''
+  document.getElementById('bankGo').className = 'hide'
+  document.getElementById('bankRe').className = 'hide'
+  document.getElementById('bankAuto').className = 'hide'
+}
+function bankAuto(){
+  var m = document.getElementById('bankMsg')
+  m.textContent = '正在自动配对…'
+  fetch('/bank-auto-match',{method:'POST',headers:{'content-type':'application/json','x-access-key':K,'X-Book':bk()},body:JSON.stringify({apply:true})})
+    .then(function(r){ return r.json() })
+    .then(function(d){
+      if(d.error){ m.textContent = d.error; return }
+      m.textContent = d.text || ('自动认领了 ' + (d.applied||0) + ' 笔')
+      bankUnmatched()
+    })
+    .catch(function(e){ m.textContent = '没配对：' + pcErr(e) })
+}
+function bankUnmatched(){
+  var m = document.getElementById('umMsg')
+  m.textContent = '正在取…'
+  fetch('/bank-flows?unmatched=1&limit=20',{headers:{'x-access-key':K,'X-Book':bk()}})
+    .then(function(r){ return r.json() })
+    .then(function(d){
+      var rows = d.rows || []
+      if(!rows.length){ m.textContent = '没有未认领的流水 👍'; document.getElementById('umBox').innerHTML = ''; return }
+      m.textContent = '未认领 ' + (d.count || rows.length) + ' 笔（下面列前 20 笔）'
+      document.getElementById('umBox').innerHTML = '<table><tr><th>日期</th><th>收/付</th><th>金额</th><th>摘要</th></tr>' + rows.map(function(r){
+        return '<tr><td>'+pcEsc(r.date)+'</td><td>'+(r.direction==='in'?'收':'付')+'</td><td>'+pcMoney(r.amount)+'</td><td>'+pcEsc(String(r.memo||'').slice(0,24))+'</td></tr>'
+      }).join('') + '</table><div class="tip">要一笔笔认到单子上，在手机小程序「银行流水 → 认领」里点更快；金额和摘要对得上的，先点上面的「一键自动认领」。<div>'
+    })
+    .catch(function(e){ m.textContent = '没取到：' + pcErr(e) })
+}
+function pcMoney(v){ return qmoney(v) }
+function pcEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c] }) }
+// 第 23 轮 C12：首次设口令。成功后把恢复码当场显示（只显示这一次）。
+function doSetup(){
+  var a = document.getElementById('newk').value
+  var b = document.getElementById('newk2').value
+  var tk = document.getElementById('newtok').value
+  var m = document.getElementById('setupMsg')
+  if(!a || a.length < 4){ m.textContent = '口令至少 4 位'; return }
+  if(a !== b){ m.textContent = '两次输的不一样'; return }
+  m.textContent = '正在设…'
+  fetch('/auth/setup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key:a,confirm:b,install_token:tk})})
+    .then(function(r){ return r.json().then(function(d){ return {st:r.status,d:d||{}} }) })
+    .then(function(o){
+      var d = o.d
+      if(!o.st || o.st >= 400 || d.error){
+        m.innerHTML = ''
+        var dv = document.createElement('div')
+        dv.style.color = '#b3261e'
+        dv.textContent = d.error || ('没设成（' + o.st + '）')
+        if(d.code === 'bad_install_token') dv.textContent = '安装令牌不对 —— 安装令牌在部署时生成，不是访问口令。找不到就问当初帮你部署的人。'
+        m.appendChild(dv)
+        return
+      }
+      localStorage.setItem('fa_key', a); K = a
+      m.innerHTML = '<div style="color:#0a7d32;font-size:15px">口令设好了。恢复码（只显示这一次，抄到纸上）：</div>'
+        + '<div style="font-family:ui-monospace,Menlo,monospace;font-size:20px;letter-spacing:1px;margin:6px 0">' + pcEsc(d.recover_code || '(没生成，去手机「设置 → 找回口令」里再要一个)') + '</div>'
+        + '<div class="tip">抄好以后点上面「刷新数据」就能看了。</div>'
+    })
+    .catch(function(e){ m.textContent = '没设成：' + pcErr(e) })
+}
+
 function doRecover(){
   var code = String(document.getElementById('rc_code').value || '').trim()
   var pw = String(document.getElementById('rc_pw').value || '').trim()
@@ -9616,7 +10377,18 @@ function dl(tpl){
       if (f.suppliers) bits.push('供应商 ' + f.suppliers + ' 个')
       if (f.staffs) bits.push('员工 ' + f.staffs + ' 个')
       msg('下载好了：' + (d.name || tpl + '.xlsx') + (fill && bits.length ? '（已填好：' + bits.join('、') + '，名字都是下拉可选）' : ''), true)
-    }).catch(function(e){ msg('下载失败：' + e, false) })
+    }).catch(function(e){ msg('下载失败：' + pcErr(e), false) })
+}
+// 第 23 轮 A10（真 bug）：以前 catch 里直接拼 e（JS 异常对象），Cloudflare 层回 502/524 的
+// HTML 错误页时 r.json() 会抛 SyntaxError，页面就打出一大段
+// "下载失败：SyntaxError: Unexpected token '<', "<!DOCTYPE"... is not valid JSON"。
+// 而这恰好是导出 Excel 最容易超时的时刻，老板最需要的是一句「再点一次」。
+function pcErr(e){
+  var s = String((e && e.message) || e || '')
+  if (/JSON|DOCTYPE|Unexpected token/i.test(s)) return '服务器没回应（大概超时了），过一会儿再点一次'
+  if (/Failed to fetch|Load failed|NetworkError|fetch failed/i.test(s)) return '连不上服务器（网断了或正在重启），过一会儿再点一次'
+  if (/aborted|timeout/i.test(s)) return '等太久了，过一会儿再点一次'
+  return s
 }
 function qmsg(t, good){
   var el = document.getElementById('quick_msg')
@@ -9638,14 +10410,26 @@ function quickLoad(){
       .then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } })
       .catch(function(e){ return { error: '连不上（' + ((e && e.message) || e) + '）' } })
   }
-  Promise.all([one('/dashboard'), one('/collect-list'), one('/statement-acks?days=60')]).then(function(a){
-    var d = a[0] || {}, c = a[1] || {}, s = a[2] || {}
-    if (d.error) {
+  // 第 23 轮 B3：这一块只要 6 个数字（本月收/付/剩、应收、应付、逾期单数），
+  // 以前却拉了整个 /dashboard —— 19 条并发查询、约 2.5 万行（含 3 次全表扫 + 13 个子查询）。
+  // 现在用 /kpi（月度聚合）+ /ar-summary（收/付各一次），数字一模一样，读量降一个量级。
+  var m0 = (function(){ var d0 = new Date(); return d0.getFullYear() + '-' + ('0' + (d0.getMonth() + 1)).slice(-2) })()
+  Promise.all([one('/kpi?month=' + m0), one('/ar-summary?month=' + m0), one('/ar-summary?month=' + m0 + '&type=ap'), one('/collect-list'), one('/statement-acks?days=60')]).then(function(a){
+    var k = a[0] || {}, ar = a[1] || {}, ap = a[2] || {}, c = a[3] || {}, s = a[4] || {}
+    var bad = k.error || ar.error || ap.error
+    if (bad) {
       // 第 20 轮 A10：总览没读出来也继续渲染催款清单与对账状态（以前直接 return，全没了）
-      qmsg('总览没读出来：' + (d.error || '口令对吗？') + ' —— 下面的催款清单照常显示', false)
+      qmsg('总览没读出来：' + (bad || '口令对吗？') + ' —— 下面的催款清单照常显示', false)
       // 数字位一律显示「—」：显示 ¥0.00 会让人以为「这个月没收入」（第 20 轮 A7 的同一条原则）
       document.getElementById('quick_nums').textContent = '（总览没读出来，下面的数字先空着）'
-      d = { month_income: null, month_outcome: null, month_profit: null, ar_total: null, ap_total: null, overdue_count: null }
+    }
+    var d = {
+      month_income: k.error ? null : k.cash_in,
+      month_outcome: k.error ? null : k.cash_out,
+      month_profit: k.error ? null : k.profit,
+      ar_total: ar.error ? null : ar.open_amount,
+      ap_total: ap.error ? null : ap.open_amount,
+      overdue_count: ar.error ? null : ar.overdue_count
     }
     var qm = function(v){ return (v === null || v === undefined) ? '—' : qmoney(v) }
     var bits = []
@@ -9817,7 +10601,7 @@ function dlSheet(t){
       for (var i = 0; i < n; i++) u[i] = bin.charCodeAt(i)
       saveBlob(new Blob([u], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), d.name || (t + '.xlsx'))
       msg('下载好了：' + (d.name || t + '.xlsx'), true)
-    }).catch(function(e){ msg('下载失败：' + e, false) })
+    }).catch(function(e){ msg('下载失败：' + pcErr(e), false) })
 }
 function readFile(){
   return new Promise(function(ok, bad){
@@ -11250,11 +12034,27 @@ app.post('/book-admin-key', async (c) => {
   return c.json({ ok: true, book: id, name: await bookNameOf(db, id) })
 })
 
+// 第 23 轮 B8：这本列表一页要问 9 本库、每本 5 条查询（订单数、未收、口令、封账、名字），
+// 最坏 45 次 D1 往返 —— 而它只用在「账套」那一块，老板切一次账、刷一次页就整跑一遍。
+// 60 秒内缓存（改名字/开账/封账会主动清掉，见 invalidateBooksAll）。
+// 第 23 轮 B8 补的一条关键护栏：**任何写操作都要让缓存失效**。
+// 一开始只做了「改名后清缓存」，结果 test-book4 立刻抓到：往第 4 本开一张单，
+// 60 秒内再打开账套页，单数还是旧的 —— 页面把「旧的」当真的显示，
+// 这正是本轮 A 组要治的病，缓存自己不能犯。
+const _booksAllCache = new WeakMap()
+const BOOKS_ALL_CACHE_MS = 60 * 1000
+let _booksAllVer = 0
+function invalidateBooksAll(env) { _booksAllVer++; try { _booksAllCache.delete(env) } catch (e) {} }
 app.get('/books-all', async (c) => {
   if ((c.get('role') || '') !== 'owner') return c.json({ error: '只有老板口令能管理账套', code: 'owner_only' }, 403)
   const all = c.env.ENV_ALL || c.env
   const onlyOwn = !!(c.get('book_owner') && !c.get('super'))
   const curId = num(c.env.BOOK) || 1
+  // 缓存 key 必须带上「是不是超级管理员」：同一本账、同样 onlyOwn，超级口令和老板口令
+  // 看到的 books/super 不一样，混用会把别家账套名露给普通老板。
+  const ckB = onlyOwn + '|' + curId + '|' + (c.get('super') ? 1 : 0) + '|v' + _booksAllVer
+  const hitB = _booksAllCache.get(all)
+  if (hitB && hitB.k === ckB && Date.now() - hitB.at < BOOKS_ALL_CACHE_MS) return c.json(Object.assign({}, hitB.d, { cached: true }))
   // 9 本账原来是「每本 5 次串行 await」= 最多 45 次往返；改成同一本内部并发、几本之间也并发。
   const targets = bookDbs(all).filter(([id]) => !onlyOwn || id === curId)
   const list = await Promise.all(targets.map(async ([id, db]) => {
@@ -11280,7 +12080,7 @@ app.get('/books-all', async (c) => {
     if (!name) name = await bookNameOf(db, id)
     return { id, name, orders, ar, has_key: hasKey, sealed, binding: bookBindingName(id), current: curId === id }
   }))
-  return c.json({
+  const outB = {
     ok: true,
     current: num(c.env.BOOK) || 1,
     max: BOOK_MAX,
@@ -11288,7 +12088,9 @@ app.get('/books-all', async (c) => {
     super: !!c.get('super'),
     super_enabled: await superKeyOn(c.env.ENV_ALL && c.env.ENV_ALL.DB ? c.env.ENV_ALL.DB : c.env.DB),
     text: '现在一共 ' + list.length + ' 本账，最多可以开到 ' + BOOK_MAX + ' 本（每本要一个 D1 库）',
-  })
+  }
+  _booksAllCache.set(all, { at: Date.now(), k: ckB, d: outB })
+  return c.json(outB)
 })
 
 // 给指定的那本账改名（老板口令 + 当前账套已登录即可，不用切过去）
@@ -11314,6 +12116,7 @@ app.post('/book-admin', async (c) => {
   await db.prepare("INSERT INTO settings (key, value) VALUES ('book_name', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(nm).run()
   // 审计要写进被改的那本（以前写当前这本，回头在第 5 本查日志看不到这次改名）
   await logAudit(db, '账套改名', '设置', '第 ' + id + ' 本 → ' + nm, '', act(c))
+  invalidateBooksAll(all)   // 第 23 轮 B8：改名后账套列表的 60 秒缓存要立刻作废
   return c.json({ ok: true, book: id, name: nm })
 })
 
@@ -11338,37 +12141,33 @@ app.get('/dashboard', async (c) => {
   // 而且「本月」相关的子查询全靠 month 列走索引，混在一条大 SQL 里反而看不出哪些能用索引。
   // 现在拆成 4 条更简单的查询并发跑：订单侧 / 应付侧 / 流水侧 / 其它杂项，各走各的索引。
   // 第 10 轮 E3：金额合计改用 SUM_MONEY（按分取整再求和），不再有 0.01 的浮点尾差。
+  // 第 23 轮 B5：order_add / order_cost 已经在 plOf 里算过（income / mat，同一句 SQL 口径），
+  // 这里再算一遍就是同一批行读两次 —— 只留 pending。
+  // 第 23 轮 B7：ar（未收总额）、top_customer（欠得最多的一家）、over_limit_count（超授信的家数）
+  // 三个数以前是三条各自全表扫 orders 的查询，而且前两条的口径完全一样（只是 GROUP BY 不同）。
+  // 现在合并成「按客户分组扫一次」，总额/最多/超授信都在 JS 里一次算出来。
   const qOrders = `SELECT
-    (SELECT ${SUM_MONEY('price-COALESCE(paid,0)-COALESCE(written_off,0)')} FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price) AS ar,
-    (SELECT COUNT(*) FROM orders WHERE status < 2) AS pending,
-    (SELECT ${SUM_MONEY('price')} FROM orders WHERE month=?) AS order_add,
-    (SELECT ${SUM_MONEY('COALESCE(cost,0)')} FROM orders WHERE month=?) AS order_cost`
+    (SELECT COUNT(*) FROM orders WHERE status < 2) AS pending`
+  // 第 23 轮 B5：payable_add 也在 plOf 里（同一个数），这里只剩 ap。
   const qPays = `SELECT
-    (SELECT ${SUM_MONEY('amount-COALESCE(paid,0)-COALESCE(written_off,0)')} FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount) AS ap,
-    (SELECT ${SUM_MONEY('amount')} FROM payables WHERE month=?) AS payable_add`
+    (SELECT ${SUM_MONEY('amount-COALESCE(paid,0)-COALESCE(written_off,0)')} FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount) AS ap`
+  // 第 23 轮 B5：这条原来有 9 个标量子查询（流水表 7 遍、核销表 2 遍），
+  // 而其中 8 个 plOf 刚刚算过（inc/outt/exp_cash/amort/acr/dep/wo/wo_g 与 pl.cash_in/cash_out/
+  // cash_exp/amort/accrue/dep/writeoff/writeoff_ap 是同一句 SQL 口径）。
+  // 现在只留 plOf 没有的那一个：今天的进账。
   const qLedger = `SELECT
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='in' AND cash=1 AND ${CASH_EXCLUDE} AND month=?) AS inc,
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='out' AND cash=1 AND ${CASH_EXCLUDE} AND month=?) AS outt,
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ${COST_EXP_WHERE} AND month=?) AS exp_cash,
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='in' AND cash=1 AND ${CASH_EXCLUDE} AND substr(created_at,1,10)=?) AS today_in,
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='amort' AND month=?) AS amort,
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='debt_int' AND month=?) AS acr,
-    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE ref_type='dep' AND month=?) AS dep,
-    -- 第 16 轮 A1：首页「本月坏账核销」只算客户坏账（损失）；豁免应付是收益，另给一个字段
-    (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ref_type='order' AND COALESCE(month,substr(created_at,1,7))=?) AS wo,
-    (SELECT ${SUM_MONEY('amount')} FROM writeoffs WHERE ref_type='payable' AND COALESCE(month,substr(created_at,1,7))=?) AS wo_g`
+    (SELECT ${SUM_MONEY('amount')} FROM ledger WHERE direction='in' AND cash=1 AND ${CASH_EXCLUDE} AND substr(created_at,1,10)=?) AS today_in`
   const qMisc = `SELECT
-    (SELECT COUNT(*) FROM (SELECT o.customer, SUM(MAX(0,o.price-o.paid-COALESCE(o.written_off,0))) AS unpaid FROM orders o GROUP BY o.customer) t JOIN credit_limits l ON l.party=t.customer WHERE l.limit_amount>0 AND t.unpaid>l.limit_amount) AS over_limit,
     (SELECT ${SUM_MONEY('amount-used-returned')} FROM loans) AS loan_open,
     (SELECT value FROM settings WHERE key='selfcheck_count') AS sc_cnt,
     (SELECT value FROM settings WHERE key='selfcheck_at') AS sc_at,
     (SELECT receive FROM targets WHERE month=?) AS tgt_receive,
     (SELECT order_add FROM targets WHERE month=?) AS tgt_order`
-  const [aggR, ordR, payR, ledR, plOfR, recentR, overdueR, dueSoonR, paySoonR, cntOverdueR, cntDueR, cntPayR, topCustR, budsR, spendR, debtRowsR, debtRepsR, accList] = await Promise.all([
+  const [aggR, ordR, payR, ledR, plOfR, recentR, overdueR, dueSoonR, paySoonR, cntOverdueR, cntDueR, cntPayR, custOpenR, limitsR, budsR, spendR, debtRowsR, debtRepsR, accList] = await Promise.all([
     // 第 10 轮 I1：拆成 4 条并发的小查询（见上面的说明）
-    db.prepare(qOrders).bind(m, m).first().catch((e) => { noteFail(e, '首页汇总·订单'); return null }),
-    db.prepare(qPays).bind(m).first().catch((e) => { noteFail(e, '首页汇总·应付'); return null }),
-    db.prepare(qLedger).bind(m, m, m, todayS, m, m, m, m, m).first().catch((e) => { noteFail(e, '首页汇总·流水'); return null }),
+    db.prepare(qOrders).first().catch((e) => { noteFail(e, '首页汇总·订单'); return null }),
+    db.prepare(qPays).first().catch((e) => { noteFail(e, '首页汇总·应付'); return null }),
+    db.prepare(qLedger).bind(todayS).first().catch((e) => { noteFail(e, '首页汇总·流水'); return null }),
     db.prepare(qMisc).bind(m, m).first().catch((e) => { noteFail(e, '首页汇总·其它'); return null }),
     // 第 10 轮 C1：本月的利润/成本统一调 plOf，不再自己算一遍
     plOf(db, m, { includeWriteoff: true, includeAccrual: true }).catch((e) => { noteFail(e, '首页汇总·利润'); return null }),
@@ -11382,7 +12181,9 @@ app.get('/dashboard', async (c) => {
     db.prepare('SELECT COUNT(*) AS n FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND created_at < ?').bind(cutoff).first().catch((e) => { noteFail(e, '首页计数'); return null }),
     db.prepare('SELECT COUNT(*) AS n FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ?').bind(soonS, todayS).first().catch((e) => { noteFail(e, '首页计数'); return null }),
     db.prepare('SELECT COUNT(*) AS n FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND substr(due_date,1,10) <= ? AND substr(due_date,1,10) >= ?').bind(soonS, todayS).first().catch((e) => { noteFail(e, '首页计数'); return null }),
-    db.prepare('SELECT customer AS nm, COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) AS t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price GROUP BY customer ORDER BY t DESC LIMIT 1').first().catch((e) => { noteFail(e, '首页客户'); return null }),
+    // 第 23 轮 B7：一次按客户分组，替掉原来「总额」「欠最多的一家」「超授信家数」三条扫描
+    db.prepare(`SELECT customer AS nm, ${SUM_MONEY('price-COALESCE(paid,0)-COALESCE(written_off,0)')} AS t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price GROUP BY customer`).all().catch((e) => { noteFail(e, '首页客户'); return null }),
+    db.prepare('SELECT party, limit_amount FROM credit_limits').all().catch((e) => { noteFail(e, '首页客户'); return null }),
     // 第 10 轮 I2：显式窄列（budgets 表没有 remark 列 —— 写错列名这条 SQL 直接跑不通）
     db.prepare('SELECT id, category, amount, created_at FROM budgets ORDER BY id').all().catch((e) => { noteFail(e, '首页明细'); return null }),
     db.prepare(`SELECT COALESCE(NULLIF(category,''),'其他') AS c, COALESCE(SUM(amount),0) AS t FROM ledger WHERE direction='out' AND cash=1 AND ${CASH_EXCLUDE} AND month=? GROUP BY 1`).bind(m).all().catch((e) => { noteFail(e, '首页明细'); return null }),
@@ -11394,15 +12195,26 @@ app.get('/dashboard', async (c) => {
   // 注意：plOf 的结果不进 agg（它是利润，不是汇总项）—— 早先这里多写了一个占位名字，
   // 导致后面所有变量整体错位一格，debtReps 拿到的是账户余额数组 → 首页整页 500。
   const agg = Object.assign({}, aggR || {}, ordR || {}, payR || {}, ledR || {})
-  const ar = { total: agg.ar }, ap = { total: agg.ap }, inc = { total: agg.inc }, out = { total: agg.outt }
-  const pending = { n: agg.pending }, orderAdd = { t: agg.order_add }, payableAdd = { t: agg.payable_add }
-  const matCost = { t: agg.order_cost }
-  const expCash = { t: agg.exp_cash }, todayIn = { t: agg.today_in }
+  // 第 23 轮 B5：这几个数一律取 plOf 的结果（pl）—— 以前是同一批 ledger/writeoffs 行被读第二遍，
+  // 两处口径一旦哪天改一处、忘另一处，首页和报表就会开始打架（第 21 轮就发生过）。
+  const pl = plOfR || {}
+  // 第 23 轮 B7：未收总额、欠最多的一家、超授信家数 —— 都从这一次分组结果里算
+  const custOpen = (custOpenR && custOpenR.results) || []
+  const arTotalB7 = round2(custOpen.reduce((a2, x) => a2 + num(x.t), 0))
+  let topCustB7 = null
+  for (const x of custOpen) { if (!topCustB7 || num(x.t) > num(topCustB7.t)) topCustB7 = x }
+  const limMap = {}
+  for (const l of ((limitsR && limitsR.results) || [])) limMap[String(l.party || '')] = num(l.limit_amount)
+  const overLimitB7 = custOpen.filter((x) => num(limMap[String(x.nm || '')]) > 0 && num(x.t) > num(limMap[String(x.nm || '')])).length
+  const ar = { total: arTotalB7 }, ap = { total: agg.ap }, inc = { total: pl.cash_in }, out = { total: pl.cash_out }
+  const pending = { n: agg.pending }, orderAdd = { t: pl.income }, payableAdd = { t: pl.payable_add }
+  const matCost = { t: pl.mat }
+  const expCash = { t: pl.cash_exp }, todayIn = { t: agg.today_in }
   // 坏账核销：客户那笔钱确认收不回来了，从「应收」里划掉。它不是现金支出，所以以前既不在成本里、
   // 也不在现金流里 —— 结果家底少了、利润一点没少，两个数字越走越远。
-  const woLoss = round2(num(agg.wo))
-  const woGain = round2(num(agg.wo_g))
-  const accAdj = { amort: round2(num(agg.amort)), accrue_int: round2(num(agg.acr)), dep: round2(num(agg.dep)) }
+  const woLoss = round2(num(pl.writeoff))
+  const woGain = round2(num(pl.writeoff_ap))
+  const accAdj = { amort: round2(num(pl.amort)), accrue_int: round2(num(pl.accrue)), dep: round2(num(pl.dep)) }
   accAdj.net = round2(accAdj.amort + accAdj.accrue_int + accAdj.dep)
   const expTotal = round2(num(expCash.t) + accAdj.net)
   // 任何一条明细查询失败都不能把首页整页打挂：拿不到就当空，并在 degraded 里说明
@@ -11411,13 +12223,13 @@ app.get('/dashboard', async (c) => {
   const cntOverdue = num(cntOverdueR && cntOverdueR.n)
   const cntDue = num(cntDueR && cntDueR.n)
   const cntPay = num(cntPayR && cntPayR.n)
-  const topCust = topCustR || {}, buds = R0(budsR)
+  const topCust = topCustB7 || {}, buds = R0(budsR)
   const debtRows = R0(debtRowsR).results, debtReps = R0(debtRepsR).results
   const debts = (() => {
     const list = debtRows.map((d) => debtView(d, debtReps.filter((r) => r.debt_id === d.id))).filter((x) => x.status === 'open')
     return { total_principal: round2(list.reduce((a, x) => a + x.remain, 0)), month_interest: round2(list.reduce((a, x) => a + x.monthly_interest, 0)), overdue_count: list.filter((x) => x.overdue).length, soon: list.filter((x) => !x.overdue && x.days_to_due !== null && x.days_to_due >= 0 && x.days_to_due <= 7) }
   })()
-  const overLimit = { n: num(agg.over_limit) }
+  const overLimit = { n: overLimitB7 }
   const curM = now().slice(0, 7)
   const tgtRow = { receive: num(agg.tgt_receive), order_add: num(agg.tgt_order) }
   // 预算：一次分组查出本月各分类已花，再和预算比（原来每个预算查一次）
@@ -12261,37 +13073,50 @@ app.get('/ar-summary', async (c) => {
     // 第 20 轮 B4：这六条查询彼此没有任何依赖，以前却是六次串行 await ——
     // 每条 D1 往返 80–120ms（同文件 :15549 的注释自己写着这个数），白等 400–700ms，
     // 而 /desk 首屏就调它。改成并发。
-    const [open, over, due, add, got, topR] = await Promise.all([
-      q('SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price' + sAr + oAr, ...(sf.on ? [sf.who] : [])).first(),
-      q("SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= ?" + sAr + oAr, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first(),
-      q("SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAr + oAr, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first(),
+    // 第 23 轮 B6：open/overdue/due 三条以前各扫一遍 orders（同一批未结清的行读三次）。
+    // 现在一次扫描、用条件聚合把六个数一起算出来（口径逐字不变：还是「未结清」那批行）。
+    const LEFT = 'price - COALESCE(paid,0) - COALESCE(written_off,0)'
+    const [open, add, got, topR] = await Promise.all([
+      q(`SELECT COUNT(*) AS open_n, COALESCE(${SUM_MONEY(LEFT)},0) AS open_t,
+        COALESCE(SUM(CASE WHEN substr(created_at,1,10) <= ? THEN 1 ELSE 0 END),0) AS over_n,
+        COALESCE(${SUM_MONEY(`CASE WHEN substr(created_at,1,10) <= ? THEN ${LEFT} ELSE 0 END`)},0) AS over_t,
+        COALESCE(SUM(CASE WHEN due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ? THEN 1 ELSE 0 END),0) AS due_n,
+        COALESCE(${SUM_MONEY(`CASE WHEN due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ? THEN ${LEFT} ELSE 0 END`)},0) AS due_t
+        FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price` + sAr + oAr,
+        ...(sf.on ? [dayAgo(30), dayAgo(30), today, dayAfter(7), today, dayAfter(7), sf.who] : [dayAgo(30), dayAgo(30), today, dayAfter(7), today, dayAfter(7)])).first(),
       q('SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?' + sAr + oAr, ...(sf.on ? [m, sf.who] : [m])).first(),
       q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND month=?" + sArL + (sc.on ? ' AND ref_id IN (SELECT id FROM orders WHERE customer IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first(),
       q('SELECT customer name, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price' + sAr + oAr + ' GROUP BY customer ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()
     ])
     const top = (topR && topR.results) || []
     return c.json({
-      type, open_amount: round2(num(open.t)), open_count: num(open.n),
-      overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
-      due_amount: round2(num(due.t)), due_count: num(due.n),
+      type, open_amount: round2(num(open.open_t)), open_count: num(open.open_n),
+      overdue_amount: round2(num(open.over_t)), overdue_count: num(open.over_n),
+      due_amount: round2(num(open.due_t)), due_count: num(open.due_n),
       month_new: round2(num(add.t)), month_new_count: num(add.n), month_settled: round2(num(got.t)),
       top: top.map((x) => ({ name: x.name, amount: round2(num(x.t)) }))
     })
   }
   // 第 20 轮 B4：同上，六条并发。
-  const [open, over, due, add, paid, topR] = await Promise.all([
-    q('SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount' + sAp + oAp, ...(sf.on ? [sf.who] : [])).first(),
-    q("SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND substr(created_at,1,10) <= ?" + sAp + oAp, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first(),
-    q("SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAp + oAp, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first(),
+  // 第 23 轮 B6：同上，应付侧三条并成一次扫描。
+  const LEFT_P = 'amount - COALESCE(paid,0) - COALESCE(written_off,0)'
+  const [open, add, paid, topR] = await Promise.all([
+    q(`SELECT COUNT(*) AS open_n, COALESCE(${SUM_MONEY(LEFT_P)},0) AS open_t,
+      COALESCE(SUM(CASE WHEN substr(created_at,1,10) <= ? THEN 1 ELSE 0 END),0) AS over_n,
+      COALESCE(${SUM_MONEY(`CASE WHEN substr(created_at,1,10) <= ? THEN ${LEFT_P} ELSE 0 END`)},0) AS over_t,
+      COALESCE(SUM(CASE WHEN due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ? THEN 1 ELSE 0 END),0) AS due_n,
+      COALESCE(${SUM_MONEY(`CASE WHEN due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ? THEN ${LEFT_P} ELSE 0 END`)},0) AS due_t
+      FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount` + sAp + oAp,
+      ...(sf.on ? [dayAgo(30), dayAgo(30), today, dayAfter(7), today, dayAfter(7), sf.who] : [dayAgo(30), dayAgo(30), today, dayAfter(7), today, dayAfter(7)])).first(),
     q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=?' + sAp + oAp, ...(sf.on ? [m, sf.who] : [m])).first(),
     q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND month=?" + sApL + (sc.on ? ' AND ref_id IN (SELECT id FROM payables WHERE supplier IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first(),
     q('SELECT supplier name, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount' + sAp + oAp + ' GROUP BY supplier ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()
   ])
   const top = (topR && topR.results) || []
   return c.json({
-    type, open_amount: round2(num(open.t)), open_count: num(open.n),
-    overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
-    due_amount: round2(num(due.t)), due_count: num(due.n),
+    type, open_amount: round2(num(open.open_t)), open_count: num(open.open_n),
+    overdue_amount: round2(num(open.over_t)), overdue_count: num(open.over_n),
+    due_amount: round2(num(open.due_t)), due_count: num(open.due_n),
     month_new: round2(num(add.t)), month_new_count: num(add.n), month_settled: round2(num(paid.t)),
     top: top.map((x) => ({ name: x.name, amount: round2(num(x.t)) }))
   })
@@ -13163,13 +13988,23 @@ ${q.note ? `<h2>说明</h2><div class="sub" style="text-align:left">${escHtml(q.
 <div class="tip2" id="tip2">点一下就行，不用打字。老板那边马上能看到。</div>
 <div class="sign"><span>报价人：____________</span><span>客户确认：____________</span><span>日期：____________</span></div>
 <script>
+// 第 23 轮 A5（真 bug）：以前第一行就把两个按钮 disable 掉，而失败分支从来不恢复 ——
+// 客户看到「请再点一次」，可按钮是灰的，点不动。这是客户侧唯一入口。
+function qBtns(on){ document.querySelectorAll('.pick button').forEach(function(b){ b.disabled = !on }) }
 function decide(ok){
-  document.querySelectorAll('.pick button').forEach(function(b){b.disabled=true});
+  qBtns(false);
   fetch('/quote-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:${q.id},t:'${want}',x:'${expQ}',ok:!!ok})})
-    .then(function(r){return r.json()}).then(function(d){
-      document.getElementById('tip2').textContent = d.ok ? (ok?'已回复「接受」，老板会尽快跟您确认排产。':'已回复「再谈谈」，老板会联系您。') : (d.error||'没提交成功，请再点一次');
+    .then(function(r){ return r.json().then(function(d){ return { ok: r.ok, d: d || {} } }).catch(function(){ return { ok: false, d: {} } }) })
+    .then(function(o){
+      var d = o.d
+      var good = o.ok && d.ok !== false
+      document.getElementById('tip2').textContent = good ? (ok?'已回复「接受」，老板会尽快跟您确认排产。':'已回复「再谈谈」，老板会联系您。') : (d.error||'没提交成功，请再点一次（按钮已经恢复，可以再点）');
       document.getElementById('tip2').className = 'tip2 done';
-    }).catch(function(){document.getElementById('tip2').textContent='网络不太好，请再点一次'});
+      if(!good) qBtns(true);
+    }).catch(function(){
+      document.getElementById('tip2').textContent='网络不太好，请再点一次（按钮已经恢复）';
+      qBtns(true);
+    });
 }
 </script>`
   return c.html(a4Page({
@@ -13859,7 +14694,9 @@ app.post('/payables/:id/pay', async (c) => {
 // 现付支出
 app.post('/expenses', async (c) => {
   const body = await c.req.json().catch(() => ({}))
-  const { amount, category, remark, operator, account_id, confirm_dup, date } = body
+  const { amount, category: categoryRaw, remark, operator, account_id, confirm_dup, date } = body
+  // 第 23 轮 A4：category 可能被上面那段「数字 id 换名字」改写，所以这里用 let。
+  let category = categoryRaw
   // 第 10 轮 E1/E4：支出金额先按分规整，认不出直接 400（以前 Excel 里的科学计数法会静默记 0 元）。
   const expNum = numStrict(amount)
   if (expNum === null || expNum <= 0) return c.json({ error: '金额必填（金额要是正常数字）' }, 400)
@@ -13869,6 +14706,15 @@ app.post('/expenses', async (c) => {
   const db = c.env.DB
   const cid = String(body.client_id || '')
   if (await opSeen(db, cid, "expense")) return c.json({ ok: true, dup_ok: true })
+  // 第 23 轮 A4：第 20 轮 /desk 的「快速记一笔」把分类下拉的 value 写成了 categories.id，
+  // 于是那段时间从网页记的支出，category 存的是「39」这种数字。页面已经改回名字了，
+  // 但手机端缓存、以及已经存进去的脏数据还得兜一下：纯数字且能对上分类 id 就换成名字。
+  let catName0 = String(category || '')
+  if (/^\d+$/.test(catName0)) {
+    const cRow = await db.prepare('SELECT name FROM categories WHERE id=?').bind(num(catName0)).first().catch(() => null)
+    if (cRow && cRow.name) catName0 = String(cRow.name)
+  }
+  category = catName0
   const created = stampOf(date)
   if (await isMonthLocked(db, created.slice(0, 7))) return c.json({ error: '该月份已结账锁定，先解锁再记账' }, 403)
   // 防重复：同一天 + 同分类 + 同金额，提醒一次
@@ -16759,6 +17605,8 @@ app.get('/statement-ack', async (c) => {
   if (!good || want !== good || linkExpired(xq)) return c.html(ackPage('<div class="card"><h3>链接已失效或已过期</h3><div class="tip">请让老板在小程序里重新发一次确认链接。</div></div>'))
   const t = await getTitle(db)
   const d = await conclusionOf(db, type, party, month)
+  // 第 23 轮 A2：客户页算不出来时，以前会显示「您还欠 ¥0.00」——客户截图说「我不欠了」。
+  if (!d) return c.html(ackPage('<div class="card"><h3>这一页这次没打开</h3><div class="tip">账没算出来（服务器刚抖了一下），不是你的问题。过一会儿再点一次这条链接，或者直接打电话问老板。</div></div>'))
   const docs = ((await db.prepare(type === 'ar'
     ? 'SELECT id, created_at, item_name AS item, price AS amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo FROM orders WHERE customer=? AND price-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 ORDER BY created_at ASC LIMIT 12'
     : 'SELECT id, created_at, remark AS item, amount, COALESCE(paid,0) AS paid, COALESCE(written_off,0) AS wo FROM payables WHERE supplier=? AND amount-COALESCE(paid,0)-COALESCE(written_off,0)>0.005 ORDER BY created_at ASC LIMIT 12').bind(party).all()).results || [])
@@ -16771,9 +17619,14 @@ app.get('/statement-ack', async (c) => {
     .bind(party, type, month).first().catch(() => null)
   const ackBanner = prevAck
     ? `<div class="ok" style="margin-top:0;background:#fff8e6;color:#8a5a00">您已于 ${escHtml(String(prevAck.ack_at || '').slice(0, 16).replace('T', ' '))} ${
-      prevAck.ack === 'ok' ? '确认「对得上」' : '说过「有几笔对不上」'}${prevAck.ack !== 'ok' && prevAck.note ? '（' + escHtml(String(prevAck.note).slice(0, 60)) + '）' : ''}。<br>要改口就在下面重新点一次（同一天点同一个按钮只记一次，换一个说法当场就改过来）。</div>`
+      prevAck.ack === 'ok' ? '确认「对得上」' : (prevAck.ack === 'note' ? '留了一句话' : '说过「有几笔对不上」')}${prevAck.ack !== 'ok' && prevAck.note ? '（' + escHtml(String(prevAck.note).slice(0, 60)) + '）' : ''}。<br>要改口就在下面重新点一次（同一天点同一个按钮只记一次，换一个说法当场就改过来）。</div>`
     : ''
-  const inner = `<div class="hd"><b>${escHtml(t.title || '对账确认')}</b><span>${type === 'ar' ? '给您对一下加工费的账' : '和您对一下货款的账'} · ${escHtml(month)}</span></div>`
+  // 第 23 轮 C7：客户想把这份对账单存一份给会计，以前页面没有「存成 PDF」，
+  // 微信里也不能打印 → 只能截图。这里照抄打印页那两个按钮（打印 / 复制链接）。
+  const inner = `<div class="pbar" style="display:flex;gap:8px;margin-bottom:10px">`
+    + `<button class="btn" id="pbtn" onclick="window.print()" style="flex:1">🖨 存成 PDF / 打印</button>`
+    + `<button class="btn gray" id="cbtn" onclick="copyLink()" style="flex:1">🔗 复制本页链接</button></div>`
+    + `<div class="hd"><b>${escHtml(t.title || '对账确认')}</b><span>${type === 'ar' ? '给您对一下加工费的账' : '和您对一下货款的账'} · ${escHtml(month)}</span></div>`
     + ackBanner
     + `<div class="card"><h3>${escHtml(party)}，到 ${now().slice(0, 10)}</h3>`
     + `<div class="kv"><span>月初欠</span><b>¥${fmtMoney(num(d.open))}</b></div>`
@@ -16786,18 +17639,24 @@ app.get('/statement-ack', async (c) => {
     + (d.recon && d.recon.length && d.lines && d.lines.length ? `<div class="tip">${escHtml(d.lines.join('；'))}</div>` : '')
     + `</div>`
     + (docRows ? `<div class="card"><h3>还没结清的单子（${docs.length} 笔${openAmt > 0 && docs.length >= 12 ? '，只列最早 12 笔' : ''}）</h3>${docRows}</div>` : '')
-    + `<div class="card"><h3>请您核一下</h3><div class="tip">金额对得上就点下面第一个按钮；有对不上的，点第二个并写一下差多少。</div>`
+    + `<div class="card"><h3>请您核一下</h3><div class="tip">金额对得上就点第一个；只是想交代一句（比如「下周五给你」）点第二个，账照收；数字确实不对点第三个。</div>`
     + `<button class="btn" onclick="ack('ok')">✓ 对得上，没问题</button>`
+    + `<button class="btn gray" onclick="showSay()">💬 我有话说（账照收，只是说一句）</button>`
     + `<button class="btn gray" onclick="showDoubt()">✗ 有几笔对不上</button>`
+    + `<div id="say" style="display:none"><input class="inp" id="sayNote" placeholder="要跟老板说的话（比如「这 3 万下周五付」）"/>`
+    + `<button class="btn" onclick="ack('note')">发过去</button></div>`
     + `<div id="doubt" style="display:none"><input class="inp" id="amt" type="number" placeholder="差多少钱（比如 800，多了写 -800）"/>`
     + `<input class="inp" id="note" placeholder="哪一笔不对（选填，比如 6 月那笔 3000 应是 3800）"/>`
     + `<button class="btn red" onclick="ack('doubt')">提交</button></div>`
-    + `<div id="res"></div><div class="tip">这是只读页面，只能看您自己这一家。点完老板那边就能看到结果。</div></div>`
+    + `<div id="res"></div><div class="tip">这是只读页面，只能看您自己这一家。点完老板那边就能看到结果。要留个底就点上面的「存成 PDF」。</div></div>`
   // 第 19 轮 D5：JSON.stringify 不转义 "</script>"。现在安全完全靠「四个字段都进了签名」，
   // 哪天有人往这个对象里加一个未签名字段就是 XSS。把 < 换成 \u003c 永久免疫。
   const script = `var P=${JSON.stringify({ type, party, month, t: want, x: xq }).replace(/</g, '\\u003c')};`
-    + `function showDoubt(){document.getElementById('doubt').style.display='block'}`
+    + `function showDoubt(){document.getElementById('doubt').style.display='block';document.getElementById('say').style.display='none'}`
+    + `function showSay(){document.getElementById('say').style.display='block';document.getElementById('doubt').style.display='none'}`
+    + `function copyLink(){var u=location.href;if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(u).then(function(){alert('链接复制好了，可以发给会计')},function(){window.prompt('复制这条链接：',u)})}else{window.prompt('复制这条链接：',u)}}`
     + `function ack(kind){var amt=0,note='';if(kind==='doubt'){amt=Number(document.getElementById('amt').value||0);note=String(document.getElementById('note').value||'')}`
+    + `if(kind==='note'){note=String(document.getElementById('sayNote').value||'').trim();if(!note){alert('写一句要跟老板说的话');return}}`
     + `if(kind==='doubt'&&!amt&&!note){alert('写一下差多少，或者说明哪一笔不对');return}`
     + `fetch('/statement-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:P.type,party:P.party,month:P.month,t:P.t,x:P.x,ack:kind,amount:amt,note:note})})`
     // 第 20 轮 A1（高危）：以前不判 r.ok，直接 d.text||'收到了，谢谢！' —— 后端 403（链接过期）
@@ -16822,7 +17681,9 @@ app.post('/statement-ack', async (c) => {
   const bx = String(b.x || '')
   const good = saved && party ? await sigBook(mainDb, c.env.BOOK, party, 'ack:' + type + '#' + month, numTs(bx)) : ''
   if (!good || String(b.t || '') !== good || linkExpired(bx)) return c.json({ error: '链接已失效或已过期，请让老板重新发一次' }, 403)
-  const ack = b.ack === 'doubt' ? 'doubt' : 'ok'
+  // 第 23 轮 C7：客户想说一句话（「这 3 万下周五给你」）以前只能点「有几笔对不上」——
+  // 老板看到「对账有争议」，其实一分钱不差。现在多一种 ack='note'：账照收，另有话说。
+  const ack = b.ack === 'doubt' ? 'doubt' : (b.ack === 'note' ? 'note' : 'ok')
   // 第 12 轮 A5：POST 以前不防重放——同一条链接可以反复提交，每次都插一条 statement_log，
   // 「对方确认了 3 次」的假记录堆起来。现在同 party+month+type 的确认链接只能提交一次（提交后令牌作废）。
   // 第 19 轮 B2：以前 cid 里只有 party+type+month → 客户先点「有几笔对不上」，
@@ -16835,7 +17696,10 @@ app.post('/statement-ack', async (c) => {
   if (!(await opClaim(db, cid, 'statement-ack'))) return c.json({ ok: true, dup_ok: true, ack, text: '这条已经确认过了，不用再点了' })
   const amt = round2(num(b.amount))
   const note = String(b.note || '').slice(0, 120)
-  const memo = ack === 'ok' ? '对方确认：对得上' : ('对方说对不上' + (amt ? '，差 ¥' + amt : '') + (note ? '（' + note + '）' : ''))
+  if (ack === 'note' && !note) return c.json({ error: '写一句要说的话（比如「下周五付」）', code: 'no_note' }, 400)
+  const memo = ack === 'ok' ? '对方确认：对得上'
+    : ack === 'note' ? ('对方有话说：' + note)
+    : ('对方说对不上' + (amt ? '，差 ¥' + amt : '') + (note ? '（' + note + '）' : ''))
   try {
     await db.prepare('INSERT INTO statement_log (party,type,month,channel,note,ack,ack_at,created_at) VALUES (?,?,?,?,?,?,?,?)')
       .bind(party, type, month, '自助确认', memo.slice(0, 200), ack, now(), now()).run()
@@ -16849,7 +17713,9 @@ app.post('/statement-ack', async (c) => {
     ok: true, ack,
     text: ack === 'ok'
       ? '收到，谢谢！老板那边已经看到「对得上」，后面按这个数结。'
-      : '收到，已经把「对不上' + (amt ? '（差 ¥' + amt + '）' : '') + '」告诉老板了，会尽快跟您核。'
+      : ack === 'note'
+        ? '收到，您这句话已经带给老板了。账还是按上面这个数，不用您再点别的。'
+        : '收到，已经把「对不上' + (amt ? '（差 ¥' + amt + '）' : '') + '」告诉老板了，会尽快跟您核。'
   })
 })
 
@@ -17031,7 +17897,7 @@ async function partyTermMap(db) {
   return map
 }
 
-async function dueRows(db, type, months, party, limit, offset, scope) {
+async function dueRows(db, type, months, party, limit, offset, scope, kw) {
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
@@ -17039,72 +17905,85 @@ async function dueRows(db, type, months, party, limit, offset, scope) {
   // 第 20 轮 B9：账期表以前每次 /due-schedule 都整表读（500 家≈300 行），
   // 而 /desk 首屏就调它。30 秒缓存，改账期最多 30 秒后生效（和余额缓存同口径）。
   const tmap = await partyTermMap(db)
+  // 第 23 轮 C2：binds 必须按 SQL 里 ? 出现的先后顺序拼。
+  // 以前是先 push(party) 再 push(scope.binds)，而 SQL 是 scope 条件写在 party 条件前面 ——
+  // 员工（只看自己客户）一用「按客户筛选」就把两边的值对调了，查出来永远是空。
   const binds = []
-  if (party) binds.push(String(party))
   // 第 12 轮 C1：员工（scopeOwn）只能看分给自己的客户/供应商，SQL 里加归属条件。
   const scopeF = (scope && scope.on) ? ` AND ${scope.sql}` : ''
   if (scope && scope.on) binds.push(...scope.binds)
+  if (party) binds.push(String(party))
   // 以前一次 LIMIT 3000：单子超过 3000 张时，最老的一批被静默丢掉，
   // 汇总的「总欠款」也跟着少算，用户以为全账都在表里。
   // 改成按 rowid 分页取完（每页 3000），再统计总数。
-  const raw = []
-  // 第 20 轮 B5：条件写成「已付+已核销 < 金额」这个标准形式 —— 和 schema 里
-  // idx_orders_open / idx_payables_open 这两个**部分索引**的谓词逐字一致，
-  // SQLite 才肯用它。以前写成 `${amt}-paid-wo > 0`（表达式比较），索引一律用不上。
-  let pageSql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE COALESCE(paid,0)+COALESCE(written_off,0) < ${amt}${scopeF}`
-  if (party) pageSql += ` AND ${col} = ?`
-  pageSql += ' ORDER BY id ASC LIMIT 3000 OFFSET ?'
-  for (let off = 0; off < 60000; off += 3000) {
-    const ps = binds.length ? binds.concat([off]) : [off]
-    const part = (await db.prepare(pageSql).bind(...ps).all()).results || []
-    raw.push(...part)
-    if (part.length < 3000) break
-  }
-  const truncated = raw.length >= 60000
+  // 第 23 轮 B10：以前「合计」要先把全部未结单按 3000 一段搬进 Worker（最多 6 万行），
+  // 造几千个对象再全量排序，最后只取 20 行。现在合计交给 SQL 一次算（与 JS 同一套口径），
+  // 列表也交给 SQL 排序分页 —— 往返从 1–20 次降到 2 次。
+  // 到期日口径必须和以前 JS 里一模一样：先看单子上填的 due_date，
+  // 没填就「开单日 + 客户账期（没有账期按 30 天）」。
+  const todayS = now().slice(0, 10)
   const horizon = dayAfter(num(months) > 0 ? num(months) * 31 : 186)
-  const out = []
-  raw.forEach((r) => {
-    const left = round2(num(r.amount) - num(r.paid) - num(r.wo))
-    if (left <= 0.005) return
-    let due = r.due_date ? String(r.due_date).slice(0, 10) : ''
-    let guess = false
-    if (!due) {
-      const td0 = tmap[norm(r.party)]
-      const td = td0 > 0 ? td0 : 30
-      const d = new Date(String(r.created_at).slice(0, 10) + 'T00:00:00.000Z')
-      d.setUTCDate(d.getUTCDate() + td)
-      due = d.toISOString().slice(0, 10)
-      guess = true
-    }
-    const days = due ? dayDiff(due) : null
-    let state = '没有到期日'
-    if (due && days > 0) state = '已逾期 ' + days + ' 天'
-    else if (due && days === 0) state = '今天到期'
-    else if (due) state = '还有 ' + Math.abs(days) + ' 天'
-    out.push({ id: r.id, party: r.party || '', item: r.item || '', amount: round2(num(r.amount)), left, due, guess, days, state, created_at: String(r.created_at).slice(0, 10) })
-  })
-  out.sort((a, b) => (a.due || '9999') < (b.due || '9999') ? -1 : 1)
-  const soon = out.filter((x) => x.days !== null && x.days <= 7)
-  const overdue = out.filter((x) => x.days !== null && x.days > 0)
-  const future = out.filter((x) => x.days !== null && x.days < 0 && x.due <= horizon)
+  const kw1 = String(kw || '').trim()
+  // due_eff：和 JS 里 due / guess 的算法等价（SQLite 的 date(x, '+N day') 走 UTC，与 JS 的 UTC 加法一致）
+  const dueEff = (a) => `COALESCE(NULLIF(${a}.due_date,''), date(${a}.created_at, '+' || (CASE WHEN pt.term_days > 0 THEN pt.term_days ELSE 30 END) || ' day'))`
+  const OPENW = (a) => `COALESCE(${a}.paid,0)+COALESCE(${a}.written_off,0) < ${a}.${amt}`
+  const LEFT = (a) => `${a}.${amt}-COALESCE(${a}.paid,0)-COALESCE(${a}.written_off,0)`
+  const joinPT = `LEFT JOIN party_terms pt ON pt.party = t.${col}`
+  const filters = []
+  const fbinds = []
+  if (scope && scope.on) { filters.push(`t.${col} IN (SELECT party FROM party_staff WHERE staff=?)`); fbinds.push(...scope.binds) }
+  if (party) { filters.push(`t.${col} = ?`); fbinds.push(party) }
+  if (kw1) { filters.push(`(t.${col} LIKE ? OR COALESCE(t.${itemCol},'') LIKE ? OR CAST(t.id AS TEXT) = ?)`); fbinds.push('%' + kw1 + '%', '%' + kw1 + '%', kw1) }
+  const WHERE = ` WHERE ${OPENW('t')}` + (filters.length ? ' AND ' + filters.join(' AND ') : '')
+  const de = dueEff('t')
+  const totSql = `SELECT COUNT(*) AS n, ${SUM_MONEY(LEFT('t'))} AS tot,`
+    + ` SUM(CASE WHEN ${de} < ? THEN 1 ELSE 0 END) AS over_n,`
+    + ` ${SUM_MONEY(`CASE WHEN ${de} < ? THEN ${LEFT('t')} ELSE 0 END`)} AS over_t,`
+    + ` SUM(CASE WHEN ${de} >= date(?, '-7 day') THEN 1 ELSE 0 END) AS soon_n,`
+    + ` ${SUM_MONEY(`CASE WHEN ${de} >= date(?, '-7 day') THEN ${LEFT('t')} ELSE 0 END`)} AS soon_t,`
+    + ` SUM(CASE WHEN ${de} > ? AND ${de} <= ? THEN 1 ELSE 0 END) AS future_n,`
+    + ` ${SUM_MONEY(`CASE WHEN ${de} > ? AND ${de} <= ? THEN ${LEFT('t')} ELSE 0 END`)} AS future_t`
+    + ` FROM ${tbl} t ${joinPT}${WHERE}`
+  const totR = await db.prepare(totSql).bind(todayS, todayS, todayS, todayS, todayS, horizon, todayS, horizon, ...fbinds).first()
+  const tot = totR || {}
+  const rowsTotal = num(tot.n)
+  const total = round2(num(tot.tot))
   const size = Math.max(10, Math.min(300, num(limit) || 60))
-  const off = Math.max(0, num(offset) || 0)
-  const page = out.slice(off, off + size)
+  const off0 = Math.max(0, num(offset) || 0)
+  let page = []
+  if (rowsTotal > 0 && off0 < rowsTotal) {
+    const pageSql = `SELECT t.id, t.${col} AS party, t.${itemCol} AS item, t.${amt} AS amount, t.paid, COALESCE(t.written_off,0) AS wo, t.due_date, t.created_at, ${de} AS due_eff`
+      + ` FROM ${tbl} t ${joinPT}${WHERE} ORDER BY ${de} ASC, t.id ASC LIMIT ? OFFSET ?`
+    const pr = (await db.prepare(pageSql).bind(...fbinds, size, off0).all()).results || []
+    page = pr.map((r) => {
+      const left = round2(num(r.amount) - num(r.paid) - num(r.wo))
+      const due = String(r.due_eff || '').slice(0, 10)
+      const guess = !r.due_date
+      const days = due ? dayDiff(due) : null
+      let state = '没有到期日'
+      if (due && days > 0) state = '已逾期 ' + days + ' 天'
+      else if (due && days === 0) state = '今天到期'
+      else if (due) state = '还有 ' + Math.abs(days) + ' 天'
+      return { id: r.id, party: r.party || '', item: r.item || '', amount: round2(num(r.amount)), left, due, guess, days, state, created_at: String(r.created_at).slice(0, 10) }
+    })
+  }
+  // 第 20 轮 B5 的注释：条件写成「已付+已核销 < 金额」这个标准形式 —— 和 schema 里
+  // idx_orders_open / idx_payables_open 两个**部分索引**的谓词逐字一致，SQLite 才肯用它。
   return {
-    rows: page, page_size: size, offset: off, shown: page.length, rows_total: out.length,
-    has_more: off + page.length < out.length, next_offset: off + page.length,
-    total: centsSum(out, (x) => x.left),
-    overdue_total: centsSum(overdue, (x) => x.left),
-    soon_total: centsSum(soon, (x) => x.left),
-    future_total: centsSum(future, (x) => x.left),
-    no_due_total: centsSum(out.filter((x) => !x.due), (x) => x.left),
-    count: out.length, overdue_count: overdue.length,
-    rows_fetched: raw.length,
+    rows: page, page_size: size, offset: off0, shown: page.length, rows_total: rowsTotal,
+    has_more: off0 + page.length < rowsTotal, next_offset: off0 + page.length,
+    total,
+    overdue_total: round2(num(tot.over_t)),
+    soon_total: round2(num(tot.soon_t)),
+    future_total: round2(num(tot.future_t)),
+    no_due_total: 0,
+    count: rowsTotal, overdue_count: num(tot.over_n),
+    rows_fetched: rowsTotal,
     // 第 14 轮：以前只回一个 truncated 标记，前端不显示，于是「合计」被当成全量。
-    // 6 万行封顶之后，下面的 total/overdue_total 只是「取到的这些行之和」，真实总额更大。
-    truncated: truncated || undefined,
-    warn: truncated ? ('账本太大：这份只按前 ' + raw.length + ' 行算，下面的合计只是这 ' + raw.length + ' 行之和，真实总额会比这个大。要全量请用备份包') : undefined,
-    code: truncated ? 'truncated' : undefined
+    // 第 23 轮 B10：合计现在由 SQL 一次算全，不再有「只算了前 N 行」的问题。
+    truncated: undefined,
+    warn: undefined,
+    code: undefined
   }
 }
 
@@ -17116,7 +17995,23 @@ app.get('/due-schedule', async (c) => {
   const sc = await scopeOwn(c)
   if (sc.on) { try { await partyStaffTable(db) } catch (e) { noteFail(e, '·到期表客户归属') } }
   const scope = sc.on ? { on: true, sql: `${col} IN (SELECT party FROM party_staff WHERE staff=?)`, binds: [sc.name] } : null
-  const r = await dueRows(db, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim(), c.req.query('limit'), c.req.query('offset'), scope)
+  const r = await dueRows(db, type, num(c.req.query('months')) || 6, (c.req.query('party') || '').trim(), c.req.query('limit'), c.req.query('offset'), scope, c.req.query('q'))
+  // 第 23 轮 C3：催款要拨号、要记「我催过了」。电话存在 party_profiles，
+  // 催款记录在 dunning_log —— 以前这两样只有手机上看得到，电脑上只能翻微信找号码。
+  let profRows = []
+  let dunRows = []
+  try { profRows = (await db.prepare('SELECT party, contact, phone FROM party_profiles').all()).results || [] } catch (e) { noteFail(e, '到期表·电话') }
+  try { dunRows = (await db.prepare("SELECT party, MAX(created_at) AS last_at, MAX(COALESCE(promise_date,'')) AS pdate FROM dunning_log WHERE type=? GROUP BY party").bind(type).all()).results || [] } catch (e) { noteFail(e, '到期表·催款记录') }
+  const phMap = {}; profRows.forEach((x) => { phMap[norm(x.party)] = { phone: String(x.phone || ''), contact: String(x.contact || '') } })
+  const dunMap = {}; dunRows.forEach((x) => { dunMap[norm(x.party)] = { at: String(x.last_at || '').slice(0, 10), pdate: String(x.pdate || '').slice(0, 10) } })
+  r.rows.forEach((x) => {
+    const pf = phMap[norm(x.party)] || {}
+    const dn = dunMap[norm(x.party)] || {}
+    x.phone = pf.phone || ''
+    x.contact = pf.contact || ''
+    x.dun_at = dn.at || ''
+    x.dun_pdate = dn.pdate || ''
+  })
   return c.json(Object.assign({ ok: true, type }, r))
 })
 
@@ -18212,7 +19107,13 @@ async function yearReview(db, y) {
     db.prepare(`SELECT o.customer party, substr(l.created_at,1,10) d, l.amount FROM ledger l JOIN orders o ON o.id=l.ref_id
       WHERE l.ref_type='order' AND l.direction='in' AND substr(l.created_at,1,4)=?`).bind(y).all()
   ]
-  const [custR, bigR, dunR, woR, lowR, inR] = await Promise.all(jobs.map((j) => j.catch((e) => { noteFail(e, '年度回顾'); return null })))
+  // 第 23 轮 A7（真 bug）：六条查询失败各自变 null，而下面的句子照旧往下写 ——
+  // 于是会印出「催完收回 0 元（一分没回）」「一共做了 0 家客户的 N 单活」这种自相矛盾又伤人的话。
+  // 现在记住哪几项没取到，对应那句话整句不出，页头明说「这几句没算」。
+  const failKeys = []
+  const jobNames = ['客户排行', '最大一单', '催款记录', '核销', '低价单', '回款流水']
+  const [custR, bigR, dunR, woR, lowR, inR] = await Promise.all(jobs.map((j, ji) => j.catch((e) => { noteFail(e, '年度回顾'); failKeys.push(jobNames[ji]); return null })))
+  const custFail = !custR, dunFail = !dunR, woFail = !woR, lowFail = !lowR, inFail = !inR
   const custs = ((custR && custR.results) || []).map((r) => ({ party: r.party, income: round2(num(r.inc)), cnt: num(r.n) }))
   const big = bigR && num(bigR.price) ? { party: bigR.customer, item: bigR.item_name, price: round2(num(bigR.price)), date: String(bigR.created_at || '').slice(0, 10) } : null
   const duns = (dunR && dunR.results) || []
@@ -18241,23 +19142,27 @@ async function yearReview(db, y) {
   if (!income && !yb.totals.exp) {
     S.push({ tone: 'gray', text: `${y} 年还没记过账，先把单子和钱记上，年底就能回顾了。` })
   } else {
-    S.push({ tone: 'info', text: `${y} 年一共做了 ${custs.length} 家客户的 ${cnt} 单活，接单 ${income} 元，净利 ${profit} 元（净利率 ${margin}%）。` })
+    S.push({ tone: 'info', text: `${y} 年一共做了 ${custFail ? '' : custs.length + ' 家客户的 '}${cnt} 单活，接单 ${income} 元，净利 ${profit} 元（净利率 ${margin}%）。` })
     if (big) S.push({ tone: 'info', text: `最大的一单是 ${big.party} 的「${big.item || '加工'}」，${big.price} 元，${big.date} 开的。` })
     if (active.length >= 2 && best.profit > 0) S.push({ tone: 'ok', text: `最好的一个月是 ${best.label}（${best.profit} 元），最差是 ${worst.label}（${worst.profit} 元）。` })
-    if (duns.length) {
+    if (!dunFail && duns.length) {
       const times = duns.reduce((a, x) => a + num(x.n), 0)
-      S.push({ tone: recovered > 0 ? 'ok' : 'warn', text: `催款催了 ${duns.length} 家共 ${times} 次，催完收回 ${round2(recovered)} 元${recovered > 0 ? `（${recoveredParties} 家给了钱）` : '（一分没回）'}。` })
+      // 第 23 轮 A7：「一分没回」只有在回款流水真的取到了、且真是 0 的时候才说
+      const tail = inFail ? '（回款流水这次没取到，收回多少没法算）' : (recovered > 0 ? `（${recoveredParties} 家给了钱）` : '（一分没回）')
+      S.push({ tone: inFail ? 'warn' : (recovered > 0 ? 'ok' : 'warn'), text: `催款催了 ${duns.length} 家共 ${times} 次，催完收回 ${inFail ? '—' : round2(recovered) + ' 元'}${tail}。` })
     }
-    if (realLoss > 0) S.push({ tone: 'warn', text: `有 ${realLoss} 元是真收不回来的（${realCnt} 单核销掉了）。` })
-    if (missed > 0) S.push({ tone: 'warn', text: `还有约 ${missed} 元是「本来能赚没赚到」的（${missedCnt} 单报价偏低，毛利不到 15%）。` })
+    if (!woFail && realLoss > 0) S.push({ tone: 'warn', text: `有 ${realLoss} 元是真收不回来的（${realCnt} 单核销掉了）。` })
+    if (!lowFail && missed > 0) S.push({ tone: 'warn', text: `还有约 ${missed} 元是「本来能赚没赚到」的（${missedCnt} 单报价偏低，毛利不到 15%）。` })
     if (yb.ar_end > 0) S.push({ tone: 'warn', text: `到年底还有 ${yb.ar_end} 元在外面没收回，这笔钱不在兜里。` })
     S.push({ tone: 'info', text: `年底现金 ${yb.cash.end} 元，算上别人欠的和欠别人的，家底 ${yb.net_worth} 元。` })
-    if (topShare >= 50 && custs.length >= 3) S.push({ tone: 'warn', text: `${custs[0].party} 一家就占了 ${topShare}% 的活，太靠一家了，明年可以多找一家。` })
+    if (!custFail && topShare >= 50 && custs.length >= 3) S.push({ tone: 'warn', text: `${custs[0].party} 一家就占了 ${topShare}% 的活，太靠一家了，明年可以多找一家。` })
     if (margin < 15 && income > 0) S.push({ tone: 'bad', text: `全年净利率只有 ${margin}%，几乎白干，得看看哪几单不赚钱。` })
   }
+  // 第 23 轮 A7：哪几句因为没查到而没算，明说一句，别让老板以为「今年一分钱没催回来」。
+  if (failKeys.length) S.push({ tone: 'gray', text: `这次有 ${failKeys.length} 项没查出来（${failKeys.join('、')}），上面跟这几项有关的话没算，过一会儿再打开看一眼。` })
   const text = [`【${y} 年回顾】`].concat(S.map((x) => x.text)).join('\n')
   return {
-    ok: true, year: y,
+    ok: true, year: y, gaps: failKeys,
     headline: income ? `${y} 年：${cnt} 单活，净赚 ${profit} 元` : `${y} 年还没记过账`,
     stats: { customers: custs.length, orders: cnt, income, profit, margin, cash_end: yb.cash.end, ar_end: yb.ar_end, ap_end: yb.ap_end, net_worth: yb.net_worth, active_months: active.length },
     biggest: big, best: { label: best.label, profit: best.profit }, worst: { label: worst.label, profit: worst.profit },
@@ -22387,7 +23292,8 @@ app.get('/month-report', async (c) => {
     debtLeftAt(db, monthEndOf(m) || (m + '-28')),
     // 预收（客户先打来的钱，我们还欠他货）要减；预付（先付给供应商的钱）要加。
     // 以前这里只有现金+应收−应付−借款，客户打来 2 万定金，家底一分没涨。
-    advLeftAt(db, advEnd).catch((e) => { noteFail(e, '月度归档·预收预付'); return { in: 0, out: 0 } }),
+    // 第 23 轮 A8：这份归档也是永久的，预收预付算不出来就整份别生成，别按 0 写死。
+    advLeftAt(db, advEnd),
     monthPL(db, m),
     reconRate(db, m)
   ])
@@ -22524,7 +23430,16 @@ app.get('/kpi', async (c) => {
       ${SUM_MONEY("CASE WHEN ref_type='order' THEN amount ELSE 0 END")} w,
       ${SUM_MONEY("CASE WHEN ref_type='payable' THEN amount ELSE 0 END")} wg
       FROM writeoffs WHERE COALESCE(month,substr(created_at,1,7))>=? GROUP BY mk`).bind(from6).all(),
-    db.prepare("SELECT o.id, o.created_at, MAX(l.created_at) last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid >= o.price GROUP BY o.id").all(),
+    // 第 23 轮 B2：这条以前把「所有已结清的单 + 它们的全部收款流水」JOIN 出来（全表扫、几万行、
+    // 几百 KB 传回 Worker）再在 JS 里算平均 —— 结果只用了两个数：平均天数、张数。
+    // 现在直接在 SQL 里 AVG，且只看最近 12 个月结清的单（更早的单对「现在收钱快不快」没参考价值，
+    // 而且 `o.paid >= o.price` 是全表判断，老单越多越慢）。
+    db.prepare(`SELECT COUNT(*) AS n, COALESCE(AVG(julianday(last_pay) - julianday(substr(created_at,1,10))), 0) AS avg_days FROM (
+      SELECT o.id, o.created_at, MAX(l.created_at) AS last_pay
+      FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in'
+      WHERE o.paid >= o.price AND substr(o.created_at,1,10) >= date('now','-12 months')
+      GROUP BY o.id
+    ) WHERE julianday(last_pay) >= julianday(substr(created_at,1,10))`).all(),
     db.prepare("SELECT o.customer c, SUM(l.amount) t FROM ledger l JOIN orders o ON l.ref_id=o.id WHERE l.direction='in' AND l.ref_type='order' AND l.month=? GROUP BY o.customer ORDER BY t DESC").bind(m).all(),
     accountBalances(db)
   ].map((x) => x.catch((e) => { noteFail(e); return null }))
@@ -22588,13 +23503,10 @@ app.get('/kpi', async (c) => {
   const debtOpen = num(agg.debt_open)
   const debtRepaid = num(agg.debt_repaid)
   const nw = round2(cashNow + arOpen - apOpen - Math.max(debtOpen - debtRepaid, 0))
-  const paidOrders = rowsOf(paidR)
-  let sumD = 0, cntD = 0
-  for (const o of paidOrders) {
-    const a = Date.parse(o.created_at || ''); const b = Date.parse(o.last_pay || '')
-    if (a && b && b >= a) { sumD += (b - a) / 86400000; cntD++ }
-  }
-  const avg_days = cntD ? round2(sumD / cntD) : 0
+  // 第 23 轮 B2：SQL 已经把平均天数算好了（见上面的 jobs）
+  const paidAgg = rowsOf(paidR)[0] || {}
+  const avg_days = round2(num(paidAgg.avg_days))
+  const cntD = num(paidAgg.n)
   const in3 = num(agg.in3)
   const ar = round2(Math.max(num(agg.ar_end_a) - num(agg.ar_end_b), 0))
   const turnDays = in3 > 0 ? round2((ar / (in3 / 3)) * 30) : 0
@@ -24554,10 +25466,30 @@ const cronAlert = async (db, book, stepName, errMsg) => {
   }
 }
 // 跑一遍自动记账。opts: {force（忽略「今天已经跑过」的标记）, book, onStep（每步结束的回调）}
+// 第 23 轮 A4：第 20 轮网页端「快速记一笔」的支出分类下拉把 value 写成了 categories.id，
+// 于是那段时间从网页记的支出，ledger.category 存的是「39」「40」这种数字。
+// 页面和 POST /expenses 都已经改了，这里把已经写进账里的脏数据修一次。
+// 幂等：settings 里留标记，跑过一次就不再扫。挂在 runAccounting 开头（cron 每天跑）。
+async function fixCategoryIdsOnce(db) {
+  const done = await db.prepare("SELECT value FROM settings WHERE key='fix_cat_id_v23'").first().catch(() => null)
+  if (done && String(done.value || '') === '1') return { skipped: true }
+  const cats = (await db.prepare('SELECT id, name FROM categories').all().catch(() => ({ results: [] }))).results || []
+  let n = 0
+  for (const c of cats) {
+    if (!c || c.id === undefined || !c.name) continue
+    const r = await db.prepare('UPDATE ledger SET category=? WHERE category=?').bind(String(c.name), String(c.id)).run().catch(() => null)
+    n += (r && r.meta && r.meta.changes) || 0
+  }
+  await putSetting(db, 'fix_cat_id_v23', '1')
+  return { fixed: n }
+}
+
 const runAccounting = async (db, opts) => {
   const o = opts || {}
   const book = num(o.book) || 1
   const out = { steps: {}, failed: [] }
+  // 第 23 轮 A4：先把「支出分类存成数字 id」的历史脏数据修一次（幂等，跑过就不再跑）
+  try { out.steps.fix_cat_id = await fixCategoryIdsOnce(db) } catch (e) { out.steps.fix_cat_id = String((e && e.message) || e) }
   // 第 10 轮 I5：自动记账会往流水里写数，写完必须让「本月利润」的缓存失效，
   // 否则 cron 跑完之后首页还显示 5 分钟前的旧利润（cron 不经过 HTTP 中间件的失效钩子）。
   try { invalidatePL(db) } catch (e) { /* 忽略 */ }
