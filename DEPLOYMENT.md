@@ -1303,6 +1303,16 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.49 第 19 轮（网页端第二轮）的七条硬规矩
+
+1. **打印隐藏名单只能收窄，不能拿 `.tip` 当垃圾桶。** `@media print{ .tip{display:none} }` 会把「电话」「数据截至」「验收条款」一起藏掉 —— 印出来的纸上看不到，而这几句正是纸上最该有的东西。要藏的是「只在屏幕上有意义」的控件（按钮、微信提示块），给它们各自的类（`.wxtip`），别复用语义类。
+2. **`m-hide` 必须表头与合计行成对。** 手机断点藏列时，`<thead>` 藏了 4 列、`<tfoot>` 一格不藏，合计行就整体串位（工资单错两格，且看不出错）。改列必改合计行，并且要有断言（`test-web-pages` 里数 `m-hide` 出现次数是否相等）。
+3. **`extraCss` 会赢过移动断点。** 页面自己注入的 `table{font-size:11.5px} th,td{padding:4px 6px}` 与 `A4_CSS` 同权重、且在后面 → 375px 上表宽 450px 撑破卡片。宽表页面必须自带 `@media screen and (max-width:760px)`，或让 `.sheet` 在卡片内横滚。
+4. **给客户看的失效页，一律走 `errorPage()`，不要走 `a4Page()`。** `a4Page` 带「打印/存 PDF」按钮，手机上是张 A4 白纸，点下去印出来的就是「链接已失效」。`errorPage` 支持 `phone`，有号码就别让客户自己找。
+5. **模板字面量里的 `\n` 会被解释成真换行。** 写进页面脚本的 `split('\n')` 到了浏览器就是 `SyntaxError: Invalid or unexpected token`（整页按钮全点不动）。要在页面里出现 `\n`，源文件必须写 `\\n`；`JSON.stringify(...).replace(/</g,'\u003c')` 这种**在服务端执行**的替换只能写 2 个反斜杠。改完页面脚本，务必把 `<script>` 抽出来跑一次 `node --check`。
+6. **缓存头分三类，别一把梭。** ①签名页（URL 里有 `?t=`）：`no-store` + 不发 ETag + 允许压缩；②账目 JSON：`no-store`（公用电脑退出后按后退不该还能看到金额）；③普通页（`/`、`/pc`、`/guide`）：`no-cache` 走 304。注意 `applyEtag` 里任何「提前 return」都必须先把该有的头补上，否则又回到「一个缓存指令都没有」。
+7. **进 `innerHTML` 的东西一律 `esc()`，包括「只是数字旁边的一小段名字」。** `/desk` 的客户名截断后直接拼进 `innerHTML`，而同一页 `localStorage` 里放着老板口令 —— 一个员工把客户名改成 `<img onerror=…>` 就能把口令发走。截断和转义的顺序也要对：先 `slice` 再 `esc`，别把 `&quot;` 截断成半个实体。
+
 ### 4.48 第 18 轮（网页端）的六条硬规矩
 
 1. **服务端内联页也必须过手机这一关**：改 `A4_CSS` / `a4Page` 之后，用 375px 宽度打开对账单、工资单、经营报表各看一遍 —— 全仓只有 `@media print` 没有屏幕断点 11 个月，手机上正文只剩 248px 却没人发现（老板以为「网页版就这样」）。同理：**藏列只许藏序号/签字这类非金额列**，金额列在手机上再挤也得留（藏了等于藏账）。

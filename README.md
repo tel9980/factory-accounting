@@ -1734,6 +1734,19 @@ node scripts/build-exe.mjs --out dist
    - **验证**（干净库 `/tmp/d1ac` + dev 9211，三本账都灌 schema）：`test-arcat` 33 项、`test-apcat` 31 项、`test-pack` 65 项、`smoke` 236 GET 无 5xx、`smoke-write` 主流程 + 写路由 + 备份恢复闭环全通、`check.mjs` 全绿（428 路由 / 57 表 / 651 SQL / 263 调用 / 774 绑定）。
    - ⚠️ 动了前端（录单 chips、单据行、应收页分类卡）→ 小程序要重新上传发布。
 
+361. ✅ **第 19 轮：网页端第二轮 —— 印出来的纸缺东西、客户对账最后一米是断的、电脑上动不了**（用户「网页端可以优化吗」→「好的，按方案，全部由你来完成」，方案见 `docs/优化方案-20261125-网页端第2轮.md`，55 条分四批）。这一轮最要紧的不是样式，而是三件**客户真会踩**的事：
+    - **印出来的纸少了该有的东西**：第 18 轮刚给对账单、工资单加上电话和「数据截至」，结果 `@media print` 里那条 `.tip{display:none}` 把它们连同正文说明一起藏了 —— 打出来的纸上一个字都没有。加工单「货到请当场验收，有异议请在签收时注明」这条免责依据，纸上不存在。改法：隐藏规则从 `.tip` 收窄到只藏微信提示那块（`.wxtip`），`.tip` 改成灰字照印。
+    - **工资单合计行整体错两格**：表头 10 列里有 4 列在手机上被藏（`m-hide`），合计行 10 个格子一个都没藏 → 手机上 6 列 vs 合计行 10 格，数字全串位。合计行补上同样的 `m-hide`。
+    - **批量打对账单永远多一张空白页**：`.psheet:last-of-type{page-break-after:auto}` 永不匹配（`#wxtip` 是 body 最后一个 div）→ 改成给最后一张加 `.last` 类。
+    - 其余印刷项：`/year-print` 8 列在 375px 上表宽 ≈450px（`extraCss` 同权重赢过移动断点）→ 加 `YEAR_TABLE_CSS` 带自己的断点 + `.sheet` 卡片内横滚；`${m.cnt || ''}` 把 **0 印成空白** → `num()`/`fmtMoney()`；经营报表抬头恒为「经营报表」（`getTitle()` 没有 `value` 字段，四处写成 `head.value`）→ 改 `head.title`；报价单存 PDF 会印出「✓ 这个价可以 / 点一下就行」→ 打印时藏 `.pick/.tip2`；签字栏从「制表人」改成带下划线的三格；年度回顾 12 根柱子在手机上挤成 26px → 藏柱顶数字、留文字结论。
+    - **客户对账最后一米**：对账单、进度页、确认页都没有**单号**和**应结日**（客户问「哪张单、什么时候结」答不出来）→ 明细表加「单号 `#id`」「应结日」两列（金额列一列都不藏）；`/track` 只按最近 40 单汇总欠款 → 汇总单独按全部单据算并在页面写明「下面只列最近 40 单」；对账单的账期以前不签名（客户改 `from/to` 就能看全历史）→ 账期进签名；确认页「要改口就重新点一次」但去重键写死月份、第二次点不动 → 去重键加结论+日期（同一天同结论仍防双击）；确认页存 PDF 时标题栏白字白底 → 补打印样式。
+    - **电脑上动不了**：`/desk` 只能看 → 加「快速记一笔」（记收款/记支出，真写库）、单号下钻、每家「发确认」、批量打完留痕；`/desk` 从不带 `X-Book`（多账套老板看到的是第 1 本的数且页面不显示是哪本）→ 统一带 `x-book` 并显示「第 N 本账」；`/desk` 的客户名 `slice()` 后未转义直接进 `innerHTML`，而同一页 `localStorage` 里放着**老板口令** → 过 `esc()`（存储型 XSS 偷口令）；批量页写着「链接 7 天有效，可以发给客户」而它复制的是整页 URL（含 20 家名字与欠款）→ 改成「别外发」；`/pc` 补恢复码重设与退出按钮（首页说「在 /pc 最下面」以前是死链）。
+    - **安全与缓存**：全站加第一步 CSP（`default-src 'none'` + 内联脚本暂时放行）；`/pc` 导入预览 7 处未转义（单元格里的 `<img onerror>` 会在老板浏览器执行）→ 全段 `esc()`；确认页 `JSON.stringify` 不转 `</` → `.replace(/</g,'\u003c')`；账目 JSON 以前一个缓存指令都没有（公用电脑退出后按后退还能看金额）→ 统一 `no-store`；`/version` 早退拿不到任何安全头 → 补 `nosniff`/`noindex`/`no-store`；签名页 `no-store` + `no-transform` 互斥导致 130KB 不压缩 → 删 ETag、允许 CF 压缩；`applyEtag` 的 `content-length` 恒 null（Hono 不设）→ `/backup` 那 9MB 保护是死的，JSON 且无 `if-none-match` 直接跳过；`/track` 失效页是全仓最后一个裸内联 div → 换 `errorPage`；`errorPage` 说「打电话问老板」却不给号码 → 支持 `phone`；`/desk` 加 `<noscript>`、加 `window.onerror` → `POST /client-err`（一天最多 300 条）。
+    - **文案与教程**：首页把 commit 原样印在页脚 → 收进 `title`；500 文案让用户去小程序找「菜单 → 数据检验 → 运行日志」（网页端没这个路径）→ 改成「过一会儿再试，反复出现把这句话发给老板」；首页说「下面两个链接」实际三张卡 → 改三句分工；`/guide` 与第 18/19 轮脱节（0 次提「看账台」、12 个锚点有 7 个点不动、`https://你的域名/pc` 占位符上线、27KB 无搜索）→ 删掉手写目录（顶部已有自动目录）、新增 7.8「电脑看账台」、修占位符、加纯前端搜索框；教程页脚不再显示「版本 dev」。
+    - 验证：新增 `scripts/test-web-pages.mjs`（**116 项**，纯 fetch 不依赖浏览器），登记进 `run-all` 与 `deploy.yml`（44 件）；`run-all` **44/44**（94s 干净库）、`test-cron` 70、`check.mjs` 全绿（439 路由 / 60 表 / 670 SQL / 197 写接口 0 白名单 / 806 绑定）、`check-manifest` 三处一致、`check-live` 17 项。
+    - 踩过的两个坑（已进 DEPLOYMENT 4.49）：①模板字面量里的 `\n` 会被解释成**真换行**，页面脚本直接 `SyntaxError`（`esc(v).split('\n')` 必须写成 `split('\\n')`）；②`JSON.stringify(...).replace(/</g,'\u003c')` 这个 replace 在**服务端**执行，源文件里只能写 2 个反斜杠，写 4 个会变成 `\\u003c`、客户名显示成字面量。
+    - ⚠️ 这次改的全是服务端页面，**小程序不用重传**；但第 18 轮发出去的老打印链接不用重发（签名规则没变）。
+
 360. ✅ **第 18 轮：网页端从「能打开」做到「手机上看得清、打印拿得出手、电脑前真能看账」**（用户「网页端可以优化吗」→「按方案全部由你来完成」，方案见 `docs/优化方案-20261124-网页端.md`）。这一轮改的全是 `backend/index.js` 里那些内联页，账上的算法一行没动：
     - **手机上终于不挤了**：`A4_CSS` 以前只有一个 `@media print`，**零个屏幕断点** —— 375px 宽的手机上，`body{padding:18px}` + `.sheet{padding:14mm 12mm}` 之后正文只剩约 248px，7 列的对账单每列 35px，「本期已收」这种表头必换行、金额挤成竖条。现在加了 `@media screen and (max-width:760px)`：padding 收到 8px/14px、表格 11.5px、按钮条 `position:sticky` 钉在顶部（滚动时一直能点「打印」）、`.m-hide` 类的次要列在手机上隐藏 —— **只藏序号和签字这类列，金额列一列都不藏**（藏了等于藏账）。
     - **微信里打不了印这件事终于说清楚了**：微信内置浏览器不弹打印框，13 个打印页里只有对账单写过一句提示。现在 `a4Page` 统一处理：微信里按钮文案变成「微信里不能打印 · 点这里看怎么办」，点了给三步说明（右上角「…」→ 在浏览器打开 → 打印）；另外加了个「🔗 复制本页链接」按钮（`navigator.clipboard` → `execCommand` → `prompt` 三级兜底），发群里给人看不用再找链接。
@@ -2184,7 +2197,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 
 ## 附录：接口清单（由 `scripts/gen-api-list.mjs` 自动生成，请勿手改）
 
-共 438 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
+共 439 个接口。改完后端跑一次 node scripts/gen-api-list.mjs 即可同步本清单（早期 python 版已删，容器里没有 python）。
 
 **accounts**（4）
 
@@ -2575,7 +2588,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /wx-config`
 - `POST /wx-config`
 
-**其它（单个接口）**（235）
+**其它（单个接口）**（236）
 
 - `GET /`
 - `GET /access-guide`
@@ -2618,6 +2631,7 @@ node server/main.mjs --port 8792 --data /tmp/fa-ci --no-open --no-cron
 - `GET /cashbook`
 - `GET /cashflow`
 - `GET /churn-risk`
+- `POST /client-err`
 - `GET /close-precheck`
 - `POST /cloud-backup`
 - `GET /collect-list`

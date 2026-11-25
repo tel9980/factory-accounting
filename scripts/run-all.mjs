@@ -67,6 +67,9 @@ export const ONLINE = [
   'test-write-methods',
   'test-profit-consistency',
   'test-oldbackup',
+  // 网页端（打印页 / 客户对账页 / 电脑看账台）：纯 fetch 断言，不需要浏览器。
+  // 第 19 轮加的 —— 这些页面以前没有任何自动化，「刚修好又被改坏」反复发生。
+  'test-web-pages',
 ]
 
 export const CASES = [...OFFLINE, ...ONLINE]

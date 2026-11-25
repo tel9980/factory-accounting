@@ -73,6 +73,9 @@ const run = async () => {
   let allowedCount = 0
   for (const [m, p] of writes) {
     if (/^\/auth\//.test(p)) continue   // /auth/* 是口令入口，本来就免口令，单独验（见下）
+    // 第 19 轮 D13：/client-err 是浏览器页面 window.onerror 丢过来的错误上报，
+    // 页面里发请求时拿不到口令头，所以它必须免口令；它只写错误日志、不碰账目。
+    if (p === '/client-err') continue
     // :id 用「刚建的那张单」，别写死 1：写死 1 会撞上「1 号单在过去月份、而那个月被结账锁了」，
     // 于是 /orders/1/status 回 403（月份锁）、被误判成「白名单里的却被拦了」（假红）。
     const path = p.replace(/:[a-zA-Z_]+/g, (x) => (x === ':id' ? String(oid || 1) : 'x'))

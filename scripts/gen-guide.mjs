@@ -175,14 +175,53 @@ const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>
  a{color:#2f6fed}
  .toc{background:#fff;border-radius:12px;padding:14px 18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.06);display:flex;flex-wrap:wrap;gap:8px 16px}
  .toc .toct{width:100%;color:#777;font-size:13px;margin-bottom:2px}
+ /* 第 19 轮 E4：一页 27KB 长文，找「怎么导 Excel」只能靠翻。纯前端过滤，不发请求。 */
+ #q{width:100%;box-sizing:border-box;border:1px solid #dcdfe6;border-radius:10px;padding:11px 14px;font-size:16px;margin:0 0 10px;background:#fff}
+ #qn{color:#777;font-size:13px;margin:0 0 10px;display:none}
+ #qn b{color:#1f6feb}
+ .hit{background:#fff3b0}
  @media print{header.top,.toc{display:none}body{background:#fff}.card{box-shadow:none;padding:0}}
 </style></head><body><div class="wrap">
 <header class="top"><a href="/pc">← 回「电脑填表」</a><span class="sp"></span><a href="/guide" onclick="window.print();return false">🖨 打印</a></header>
+<input id="q" type="search" placeholder="找一找：比如「对账单」「导入 Excel」「恢复码」" autocomplete="off"/>
+<div id="qn"></div>
 ${tocHtml}
 <div class="card">
 ${body}
 </div>
-</div></body></html>`
+</div>
+<script>
+// 第 19 轮 E4：把正文按 h2/h3 切成块，输入关键词时只留下命中的块。
+// 不做模糊匹配、不改 DOM 结构（只是 display:none），清空就全回来。
+(function(){
+  var q = document.getElementById('q'), qn = document.getElementById('qn')
+  var card = document.querySelector('.card')
+  if (!q || !card) return
+  var nodes = Array.prototype.slice.call(card.childNodes)
+  var blocks = [], cur = null
+  nodes.forEach(function(n){
+    if (n.nodeType === 1 && /^H[234]$/.test(n.tagName)) { cur = { head: n, body: [] }; blocks.push(cur) }
+    else if (cur) cur.body.push(n)
+    else blocks.push({ head: null, body: [n] })
+  })
+  var all = blocks.map(function(b){ return b })
+  q.addEventListener('input', function(){
+    var kw = String(q.value || '').trim().toLowerCase()
+    if (!kw) { all.forEach(function(b){ if (b.head) b.head.style.display = ''; b.body.forEach(function(n){ if (n.style) n.style.display = '' }) }); qn.style.display = 'none'; return }
+    var hit = 0
+    all.forEach(function(b){
+      var txt = ((b.head ? b.head.textContent : '') + ' ' + b.body.map(function(n){ return n.textContent || '' }).join(' ')).toLowerCase()
+      var on = txt.indexOf(kw) >= 0
+      if (on) hit++
+      if (b.head) b.head.style.display = on ? '' : 'none'
+      b.body.forEach(function(n){ if (n.style) n.style.display = on ? '' : 'none' })
+    })
+    qn.style.display = 'block'
+    qn.innerHTML = hit ? ('找到 <b>' + hit + '</b> 处，下面的内容已按「' + kw.replace(/[<>&]/g, '') + '」过滤；清空搜索框就全回来。') : '没找到「' + kw.replace(/[<>&]/g, '') + '」。换个词试试，比如「对账单」「备份」「员工」。'
+  })
+})();
+</script>
+</body></html>`
 
 // 故意不写「生成时间」：每次生成都变的时间戳会让 git 永远有 diff，
 // 也会让 --check 只能靠「先把时间戳抹掉再比」这种绕法。
