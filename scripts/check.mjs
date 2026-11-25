@@ -952,6 +952,45 @@ console.log('\n[4.23] 打印页/客户页出错要给 HTML 错误页，不许回
     bad23.join('；'))
 }
 
+console.log('\n[4.24] 净利口径不许回潮（第 21 轮：模拟数据跑完整账套查出来的四个错）')
+{
+  // 这四个错误都不报错，只是让同一个「净利」在几张纸上不一样：
+  //   ① 借支报销写成 cash=0 的 expense，进了成本却没动现金 → /cash-bridge 残差每月差一笔报销额
+  //   ② /kpi 的权责净利没减坏账核销、没加豁免应付（与 /trend 差一个核销额）
+  //   ③ /year-summary 全年净利用 CASH_EXP_WHERE（只认 cash=1），漏掉报销
+  //   ④ /year-customers 写成「接单 − 毛利 − 费用」，材料成本被倒加回去
+  const src24 = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad24 = []
+  // ① 桥接必须有一行「加回报销冲借支」
+  if (!/k: 'noncash_exp'/.test(src24)) bad24.push('/cash-bridge 没有 noncash_exp 行（报销冲借支没加回来）')
+  if (!/cash=0 AND ref_type IN \('expense','fixed'\)/.test(src24)) bad24.push('/cash-bridge 没查 cash=0 的 expense/fixed')
+  // ② /kpi 权责净利要减核销、加豁免
+  if (!/profitAccrual = round2\(oAdd - matCost - costTotal - wArM \+ wApM\)/.test(src24)) {
+    bad24.push('/kpi 的 profitAccrual 没把核销（−wArM + wApM）算进去')
+  }
+  // ③ /year-summary 段不许再用 CASH_EXP_WHERE 当成本口径
+  const ysStart = src24.indexOf("app.get('/year-summary'")
+  const ysEnd = ysStart >= 0 ? src24.indexOf('app.get(', ysStart + 30) : -1
+  if (ysStart < 0) bad24.push('找不到 /year-summary')
+  else {
+    const seg = src24.slice(ysStart, ysEnd > 0 ? ysEnd : ysStart + 8000)
+    // 只看真正拼进 SQL 的写法（注释里提到常量名不算）：' + CASH_EXP_WHERE + '
+    if (seg.indexOf("' + CASH_EXP_WHERE + '") >= 0) bad24.push('/year-summary 又用 CASH_EXP_WHERE 算成本（会漏掉报销）')
+    if (seg.indexOf("' + COST_EXP_WHERE + '") < 0) bad24.push('/year-summary 的成本口径没用 COST_EXP_WHERE')
+  }
+  // ④ /year-customers 的年度净利 = 毛利 − 费用
+  if (!/const yearProfitAccrual = round2\(totalProfit - yearCost\)/.test(src24)) {
+    bad24.push('/year-customers 的年度净利公式又错了（应是 totalProfit - yearCost）')
+  }
+  // ⑤ 这套口径必须有常驻测试，并且登记进 run-all（否则等于没守）
+  const tl = path.join(ROOT, 'scripts/test-ledger.mjs')
+  if (!fs.existsSync(tl)) bad24.push('缺少 scripts/test-ledger.mjs')
+  else if (fs.readFileSync(tl, 'utf8').indexOf('year-customers') < 0) bad24.push('test-ledger.mjs 没覆盖客户排行口径')
+  const ra = fs.readFileSync(path.join(ROOT, 'scripts/run-all.mjs'), 'utf8')
+  if (ra.indexOf("'test-ledger'") < 0) bad24.push('run-all.mjs 没登记 test-ledger')
+  say(bad24.length === 0, '净利口径四处口径一致 + 有常驻测试守着', bad24.join('；'))
+}
+
 console.log('\n[4.14] D1 绑定引用')
 {
   const tomlSrc = fs.readFileSync(path.join(ROOT, 'backend/wrangler.toml'), 'utf8')

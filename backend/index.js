@@ -3454,12 +3454,12 @@ app.get('/payroll-print', async (c) => {
   const head = await getTitle(db)
   const money = fmtMoney // 第 18 轮 C2：统一用全局 fmtMoney（千分位），不再各页自己的 toFixed
   // 第 10 轮 A7：借支明细属于个人隐私，工资单只给汇总（还差多少），不给每个人的借支数字。
-  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n m-hide">${r.cnt}</td><td class="n m-hide">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${r.deduct > 0.005 ? money(r.deduct) : ''}</td><td class="n">${money(r.net)}</td><td class="n m-hide"></td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell m-hide"></td></tr>`).join('')
+  const trs = p.rows.map((r) => `<tr><td>${escHtml(r.worker)}</td><td class="n m-hide">${r.cnt}</td><td class="n m-hide">${r.qty}</td><td class="n">${money(r.due)}</td><td class="n">${money(r.deduct)}</td><td class="n">${money(r.net)}</td><td class="m-hide"></td><td class="n">${money(r.paid)}</td><td class="n">${money(r.left)}</td><td class="sign-cell m-hide"></td></tr>`).join('')
   const pageBody = `<h1>计件工资表</h1>
 <div class="meta"><span>${escHtml(head.title || '')}</span><span>月份：${mm}</span><span>人数：${p.people}</span></div>
-<table><thead><tr><th>工人</th><th class="n m-hide">笔数</th><th class="n m-hide">件数</th><th class="n">应发</th><th class="n">扣款</th><th class="n">实发</th><th class="n m-hide"></th><th class="n">已发</th><th class="n">还差</th><th class="m-hide">签字</th></tr></thead>
+<table><thead><tr><th>工人</th><th class="n m-hide">笔数</th><th class="n m-hide">件数</th><th class="n">应发</th><th class="n">扣款</th><th class="n">实发</th><th class="m-hide">备注</th><th class="n">已发</th><th class="n">还差</th><th class="m-hide">签字</th></tr></thead>
 <tbody>${trs || '<tr><td colspan="10">这个月没有记工记录</td></tr>'}</tbody>
-<tfoot><tr class="total"><td>合计</td><td class="n m-hide">${p.rows.reduce((s, r) => s + r.cnt, 0)}</td><td class="n m-hide">${p.rows.reduce((s, r) => s + r.qty, 0)}</td><td class="n">${money(p.total)}</td><td class="n">${p.deduct_total > 0.005 ? money(p.deduct_total) : ''}</td><td class="n">${money(p.net_total)}</td><td class="m-hide"></td><td class="n">${money(p.paid_total)}</td><td class="n">${money(p.left_total)}</td><td class="m-hide"></td></tr></tfoot></table>
+<tfoot><tr class="total"><td>合计</td><td class="n m-hide">${p.rows.reduce((s, r) => s + r.cnt, 0)}</td><td class="n m-hide">${p.rows.reduce((s, r) => s + r.qty, 0)}</td><td class="n">${money(p.total)}</td><td class="n">${money(p.deduct_total)}</td><td class="n">${money(p.net_total)}</td><td class="m-hide"></td><td class="n">${money(p.paid_total)}</td><td class="n">${money(p.left_total)}</td><td class="m-hide"></td></tr></tfoot></table>
 <p class="tip">算法：应发 = 本月每笔记工（件数 × 单价）之和；扣款 = 宿舍水电、宿舍租金这类厂里先付给房东、再从工资里扣回来的钱；实发 = 应发 − 扣款；已发 = 本月发工资记的支出；还差 = 实发 − 已发。个人借支明细不在这张表上显示，需要请老板单独核对。</p>`
   // 第 18 轮 F2：打印页要能「有问题找到人」—— 以前只有对账单有电话。
   return c.html(a4Page({ title: `${mm} 计件工资表`, body: pageBody, sign: '<span>制表人：____________</span><span>发款人：____________</span><span>日期：____________</span>', tip: `${escHtml(head.title || '')}${head.phone ? '　工资有疑问打 ' + escHtml(head.phone) : '　工资有疑问直接找老板核对'}　数据截至 ${escHtml(now().slice(0, 10))}` }))
@@ -5287,11 +5287,18 @@ app.get('/report-print', async (c) => {
   const yCost = round2(yMat + yCashExp + yAmort + yDep + yAccrue + yWo - yWoGain)
   const yProfit = round2(yOrder - yCost)
   const cats = (await db.prepare("SELECT category, COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND month=? GROUP BY category ORDER BY t DESC").bind(mm).all()).results
+  // 第 21 轮 A3（真 bug）：费用明细子行只画了 2 个 <td>，而这张表是 3 列（项目/本月/本年累计）——
+  // 每一条费用明细的「本年累计」都是空白，老板拿这张纸对年度数时会以为那几个月没花钱。
+  // 现在按分类再查一次本年累计，给每行补齐第三格。
+  const yCatMap = {}
+  for (const x of ((await db.prepare(`SELECT category, ${SUM_MONEY('amount')} t FROM ledger WHERE direction='out' AND cash=1 AND ref_type IN ('expense','fixed') AND substr(created_at,1,7)>=? AND substr(created_at,1,7)<=? GROUP BY category`).bind(yFrom, mm).all()).results || [])) {
+    yCatMap[String(x.category || '其他')] = num(x.t)
+  }
   const accounts = (await db.prepare('SELECT * FROM accounts ORDER BY id').all()).results
   const bal = await accountBalances(db)
   const money = fmtMoney // 第 18 轮 C2：统一用全局 fmtMoney（千分位），不再各页自己的 toFixed
   const rows = (arr) => arr.map((r) => `<tr><td>${r[0]}</td><td class="n">${r[1]}</td></tr>`).join('')
-  const catRows = cats.map((x) => `<tr><td>　${x.category || '其他'}</td><td class="n">${money(x.t)}</td></tr>`).join('')
+  const catRows = cats.map((x) => `<tr><td>　${escHtml(String(x.category || '其他'))}</td><td class="n">${money(x.t)}</td><td class="n">${money(num(yCatMap[String(x.category || '其他')]))}</td></tr>`).join('')
   const accRows = (bal.accounts || []).map((a) => `<tr><td>　${a.name}</td><td class="n">${money(a.balance)}</td></tr>`).join('')
   const pageBody = `
 <h1>${(head && head.title) || '经营报表'}</h1>
@@ -14328,7 +14335,11 @@ app.get('/year-customers', async (c) => {
   // 第 16 轮 A1：坏账核销是损失、豁免应付是收益，一减一加（与 plOf 的 woAr − woAp 一致）
   const yearWoGain = round2(num(yAgg.ywog))
   const yearCost = round2(num(yAgg.yexp) + num(yAgg.yamort) + num(yAgg.ydep) + num(yAgg.yaccr) + num(yAgg.ywo) - yearWoGain)
-  const yearProfitAccrual = round2(totalIncome - totalProfit - yearCost)
+  // 第 21 轮 A4（真 bug）：这里原来写的是 `totalIncome - totalProfit - yearCost`，
+  // 但 totalProfit 本身就是「毛利 = 接单 − 材料成本」，减它等于把材料成本倒加回去，
+  // 算出来的其实是「材料成本 − 费用」（本例 -79,978.56，报表上是亏 29.6 万）。
+  // 权责净利 = 毛利 − 费用（现金费用 + 摊销 + 折旧 + 预提 + 核销 − 豁免），与 plOf 同一个公式。
+  const yearProfitAccrual = round2(totalProfit - yearCost)
   const rows = g.map((x, i) => {
     const inc = num(x.income), cost = num(x.cost)
     const profit = round2(inc - cost)
@@ -14393,7 +14404,7 @@ app.get('/cash-bridge', async (c) => {
   const WOC = 'COALESCE(month,substr(created_at,1,7))=?'
   const [collected, orderOff, orderRefund, woAr, paidPayable, payableOff, supplierRefund, woAp,
     debtIn, debtRepay, advIn, advOut, prepaidOut, disposeIn, otherIn, loanOut, loanBack, taxIn, taxOut,
-    cashIn, cashOut, uncov] = await Promise.all([
+    cashIn, cashOut, noncashExp, uncov] = await Promise.all([
     // 客户往来：本月真收到的钱 / 用预收抵扣（不动现金）/ 退款给客户
     // 注意：每一条都必须把 cash 写清楚。「预收/预付抵扣」写的是 cash=0 的流水，
     // 要是这里不写 cash=1，同一笔抵扣会被「收回的钱」和「抵扣」两处各算一次（残差直接翻倍）。
@@ -14425,6 +14436,10 @@ app.get('/cash-bridge', async (c) => {
     q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ref_type='tax_ap' AND month=?`, m),
     q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='in' AND cash=1 AND ${CASH_EXCLUDE} AND month=?`, m),
     q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=1 AND ${CASH_EXCLUDE} AND month=?`, m),
+    // 第 21 轮 A2（真 bug）：报销冲借支记的是 cash=0 的 expense —— 它进了利润（COST_EXP_WHERE 认它），
+    // 但一分钱没出去。以前只有「加回 折旧/摊销/预提利息」那一行，这 2000 块就永远挂在残差上：
+    // 只要有人走一次「借支报销」，这个月的桥接就永久差一笔，差额正好等于报销金额。
+    q1(`SELECT ${SUM_MONEY('amount')} AS v FROM ledger WHERE direction='out' AND cash=0 AND ref_type IN ('expense','fixed') AND month=?`, m),
     // 兜底：按 ref_type 把本月所有真金白银的流水分组拿回来，下面再用 BRIDGE_COVERED 把「已有行」的剔掉，
     // 剩下的就是「上面几行都不认」的类别 —— 以前这些直接被算进残差，没人知道是什么。
     // 注意这里故意不写「排除名单」那种 SQL：那样名单要写两遍，加一行忘了改另一处就静默串账。
@@ -14449,6 +14464,7 @@ app.get('/cash-bridge', async (c) => {
   const rows = [
     { k: 'profit', label: '本月净利（权责口径）', amount: pl.profit, note: '收入减材料、现金费用、折旧摊销、坏账核销' },
     { k: 'adj', label: '加回 折旧 / 摊销 / 预提利息', amount: adj, note: '这些进了利润表，但没花现金' },
+    { k: 'noncash_exp', label: '加回 报销冲借支（记了成本，没动现金）', amount: noncashExp, note: noncashExp > 0 ? `本月拿借支报销 ¥${noncashExp}：钱在借出去那天就出去了，报销只是把借支转成成本，所以这里加回来` : '' },
     { k: 'ar', label: '应收变动（本月新增 − 本月收回）', amount: round2(-dAR), note: `本月接单 ¥${pl.income}、收回 ¥${collected}、预收抵扣 ¥${orderOff}${orderRefund > 0 ? `、退给客户 ¥${orderRefund}` : ''}${woAr > 0 ? `、核销 ¥${woAr}` : ''}` },
     { k: 'ap', label: '应付变动（本月新增 − 本月付出）', amount: dAP, note: `本月赊购 ¥${pl.payable_add}、付掉 ¥${paidPayable}、预付抵扣 ¥${payableOff}${supplierRefund > 0 ? `、供应商退回来 ¥${supplierRefund}` : ''}${woAp > 0 ? `、豁免 ¥${woAp}` : ''}` },
     { k: 'mat_gap', label: '材料成本 与 本月赊购的差', amount: round2(pl.mat - pl.payable_add), note: `这月单子上用了料 ¥${pl.mat}，赊购了 ¥${pl.payable_add}（差额是现钱买的料，或料没用完）` },
@@ -18983,7 +18999,10 @@ app.get('/year-summary', async (c) => {
     db.prepare(`SELECT substr(created_at,1,7) mk,
       ${SUM_MONEY("CASE WHEN direction='in' AND cash=1 AND " + CASH_EXCLUDE + " THEN amount ELSE 0 END")} inc,
       ${SUM_MONEY("CASE WHEN direction='out' AND cash=1 AND " + CASH_EXCLUDE + " THEN amount ELSE 0 END")} outt,
-      ${SUM_MONEY('CASE WHEN ' + CASH_EXP_WHERE + ' THEN amount ELSE 0 END')} exp,
+      -- 第 21 轮 A5（真 bug）：这里以前用 CASH_EXP_WHERE（只认 cash=1）——「报销冲借支」那种
+      -- cash=0 的 expense 被漏掉，年度汇总的净利比月报/年报各高出一笔报销额（实测全年差 8000）。
+      -- 第 16 轮 A3 只修了 yearBook（年报），年度汇总这条漏了。现在统一用 COST_EXP_WHERE。
+      ${SUM_MONEY('CASE WHEN ' + COST_EXP_WHERE + ' THEN amount ELSE 0 END')} exp,
       ${SUM_MONEY("CASE WHEN direction='out' AND cash=0 AND ref_type='dep' THEN amount ELSE 0 END")} dep,
       ${SUM_MONEY("CASE WHEN direction='out' AND cash=0 AND ref_type='amort' THEN amount ELSE 0 END")} amort,
       ${SUM_MONEY("CASE WHEN direction='out' AND cash=0 AND ref_type='debt_int' THEN amount ELSE 0 END")} accr
@@ -22532,7 +22551,12 @@ app.get('/kpi', async (c) => {
   const matCost = num(agg.order_cost)
   // 收付实现制：利润 = 这个月真收到的 − 真付出去的（和首页、报表页同一个数）
   const cashOut = num(agg.cash_out)
-  const profitAccrual = round2(oAdd - matCost - costTotal)
+  // 第 21 轮 A1（真 bug）：这里以前少了核销 —— 同一份数据，下面「趋势」里每个月都
+  // 「减坏账核销、加豁免应付」，顶部这个「本月净利（按单子算）」却没减没加，
+  // 于是同一个接口里两个权责净利能差好几千（差多少正好等于当月核销 − 豁免应付），
+  // 而且和 /month-brief、/cash-bridge、/selfcheck 三处都对不上。现在四处同一个公式。
+  const wArM = round2(num(wMap[m])), wApM = round2(num(wgMap[m]))
+  const profitAccrual = round2(oAdd - matCost - costTotal - wArM + wApM)
   const profit = round2(cashIn - cashOut)
   const margin = cashIn > 0 ? round2((profit / cashIn) * 100) : 0
   const expenseRatio = oAdd > 0 ? round2((costTotal / oAdd) * 100) : 0
@@ -22584,6 +22608,7 @@ app.get('/kpi', async (c) => {
     avg_days, ar_end: ar, turn_days: turnDays, cash_now: cashNow, cushion_months: cushion,
     top_customer: topCust ? topCust.c : '', conc_pct: conc,
     cost_total: costTotal, expense_ratio: expenseRatio, break_even: breakEven,
+    writeoff: wArM, writeoff_ap: wApM,
     amort: adj.amort, dep: adj.dep, accrue_int: adj.accrue_int, net_worth: nw, trend
   })
 })

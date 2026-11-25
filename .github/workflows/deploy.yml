@@ -339,6 +339,10 @@ jobs:
       # 合计行有没有和表头藏同样的列、改账期会不会失效、客户名里的 HTML 有没有被转义。
       - name: 网页端回归（打印页 / 客户对账页 / 电脑看账台）
         run: node scripts/test-web-pages.mjs --base http://127.0.0.1:8791 --key 8888
+      # 账套口径核验：同一个「净利」在七个页面上必须一样，桥接行要能解释每一类流水。
+      # 这几条以前没有任何自动化断言，只能靠人拿纸算 —— 第 21 轮就是这么查出四个错的。
+      - name: 账套口径核验（净利七处对齐 / 桥接行覆盖 / 打印页不缺格）
+        run: node scripts/test-ledger.mjs --base http://127.0.0.1:8791 --key 8888
       # 免安装版（exe / Docker 镜像）跑的是同一份 backend/index.js，只是把 Cloudflare 的 D1
       # 换成了本机 SQLite（server/d1.mjs）。这层适配最容易悄悄坏：batch 不是事务、
       # run() 返回的形状不对（README 迭代 285 那个「库存已扣却回 409」），都会让账记歪但不报错。

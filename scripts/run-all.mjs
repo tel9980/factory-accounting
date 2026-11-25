@@ -66,6 +66,11 @@ export const ONLINE = [
   'test-write-coverage',
   'test-write-methods',
   'test-profit-consistency',
+  // 账套口径核验：同一个「净利」在 /kpi /trend /month-brief /cash-bridge /year-summary
+  // /year-book /year-customers 七处必须是同一个数，外加桥接 18 行覆盖与打印页不缺格。
+  // 第 21 轮拿模拟数据跑完整账套才发现的：这四个问题（报销不进成本、核销漏算、
+  // 年度汇总用错常量、客户排行公式反了）都不报错，只是数字各说一套。
+  'test-ledger',
   'test-oldbackup',
   // 网页端（打印页 / 客户对账页 / 电脑看账台）：纯 fetch 断言，不需要浏览器。
   // 第 19 轮加的 —— 这些页面以前没有任何自动化，「刚修好又被改坏」反复发生。

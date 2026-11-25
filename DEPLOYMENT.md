@@ -1303,6 +1303,15 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.51 第 21 轮（模拟数据跑完整账套）的六条硬规矩
+
+1. **账上多一类流水，桥接就要多一行。** `/cash-bridge` 用的是恒等式「净利 + 调整 = 现金变动」，任何一类流水进了利润却没被某一行解释，它就会静静躺在「残差」里，谁也不知道差在哪。第 21 轮就是「借支报销」（`ref_type='expense'` 但 `cash=0`）没行承接，残差每月正好多一笔报销额。**新增/修改任何写 `ledger` 的地方，都要问一句：桥接哪一行负责它？** 兜底行 `other` 只该解释「确实没法归类」的那点东西。`scripts/test-ledger.mjs` [P5] 会扫 `ref_type` 是否有未归类项。
+2. **利润口径只认 `COST_EXP_WHERE`，`CASH_EXP_WHERE` 只能用在「真现金支出」分项。** 两者差的就是 `cash=0` 的费用（报销冲借支、折旧摊销预提之外的那种）。拿 `CASH_EXP_WHERE` 去算净利，利润会一直偏高，且**只在有人报销时才偏高**——平时看不出来。`check.mjs` [4.24] 会拦 `/year-summary` 再用错。
+3. **页面上任何一个「净利」都必须等于 `/year-book` 的 `totals.profit`。** 这条不是建议，是断言：`test-ledger.mjs` [P3] 把 `/year-summary`、`/year-book`（逐月加总）、`/year-customers`、`/cash-bridge`（逐月加总）四处拉平。改任何一处口径先跑它。
+4. **数表头/合计行列数，用 `/<th[\s>]/g`，别用 `/<th/g`。** 后者会把 `<thead` 也数进去，于是「经营报表 4 列 vs 合计 3 格」「年度总账 9 vs 8」全是误报 —— 第 21 轮为此白查了半天。同理 `<td` 会数到 `<tfoot>`…（`<tf` 不同前缀，但 `<td` 与 `<tdx` 会混）。
+5. **改完后端只重启 dev，别清库。** `node /tmp/killdev.mjs killdev` 后重新 `bash /tmp/startdev.sh`，`/tmp/d1r11` 里的数据要留着（重建干净库会丢掉演练数据，得从 `scripts/mock-data.mjs` 重灌一遍）。核验脚本支持 `FA_NOWRITE=1`，**先跑只读核验，再跑写路径测试**，否则自己造的测试数据会把「逐月加总」这类跨页断言带偏。
+6. **`/month-brief` 的 `profit` 是现金口径，权责口径在 `profit_accrual`。** 同一个 `profit` 字段在不同页面上含义不一样（`/kpi`、`/cash-bridge`、`/trend` 的 `profit` 是权责）。看数、写断言、给别人讲账，都要先确认拿的是哪一个 —— 这条已经坑过一次（我把现金净利当权责净利比，误判成 bug）。
+
 ### 4.50 第 20 轮（网页端第三轮）的八条硬规矩
 
 1. **前端判成功要看状态码，不能只看「能不能解析成 JSON」。** `/statement-ack` 曾经在后端 403/500 时照样弹「收到了，谢谢！」—— 后端错误响应也是合法 JSON，`r.json()` 永远成功。凡是「对外部的人」的页面（客户确认、客户对账、进度页），一律 `r.ok` + `d.ok !== false` 双判，失败必须用红色文字说明，不能静默。
