@@ -88,7 +88,9 @@ for (const [label, set] of [['deploy.yml', deployScripts], ['release.yml', relea
 //    MANUAL：只给本地用、不需要进 CI 的工具脚本。
 // 第 14 轮：book-add 是「本机加一本线上账套」的一次性工具 —— 建库要真 CF 凭证、
 // 还要往 wrangler.toml 写绑定，放进 CI 只会变成「每次部署都试一次建库」，所以留在本地。
-const MANUAL = new Set(['cli', 'diag', 'migrations-lib', 'prof', 'book-add']) // 本地工具，不进 CI
+// 第 21 轮：mock-data 是「往干净库灌一套模拟账套」的演练工具 —— 它会写几百条单据、
+// 还会把月份结账锁定，跑在 CI 里只会把后面所有测试的数据搅浑，所以只在本地手动跑。
+const MANUAL = new Set(['cli', 'diag', 'migrations-lib', 'prof', 'book-add', 'mock-data']) // 本地工具，不进 CI
 {
   const dir = path.join(ROOT, 'scripts')
   const all = fs.readdirSync(dir).filter((f) => f.endsWith('.mjs') && !f.startsWith('_'))
