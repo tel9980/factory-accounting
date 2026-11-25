@@ -182,7 +182,7 @@ const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"/>
  .hit{background:#fff3b0}
  @media print{header.top,.toc{display:none}body{background:#fff}.card{box-shadow:none;padding:0}}
 </style></head><body><div class="wrap">
-<header class="top"><a href="/pc">← 回「电脑填表」</a><span class="sp"></span><a href="/guide" onclick="window.print();return false">🖨 打印</a></header>
+<header class="top"><a href="/desk">📊 电脑看账台</a><a href="/pc">🖊 电脑填表</a><a href="/">🏠 首页</a><span class="sp"></span><a href="/guide" onclick="window.print();return false">🖨 打印</a></header>
 <input id="q" type="search" placeholder="找一找：比如「对账单」「导入 Excel」「恢复码」" autocomplete="off"/>
 <div id="qn"></div>
 ${tocHtml}
@@ -205,13 +205,26 @@ ${body}
     else blocks.push({ head: null, body: [n] })
   })
   var all = blocks.map(function(b){ return b })
+  // 第 20 轮 C19：厂里打字习惯不一样（对帐/对账、报价单/报价、核销/冲账），
+  // 一个词搜不到不等于没有。命中任一近义词就算命中。
+  var SYN = {
+    '对帐': ['对账', '对帐'], '对账': ['对账', '对帐'],
+    '冲账': ['核销', '冲账'], '核销': ['核销', '冲账'],
+    '工资': ['工资', '工钱', '计件'], '工钱': ['工资', '工钱'],
+    '备份': ['备份', '存档', '备份包'], '存档': ['备份', '存档', '月结'],
+    '找回': ['恢复码', '找回', '重设'], '恢复码': ['恢复码', '找回'],
+    '导入': ['导入', 'Excel', '模板'], 'excel': ['导入', 'Excel', '模板'],
+    '欠款': ['欠款', '还欠', '应收'], '催款': ['催款', '催', '提醒'],
+    '打印': ['打印', '打出来', 'PDF'], 'pdf': ['打印', 'PDF']
+  }
   q.addEventListener('input', function(){
     var kw = String(q.value || '').trim().toLowerCase()
     if (!kw) { all.forEach(function(b){ if (b.head) b.head.style.display = ''; b.body.forEach(function(n){ if (n.style) n.style.display = '' }) }); qn.style.display = 'none'; return }
     var hit = 0
+    var kws = SYN[kw] ? SYN[kw].map(function(x){ return String(x).toLowerCase() }) : [kw]
     all.forEach(function(b){
       var txt = ((b.head ? b.head.textContent : '') + ' ' + b.body.map(function(n){ return n.textContent || '' }).join(' ')).toLowerCase()
-      var on = txt.indexOf(kw) >= 0
+      var on = kws.some(function(k){ return txt.indexOf(k) >= 0 })
       if (on) hit++
       if (b.head) b.head.style.display = on ? '' : 'none'
       b.body.forEach(function(n){ if (n.style) n.style.display = on ? '' : 'none' })

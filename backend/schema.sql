@@ -34,6 +34,11 @@ CREATE INDEX IF NOT EXISTS idx_orders_deliver ON orders(deliver_date);
 CREATE INDEX IF NOT EXISTS idx_orders_by ON orders(created_by);
 -- 第 17 轮 E1：见 ledger 那段注释 —— 这个索引原来也只在迁移里
 CREATE INDEX IF NOT EXISTS idx_orders_paid ON orders(paid, written_off);
+-- 第 20 轮 B5：部分索引 —— 只给「还没结清」的行建索引。
+-- 为什么需要：全仓 8 处「未结清」查询都是 `WHERE COALESCE(paid,0)+COALESCE(written_off,0) < price`
+-- 这种表达式比较，普通索引（上面那条按 paid,written_off 排的）帮不上忙，只能全表扫。
+-- 谓词必须和查询里的写法逐字一致，SQLite 才肯用（所以 dueRows 那边也改成了同样的形式）。
+CREATE INDEX IF NOT EXISTS idx_orders_open ON orders(due_date) WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price;
 CREATE TRIGGER IF NOT EXISTS trg_orders_month AFTER INSERT ON orders WHEN NEW.month IS NULL
 BEGIN UPDATE orders SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 
@@ -76,6 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_payables_month ON payables(month);
 CREATE INDEX IF NOT EXISTS idx_payables_by ON payables(created_by);
 -- 第 17 轮 E1：见 ledger 那段注释 —— 这个索引原来也只在迁移里
 CREATE INDEX IF NOT EXISTS idx_payables_paid ON payables(paid, written_off);
+CREATE INDEX IF NOT EXISTS idx_payables_open ON payables(due_date) WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount;
 CREATE TRIGGER IF NOT EXISTS trg_payables_month AFTER INSERT ON payables WHEN NEW.month IS NULL
 BEGIN UPDATE payables SET month=substr(NEW.created_at,1,7) WHERE id=NEW.id; END;
 

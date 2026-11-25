@@ -1303,6 +1303,17 @@ git -c http.proxy=$P -c https.proxy=$P push origin main
 - **文档表数 / 账套数是钉死的**：README 和 DEPLOYMENT 里「建 N 张表」必须 == `schema.sql` 的表数（check.mjs [4.9]）；`backend BOOK_MAX` 必须 == `server/books.mjs BOOKS`（check.mjs [4.11]）。**改 schema 加表、改账套上限，文档和两个常量要同步**，否则 check.mjs 红。
 - **`node:async_hooks` 已在 `wrangler.toml` 开 `nodejs_compat`**。`failBucket` 用 `AsyncLocalStorage` 给每个请求独立桶，`noteFail(e,tag)` 通过 `als.getStore()` 拿当前请求桶。**别再退回模块级数组做「当前请求」状态**——单 isolate 多请求交错必串台；Workers 没有别的 TLS 机制，ALS + nodejs_compat 是正路。
 
+### 4.50 第 20 轮（网页端第三轮）的八条硬规矩
+
+1. **前端判成功要看状态码，不能只看「能不能解析成 JSON」。** `/statement-ack` 曾经在后端 403/500 时照样弹「收到了，谢谢！」—— 后端错误响应也是合法 JSON，`r.json()` 永远成功。凡是「对外部的人」的页面（客户确认、客户对账、进度页），一律 `r.ok` + `d.ok !== false` 双判，失败必须用红色文字说明，不能静默。
+2. **浏览器里凡是「点了没反应」，先怀疑 `window.open` 写在异步回调里。** 弹窗权限只在用户点击的同步阶段有效。写法固定为：函数入口 `var w = window.open('','_blank')`，回调里 `w.location.href = url`（本项目封装成 `/desk` 的 `preWin()` / `goWin()`）。`scripts/test-web-pages.mjs` 里有一条断言专门禁止 `window.open(d.url` 这种写法回来。
+3. **幂等键不许用「纯内容指纹」。** 后端 `op_dedupe` 记录保留 30 天，纯内容指纹会把「同一天同金额的两笔真实收款」也判成重复。`/desk` 用的是「3 秒时间桶 + 内容」：3 秒内重复点击是同一个 id（后端判重），超过 3 秒是新的 id（真的是第二笔）。
+4. **「没取到」不许显示成 0。** 金额位显示 `¥0.00` 比显示「加载失败」更危险 —— 老板会以为这个月没收入。约定：`null`/`undefined`/非数字 → 显示 `—`，并写「没取到，不是没有 —— 点刷新再看」。
+5. **缓存分层要写清楚**：签名页（URL 带 `?t=`）`no-store` + 不发 ETag + 允许压缩；账目 JSON `no-store`；普通页面 `no-cache`（走 304）。`applyEtag` 里任何提前 `return` 都必须先把头补齐 —— 曾经因为 `c.res = res` 把新加的头全丢了。
+6. **压缩交给 Cloudflare，不要自己在 Worker 里压。** 本机实测两个坑：`fetch` 拿到手写 `Content-Encoding` 的响应时不会自动解（显示乱码）；上线后 CF 可能对已 gzip 的响应再压一层，浏览器只解一层 = 全站乱码。要做的是**别写 `no-transform`**（它会让 CF 完全不压）。
+7. **部分索引的谓词必须和查询逐字一致。** `idx_orders_open ... WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price` 只有查询里写成一模一样的形式才可能被用上；写成 `price - paid - wo > 0` 就退回全表扫。改索引时 `check.mjs` 的 [4.15]/[4.20] 会校 schema.sql 与 migrations 是否一致。
+8. **新加的「服务端页面」要同时补三样东西**：`scripts/test-web-pages.mjs` 的断言（含内联脚本 `new Function` 编译）、`check.mjs` 的守卫（守住那条断言不许被删）、以及公开路径白名单（`/desk`、`/statements-print` 这类壳页面靠口令头取数，漏了白名单就是 401）。
+
 ### 4.49 第 19 轮（网页端第二轮）的七条硬规矩
 
 1. **打印隐藏名单只能收窄，不能拿 `.tip` 当垃圾桶。** `@media print{ .tip{display:none} }` 会把「电话」「数据截至」「验收条款」一起藏掉 —— 印出来的纸上看不到，而这几句正是纸上最该有的东西。要藏的是「只在屏幕上有意义」的控件（按钮、微信提示块），给它们各自的类（`.wxtip`），别复用语义类。

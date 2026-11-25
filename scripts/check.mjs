@@ -906,6 +906,52 @@ console.log('\n[4.21] 裸 SUM(金额列) 不许再增加（棘轮）')
   }
 }
 
+console.log('\n[4.22] 内联脚本必须能编译（第 20 轮 A13）')
+{
+  // 第 19 轮我自己就踩过：`/pc` 里 split('\n') 在模板字面量里变成真换行，
+  // 页面脚本整段 SyntaxError，按钮全点不动，而所有门禁都是绿的。
+  // 为什么这条检查放在 scripts/test-web-pages.mjs 而不是这里：后端源码里的内联脚本
+  // 带着 ${...} 插值，静态抽出来没法编译；只有「服务端渲染后的 HTML」才是真东西。
+  // 所以这里守住的是「那条断言不许被删掉」。
+  const f = path.join(ROOT, 'scripts/test-web-pages.mjs')
+  const src = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : ''
+  const bad22 = []
+  if (!/new Function\(/.test(src)) bad22.push('test-web-pages.mjs 里没有 new Function(...) 编译内联脚本')
+  for (const must of ['/desk', '/pc', '/guide', '/track', '/statement-ack']) {
+    if (src.indexOf(must) < 0) bad22.push(`test-web-pages.mjs 没覆盖 ${must}`)
+  }
+  if (!/脚本能编译|scriptCompiles|compileScript/.test(src)) bad22.push('test-web-pages.mjs 里找不到「内联脚本能编译」的断言')
+  say(bad22.length === 0,
+    '内联脚本编译门禁在位（test-web-pages 用 new Function 编译 5 个页面的 <script>）',
+    bad22.join('；'))
+}
+
+console.log('\n[4.23] 打印页/客户页出错要给 HTML 错误页，不许回 JSON（第 20 轮 A4）')
+{
+  // 客户在微信里点开对账单链接，出异常时以前看到的是 {"ok":false,...} 一串花括号。
+  // 现在统一走 serverErrResp()：这些路径或浏览器导航一律给 errorPage。
+  const src = fs.readFileSync(path.join(ROOT, 'backend/index.js'), 'utf8')
+  const bad23 = []
+  const need = ['/payroll-print', '/statement-print', '/statements-print', '/order-print', '/report-print',
+    '/recon-print', '/quote-print', '/year-review-print', '/year-close-print', '/year-print',
+    '/year-open-print', '/health-print', '/statement-ack', '/track']
+  const setM = src.match(/const HTML_ERR_PATHS = new Set\(\[([\s\S]*?)\]\)/)
+  if (!setM) bad23.push('找不到 HTML_ERR_PATHS')
+  else for (const pth of need) if (setM[1].indexOf(`'${pth}'`) < 0) bad23.push(`HTML_ERR_PATHS 缺 ${pth}`)
+  if (!/function serverErrResp\(/.test(src)) bad23.push('找不到 serverErrResp()')
+  if (!/return serverErrResp\(c\)/.test(src)) bad23.push('500 分支没走 serverErrResp(c)')
+  // A5：批量打对账单失败的那几家必须点名（以前只写「17 家」，老板不知道少了谁）
+  if (!/failed\.push\(party\)/.test(src)) bad23.push('/statements-print 没收集失败的家数')
+  if (src.indexOf('没生成出来：') < 0) bad23.push('批量页标题没写「没生成出来」')
+  if (/c\.json\(\{ ok: false, code: 'server_error'/.test(src)) {
+    const n = (src.match(/c\.json\(\{ ok: false, code: 'server_error'/g) || []).length
+    if (n > 1) bad23.push(`还有 ${n} 处直接回 server_error JSON（应只留 serverErrResp 里那一处）`)
+  }
+  say(bad23.length === 0,
+    `14 个打印/客户页路径出错都给 HTML 错误页（serverErrResp 单点收口）`,
+    bad23.join('；'))
+}
+
 console.log('\n[4.14] D1 绑定引用')
 {
   const tomlSrc = fs.readFileSync(path.join(ROOT, 'backend/wrangler.toml'), 'utf8')

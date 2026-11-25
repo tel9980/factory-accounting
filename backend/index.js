@@ -63,7 +63,7 @@ app.use('*', async (c, next) => {
   } catch (e) {
     await logError(c, 500, (e && (e.stack || e.message)) || e, Date.now() - t0)
     // 不往外抛：抛出去 Cloudflare 只会回一句空白「Internal Server Error」，手机上看起来像卡死
-    return c.json({ ok: false, code: 'server_error', error: '服务器出了点问题（已经记下来了，不是你的操作错）。过一会儿再点一次；反复出现就把这句发给老板：server_error' }, 500)
+    return serverErrResp(c)
   }
   // 写操作之后，账户余额缓存必须立刻作废（否则用户刚记完一笔，首页余额还是旧的）
   if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
@@ -87,8 +87,37 @@ app.use('*', async (c, next) => {
 app.onError(async (err, c) => {
   const t0 = Date.now()
   try { await logError(c, 500, (err && (err.stack || err.message)) || err, Date.now() - t0) } catch (e) {}
-  return c.json({ ok: false, code: 'server_error', error: '服务器出了点问题（已经记下来了，不是你的操作错）。过一会儿再点一次；反复出现就把这句发给老板：server_error' }, 500)
+  return serverErrResp(c)
 })
+
+// 第 20 轮 A4：打印页/客户页出异常时，以前一律回 JSON —— 客户在微信里点开链接，
+// 看到的是一串花括号（而且正是「发给客户看」的那些页面）。现在这些路径、
+// 或者浏览器导航（Accept 含 text/html）一律给 HTML 错误页。
+const HTML_ERR_PATHS = new Set([
+  '/payroll-print', '/handover-print', '/statement-print', '/statements-print', '/order-print',
+  '/report-print', '/recon-print', '/quote-print', '/year-review-print', '/year-close-print',
+  '/year-print', '/year-open-print', '/health-print', '/statement-ack', '/track'
+])
+function wantsHtmlErr(c) {
+  try {
+    const p = new URL(c.req.url).pathname
+    if (HTML_ERR_PATHS.has(p)) return true
+    return /text\/html/i.test(c.req.header('accept') || '')
+  } catch (e) { return false }
+}
+function serverErrResp(c) {
+  if (wantsHtmlErr(c)) {
+    try {
+      return c.html(errorPage({
+        title: '这一页没生成出来',
+        why: '系统出错了（不是链接的问题，也不是你点错了）',
+        how: '过一会儿再点一次；一直不行就把这条链接发给老板，让他重新发一条。',
+        code: 'print_error'
+      }), 500)
+    } catch (e) { /* errorPage 自己出错就退回 JSON */ }
+  }
+  return c.json({ ok: false, code: 'server_error', error: '服务器出了点问题（已经记下来了，不是你的操作错）。过一会儿再点一次；反复出现就把这句发给老板：server_error' }, 500)
+}
 
 // 全站统一北京时间（UTC+8）：created_at / due_date 存的一律是「北京日期时间串」。
 // 以前用 UTC，北京时间 00:00–08:00 记的账会显示成前一天，「今天收到」「逾期天数」也都会差一天。
@@ -1663,6 +1692,9 @@ const sigOf = async (keyOrDb, party, type, exp) => {
 // ETag / 304：只处理 GET、200、JSON 或 HTML、且响应体不太大（/backup 那种 9MB 直接跳过）。
 // 只有客户端真的发了 if-none-match 才可能回 304 —— 小程序 wx.request 从来不发这个头，
 // 所以对现有前端只是「多一个响应头」，不会改变任何行为；浏览器打开打印页才真省流量。
+// 第 20 轮 B1/B2：CSP 抽成常量（原来在两处重复写，改一处漏一处就是两个策略）
+const CSP_HTML = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
 async function applyEtag(c, noTransform) {
   const res = c.res
   if (c.req.method !== 'GET' || !res || res.status !== 200) return
@@ -1670,11 +1702,34 @@ async function applyEtag(c, noTransform) {
   if (cl > 262144) return
   const ct = res.headers.get('content-type') || ''
   if (!/application\/json|text\/html/i.test(ct)) return
+  const isHtml = /text\/html/i.test(ct)
+  // 第 20 轮 B2：带签名的公开页（URL 里有 ?t=）先判、先返回。
+  // 以前克隆 + 算哈希都发生在判定之前，然后结果被 h.delete('ETag') 扔掉 ——
+  // 批量 20 页约 130KB 每次白拷一遍、白算一遍哈希。签名页本来就不发 ETag，
+  // 直接 no-store + 压缩（实测 130KB → 约 12KB）走人。
+  const signedPage = /[?&]t=/.test(new URL(c.req.url).search || '')
+  if (signedPage && isHtml) {
+    const h = new Headers(res.headers)
+    h.set('Cache-Control', 'no-store')
+    h.set('X-Content-Type-Options', 'nosniff')
+    h.set('Referrer-Policy', 'no-referrer')
+    h.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
+    h.set('X-Frame-Options', 'DENY')
+    h.set('Content-Security-Policy', CSP_HTML)
+    // 第 20 轮 B1：这里**不自己压**。Cloudflare 会按客户端自己的 Accept-Encoding 压，
+    // 我们在 Worker 里压完再交给 CF，万一它再压一次就是双层 gzip —— 浏览器只解一层，
+    // 页面直接是乱码（本机实测过：node fetch 拿到 gzip 字节不自动解，页面 4000 字全是乱码）。
+    // 省流靠「不写 no-transform」让 CF 去压，这才是稳的做法。
+    // 注意：必须用 h 重建响应 —— 上面那些 h.set() 只改了一份 Headers 副本，
+    // 直接 c.res = res 会把 no-store / no-referrer / CSP 全部丢掉（本机实测过）。
+    c.res = new Response(res.body, { status: res.status, headers: h })
+    return
+  }
   // 第 19 轮 D10：Hono 的 c.json/c.html 从不设 content-length，上面那句 `cl > 262144`
   // 永远是 0 —— 注释里写着「/backup 那种 9MB 直接跳过」，其实从没跳过：每次先把整个
   // JSON 克隆成字符串（约 2 倍内存）再丢掉。而小程序端从不发 if-none-match，
   // 这些 ETag 一个都用不上。所以：JSON 且客户端没带 if-none-match → 直接不参与。
-  if (/application\/json/i.test(ct) && !c.req.header('if-none-match')) {
+  if (!isHtml && !c.req.header('if-none-match')) {
     // 注意：早退前必须把 no-store 补上 —— 否则账目 JSON 一个缓存指令都没有，
     // 公用电脑上退出后按「后退」还能看到金额（D8 就是为这个加的）。
     const h0 = new Headers(res.headers)
@@ -1689,19 +1744,9 @@ async function applyEtag(c, noTransform) {
     const etag = 'W/"' + body.length.toString(36) + '-' + fnv1a(body).toString(36) + '"'
     const h = new Headers(res.headers)
     h.set('ETag', etag)
-    // 打印页额外加 no-transform：Cloudflare 一旦压缩响应就会把 ETag 摘掉（线上实测），
-    // 这些页面就几 KB，重复打开时 304 比压缩更省。
-    // 第 18 轮 C3：带签名的公开页（URL 里有 ?t=）改成 no-store —— 这类页面上是客户名+金额，
-    // 链接过期后不该还能靠浏览器「后退」看到；普通页（/、/pc、/guide）保持 no-cache 走 304。
-    const signedPage = /[?&]t=/.test(new URL(c.req.url).search || '')
-    if (noTransform) h.set('Cache-Control', signedPage ? 'no-store' : 'no-cache, no-transform')
-    // 第 19 轮 D11：no-store 的响应浏览器根本不存，永远不带 if-none-match 回来 → 304 分支
-    // 不可达；同时 no-transform 让 Cloudflare 不压缩（批量 20 页约 130KB 白付）。
-    // 签名页改成：no-store + 不发 ETag + 允许 CF 压缩（实测 130KB → 约 12KB）。
-    if (signedPage) { h.delete('ETag'); h.delete('Cache-Control'); h.set('Cache-Control', 'no-store') }
-    // 第 18 轮 C3：以前这些头一个都没有。URL 里带签名 token，页面里只要有一个外链
-    //（现在是 tel:，将来可能有地图/二维码图片），Referer 就把签名送给了对方站点。
-    if (/text\/html/i.test(ct)) {
+    if (noTransform && !isHtml) h.set('Cache-Control', 'no-cache, no-transform')
+    if (isHtml) h.set('Cache-Control', 'no-cache')
+    if (isHtml) {
       h.set('Referrer-Policy', 'no-referrer')
       h.set('X-Robots-Tag', 'noindex, nofollow, noarchive')
       h.set('X-Frame-Options', 'DENY')
@@ -1710,16 +1755,19 @@ async function applyEtag(c, noTransform) {
       //（全仓 45 处 onclick + 7 段内联 <script>，收紧到 'self' 会让 13 个打印页
       // 和 /pc、/desk 一起白屏 —— 那是下一轮的量）。
       // connect-src 必须留 'self'：/desk 和 /pc 用 fetch 打自己的接口。
-      h.set('Content-Security-Policy', "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+      h.set('Content-Security-Policy', CSP_HTML)
     }
     // 第 19 轮 D8：/kpi、/dashboard、/ar-summary 这些账目 JSON 以前一个缓存指令都没有
     //（第 18 轮只给签名 HTML 上了 no-store，数据本体反而没上）。同一台公用电脑上
     // 退出后按「后退」还能看到金额。这里统一 no-store（/version 在中间件里早退，走不到这儿）。
-    if (/application\/json/i.test(ct)) h.set('Cache-Control', 'no-store')
+    if (!isHtml) h.set('Cache-Control', 'no-store')
     h.set('X-Content-Type-Options', 'nosniff')
     const inm = c.req.header('if-none-match') || ''
     const hit = inm && (inm.trim() === '*' || inm.split(',').some((x) => x.trim() === etag))
-    c.res = hit ? new Response(null, { status: 304, headers: h }) : new Response(body, { status: 200, headers: h })
+    if (hit) { c.res = new Response(null, { status: 304, headers: h }); return }
+    // 第 20 轮 B1：同样不自己压（见上面签名页那段）。这里只保证不写 no-transform，
+    // 让 Cloudflare 按客户端能力压缩 —— 线上实测 /guide 40KB、/pc 52KB 以前一个字节都没压。
+    c.res = new Response(body, { status: 200, headers: h })
   } catch (e) { /* 读不出 body 就算了，照常返回 */ }
 }
 
@@ -1769,6 +1817,16 @@ app.use('*', async (c, next) => {
         if (offPub.size) {
           const mPub = moduleOfPath(path)
           if (mPub && offPub.has(mPub.k)) {
+            // 第 20 轮 A8：这条以前对浏览器也回 JSON（客户点旧打印链接看到一串花括号）。
+            // 现在只要是页面导航就给 errorPage。
+            if (wantsHtmlErr(c)) {
+              return c.html(errorPage({
+                title: '这一页打不开了',
+                why: '「' + mPub.name + '」这个功能被关掉了。',
+                how: '要用就在小程序里打开：设置 → 🧩 功能模块 → 把「' + mPub.name + '」打开，再点一次这条链接。',
+                code: 'module_off'
+              }), 403)
+            }
             return c.json({ code: 'module_off', module: mPub.k, error: '「' + mPub.name + '」' + MODULE_OFF_NOTE }, 403)
           }
         }
@@ -1957,6 +2015,15 @@ app.use('*', async (c, next) => {
     if (off.size) {
       const mOff = moduleOfPath(path)
       if (mOff && off.has(mOff.k)) {
+        // 第 20 轮 A8：同上，页面导航给 HTML 错误页
+        if (wantsHtmlErr(c)) {
+          return c.html(errorPage({
+            title: '这一页打不开了',
+            why: '「' + mOff.name + '」这个功能被关掉了。',
+            how: '要用就在小程序里打开：设置 → 🧩 功能模块 → 把「' + mOff.name + '」打开，再点一次这条链接。',
+            code: 'module_off'
+          }), 403)
+        }
         return c.json({ code: 'module_off', module: mOff.k, error: '「' + mOff.name + '」' + MODULE_OFF_NOTE }, 403)
       }
     }
@@ -4202,12 +4269,17 @@ app.get('/statements-print', async (c) => {
   const from = month + '-01'
   const to = String(monthEndOf(month) || (month + '-31')).slice(0, 10) // 该月最后一天
   const sheets = []
+  const failed = []
   const preTitle = await getTitle(db).catch(() => null)
   for (const party of parties) {
-    try { sheets.push(await statementSheetData(db, party, type, from, to, preTitle)) } catch (e) { noteFail(e, '批量打对账单') }
+    try { sheets.push(await statementSheetData(db, party, type, from, to, preTitle)) } catch (e) { noteFail(e, '批量打对账单'); failed.push(party) }
   }
-  if (!sheets.length) return c.html(errorPage({ title: '这批一张都没打出来', why: '查询出错了（不是没有账）', how: '过一会儿再点一次；一直不行就把这条链接发给技术。' }))
-  return c.html(a4MultiPage({ title: `${month} ${type === 'ap' ? '应付' : '应收'}对账单 ${sheets.length} 家`, sheets }))
+  if (!sheets.length) return c.html(errorPage({ title: '这批一张都没打出来', why: '查询出错了（不是没有账）', how: '过一会儿再点一次；一直不行就把这条链接发给技术。', code: 'bulk_failed' }))
+  // 第 20 轮 A5：以前某一家查询失败就静默跳过，标题只写「17 家」——
+  // 勾了 20 家、打出 17 家，老板不知道少的是哪 3 家，那 3 家这月就漏了。
+  const titleTxt = `${month} ${type === 'ap' ? '应付' : '应收'}对账单 ${sheets.length} 家`
+    + (failed.length ? `（另有 ${failed.length} 家没生成出来：${failed.slice(0, 6).join('、')}${failed.length > 6 ? ' 等' : ''} —— 过一会儿单独重打）` : '')
+  return c.html(a4MultiPage({ title: titleTxt, sheets }))
 })
 
 // ==================== 借款台账（银行/亲友借款 + 利息 + 还款计划） ====================
@@ -4825,6 +4897,11 @@ const saveArchive = async (db, snap) => {
 }
 
 // 读某月数据：已归档就用归档快照（历史改动不影响已出报表）
+// 第 20 轮 B12：没归档的月份每次都要现算（一个月约 15 条查询、9,000 行），
+// 而 /report-print、/dashboard、/month-brief 会连着要同一个月。缓存 5 分钟，
+// 口径与 plOf 的 5 分钟缓存一致（README 里写过「报表最长 5 分钟滞后」）。
+const _snapCache = new WeakMap()
+const SNAP_CACHE_MS = 5 * 60 * 1000
 const snapOf = async (db, mm) => {
   const a = await db.prepare('SELECT data FROM month_archive WHERE month=?').bind(mm).first()
   if (a && a.data) {
@@ -4834,8 +4911,13 @@ const snapOf = async (db, mm) => {
       return d
     } catch (e) { /* 归档坏了就现算 */ }
   }
+  const hit = (_snapCache.get(db) || {})[mm]
+  if (hit && Date.now() - hit.at < SNAP_CACHE_MS) return Object.assign({}, hit.d, { cached: true })
   const d = await monthSnapshot(db, mm)
   d.archived = false
+  const bag = _snapCache.get(db) || {}
+  bag[mm] = { at: Date.now(), d }
+  _snapCache.set(db, bag)
   return d
 }
 
@@ -6634,28 +6716,40 @@ app.get('/me', async (c) => {
   const role = c.get('role') || 'owner'
   const mainDb = (c.env.ENV_ALL && c.env.ENV_ALL.DB) || c.env.DB
   const bookDb = c.env.DB || mainDb
-  const staff = await getStaffKey(bookDb)
-  const seal = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed'").first().catch(() => null)
-  const sealAt = await c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed_at'").first().catch(() => null)
   // 一人一个口令时，权限按这个人的来；没有个人账号就用整体员工权限
   const myName = String(c.get('staff_name') || '')
-  let mods = role === 'staff' ? await getStaffModules(bookDb) : Object.keys(STAFF_MOD_LABEL)
-  if (role === 'staff' && myName) {
-    const su = await bookDb.prepare('SELECT modules FROM staff_users WHERE name=? AND active=1 ORDER BY id DESC').bind(myName).first().catch(() => null)
-    if (su && String(su.modules || '').trim()) mods = String(su.modules).split(',').map((x) => x.trim()).filter(Boolean)
+  // 第 20 轮 B3：这 8 处以前全是串行 await。每条 D1 往返 80–120ms，而 /desk 必须
+  // 先拿到 /me 才会发后面 6 个请求 —— 关键路径上白等 300–600ms，每次打开都等。
+  // 它们之间没有任何依赖（mods 的两段也只是「先取后算」，不是「先取后查」），
+  // 所以一起发。注意别把 getKey/getStaffKey 的缓存语义改掉：仍然调原来的函数。
+  const [staff, seal, sealAt, staffMods, su, demoEnabledRaw, builtinRow, superEnabledRaw, bookKey, demoBook] = await Promise.all([
+    getStaffKey(bookDb),
+    c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed'").first().catch(() => null),
+    c.env.DB.prepare("SELECT value FROM settings WHERE key='sealed_at'").first().catch(() => null),
+    role === 'staff' ? getStaffModules(bookDb) : Promise.resolve(null),
+    (role === 'staff' && myName)
+      ? bookDb.prepare('SELECT modules FROM staff_users WHERE name=? AND active=1 ORDER BY id DESC').bind(myName).first().catch(() => null)
+      : Promise.resolve(null),
+    // demo_enabled 只给老板看（前端据此决定要不要显示「设演示口令」按钮），不回明文
+    role === 'owner' ? demoKeyOn(mainDb) : Promise.resolve(false),
+    role === 'owner'
+      ? mainDb.prepare("SELECT value FROM settings WHERE key='demo_builtin_off'").first().catch(() => null)
+      : Promise.resolve(null),
+    // 超级口令开着没有：只有超级管理员/主人看得到（前端据此显示设置入口）
+    role === 'owner' ? superKeyOn(mainDb) : Promise.resolve(false),
+    // 这本账自己有没有独立管理员口令（有的话，主账套口令照样能用）
+    (c.env.DB && c.env.DB !== mainDb) ? getKey(c.env.DB) : Promise.resolve(null),
+    // 演示账套（示例数据那本）：前端据此把「员工账号/员工权限/客户分给员工」这些入口全藏掉
+    isDemoBook(c).catch(() => false)
+  ])
+  let mods = role === 'staff' ? (staffMods || []) : Object.keys(STAFF_MOD_LABEL)
+  if (role === 'staff' && myName && su && String(su.modules || '').trim()) {
+    mods = String(su.modules).split(',').map((x) => x.trim()).filter(Boolean)
   }
-  // demo_enabled 只给老板看（前端据此决定要不要显示「设演示口令」按钮），不回明文
-  const demoEnabled = role === 'owner' ? await demoKeyOn(mainDb) : false
-  const builtinOff = role === 'owner'
-    ? !!(await mainDb.prepare("SELECT value FROM settings WHERE key='demo_builtin_off'").first().catch(() => null) || { value: '' }).value === '1'
-    : false
+  const demoEnabled = role === 'owner' ? demoEnabledRaw : false
+  const builtinOff = role === 'owner' ? String((builtinRow || {}).value || '') === '1' : false
   const isSuper = !!c.get('super')
-  // 超级口令开着没有：只有超级管理员/主人看得到（前端据此显示设置入口）
-  const superEnabled = role === 'owner' ? await superKeyOn(mainDb) : false
-  // 这本账自己有没有独立管理员口令（有的话，主账套口令照样能用）
-  const bookKey = c.env.DB && c.env.DB !== mainDb ? await getKey(c.env.DB) : null
-  // 演示账套（示例数据那本）：前端据此把「员工账号/员工权限/客户分给员工」这些入口全藏掉
-  const demoBook = await isDemoBook(c).catch(() => false)
+  const superEnabled = role === 'owner' ? superEnabledRaw : false
   return c.json({
     role,
     book: String(c.env.BOOK || '1'),
@@ -8546,7 +8640,13 @@ ${FAVICON_LINK}
    input[type=checkbox]{width:20px;height:20px} .wrap{padding:16px 10px 60px} .stat .v{font-size:20px} table{font-size:13px} th,td{padding:6px 4px} }
 </style></head><body><div class="wrap">
 <h1>📊 电脑看账台 <span id="bookTag" style="font-size:14px;font-weight:400;color:#6b7280"></span></h1>
-<div class="sub">看账 + 记收款/记支出（改单、删单、月结还是在小程序里）· 数据每次打开重新取</div>
+<div class="sub">看账 + 记收款/记支出（改单、删单、月结还是在小程序里）</div>
+<!-- 第 20 轮 C3：以前报错里让人「点刷新」，可这一页根本没有刷新按钮；
+     也从不显示「这些数是什么时候的」，老板盯着半小时前的数字做决定。 -->
+<div class="row" style="margin:6px 0 14px">
+  <button class="btn sm gray" onclick="load()">🔄 刷新</button>
+  <span id="lastUpd" class="tip2" style="margin:0 0 0 10px"></span>
+</div>
 <div id="err" class="err" style="display:none"></div>
 <div id="ok" class="ok" style="display:none"></div>
 
@@ -8554,7 +8654,10 @@ ${FAVICON_LINK}
   <div class="ct">先输访问口令</div>
   <input id="key" type="password" placeholder="就是小程序里那个访问口令" autocomplete="current-password">
   <button class="btn" onclick="saveKey()">进来</button>
-  <div class="tip2">口令只存在这台电脑的浏览器里（localStorage），不会发到别的地方。公用电脑请用完点「退出」。</div>
+  <!-- 第 20 轮 A6：新机器还没设过口令的人，以前只会被告知「口令不对」，
+       而网页端没有任何设口令/找回的入口。这里直接给路。 -->
+  <div class="tip2"><a href="/pc">第一次用 / 忘了口令 →</a>（电脑端那一页有「用恢复码重设」）</div>
+  <div class="tip2">口令只存在这台电脑的浏览器里，不会发到别的地方。公用电脑请用完点「退出」。</div>
 </div>
 
 <noscript>
@@ -8586,7 +8689,7 @@ ${FAVICON_LINK}
       <label>收多少<input id="rcAmt" inputmode="decimal" placeholder="比如 3000"></label>
       <label>进哪个账户<select id="rcAcc"></select></label>
       <label>哪天收的<input id="rcDate" type="date"></label>
-      <label>&nbsp;<button class="btn" onclick="doRecv()">记上</button></label>
+      <label>&nbsp;<button class="btn" onclick="doRecv(this)">记上</button></label>
     </div>
     <div id="fExp" class="form" style="display:none">
       <label>花在什么上<select id="exCat"></select></label>
@@ -8594,13 +8697,21 @@ ${FAVICON_LINK}
       <label>从哪个账户出<select id="exAcc"></select></label>
       <label>哪天花的<input id="exDate" type="date"></label>
       <label>备注<input id="exNote" placeholder="选填，比如「交电费」"></label>
-      <label>&nbsp;<button class="btn" onclick="doExp()">记上</button></label>
+      <label>&nbsp;<button class="btn" onclick="doExp(this)">记上</button></label>
     </div>
     <div class="tip2">记完上面的数字会自动跟着变。同一个按钮连点两下只会记一笔。</div>
   </div>
 
   <div class="card">
     <div class="ct">该催的钱<span id="dueSum"></span></div>
+    <!-- 第 20 轮 C7/C11：找单位 + 按条件勾。放在 dueBox 外面 —— 表格重画时不能把
+         正在输入的搜索框也一起换掉（那样每打一个字就失焦）。 -->
+    <div class="row" style="margin-bottom:8px">
+      <input id="dueQ" placeholder="找单位（打两个字就筛）" style="max-width:220px;padding:8px 10px;border:1px solid #d8dde3;border-radius:8px;font-size:16px" oninput="filterDue(this.value)">
+      <button class="btn sm gray" onclick="checkOverdue(30)">只勾逾期 30 天以上</button>
+      <button class="btn sm gray" onclick="toggleAll(false)">全不勾</button>
+      <button class="btn sm gray" onclick="toggleAll(true)">全勾</button>
+    </div>
     <div id="dueBox">正在取…</div>
     <div class="row">
       <label>账期 <input id="bm" type="month"></label>
@@ -8640,7 +8751,10 @@ window.onerror = function(m, src, ln){
   } catch (e) {}
 }
 function el(id){ return document.getElementById(id) }
-function money(n){ n = Number(n||0); var a = Math.abs(n).toFixed(2).split('.'); a[0]=a[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,','); return (n<0?'-':'')+a[0]+'.'+a[1] }
+// 第 20 轮 A7：以前 money(undefined) → Number(undefined||0) → 「¥0.00」。
+// 接口失败时那一格就变成「逾期 ¥0.00」，老板以为钱收齐了 —— 这是最典型的假安心。
+// 现在「没取到」和「真的是 0」分开显示。
+function money(n){ if(n===null || n===undefined || n==='') return '—'; n = Number(n); if(!isFinite(n)) return '—'; var a = Math.abs(n).toFixed(2).split('.'); a[0]=a[0].replace(/\\B(?=(\\d{3})+(?!\\d))/g,','); return (n<0?'-':'')+a[0]+'.'+a[1] }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c] }) }
 function ym(){ var d=new Date(); return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2) }
 function ymd(){ var d=new Date(); return ym()+'-'+('0'+d.getDate()).slice(-2) }
@@ -8654,27 +8768,46 @@ function logout(){ localStorage.removeItem('fa_key'); localStorage.removeItem('f
 // 并在标题栏写明「第 N 本账」。
 function api(p){
   return fetch(p,{headers:{'x-access-key':K,'x-book':BK}}).then(function(r){
-    if(r.status===401||r.status===403){ var e=new Error('auth'); e.auth=true; throw e }
+    // 第 20 轮 A6：以前 401/403 一律 throw new Error('auth')，把后端的 code（no_key / bad_key /
+    // book_unavailable）和「首次使用请设置访问口令」这句全丢了 → 新机器上的老板被告诉
+    // 「口令不对」，以为是自己记错了，而真相是这台机器还没设过口令。
+    if(r.status===401||r.status===403){
+      return r.json().catch(function(){ return {} }).then(function(d){
+        var e=new Error((d && d.error) || 'auth'); e.auth=true; e.code=(d && d.code)||''; e.http=r.status; throw e
+      })
+    }
     if(!r.ok){ var e2=new Error('HTTP '+r.status); e2.http=r.status; throw e2 }
     return r.json()
   })
 }
-// 第 19 轮 C1：写接口。client_id 由这里发号 —— 连点两下会被后端判重，
-// 不会记成两笔（这也是小程序那边一直在用的规矩）。
-function post(p, body){
+// 第 19 轮 C1：写接口。client_id 由这里发号。
+// 第 20 轮 A2：以前每次都现造随机 client_id，连点两下就是两个 id → 后端判重形同不存在，
+// 实测「记上 300」点两次 paid 从 300 变 600。现在按「内容 + 3 秒时间桶」发号：
+// 3 秒内的同内容重发会拿到同一个 id（后端判重），超过 3 秒的第二次真收款仍是新 id。
+function cidOf(tag, parts){
+  return 'desk-' + tag + '-' + Math.floor(Date.now()/3000).toString(36) + '-' + parts.map(function(x){ return String(x==null?'':x).replace(/[^\w.\-]/g,'_') }).join('_')
+}
+function post(p, body, cid){
   body = body || {}
-  body.client_id = 'desk-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)
+  body.client_id = cid || ('desk-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6))
   return fetch(p,{method:'POST',headers:{'x-access-key':K,'x-book':BK,'Content-Type':'application/json'},body:JSON.stringify(body)})
     .then(function(r){ return r.json().catch(function(){ return {} }).then(function(d){
-      if(!r.ok){ var e=new Error((d && d.error) || ('HTTP '+r.status)); e.code=(d && d.code)||''; e.http=r.status; throw e }
+      if(!r.ok){ var e=new Error((d && d.error) || ('HTTP '+r.status)); e.code=(d && d.code)||''; e.http=r.status; e.dup=!!(d && d.dup); e.body=d||{}; throw e }
       return d
     }) })
 }
 function errText(e){
   // 第 19 轮 C13：把后端的错误码一起显出来，方便照着截图问人
+  // 第 20 轮 C16：浏览器给的英文原话（Failed to fetch / Load failed / NetworkError）
+  // 老板看不懂，也不该看懂。翻成「网断了 / 服务器没回应 / 超时」。
   if(!e) return '不知道哪出错了'
-  var t = e.message || '网络不好'
-  if(e.code) t += '（' + e.code + '）'
+  var m = String(e.message || '')
+  if(/Failed to fetch|Load failed|NetworkError|fetch failed/i.test(m)) return '连不上服务器（网断了或服务器正在重启），过一会儿再点一次'
+  if(/aborted|timeout/i.test(m)) return '等太久了（网络太慢），再点一次'
+  var t = m || '网络不好'
+  if(e.code === 'server_error') t = '服务器出错了（已经记下来了），过一会儿再点一次'
+  else if(e.code === 'stale') t = '这张单的数字刚变过（可能在手机上改过），点刷新看一眼再记'
+  else if(e.code) t += '（' + e.code + '）'
   return t
 }
 function tab(which){
@@ -8687,36 +8820,77 @@ function fillForms(due, accs, cats){
   LAST.due = ((due && due.rows) || []).filter(function(r){ return Number(r.left) > 0.005 })
   LAST.accs = (accs && accs.accounts) || []
   LAST.cats = (cats && cats.out) || []
+  // 第 20 轮 C9：以前下拉只有「已到期/逾期」那 20 张单，想记「没到期先付一笔」
+  // 必须回小程序。现在多一个入口：手输单号。
+  var otherOpt = '<option value="__other">— 别的单（手输单号）—</option>'
   el('rcDoc').innerHTML = LAST.due.length ? LAST.due.map(function(r){
     return '<option value="'+esc(r.id)+'">#'+esc(r.id)+' '+esc(String(r.party||'').slice(0,10))+' '+esc(String(r.item||'').slice(0,10))+' 还欠 '+money(r.left)+'</option>'
-  }).join('') : '<option value="">没有还欠钱的单</option>'
+  }).join('') + otherOpt : (due ? '<option value="">没有还欠钱的单</option>' + otherOpt : '<option value="">（没取到，不是没有 —— 点刷新再看）</option>')
   var accOpt = LAST.accs.map(function(a){ return '<option value="'+esc(a.id)+'">'+esc(a.name)+'（余 '+money(a.balance)+'）</option>' }).join('')
+  // 第 20 轮 A7：账户/分类没取到时以前是空下拉（点了也没反应），现在写明「没取到」。
+  if(!accOpt) accOpt = '<option value="">（账户没取到 —— 点刷新再看）</option>'
   el('rcAcc').innerHTML = accOpt
   el('exAcc').innerHTML = accOpt
-  el('exCat').innerHTML = LAST.cats.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>' }).join('')
+  el('exCat').innerHTML = LAST.cats.length ? LAST.cats.map(function(c){ return '<option value="'+esc(c.id)+'">'+esc(c.name)+'</option>' }).join('') : '<option value="">（支出分类没取到 —— 点刷新再看）</option>'
+  // 第 20 轮 C15：记住上次用的账户（老板通常只有一个收款账户），少点一次
+  try {
+    var lastAcc = localStorage.getItem('fa_acc')
+    if(lastAcc){ ['rcAcc','exAcc'].forEach(function(k){ var e0=el(k); if(e0 && [].some.call(e0.options, function(o){ return o.value===lastAcc })) e0.value = lastAcc }) }
+  } catch(e) {}
   if(!el('rcDate').value) el('rcDate').value = ymd()
   if(!el('exDate').value) el('exDate').value = ymd()
 }
 function numOf(v){ var s=String(v||'').replace(/[¥￥,\s元]/g,''); if(!s) return null; var n=Number(s); return isFinite(n)? n : null }
-function doRecv(){
+// 第 20 轮 A2：连点保护。以前 doRecv 进来就发请求、按钮也不 disable，
+// 两次点击拿到两个 client_id → 后端当成两笔（实测 paid 300 → 600）。
+// 现在同一时刻只允许一个在飞，并给出「正在记…」。
+var BUSY = {}
+function busyStart(k, btn){ if(BUSY[k]) return false; BUSY[k]=1; if(btn){ btn.disabled=true; btn.setAttribute('data-t','1') } return true }
+function busyEnd(k, btn){ BUSY[k]=0; if(btn && btn.getAttribute('data-t')){ btn.disabled=false; btn.removeAttribute('data-t') } }
+function doRecv(btn){
   var id = el('rcDoc').value
+  if(id === '__other'){
+    var typed = window.prompt('输入单号（单据列表里那个 # 后面的数字）', '')
+    if(!typed) return
+    if(!/^\d+$/.test(String(typed).trim())){ showErr('单号是数字，比如 128'); return }
+    id = String(typed).trim()
+  }
   if(!id){ showErr('没有还欠钱的单可以收款'); return }
   var amt = numOf(el('rcAmt').value)
   if(amt===null || amt<=0){ showErr('收多少要填个正常数字（比如 3000 或 3,000）'); return }
+  if(!busyStart('recv', btn)) return
   hideErr()
-  post('/orders/'+encodeURIComponent(id)+'/receive', { amount: amt, account_id: el('rcAcc').value||null, date: el('rcDate').value||ymd() })
-    .then(function(d){ el('rcAmt').value=''; showOk('记上了'+(d && d.overdue_left ? '，这张单还欠 ¥'+money(d.overdue_left) : '')); load() })
-    .catch(function(e){ showErr('没记上：'+errText(e)) })
+  var dt = el('rcDate').value||ymd(), acc = el('rcAcc').value||null
+  post('/orders/'+encodeURIComponent(id)+'/receive', { amount: amt, account_id: acc, date: dt }, cidOf('recv',[id,amt,dt,acc]))
+    .then(function(d){ el('rcAmt').value=''; busyEnd('recv', btn); showOk(d && d.dup_ok ? '这笔刚才已经记上了（没重复记）' : ('记上了'+(d && d.overdue_left ? '，这张单还欠 ¥'+money(d.overdue_left) : ''))); load() })
+    .catch(function(e){ busyEnd('recv', btn); showErr('没记上：'+errText(e)) })
 }
-function doExp(){
+function doExp(btn){
   var amt = numOf(el('exAmt').value)
   if(amt===null || amt<=0){ showErr('多少钱要填个正常数字（比如 380 或 380.50）'); return }
   var cat = el('exCat').value
   if(!cat){ showErr('先选花在什么上'); return }
+  if(!busyStart('exp', btn)) return
   hideErr()
-  post('/expenses', { amount: amt, category: cat, account_id: el('exAcc').value||null, date: el('exDate').value||ymd(), remark: el('exNote').value||'' })
-    .then(function(d){ el('exAmt').value=''; el('exNote').value=''; showOk('记上了'); load() })
-    .catch(function(e){ showErr('没记上：'+errText(e)) })
+  var dt = el('exDate').value||ymd(), acc = el('exAcc').value||null, note = el('exNote').value||''
+  sendExp(amt, cat, acc, dt, note, false, btn)
+}
+function sendExp(amt, cat, acc, dt, note, force, btn){
+  var body = { amount: amt, category: cat, account_id: acc, date: dt, remark: note }
+  if(force) body.confirm_dup = true
+  post('/expenses', body, cidOf('exp',[amt,cat,dt,acc,note,force?1:0]))
+    .then(function(d){ el('exAmt').value=''; el('exNote').value=''; busyEnd('exp', btn); showOk(d && d.dup_ok ? '这笔刚才已经记上了（没重复记）' : '记上了'); load() })
+    .catch(function(e){
+      busyEnd('exp', btn)
+      // 第 20 轮 A3：同一天、同金额、同分类的第二笔，后端返回 409 + dup:true 要 confirm_dup。
+      // 以前页面没有这个入口 → 这笔永远记不进去，老板只好改成 381 记上去（账从此错）。
+      if(e && e.dup && !force){
+        var msg = (e.message || '今天已经记过一笔一样的') + '\\n\\n确认再记一笔吗？（是两笔不同的花费才确认）'
+        if(window.confirm(msg)){ busyStart('exp', btn); sendExp(amt, cat, acc, dt, note, true, btn); return }
+        return
+      }
+      showErr('没记上：'+errText(e))
+    })
 }
 function showOk(t){ var e=el('ok'); e.textContent=t; e.style.display='block'; setTimeout(function(){ e.style.display='none' }, 4000) }
 function load(){
@@ -8733,12 +8907,16 @@ function load(){
     BK = String(me.book||'') || BK
     try { localStorage.setItem('fa_book', BK) } catch(e) {}
     el('bookTag').textContent = '第 ' + (BK||'1') + ' 本账'
-    var m = el('bm').value || ym(); el('bm').value = m
+    // 第 20 轮 C8：月份记住上次看的（老板常年盯上个月的对账，每次都要重选）
+    var m = el('bm').value
+    if(!m){ try { m = localStorage.getItem('fa_month') || '' } catch(e){} }
+    if(!m) m = ym()
+    el('bm').value = m
     el('gate').style.display='none'; el('main').style.display='block'
     // 第 19 轮 C9：以前用 Promise.all —— 六个接口里任何一个抖一下，整页空白，
     // 老板以为账没了。现在各自独立：取到几张卡就显示几张卡，缺的单独提示。
     Promise.allSettled([
-      api('/kpi?month='+m), api('/ar-summary?month='+m), api('/due-schedule?type=ar&days=365&limit=20'),
+      api('/kpi?month='+m), api('/ar-summary?month='+m), api('/due-schedule?type=ar&limit='+DUE_LIMIT),
       api('/dashboard?month='+m), api('/accounts'), api('/categories')
     ]).then(function(rs){
       var miss = []
@@ -8746,14 +8924,28 @@ function load(){
       var kpi = get(0,'利润'), ar = get(1,'应收汇总'), due = get(2,'逾期'), dash = get(3,'首页数据'), accs = get(4,'账户'), cats = get(5,'支出分类')
       fillForms(due, accs, cats)
       render(kpi, ar, due, dash)
-      if(miss.length) showErr('这几块没取到：'+miss.join('、')+' —— 其它数字照常，点「刷新」再试')
+      if(miss.length) showErr('这几块没取到：'+miss.join('、')+' —— 其它数字照常，点「🔄 刷新」再试')
       else hideErr()
+      var d0 = new Date()
+      el('lastUpd').textContent = '最后更新 ' + ('0'+d0.getHours()).slice(-2) + ':' + ('0'+d0.getMinutes()).slice(-2) + '（看的是这个月的账）'
     })
-  }).catch(function(e){ if(e && e.auth) showGate('口令不对（或换了账套）：重新输一次'); else showErr('连不上：'+errText(e)) })
+  }).catch(function(e){
+    // 第 20 轮 A6：分三种情况说人话 —— 没设过口令 / 口令不对 / 连不上。
+    if(e && e.auth){
+      if(e.code==='no_key') showGate('这台机器还没设过口令：先在微信小程序「我的」里设一个；忘了口令就点下面的「第一次用 / 忘了口令」用恢复码重设。')
+      else if(e.code==='book_unavailable') showGate('这本账还没开通（第 '+(BK||'?')+' 本）。换一本，或让老板在小程序里开通。')
+      else showGate('口令不对（或换了账套）：重新输一次。忘了口令就点下面的「第一次用 / 忘了口令」。')
+      return
+    }
+    showErr('连不上：'+errText(e))
+  })
 }
 function render(kpi, ar, due, dash){
   kpi = kpi || {}; ar = ar || {}; due = due || {}; dash = dash || {}
   var st = [
+    // 第 20 轮 C2：老板每天第一句话是「今天收了多少钱」，而 /dashboard 早就返回了
+    // today_income，这一页以前偏偏不画 —— 得回手机看。
+    { k:'今天收了', v:'¥'+money(dash.today_income), c:'blue', n:'今天真金白银进账' },
     { k:'本月利润（按单子算）', v:'¥'+money(kpi.profit_accrual), c: (Number(kpi.profit_accrual)<0?'red':'green'), n:'现金口径 ¥'+money(kpi.profit) },
     { k:'本月收款', v:'¥'+money(kpi.cash_in), c:'blue', n:'本月付出去 ¥'+money(kpi.cash_out) },
     { k:'逾期没收回', v:'¥'+money(ar.overdue_amount), c:(Number(ar.overdue_amount)>0?'red':''), n:(ar.overdue_count||0)+' 家有逾期 · 总共还欠 ¥'+money(ar.open_amount) },
@@ -8763,25 +8955,8 @@ function render(kpi, ar, due, dash){
   el('stats').innerHTML = st.map(function(x){
     return '<div class="stat"><div class="k">'+esc(x.k)+'</div><div class="v '+(x.c||'')+'">'+esc(x.v)+'</div><div class="n2">'+(x.n||'&nbsp;')+'</div></div>'
   }).join('')
-  var rows = due.rows || []
-  // 第 19 轮 C8：这里只列 20 条，但以前连「一共多少家」都不说，老板以为只有 20 家逾期。
-  el('dueSum').innerHTML = rows.length
-    ? '<small>逾期共 ¥'+money(due.overdue_total)+' · '+(due.count||rows.length)+' 家有逾期'+(Number(due.count||rows.length)>rows.length? '（这里列逾期最久的 '+rows.length+' 家）' : '')+'</small>'
-    : ''
-  if(!rows.length){
-    el('dueBox').innerHTML = '<div style="color:#0a7d32;padding:6px 0">没有逾期没收回的钱 👍</div>'
-  } else {
-    el('dueBox').innerHTML = '<table><thead><tr><th style="width:44px"><input type="checkbox" id="ckAll" onclick="toggleAll(this.checked)" checked></th>'
-      + '<th>单位</th><th>单据</th><th class="num">还欠</th><th>应结日</th><th>情况</th><th>操作</th></tr></thead><tbody>'
-      + rows.map(function(r){
-          return '<tr><td><input type="checkbox" class="ck" data-party="'+esc(r.party)+'" checked></td>'
-            + '<td>'+esc(r.party)+'</td><td>#'+esc(String(r.id))+' '+esc(String(r.item||'—').slice(0,14))+'</td>'
-            + '<td class="num">¥'+money(r.left)+'</td><td>'+esc(r.due||'—')+'</td>'
-            + '<td class="'+(Number(r.days)>30?'bad':'')+'">'+esc(r.state||'')+'</td>'
-            // 第 19 轮 C5：每家一条「发确认链接」（只含这一家，能发给客户）
-            + '<td><button class="btn sm gray" data-ack="'+esc(r.party)+'" onclick="sendAck(this)">发确认</button></td></tr>'
-        }).join('') + '</tbody></table>'
-  }
+  renderDue(due.rows || [], due)
+  var rec = (dash && dash.recent) || []
   var rec = (dash && dash.recent) || []
   el('recent').innerHTML = rec.length ? '<table><thead><tr><th>单号</th><th>单位</th><th>产品</th><th class="num">金额</th><th class="num">还没收</th></tr></thead><tbody>'
     + rec.slice(0,12).map(function(x){
@@ -8793,22 +8968,104 @@ function render(kpi, ar, due, dash){
           + '<td class="num">¥'+money(amt)+'</td><td class="num">'+(left>0.005? '¥'+money(left) : '<span style="color:#0a7d32">已结清</span>')+'</td></tr>'
       }).join('') + '</tbody></table>' : '<div style="color:#8a94a6">最近没有单据</div>'
 }
+// 第 20 轮 C7/C11：逾期表单独成函数 —— 搜索框和「只勾逾期 30 天以上」要重画它。
+function renderDue(rows, due){
+  due = due || {}
+  // 第 20 轮 C4：以前每次 load() 之后所有勾都变回「已勾」——
+  // 老板取消勾了 5 家不想打，记完一笔收款回来，那 5 家又被勾上，一按就发出去。
+  var keepOff = {}
+  try {
+    var olds = document.querySelectorAll('#dueBox .ck')
+    for (var oi = 0; oi < olds.length; oi++) if (!olds[oi].checked) keepOff[olds[oi].getAttribute('data-party')] = 1
+  } catch (e) {}
+  // 第 19 轮 C8：这里只列 20 条，但以前连「一共多少家」都不说，老板以为只有 20 家逾期。
+  el('dueSum').innerHTML = rows.length
+    ? '<small>逾期共 ¥'+money(due.overdue_total)+' · '+(due.count||rows.length)+' 家有逾期'+(Number(due.count||rows.length)>rows.length? '（这里列逾期最久的 '+rows.length+' 家）' : '')+'</small>'
+      + (Number(due.count||0) > rows.length
+        ? ' <button class="btn sm gray" style="margin-left:8px" onclick="moreDue()">显示更多（现在 '+rows.length+' 家）</button>'
+        : '')
+    : ''
+  if(!rows.length){
+    el('dueBox').innerHTML = '<div style="color:#0a7d32;padding:6px 0">没有逾期没收回的钱 👍</div>'
+    return
+  }
+  el('dueBox').innerHTML = '<table><thead><tr><th style="width:44px"><input type="checkbox" id="ckAll" onclick="toggleAll(this.checked)" checked></th>'
+    + '<th>单位</th><th>单据</th><th class="num">还欠</th><th>应结日</th><th>情况</th><th>操作</th></tr></thead><tbody>'
+    + rows.map(function(r){
+        return '<tr><td><input type="checkbox" class="ck" data-party="'+esc(r.party)+'" data-days="'+esc(String(r.days||0))+'"'+(keepOff[r.party] ? '' : ' checked')+'></td>'
+          + '<td>'+esc(r.party)+'</td><td>#'+esc(String(r.id))+' '+esc(String(r.item||'—').slice(0,14))+'</td>'
+          + '<td class="num">¥'+money(r.left)+'</td><td>'+esc(r.due||'—')+'</td>'
+          + '<td class="'+(Number(r.days)>30?'bad':'')+'">'+esc(r.state||'')+'</td>'
+          // 第 19 轮 C5：每家一条「发确认链接」（只含这一家，能发给客户）
+          + '<td><button class="btn sm gray" data-ack="'+esc(r.party)+'" onclick="sendAck(this)">发确认</button></td></tr>'
+      }).join('') + '</tbody></table>'
+}
+
 function toggleAll(on){ var cs=document.querySelectorAll('.ck'); for(var i=0;i<cs.length;i++) cs[i].checked=on }
+// 第 20 轮 C11：按条件勾选（逾期 30 天以上 / 全不选），20 家一个个点容易点错
+function checkOverdue(days){
+  var cs = document.querySelectorAll('#dueBox .ck')
+  for(var i=0;i<cs.length;i++){
+    var d = Number(cs[i].getAttribute('data-days') || 0)
+    cs[i].checked = d > days
+  }
+}
+// 第 20 轮 C7：单位太多时按名字筛（接口 /due-schedule 的 party 是精确匹配，
+// 这里在已经取到的 20 行里过滤，够用且零后端改动）
+function filterDue(q){
+  var rows = (LAST.due || [])
+  var kw = String(q||'').trim()
+  if(!kw) return renderDue(rows)
+  renderDue(rows.filter(function(r){ return String(r.party||'').indexOf(kw) >= 0 }))
+}
+// 第 20 轮 C1：浏览器只在「用户点击的同一个同步过程」里允许开新窗口。
+// 以前四处的 window.open 都在 fetch 回调里 —— 点「发确认」「看报表」全都没反应
+//（老板以为按钮坏了，反复点）。现在点击时先同步开一个空窗口，拿到链接再改它的地址。
+function preWin(){ try { return window.open('', '_blank') } catch (e) { return null } }
+function goWin(w, url){
+  if (!url) { if (w && !w.closed) { try { w.close() } catch (e) {} } return false }
+  if (w && !w.closed) { try { w.location.href = url; return true } catch (e) {} }
+  var w2 = window.open(url, '_blank')
+  if (!w2) showErr('浏览器把新窗口拦了：地址栏右边允许「弹出式窗口」，或再点一次')
+  return !!w2
+}
+// 第 20 轮 C5：发确认链接要能直接复制（以前得自己去地址栏选中复制）
+function copyText(t){
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t); return true }
+  } catch (e) {}
+  try {
+    var ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); return true
+  } catch (e) { return false }
+}
+// 第 20 轮 C6：默认 20 家，点「显示更多」加到 40、60… 最多 100
+var DUE_LIMIT = 20
+function moreDue(){ DUE_LIMIT = Math.min(100, DUE_LIMIT + 20); load() }
 function openStmt(a){
   var party = a.getAttribute('data-party')
   if(!party){ showErr('这单没有单位名'); return }
   hideErr()
+  var w = preWin()
   api('/statement-link?type=ar&party='+encodeURIComponent(party))
-    .then(function(d){ if(d && d.url) window.open(d.url,'_blank'); else showErr((d && d.error) || '没生成出来') })
-    .catch(function(e){ showErr('没取到对账单：'+errText(e)) })
+    .then(function(d){ if(d && d.url){ goWin(w, d.url) } else { goWin(w, ''); showErr((d && d.error) || '没生成出来') } })
+    .catch(function(e){ goWin(w, ''); showErr('没取到对账单：'+errText(e)) })
 }
 function sendAck(btn){
   var party = btn.getAttribute('data-ack')
   var m = el('bm').value || ym()
   btn.disabled = true
+  var w = preWin()
   api('/statement-ack-link?type=ar&party='+encodeURIComponent(party)+'&month='+encodeURIComponent(m))
-    .then(function(d){ btn.disabled=false; if(!d || !d.url){ showErr((d && d.error)||'没生成出来'); return } window.open(d.url,'_blank') })
-    .catch(function(e){ btn.disabled=false; showErr('没生成出来：'+errText(e)) })
+    .then(function(d){
+      btn.disabled=false
+      if(!d || !d.url){ goWin(w, ''); showErr((d && d.error)||'没生成出来'); return }
+      // 第 20 轮 C5：复制到剪贴板 + 打开预览，两条路都留着（客户要微信发就粘贴，要看就预览）
+      var okCopy = copyText(d.url)
+      goWin(w, d.url)
+      showOk(okCopy ? '链接已复制，微信里粘贴发给客户就行（只显示这一家）' : '链接在打开的那一页，复制地址栏发给客户')
+    })
+    .catch(function(e){ btn.disabled=false; goWin(w, ''); showErr('没生成出来：'+errText(e)) })
 }
 function bulkPrint(){
   var parties=[]; var cs=document.querySelectorAll('.ck')
@@ -8818,16 +9075,30 @@ function bulkPrint(){
   hideErr()
   var m=el('bm').value||ym()
   el('bulkBtn').disabled=true
+  var w = preWin()
   api('/statements-print-link?month='+encodeURIComponent(m)+'&parties='+encodeURIComponent(parties.join(',')))
-    .then(function(d){ el('bulkBtn').disabled=false; if(!d.url){ showErr(d.error||'没生成出来'); return } window.open(d.url,'_blank') })
-    .catch(function(e){ el('bulkBtn').disabled=false; showErr('没生成出来：'+errText(e)) })
+    .then(function(d){ el('bulkBtn').disabled=false; if(!d.url){ goWin(w, ''); showErr(d.error||'没生成出来'); return } goWin(w, d.url) })
+    .catch(function(e){ el('bulkBtn').disabled=false; goWin(w, ''); showErr('没生成出来：'+errText(e)) })
 }
 function openReport(){
   var m=el('bm').value||ym()
-  api('/report-link?month='+encodeURIComponent(m)).then(function(d){ if(d&&d.url) window.open(d.url,'_blank'); else showErr('报表还没生成（先在小程序里出这个月的报表）') })
-    .catch(function(e){ showErr('没取到报表链接：'+errText(e)) })
+  var w = preWin()
+  api('/report-link?month='+encodeURIComponent(m)).then(function(d){ if(d&&d.url) goWin(w, d.url); else { goWin(w, ''); showErr('报表还没生成（先在小程序里出这个月的报表）') } })
+    .catch(function(e){ goWin(w, ''); showErr('没取到报表链接：'+errText(e)) })
 }
+// 第 20 轮 C3：页面开着不动时，数字会一直停在打开那一刻。切回来就刷一次；
+// 一直盯着的话每分钟刷一次（老板常年开着一个标签页）。
+document.addEventListener('visibilitychange', function(){ if(!document.hidden && K) load() })
+setInterval(function(){ if(!document.hidden && K) load() }, 60000)
 el('key').addEventListener('keydown',function(e){ if(e.key==='Enter') saveKey() })
+// 第 20 轮 C14：金额框里敲回车直接提交（以前必须去点按钮；键盘手最烦这个）
+;['rcAmt','exAmt'].forEach(function(id){
+  var e0 = el(id)
+  if(e0) e0.addEventListener('keydown', function(ev){ if(ev.key==='Enter'){ ev.preventDefault(); if(id==='rcAmt') doRecv(document.querySelector('#fRecv .btn')); else doExp(document.querySelector('#fExp .btn')) } })
+})
+// 第 20 轮 C8/C15：月份和账户都记住上次用的
+el('bm').addEventListener('change', function(){ try { localStorage.setItem('fa_month', el('bm').value||'') } catch(e){} })
+;['rcAcc','exAcc'].forEach(function(id){ var e0=el(id); if(e0) e0.addEventListener('change', function(){ try { localStorage.setItem('fa_acc', e0.value||'') } catch(e){} }) })
 el('bm').addEventListener('change',function(){ load() })
 load();
 </script>
@@ -9352,20 +9623,30 @@ function quickLoad(){
   qmsg('正在读……')
   document.getElementById('quick_nums').textContent = '正在读……'
   var hd = { 'x-access-key': K, 'X-Book': bk() }
-  Promise.all([
-    fetch('/dashboard', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } }),
-    fetch('/collect-list', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } }),
-    fetch('/statement-acks?days=60', { headers: hd }).then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } })
-  ]).then(function(a){
+  // 第 20 轮 A10：以前是裸 Promise.all —— 三个接口里任何一个网络抖一下，
+  // 整块（含已经取到的催款清单）一起消失，只留一句「读不出来」。
+  // 每个都自带 catch，坏哪个提示哪个，其余照常显示。
+  var one = function(u){
+    return fetch(u, { headers: hd })
+      .then(function(r){ return r.ok ? r.json() : { error: 'HTTP ' + r.status } })
+      .catch(function(e){ return { error: '连不上（' + ((e && e.message) || e) + '）' } })
+  }
+  Promise.all([one('/dashboard'), one('/collect-list'), one('/statement-acks?days=60')]).then(function(a){
     var d = a[0] || {}, c = a[1] || {}, s = a[2] || {}
-    if (d.error) { qmsg('总览没读出来：' + (d.error || '口令对吗？'), false); return }
-    var prof = (d.month_profit == null) ? '—' : qmoney(d.month_profit)
+    if (d.error) {
+      // 第 20 轮 A10：总览没读出来也继续渲染催款清单与对账状态（以前直接 return，全没了）
+      qmsg('总览没读出来：' + (d.error || '口令对吗？') + ' —— 下面的催款清单照常显示', false)
+      // 数字位一律显示「—」：显示 ¥0.00 会让人以为「这个月没收入」（第 20 轮 A7 的同一条原则）
+      document.getElementById('quick_nums').textContent = '（总览没读出来，下面的数字先空着）'
+      d = { month_income: null, month_outcome: null, month_profit: null, ar_total: null, ap_total: null, overdue_count: null }
+    }
+    var qm = function(v){ return (v === null || v === undefined) ? '—' : qmoney(v) }
     var bits = []
-    bits.push('本月收 <b class="ok">' + qmoney(d.month_income) + '</b>')
-    bits.push('付 <b class="bad">' + qmoney(d.month_outcome) + '</b>')
-    bits.push('剩 <b>' + prof + '</b>')
-    bits.push('应收 ' + qmoney(d.ar_total) + ' · 应付 ' + qmoney(d.ap_total))
-    bits.push('逾期 ' + (d.overdue_count || 0) + ' 单')
+    bits.push('本月收 <b class="ok">' + qm(d.month_income) + '</b>')
+    bits.push('付 <b class="bad">' + qm(d.month_outcome) + '</b>')
+    bits.push('剩 <b>' + qm(d.month_profit) + '</b>')
+    bits.push('应收 ' + qm(d.ar_total) + ' · 应付 ' + qm(d.ap_total))
+    bits.push('逾期 ' + (d.overdue_count === null || d.overdue_count === undefined ? '—' : d.overdue_count) + ' 单')
     document.getElementById('quick_nums').innerHTML = bits.join(' &nbsp;·&nbsp; ')
     var list = (c.ok && c.list) ? c.list : []
     window._quickList = list.slice(0, 6)
@@ -11970,12 +12251,18 @@ app.get('/ar-summary', async (c) => {
   const sArL = sf.on ? ' AND ref_id IN (SELECT id FROM orders WHERE created_by = ?)' : ''
   const sApL = sf.on ? ' AND ref_id IN (SELECT id FROM payables WHERE created_by = ?)' : ''
   if (type === 'ar') {
-    const open = await q('SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price' + sAr + oAr, ...(sf.on ? [sf.who] : [])).first()
-    const over = await q("SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= ?" + sAr + oAr, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first()
-    const due = await q("SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAr + oAr, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first()
-    const add = await q('SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?' + sAr + oAr, ...(sf.on ? [m, sf.who] : [m])).first()
-    const got = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND month=?" + sArL + (sc.on ? ' AND ref_id IN (SELECT id FROM orders WHERE customer IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first()
-    const top = (await q('SELECT customer name, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price' + sAr + oAr + ' GROUP BY customer ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()).results
+    // 第 20 轮 B4：这六条查询彼此没有任何依赖，以前却是六次串行 await ——
+    // 每条 D1 往返 80–120ms（同文件 :15549 的注释自己写着这个数），白等 400–700ms，
+    // 而 /desk 首屏就调它。改成并发。
+    const [open, over, due, add, got, topR] = await Promise.all([
+      q('SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price' + sAr + oAr, ...(sf.on ? [sf.who] : [])).first(),
+      q("SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND substr(created_at,1,10) <= ?" + sAr + oAr, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first(),
+      q("SELECT COUNT(*) n, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAr + oAr, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first(),
+      q('SELECT COUNT(*) n, COALESCE(SUM(price),0) t FROM orders WHERE month=?' + sAr + oAr, ...(sf.on ? [m, sf.who] : [m])).first(),
+      q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='in' AND ref_type='order' AND month=?" + sArL + (sc.on ? ' AND ref_id IN (SELECT id FROM orders WHERE customer IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first(),
+      q('SELECT customer name, COALESCE(SUM(price - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM orders WHERE COALESCE(paid,0) + COALESCE(written_off,0) < price' + sAr + oAr + ' GROUP BY customer ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()
+    ])
+    const top = (topR && topR.results) || []
     return c.json({
       type, open_amount: round2(num(open.t)), open_count: num(open.n),
       overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
@@ -11984,12 +12271,16 @@ app.get('/ar-summary', async (c) => {
       top: top.map((x) => ({ name: x.name, amount: round2(num(x.t)) }))
     })
   }
-  const open = await q('SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount' + sAp + oAp, ...(sf.on ? [sf.who] : [])).first()
-  const over = await q("SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND substr(created_at,1,10) <= ?" + sAp + oAp, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first()
-  const due = await q("SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAp + oAp, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first()
-  const add = await q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=?' + sAp + oAp, ...(sf.on ? [m, sf.who] : [m])).first()
-  const paid = await q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND month=?" + sApL + (sc.on ? ' AND ref_id IN (SELECT id FROM payables WHERE supplier IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first()
-  const top = (await q('SELECT supplier name, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount' + sAp + oAp + ' GROUP BY supplier ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()).results
+  // 第 20 轮 B4：同上，六条并发。
+  const [open, over, due, add, paid, topR] = await Promise.all([
+    q('SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount' + sAp + oAp, ...(sf.on ? [sf.who] : [])).first(),
+    q("SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND substr(created_at,1,10) <= ?" + sAp + oAp, ...(sf.on ? [dayAgo(30), sf.who] : [dayAgo(30)])).first(),
+    q("SELECT COUNT(*) n, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount AND due_date IS NOT NULL AND due_date <> '' AND substr(due_date,1,10) BETWEEN ? AND ?" + sAp + oAp, ...(sf.on ? [today, dayAfter(7), sf.who] : [today, dayAfter(7)])).first(),
+    q('SELECT COUNT(*) n, COALESCE(SUM(amount),0) t FROM payables WHERE month=?' + sAp + oAp, ...(sf.on ? [m, sf.who] : [m])).first(),
+    q("SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE direction='out' AND ref_type='payable' AND month=?" + sApL + (sc.on ? ' AND ref_id IN (SELECT id FROM payables WHERE supplier IN (SELECT party FROM party_staff WHERE staff=?))' : ''), ...(sf.on ? [m, sf.who] : [m])).first(),
+    q('SELECT supplier name, COALESCE(SUM(amount - COALESCE(paid,0) -  COALESCE(written_off,0)),0) t FROM payables WHERE COALESCE(paid,0) + COALESCE(written_off,0) < amount' + sAp + oAp + ' GROUP BY supplier ORDER BY t DESC LIMIT 3', ...(sf.on ? [sf.who] : [])).all()
+  ])
+  const top = (topR && topR.results) || []
   return c.json({
     type, open_amount: round2(num(open.t)), open_count: num(open.n),
     overdue_amount: round2(num(over.t)), overdue_count: num(over.n),
@@ -15563,9 +15854,12 @@ app.get('/collect-list', async (c) => {
   const title = titleRow.title
   const rows = rowsRes0.results || []
   // 每家的历史付款速度（结清的单平均几天付清）——用来判断「催得动」还是「一直拖」
+  // 第 20 轮 B7：这条以前是全表 JOIN（结清的单全扫一遍，几千行），而 /pc 只显示 6 条。
+  // 加 12 个月窗口 + 上限 3000 行，足够算「平均几天付清」。
+  const histWhere = " AND substr(o.created_at,1,10) >= date('now','-12 months')"
   const histSql = type === 'ap'
-    ? "SELECT o.supplier AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM payables o JOIN ledger l ON l.ref_type='payable' AND l.ref_id=o.id AND l.direction='out' WHERE o.paid + COALESCE(o.written_off,0) >= o.amount GROUP BY o.id"
-    : "SELECT o.customer AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid + COALESCE(o.written_off,0) >= o.price GROUP BY o.id"
+    ? "SELECT o.supplier AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM payables o JOIN ledger l ON l.ref_type='payable' AND l.ref_id=o.id AND l.direction='out' WHERE o.paid + COALESCE(o.written_off,0) >= o.amount" + histWhere + " GROUP BY o.id LIMIT 3000"
+    : "SELECT o.customer AS party, o.created_at AS c_at, MAX(l.created_at) AS last_pay FROM orders o JOIN ledger l ON l.ref_type='order' AND l.ref_id=o.id AND l.direction='in' WHERE o.paid + COALESCE(o.written_off,0) >= o.price" + histWhere + " GROUP BY o.id LIMIT 3000"
   const histRows = (await db.prepare(histSql).all()).results || []
   const hstat = {}
   for (const h of histRows) {
@@ -16407,6 +16701,8 @@ const ACK_CSS = 'body{margin:0;background:#f5f6f8;font:15px/1.65 -apple-system,B
   // 客户最需要读的那句。统一换成 #5b6472（约 5.4:1）。
   + '.tip{font-size:12.5px;color:#5b6472;margin-top:10px;line-height:1.6}'
   + '.ok{background:#eaf7ee;color:#1a7f37;border-radius:10px;padding:12px;font-size:15px;margin-top:10px}'
+  // 第 20 轮 A1：以前失败时也套 .ok 的绿色样式（见下面的脚本），客户分不清成没成。
+  + '.err{background:#fdecea;color:#b3261e;border-radius:10px;padding:12px;font-size:15px;margin-top:10px}'
   // 第 19 轮 B6：客户会把这一页存 PDF 留底。浏览器默认不打印背景 → 蓝色标题栏的
   // 白字变成白底白字，整块标题看不见。这里在打印时把它改成白底黑字，并藏掉按钮。
   + '@media print{body{background:#fff}.hd{background:#fff;color:#111;border:1px solid #ccc}.card{box-shadow:none;border:1px solid #eee}.btn{display:none}.inp{display:none}}'
@@ -16488,7 +16784,11 @@ app.get('/statement-ack', async (c) => {
     + `function ack(kind){var amt=0,note='';if(kind==='doubt'){amt=Number(document.getElementById('amt').value||0);note=String(document.getElementById('note').value||'')}`
     + `if(kind==='doubt'&&!amt&&!note){alert('写一下差多少，或者说明哪一笔不对');return}`
     + `fetch('/statement-ack',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:P.type,party:P.party,month:P.month,t:P.t,x:P.x,ack:kind,amount:amt,note:note})})`
-    + `.then(function(r){return r.json()}).then(function(d){var bs=document.querySelectorAll('.btn');for(var i=0;i<bs.length;i++){bs[i].disabled=true;bs[i].style.opacity=.5}var tm=new Date();document.getElementById('res').innerHTML='<div class="ok">'+(d.text||'收到了，谢谢！')+'<br><span style="font-size:12px;color:#6b7280">提交时间 '+tm.toLocaleString('zh-CN')+'</span></div>';document.getElementById('doubt').style.display='none'})`
+    // 第 20 轮 A1（高危）：以前不判 r.ok，直接 d.text||'收到了，谢谢！' —— 后端 403（链接过期）
+    // 或 500 的 JSON 里没有 text 字段，客户就会看到「收到了，谢谢！提交时间 …」，
+    // 而服务端一条记录都没有。这是唯一会骗到外部客户的路径，必须判状态码与 ok。
+    + `.then(function(r){return r.json().then(function(d){return {st:r.status,ok:r.ok,d:d||{}}}).catch(function(){return {st:r.status,ok:false,d:{}}})})`
+    + `.then(function(o){var d=o.d||{};if(!o.ok||d.ok===false){var box=document.getElementById('res');box.innerHTML='';var dv=document.createElement('div');dv.className='err';dv.textContent=(d.error||('没提交成功（'+o.st+'）'))+' 再点一次，或直接给老板打电话。';box.appendChild(dv);return}var bs=document.querySelectorAll('.btn');for(var i=0;i<bs.length;i++){bs[i].disabled=true;bs[i].style.opacity=.5}var tm=new Date();document.getElementById('res').innerHTML='<div class="ok">'+(d.text||'收到了，谢谢！')+'<br><span style="font-size:12px;color:#6b7280">提交时间 '+tm.toLocaleString('zh-CN')+'</span></div>';document.getElementById('doubt').style.display='none'})`
     + `.catch(function(){alert('没提交成功，请检查网络再点一次')})}`
   return c.html(ackPage(inner, script))
 })
@@ -16701,14 +17001,28 @@ app.post('/collect-config', async (c) => {
 })
 
 // ===== 到期表：按账期排出「哪张单哪天到期」，能导 Excel 发客户 =====
+// 第 20 轮 B9：账期（party_terms）30 秒缓存。键是 db 对象，跟着 isolate 走。
+const _termCache = new WeakMap()
+const TERM_CACHE_MS = 30000
+async function partyTermMap(db) {
+  const now0 = Date.now()
+  const hit = _termCache.get(db)
+  if (hit && now0 - hit.at < TERM_CACHE_MS) return hit.map
+  const rows = (await db.prepare('SELECT party, term_days FROM party_terms').all()).results || []
+  const map = {}
+  rows.forEach((t) => { map[norm(t.party)] = num(t.term_days) })
+  _termCache.set(db, { at: now0, map })
+  return map
+}
+
 async function dueRows(db, type, months, party, limit, offset, scope) {
   const tbl = type === 'ap' ? 'payables' : 'orders'
   const col = type === 'ap' ? 'supplier' : 'customer'
   const amt = type === 'ap' ? 'amount' : 'price'
   const itemCol = type === 'ap' ? 'remark' : 'item_name'
-  const terms = (await db.prepare('SELECT party, term_days FROM party_terms').all()).results || []
-  const tmap = {}
-  terms.forEach((t) => { tmap[norm(t.party)] = num(t.term_days) })
+  // 第 20 轮 B9：账期表以前每次 /due-schedule 都整表读（500 家≈300 行），
+  // 而 /desk 首屏就调它。30 秒缓存，改账期最多 30 秒后生效（和余额缓存同口径）。
+  const tmap = await partyTermMap(db)
   const binds = []
   if (party) binds.push(String(party))
   // 第 12 轮 C1：员工（scopeOwn）只能看分给自己的客户/供应商，SQL 里加归属条件。
@@ -16718,7 +17032,10 @@ async function dueRows(db, type, months, party, limit, offset, scope) {
   // 汇总的「总欠款」也跟着少算，用户以为全账都在表里。
   // 改成按 rowid 分页取完（每页 3000），再统计总数。
   const raw = []
-  let pageSql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE ${amt}-COALESCE(paid,0)-COALESCE(written_off,0) > 0${scopeF}`
+  // 第 20 轮 B5：条件写成「已付+已核销 < 金额」这个标准形式 —— 和 schema 里
+  // idx_orders_open / idx_payables_open 这两个**部分索引**的谓词逐字一致，
+  // SQLite 才肯用它。以前写成 `${amt}-paid-wo > 0`（表达式比较），索引一律用不上。
+  let pageSql = `SELECT id, ${col} AS party, ${itemCol} AS item, ${amt} AS amount, paid, COALESCE(written_off,0) AS wo, due_date, created_at FROM ${tbl} WHERE COALESCE(paid,0)+COALESCE(written_off,0) < ${amt}${scopeF}`
   if (party) pageSql += ` AND ${col} = ?`
   pageSql += ' ORDER BY id ASC LIMIT 3000 OFFSET ?'
   for (let off = 0; off < 60000; off += 3000) {
@@ -17094,7 +17411,9 @@ app.get('/pay-speed', async (c) => {
       COALESCE(AVG(julianday(p.last_pay) - julianday(substr(o.created_at,1,10))),0) avg_days,
       COALESCE(SUM(o.price),0) amt
     FROM orders o JOIN (SELECT ref_id, MAX(substr(created_at,1,10)) last_pay FROM ledger WHERE ref_type='order' AND direction='in' GROUP BY ref_id) p ON p.ref_id=o.id
-    WHERE o.price - o.paid - COALESCE(o.written_off,0) <= 0.005 GROUP BY o.customer`).all()).results || []
+    WHERE o.price - o.paid - COALESCE(o.written_off,0) <= 0.005
+      AND substr(o.created_at,1,10) >= date('now','-12 months')
+    GROUP BY o.customer`).all()).results || []
   const unpaid = (await db.prepare(`SELECT customer AS party, COUNT(*) cnt, COALESCE(SUM(price-COALESCE(paid,0)-COALESCE(written_off,0)),0) left_amt,
       MIN(julianday('now') - julianday(substr(created_at,1,10))) min_wait, MAX(julianday('now') - julianday(substr(created_at,1,10))) max_wait
     FROM orders WHERE price-COALESCE(paid,0)-COALESCE(written_off,0) > 0.005 GROUP BY customer`).all()).results || []
@@ -19692,7 +20011,15 @@ app.get('/health-check', async (c) => {
 
 // 体检报告单：分数曲线 + 每项问题的发现/修好日期 + 一句结论（可打印）
 const HB_BLK = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+// 第 20 轮 B11：数据体检每次都要全库重扫（约 21,000 行，10 条聚合）。
+// 它被 /health-report、/health-print、小程序首页的体检卡反复调用。
+// 5 分钟缓存（同一个人连点两次不必重算）。注意：GET 里写 health_hist 那段保留，
+// 但一天只写一次，代价可忽略；真正贵的是那 10 条全表聚合。
+const _healthCache = new WeakMap()
+const HEALTH_CACHE_MS = 5 * 60 * 1000
 async function healthReport(db, days, mainDb, book) {
+  const hc = _healthCache.get(db)
+  if (hc && hc.days === num(days) && Date.now() - hc.at < HEALTH_CACHE_MS) return Object.assign({}, hc.data, { cached: true })
   const s = await healthScan(db)
   const pts = (s.hist || []).filter((x) => x && x.d).slice(-days).map((x) => ({ d: x.d, s: num(x.s) }))
   const first = pts[0] || null
@@ -19722,7 +20049,7 @@ async function healthReport(db, days, mainDb, book) {
   // → 两边签名串结构不同，体检报告单打开恒为「已失效」。现在两边都用 sigBook。
   const expH = linkExpOf(LINK_TTL.statement)
   const url = '/health-print?days=' + days + '&t=' + (await sigBook(mainDb || db, book, 'health', 'hr:' + days, expH)) + '&x=' + expH
-  return {
+  const out1 = {
     ok: true, at: now(), days, score: s.score, grade: s.grade, empty: s.empty, clean: s.clean, count: s.count,
     delta, first, last: lastP, best, worst, points: pts, spark,
     open: open.map((x) => ({ k: x.k, label: x.label, count: x.count, tip: x.tip, go: x.go, tab: x.tab, since: x.since, days_open: x.days_open })),
@@ -19730,6 +20057,9 @@ async function healthReport(db, days, mainDb, book) {
     items: items.map((x) => ({ k: x.k, label: x.label, count: x.count, tip: x.tip, go: x.go, tab: x.tab, since: x.since || '', fixed: x.fixed || '', days_open: num(x.days_open) })),
     url, sentences, text: sentences.join('')
   }
+  // 第 20 轮 B11：存进缓存（5 分钟内再问直接给，不再全库重扫）
+  _healthCache.set(db, { at: Date.now(), days: num(days), data: out1 })
+  return out1
 }
 
 app.get('/health-report', async (c) => {

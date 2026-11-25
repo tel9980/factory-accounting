@@ -376,6 +376,137 @@ console.log('\n[10] 电脑端：能记一笔、带账套号、批量去重')
   isTrue('/pc 脚本出错会上报（/client-err）', pcx.text.includes("sendBeacon('/client-err'"))
 }
 
+// ── 12. 第 20 轮：内联脚本能编译 + 七条「假成功」都堵上了 ──
+console.log('\n[12] 内联脚本能编译、假成功堵上')
+{
+  // 第 20 轮 A13：把「服务端渲染后的 HTML」里的 <script> 抽出来真编译一遍。
+  // 后端源码里的内联脚本带着 ${...} 插值，静态抽出来没法编译；只有渲染结果才是真东西。
+  // 第 19 轮 el2 的 split('\n') 就是在这个位置炸的（整页按钮全点不动，门禁全绿）。
+  const scriptCompiles = (label, html) => {
+    const blocks = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).filter((x) => x.trim())
+    if (!blocks.length) { ok(`${label} 没有内联脚本（纯 HTML，无需编译）`); return }
+    for (let i = 0; i < blocks.length; i++) {
+      try { new Function(blocks[i]) } catch (e) { no(`${label} 第 ${i + 1} 段脚本能编译`, String(e.message)); return }
+    }
+    ok(`${label} 的 ${blocks.length} 段内联脚本都能编译`)
+  }
+  const deskP = await page('/desk')
+  scriptCompiles('/desk', deskP.text)
+  const pcP = await page('/pc')
+  scriptCompiles('/pc', pcP.text)
+  const guideP = await page('/guide')
+  scriptCompiles('/guide', guideP.text)
+  const trkL = await call('GET', '/track-link?party=' + encodeURIComponent(CUST))
+  const trkP = await page(pathOf(trkL.d && trkL.d.url))
+  scriptCompiles('/track', trkP.text)
+  const ackL = await call('GET', '/statement-ack-link?type=ar&party=' + encodeURIComponent(CUST) + '&month=' + MM)
+  const ackP = await page(pathOf(ackL.d && ackL.d.url))
+  scriptCompiles('/statement-ack', ackP.text)
+
+  // A1：确认页失败时必须说「没提交成功」，不能再出现「收到了，谢谢！」的假成功。
+  // 后端 403 的 JSON 里没有 text 字段 —— 以前正是靠 d.text||'收到了，谢谢！' 兜底骗人。
+  isTrue('确认页判了 r.ok / d.ok（403 不再显示「收到了」）', /o\.ok\|\|d\.ok===false/.test(ackP.text))
+  isTrue('确认页失败走红色 .err 而不是绿色 .ok', ackP.text.includes(".err{background:#fdecea"))
+  const badAck = await fetch(BASE + '/statement-ack', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': 'factory-accounting-test/web-pages' },
+    body: JSON.stringify({ type: 'ar', party: CUST, month: MM, t: 'bad', x: '1', ack: 'ok' })
+  })
+  const badAckBody = await badAck.json().catch(() => ({}))
+  isTrue('坏链接的 POST 返回 403 且没有 text 字段（页面靠这个判断失败）', badAck.status === 403 && badAckBody.text === undefined)
+
+  // A2：连点保护 —— 同一内容 3 秒内发两次必须只记一笔
+  const DUP_CUST = TAG + '连点'
+  const ord = await call('POST', '/orders', { customer: DUP_CUST, item_name: '连点测试', qty: 1, price: 1000, date: MM + '-05' })
+  // POST /orders 只回 {ok:true}，没有 id —— 从应收列表里按客户名找回来
+  const arList = await call('GET', '/ar?kw=' + encodeURIComponent(DUP_CUST))
+  const mine = (Array.isArray(arList.d) ? arList.d : (arList.d && arList.d.rows) || []).filter((x) => x.customer === DUP_CUST)
+  const oid = ord.d && (ord.d.id || (mine.length ? mine[0].id : null))
+  if (!oid) no('建单失败（连点测试跳过）', ord.d)
+  else {
+    const cid = 'webtest-dup-' + TAG
+    const r1 = await call('POST', '/orders/' + oid + '/receive', { amount: 300, date: MM + '-05', client_id: cid })
+    const r2 = await call('POST', '/orders/' + oid + '/receive', { amount: 300, date: MM + '-05', client_id: cid })
+    eq('第一笔收款 200', r1.status, 200)
+    isTrue('同 client_id 第二次 → dup_ok（不会记成两笔）', r2.d && r2.d.dup_ok)
+    const ar = await call('GET', '/ar?kw=' + encodeURIComponent(TAG + '连点'))
+    const row = (Array.isArray(ar.d) ? ar.d : (ar.d && ar.d.rows) || []).find((x) => String(x.id) === String(oid))
+    eq('单据只收到 300（不是 600）', row && Number(row.paid), 300)
+    isTrue('/desk 用「内容+时间桶」发 client_id（cidOf）', deskP.text.includes("cidOf('recv'"))
+    isTrue('/desk 连点在飞时拦住（BUSY）', deskP.text.includes('function busyStart('))
+  }
+
+  // A3：记支出的 confirm_dup 入口
+  isTrue('记支出遇到 dup 会问「确认再记一笔吗」', deskP.text.includes('confirm_dup') && deskP.text.includes('e.dup'))
+  const ex1 = await call('POST', '/expenses', { amount: 334, category: '水电', date: TODAY, remark: '测试' })
+  const ex2 = await call('POST', '/expenses', { amount: 334, category: '水电', date: TODAY, remark: '测试' })
+  const ex3 = await call('POST', '/expenses', { amount: 334, category: '水电', date: TODAY, remark: '测试', confirm_dup: true })
+  isTrue('同额同分类第二笔返回 dup:true（页面据此弹确认）', ex2.d && ex2.d.dup === true)
+  eq('确认后再发就记上了', ex3.status, 200)
+
+  // A6：新机器没设过口令时说人话
+  isTrue('/desk 认识 no_key（不再只说「口令不对」）', deskP.text.includes("e.code==='no_key'"))
+  isTrue('口令卡上有「第一次用 / 忘了口令 →」指向 /pc', /第一次用 \/ 忘了口令/.test(deskP.text))
+
+  // A7：没取到 ≠ 0
+  isTrue('/desk 的 money() 对没取到显示「—」而不是 ¥0.00', /if\(n===null \|\| n===undefined \|\| n===''\) return '—'/.test(deskP.text))
+  isTrue('账户/分类没取到时下拉写明「没取到」', deskP.text.includes('账户没取到') && deskP.text.includes('支出分类没取到'))
+
+  // A4：打印页/客户页出错给 HTML 错误页（源码级：check.mjs [4.23] 已守，这里验行为）
+  const noT = await page('/statement-print?party=' + encodeURIComponent(CUST) + '&type=ar')
+  isTrue('没有签名参数的对账单是 HTML 错误页（不是 JSON）', /name="fa-error"/.test(noT.text))
+}
+
+// ── 13. 第 20 轮第 3 批：便捷（今天收了 / 刷新 / 弹窗 / 复制 / 更多） ──
+console.log('\n[13] 便捷：今天收了、能刷新、点链接真有反应')
+{
+  const p = await page('/desk')
+  const t = p.text
+  isTrue('有「今天收了」这张卡（老板每天第一句话）', t.includes("k:'今天收了'") && t.includes('dash.today_income'))
+  isTrue('有刷新按钮', t.includes('🔄 刷新'))
+  isTrue('显示「最后更新 HH:MM」', t.includes("el('lastUpd').textContent"))
+  isTrue('切回标签页会自动刷一次', t.includes('visibilitychange'))
+  isTrue('页面开着时每分钟自动刷', t.includes('setInterval(function(){ if(!document.hidden && K) load() }'))
+  // C1：window.open 在 fetch 回调里会被浏览器当弹窗拦掉 —— 必须点击时先同步开窗口
+  isTrue('点击时先同步开窗口（preWin）', t.includes('function preWin('))
+  isTrue('拿到链接再改地址（goWin）', t.includes('function goWin('))
+  isTrue('没有「在回调里直接 window.open(d.url)」的写法', !/window\.open\(d\.url/.test(t))
+  isTrue('发确认会复制链接（C5）', t.includes('function copyText(') && t.includes('链接已复制'))
+  isTrue('能「显示更多」（第 21 家看得到，C6）', t.includes('function moreDue(') && t.includes('DUE_LIMIT'))
+  isTrue('重画后保留取消勾选的状态（C4）', t.includes('keepOff'))
+  isTrue('不再传死参数 days=365（/due-schedule 只认 months）', !t.includes('days=365'))
+}
+
+// ── 14. 第 20 轮第 4 批：模块关掉的错误页、便捷补充、效率 ──
+console.log('\n[14] 模块关掉给错误页、搜单位/按条件勾、教程出口与同义词')
+{
+  const p = await page('/desk')
+  const t = p.text
+  isTrue('逾期表有「找单位」搜索框', t.includes('id="dueQ"') && t.includes('function filterDue('))
+  isTrue('搜索框在表格外面（重画不失焦）', t.indexOf('id="dueQ"') < t.indexOf('id="dueBox"'))
+  isTrue('能「只勾逾期 30 天以上」', t.includes('function checkOverdue('))
+  isTrue('勾选框带 data-days（按天筛）', t.includes('data-days='))
+  isTrue('金额框回车直接提交（C14）', t.includes("ev.key==='Enter'"))
+  isTrue('月份记住上次看的（C8）', t.includes("localStorage.setItem('fa_month'"))
+  isTrue('账户记住上次用的（C15）', t.includes("localStorage.setItem('fa_acc'"))
+  isTrue('下拉能选「别的单（手输单号）」（C9）', t.includes('__other'))
+  isTrue('浏览器英文错误翻成人话（C16）', t.includes('Failed to fetch') && t.includes('连不上服务器'))
+  isTrue('没取到总览时显示「—」而不是 ¥0.00', (await page('/pc')).text.includes("? '—' : qmoney(v)"))
+  isTrue('/pc 总览挂了也不清空催款清单（A10）', (await page('/pc')).text.includes("catch(function(e){ return { error: '连不上（'"))
+
+  // 教程出口与同义词（C19）
+  const g = await page('/guide')
+  isTrue('教程顶部有「电脑看账台」入口', g.text.includes('📊 电脑看账台'))
+  isTrue('教程顶部有「首页」入口', g.text.includes('🏠 首页'))
+  isTrue('教程搜索认近义词（对帐/对账）', g.text.includes("'对帐': ['对账'"))
+
+  // A8：模块关掉时，浏览器点旧打印链接要给 HTML 错误页，不是 JSON
+  await call('POST', '/modules', { off: ['wage'] })
+  const off = await page('/payroll-print?month=' + MM)
+  const isErr = /name="fa-error"/.test(off.text) || off.status === 403
+  isTrue('模块关掉 → 打印页给错误页（不是 JSON 花括号）', isErr && !/^\s*\{/.test(off.text.trim()))
+  await call('POST', '/modules', { off: [] })
+}
+
 console.log('')
 if (bad.length) {
   console.log(`❌ 网页端测试失败：${bad.length} 项`)
